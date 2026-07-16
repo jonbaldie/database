@@ -64,6 +64,9 @@ func Initialize(directory, account, password string) (Metadata, error) {
 	if err := os.WriteFile(filepath.Join(directory, "instance.json"), contents, 0o600); err != nil {
 		return Metadata{}, fmt.Errorf("write instance metadata: %w", err)
 	}
+	if err := os.WriteFile(filepath.Join(directory, "catalog.json"), []byte("{\n  \"namespaces\": {}\n}\n"), 0o600); err != nil {
+		return Metadata{}, fmt.Errorf("write catalog: %w", err)
+	}
 	return metadata, nil
 }
 
