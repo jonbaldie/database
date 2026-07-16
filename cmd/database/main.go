@@ -151,7 +151,7 @@ func version(args []string, stdout, stderr io.Writer) int {
 
 func serve(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: database serve [--format=human|json] [--diagnostics-address HOST:PORT] [--state-file PATH]")
+		fmt.Fprintln(stdout, "Usage: database serve [--data-dir PATH] [--format=human|json] [--diagnostics-address HOST:PORT] [--state-file PATH]")
 		return 0
 	}
 	opts, err := parseServeFlags(args)
@@ -221,6 +221,12 @@ func parseServeFlags(args []string) (lifecycle.Options, error) {
 				}
 				i++
 				value = args[i]
+			case "--data-dir":
+				if i+1 >= len(args) {
+					return opts, fmt.Errorf("%s requires a value", name)
+				}
+				i++
+				value = args[i]
 			default:
 				return opts, fmt.Errorf("unknown flag %q", arg)
 			}
@@ -232,6 +238,8 @@ func parseServeFlags(args []string) (lifecycle.Options, error) {
 			opts.DiagnosticsAddress = value
 		case "--state-file":
 			opts.StateFile = value
+		case "--data-dir":
+			opts.DataDirectory = value
 		default:
 			return opts, fmt.Errorf("unknown flag %q", name)
 		}

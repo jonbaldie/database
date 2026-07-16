@@ -20,6 +20,7 @@ import (
 // disables the diagnostics listener, which keeps the default command useful
 // for smoke tests and local process supervision.
 type Options struct {
+	DataDirectory      string
 	DiagnosticsAddress string
 	StateFile          string
 	Format             string
@@ -45,13 +46,19 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		return fmt.Errorf("unsupported format %q", opts.Format)
 	}
 
-	recovered, err := claimState(opts.StateFile)
+	if opts.DataDirectory != "" {
+		if err := validateInstance(opts.DataDirectory); err != nil {
+			return err
+		}
+	}
+	recovered, release, err := claimState(opts.StateFile, opts.DataDirectory)
 	if err != nil {
 		return err
 	}
 	cleanStop := false
 	defer func() {
 		if cleanStop {
+			_ = release()
 			_ = releaseState(opts.StateFile)
 		}
 	}()
@@ -90,23 +97,69 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 	return nil
 }
 
-func claimState(path string) (bool, error) {
+func claimState(path, dataDirectory string) (bool, func() error, error) {
+	release := func() error { return nil }
+	lockPath := ""
+	if dataDirectory != "" {
+		lockPath = filepath.Join(dataDirectory, ".running.lock")
+	} else if path == "" {
+		return false, release, nil
+	}
+	if lockPath != "" {
+		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return false, release, errors.New("data directory is already in use")
+			}
+			return false, release, fmt.Errorf("claim data directory: %w", err)
+		}
+		_ = file.Close()
+		release = func() error { return os.Remove(lockPath) }
+	}
 	if path == "" {
-		return false, nil
+		return false, release, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, fmt.Errorf("create state directory: %w", err)
+		_ = release()
+		return false, func() error { return nil }, fmt.Errorf("create state directory: %w", err)
 	}
 	recovered := false
 	if contents, err := os.ReadFile(path); err == nil {
 		recovered = string(contents) == "running\n"
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("read state file: %w", err)
+		_ = release()
+		return false, func() error { return nil }, fmt.Errorf("read state file: %w", err)
 	}
 	if err := os.WriteFile(path, []byte("running\n"), 0o644); err != nil {
-		return false, fmt.Errorf("write state file: %w", err)
+		_ = release()
+		return false, func() error { return nil }, fmt.Errorf("write state file: %w", err)
 	}
-	return recovered, nil
+	return recovered, release, nil
+}
+
+func validateInstance(directory string) error {
+	info, err := os.Stat(directory)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("data directory does not exist")
+		}
+		return fmt.Errorf("inspect data directory: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("data directory is not a directory")
+	}
+	metadata, err := os.ReadFile(filepath.Join(directory, "instance.json"))
+	if err != nil {
+		return errors.New("data directory is not initialized")
+	}
+	var instance struct {
+		Schema string `json:"schema"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal(metadata, &instance); err != nil || instance.Schema != "database.instance/v1" || instance.State != "stopped" {
+		return errors.New("data directory has invalid instance metadata")
+	}
+	return nil
 }
 
 func releaseState(path string) error {
