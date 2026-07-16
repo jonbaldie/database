@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/jonbaldie/database/internal/mysql"
 )
 
 // Options controls the process-level server seam. An empty DiagnosticsAddress
@@ -21,6 +23,7 @@ import (
 // for smoke tests and local process supervision.
 type Options struct {
 	DataDirectory      string
+	MySQLAddress       string
 	DiagnosticsAddress string
 	StateFile          string
 	Format             string
@@ -64,6 +67,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 	}()
 
 	var listener net.Listener
+	var mysqlServer *mysql.Server
 	var httpServer *http.Server
 	if opts.DiagnosticsAddress != "" {
 		listener, err = net.Listen("tcp", opts.DiagnosticsAddress)
@@ -72,6 +76,13 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		}
 		httpServer = &http.Server{Handler: diagnosticsHandler()}
 		go func() { _ = httpServer.Serve(listener) }()
+	}
+	if opts.MySQLAddress != "" {
+		mysqlServer, err = mysql.New(opts.MySQLAddress)
+		if err != nil {
+			return fmt.Errorf("listen for mysql: %w", err)
+		}
+		go mysqlServer.Serve()
 	}
 
 	ready := Event{Schema: "database.lifecycle/v1", State: "ready", Recovered: recovered}
@@ -91,6 +102,9 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
+	}
+	if mysqlServer != nil {
+		_ = mysqlServer.Close()
 	}
 	cleanStop = true
 	emit(Event{Schema: "database.lifecycle/v1", State: "stopped"})
