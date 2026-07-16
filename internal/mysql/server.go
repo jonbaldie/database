@@ -42,6 +42,7 @@ func serveConnection(connection net.Conn) {
 	if err := writePacket(connection, 2, okPacket()); err != nil {
 		return
 	}
+	statements := map[uint32]string{}
 	for {
 		sequence, payload, err := readPacket(connection)
 		if err != nil || len(payload) == 0 {
@@ -56,6 +57,44 @@ func serveConnection(connection net.Conn) {
 			}
 		case 0x03:
 			if writeQueryResult(connection, sequence+1, string(payload[1:])) != nil {
+				return
+			}
+		case 0x16: // COM_STMT_PREPARE
+			query := string(payload[1:])
+			statements[1] = query
+			response := []byte{0x00, 1, 0, 0, 0, 0, 0, 0, 0}
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "select") {
+				response[5] = 1
+			}
+			if writePacket(connection, sequence+1, response) != nil {
+				return
+			}
+		case 0x17: // COM_STMT_EXECUTE
+			if len(payload) < 5 {
+				if writePacket(connection, sequence+1, errorPacket(1210, "HY000", "malformed prepared statement")) != nil {
+					return
+				}
+				continue
+			}
+			id := uint32(payload[1]) | uint32(payload[2])<<8 | uint32(payload[3])<<16 | uint32(payload[4])<<24
+			query, ok := statements[id]
+			if !ok {
+				if writePacket(connection, sequence+1, errorPacket(1243, "HY000", "unknown prepared statement handler")) != nil {
+					return
+				}
+				continue
+			}
+			if writeQueryResult(connection, sequence+1, query) != nil {
+				return
+			}
+		case 0x19: // COM_STMT_CLOSE
+			if len(payload) >= 5 {
+				id := uint32(payload[1]) | uint32(payload[2])<<8 | uint32(payload[3])<<16 | uint32(payload[4])<<24
+				delete(statements, id)
+			}
+		case 0x1f: // COM_RESET_CONNECTION
+			statements = map[uint32]string{}
+			if writePacket(connection, sequence+1, okPacket()) != nil {
 				return
 			}
 		default:
