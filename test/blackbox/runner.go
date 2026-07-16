@@ -31,9 +31,21 @@ type Runner struct {
 
 // Run executes a command and captures both public output streams.
 func (r Runner) Run(ctx context.Context, args ...string) Result {
+	return r.run(ctx, "", args...)
+}
+
+// RunWithStdin executes a command with secret input supplied through stdin.
+func (r Runner) RunWithStdin(ctx context.Context, input string, args ...string) Result {
+	return r.run(ctx, input, args...)
+}
+
+func (r Runner) run(ctx context.Context, input string, args ...string) Result {
 	command := exec.CommandContext(ctx, r.Executable, args...)
 	command.Dir = r.Dir
 	command.Env = append(os.Environ(), r.Env...)
+	if input != "" {
+		command.Stdin = strings.NewReader(input)
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

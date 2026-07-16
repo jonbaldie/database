@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +92,85 @@ func TestExecutableVersionAndLifecycleArePublic(t *testing.T) {
 	}
 	if result := process.Wait(); result.ExitCode != 0 {
 		t.Fatalf("final stop: %#v", result)
+	}
+}
+
+func TestInitializeCreatesStoppedInspectableInstance(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "initial-password")
+	password := "correct horse battery staple\n"
+	if err := os.WriteFile(passwordFile, []byte(password), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json")
+	if result.ExitCode != 0 || result.Stderr != "" {
+		t.Fatalf("init result: %#v", result)
+	}
+	var output struct {
+		Schema        string `json:"schema"`
+		Operation     string `json:"operation"`
+		Success       bool   `json:"success"`
+		ExitClass     string `json:"exit_class"`
+		InstanceID    string `json:"instance_id"`
+		DataDirectory string `json:"data_directory"`
+		AdminAccount  string `json:"admin_account"`
+	}
+	if err := json.Unmarshal([]byte(result.Stdout), &output); err != nil {
+		t.Fatalf("decode init result %q: %v", result.Stdout, err)
+	}
+	if output.Schema != "database.operator.result/v1" || output.Operation != "init" || !output.Success || output.ExitClass != "success" {
+		t.Fatalf("init output = %#v", output)
+	}
+	if output.InstanceID == "" || output.DataDirectory != directory || output.AdminAccount != "admin" {
+		t.Fatalf("init identity = %#v", output)
+	}
+	metadata, err := os.ReadFile(filepath.Join(directory, "instance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metadata), strings.TrimSpace(password)) || strings.Contains(result.Stdout, strings.TrimSpace(password)) || strings.Contains(result.Stderr, strings.TrimSpace(password)) {
+		t.Fatal("initial password was exposed")
+	}
+	var instance struct {
+		Schema       string `json:"schema"`
+		InstanceID   string `json:"instance_id"`
+		State        string `json:"state"`
+		AdminAccount string `json:"admin_account"`
+		PasswordHash string `json:"password_hash"`
+	}
+	if err := json.Unmarshal(metadata, &instance); err != nil {
+		t.Fatalf("decode instance metadata %q: %v", metadata, err)
+	}
+	if instance.Schema != "database.instance/v1" || instance.InstanceID != output.InstanceID || instance.State != "stopped" || instance.AdminAccount != "admin" || instance.PasswordHash == "" {
+		t.Fatalf("instance metadata = %#v", instance)
+	}
+
+	second := runner.Run(context.Background(), "init", directory, "--password-stdin", "--format=json")
+	if second.ExitCode != 3 || second.Stderr != "" || strings.Contains(second.Stdout+second.Stderr, strings.TrimSpace(password)) {
+		t.Fatalf("unsafe reinitialization = %#v", second)
+	}
+	var failure struct {
+		Success   bool   `json:"success"`
+		ExitClass string `json:"exit_class"`
+	}
+	if err := json.Unmarshal([]byte(second.Stdout), &failure); err != nil || failure.Success || failure.ExitClass != "precondition" {
+		t.Fatalf("precondition result = %q", second.Stdout)
+	}
+}
+
+func TestInitializeAcceptsStdinAndRejectsInlinePassword(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "stdin-instance")
+	result := runner.RunWithStdin(context.Background(), "stdin-secret\n", "init", directory, "--password-stdin", "--format=json")
+	if result.ExitCode != 0 || result.Stderr != "" || strings.Contains(result.Stdout, "stdin-secret") {
+		t.Fatalf("stdin init result: %#v", result)
+	}
+
+	invalid := runner.Run(context.Background(), "init", filepath.Join(t.TempDir(), "invalid"), "--password=inline-secret", "--format=json")
+	if invalid.ExitCode != 2 || invalid.Stderr != "" || strings.Contains(invalid.Stdout+invalid.Stderr, "inline-secret") {
+		t.Fatalf("inline password result: %#v", invalid)
 	}
 }
 
