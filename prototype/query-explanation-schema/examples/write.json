@@ -1,0 +1,114 @@
+{
+  "format_version": 1,
+  "server_version": "0.1.0",
+  "mode": "plan",
+  "partial": false,
+  "statement": {
+    "kind": "replace",
+    "sql": "REPLACE INTO customers (id, email) VALUES (?, ?)",
+    "read_only": false,
+    "current_database": "app",
+    "parameters": [
+      { "position": 1, "type": "BIGINT UNSIGNED" },
+      { "position": 2, "type": "VARCHAR(320)" }
+    ],
+    "planning_settings": {
+      "sql_mode": "STRICT_ALL_TABLES,ONLY_FULL_GROUP_BY,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO"
+    }
+  },
+  "timing": { "planning_ms": 0.28 },
+  "plan": {
+    "id": 1,
+    "kind": "mutation",
+    "summary": "Replace one customer using MySQL delete-and-insert semantics for conflicting keys.",
+    "operation": { "mutation_type": "replace" },
+    "objects": [
+      { "type": "table", "database": "app", "name": "customers" }
+    ],
+    "estimates": {
+      "rows": 1,
+      "row_width_bytes": 336,
+      "cost": 6.2,
+      "peak_memory_bytes": 1024
+    },
+    "output": { "columns": [], "ordering": [], "unique_keys": [] },
+    "warnings": [],
+    "children": [
+      {
+        "id": 2,
+        "kind": "values",
+        "summary": "Produce the one submitted replacement row.",
+        "operation": { "row_count": 1 },
+        "estimates": {
+          "rows": 1,
+          "row_width_bytes": 336,
+          "cost": 0,
+          "peak_memory_bytes": 0
+        },
+        "output": {
+          "columns": ["customers.id", "customers.email"],
+          "ordering": [],
+          "unique_keys": []
+        },
+        "warnings": [],
+        "children": []
+      },
+      {
+        "id": 3,
+        "kind": "constraint_check",
+        "summary": "Check the primary key and email uniqueness constraints for conflicts.",
+        "operation": { "constraint_type": "unique", "constraint_name": "customers_email_unique" },
+        "objects": [
+          { "type": "constraint", "database": "app", "table": "customers", "name": "PRIMARY" },
+          { "type": "constraint", "database": "app", "table": "customers", "name": "customers_email_unique" }
+        ],
+        "estimates": {
+          "rows": 1,
+          "row_width_bytes": 336,
+          "cost": 2.1,
+          "peak_memory_bytes": 0
+        },
+        "output": { "columns": [], "ordering": [], "unique_keys": [] },
+        "warnings": [],
+        "children": []
+      },
+      {
+        "id": 4,
+        "kind": "mutation",
+        "summary": "Delete every row conflicting with a primary or unique key.",
+        "operation": { "mutation_type": "delete" },
+        "objects": [
+          { "type": "table", "database": "app", "name": "customers" }
+        ],
+        "estimates": {
+          "rows": 1,
+          "row_width_bytes": 336,
+          "cost": 1.8,
+          "peak_memory_bytes": 0
+        },
+        "output": { "columns": [], "ordering": [], "unique_keys": [] },
+        "warnings": [],
+        "children": []
+      },
+      {
+        "id": 5,
+        "kind": "mutation",
+        "summary": "Insert the replacement row with defaults, generated values, and referential effects.",
+        "operation": { "mutation_type": "insert" },
+        "objects": [
+          { "type": "table", "database": "app", "name": "customers" }
+        ],
+        "estimates": {
+          "rows": 1,
+          "row_width_bytes": 336,
+          "cost": 2.3,
+          "peak_memory_bytes": 1024
+        },
+        "output": { "columns": [], "ordering": [], "unique_keys": [] },
+        "warnings": [],
+        "children": []
+      }
+    ]
+  },
+  "warnings": []
+}
