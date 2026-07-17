@@ -24,8 +24,8 @@ func initialize(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, err.Error())
 	}
-	if request.directoryIsOccupied() {
-		return writeOperatorFailure(stdout, "init", newOperationID(), "precondition", 3, "data directory is not empty")
+	if err := instance.ValidateInitializationTarget(request.directory); err != nil {
+		return writeOperatorFailure(stdout, "init", newOperationID(), "precondition", 3, err.Error())
 	}
 	password, err := request.readPassword(os.Stdin)
 	if err != nil {
@@ -36,15 +36,6 @@ func initialize(args []string, stdout, stderr io.Writer) int {
 		return writeOperatorFailure(stdout, "init", newOperationID(), "precondition", 3, err.Error())
 	}
 	return writeInitializationSuccess(stdout, request, metadata)
-}
-
-func (request initializationRequest) directoryIsOccupied() bool {
-	info, err := os.Stat(request.directory)
-	if err != nil || !info.IsDir() {
-		return false
-	}
-	entries, err := os.ReadDir(request.directory)
-	return err == nil && len(entries) != 0
 }
 
 func parseInitializationRequest(args []string) (initializationRequest, error) {
@@ -169,9 +160,9 @@ func writeInitializationSuccess(stdout io.Writer, request initializationRequest,
 }
 
 func initializationResult(directory string, metadata instance.Metadata) map[string]any {
-	return map[string]any{
-		"schema": "database.operator.result/v1", "operation": "init", "operation_id": newOperationID(),
-		"success": true, "exit_class": "success", "instance_id": metadata.InstanceID,
-		"data_directory": directory, "admin_account": metadata.AdminAccount,
-	}
+	result := operatorResult("init", newOperationID(), true, "success", "")
+	result["instance_id"] = metadata.InstanceID
+	result["data_directory"] = directory
+	result["admin_account"] = metadata.AdminAccount
+	return result
 }

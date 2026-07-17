@@ -48,12 +48,10 @@ func Initialize(directory, account, password string) (Metadata, error) {
 	}
 	metadata, err := newMetadata(account, password)
 	if err != nil {
-		_ = claim.discard()
-		return Metadata{}, err
+		return Metadata{}, joinInitializationErrors(err, claim.discard())
 	}
 	if err := persistInitializedInstance(claim, metadata); err != nil {
-		_ = claim.discard()
-		return Metadata{}, err
+		return Metadata{}, joinInitializationErrors(err, claim.discard())
 	}
 	if err := claim.release(); err != nil {
 		return Metadata{}, err
@@ -97,6 +95,20 @@ func prepareDirectory(directory string) error {
 		}
 		return nil
 	}
+	return validateInitializationTarget(directory, info, err)
+}
+
+// ValidateInitializationTarget reports whether directory remains eligible for
+// explicit initialization without creating or changing it.
+func ValidateInitializationTarget(directory string) error {
+	info, err := os.Stat(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return validateInitializationTarget(directory, info, err)
+}
+
+func validateInitializationTarget(directory string, info os.FileInfo, err error) error {
 	if err != nil {
 		return fmt.Errorf("inspect data directory: %w", err)
 	}
@@ -129,8 +141,13 @@ func (claim initializationClaim) release() error {
 
 func (claim initializationClaim) discard() error {
 	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
-	paths.removeTemporary()
-	if err := os.Remove(claim.staging); err != nil {
+	return joinInitializationErrors(paths.removeTemporary(), removeDirectory(claim.staging))
+}
+
+func joinInitializationErrors(primary, cleanup error) error { return errors.Join(primary, cleanup) }
+
+func removeDirectory(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("discard data directory initialization: %w", err)
 	}
 	return nil
@@ -180,8 +197,8 @@ func (paths initializationPaths) writeStaged(metadata []byte) error {
 	return nil
 }
 
-func (paths initializationPaths) commit() error {
-	defer paths.removeTemporary()
+func (paths initializationPaths) commit() (err error) {
+	defer func() { err = joinInitializationErrors(err, paths.removeTemporary()) }()
 	if err := os.Rename(paths.catalogTemporary(), paths.catalog()); err != nil {
 		return fmt.Errorf("install catalog: %w", err)
 	}
@@ -194,9 +211,15 @@ func (paths initializationPaths) commit() error {
 	return nil
 }
 
-func (paths initializationPaths) removeTemporary() {
-	_ = os.Remove(paths.catalogTemporary())
-	_ = os.Remove(paths.metadataTemporary())
+func (paths initializationPaths) removeTemporary() error {
+	return joinInitializationErrors(removeFile(paths.catalogTemporary()), removeFile(paths.metadataTemporary()))
+}
+
+func removeFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove staged initialization artifact: %w", err)
+	}
+	return nil
 }
 
 func (paths initializationPaths) catalog() string {

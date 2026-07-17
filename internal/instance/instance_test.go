@@ -63,6 +63,34 @@ func TestDiscardedInitializationClaimLeavesNoArtifacts(t *testing.T) {
 	}
 }
 
+func TestFailedInstallRemovesPartialCatalogAndClaim(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	claim, err := claimInitialization(directory)
+	if err != nil {
+		t.Fatalf("claim initialization: %v", err)
+	}
+	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
+	if err := paths.writeStaged([]byte("metadata")); err != nil {
+		t.Fatalf("stage instance files: %v", err)
+	}
+	if err := os.Remove(paths.metadataTemporary()); err != nil {
+		t.Fatalf("make metadata installation fail: %v", err)
+	}
+	if err := paths.commit(); err == nil {
+		t.Fatal("commit succeeded without staged metadata")
+	}
+	if err := claim.discard(); err != nil {
+		t.Fatalf("discard failed initialization: %v", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read failed initialization directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed initialization artifacts = %#v", entries)
+	}
+}
+
 type initializationResult struct {
 	metadata Metadata
 	err      error

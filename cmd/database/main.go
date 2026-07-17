@@ -191,13 +191,7 @@ func operatorExitCode(class string) int {
 }
 
 func writeOperatorResult(stdout io.Writer, operation, operationID string, success bool, exitClass, diagnostic string) int {
-	result := map[string]any{
-		"schema": "database.operator.result/v1", "operation": operation, "operation_id": operationID,
-		"success": success, "exit_class": exitClass,
-	}
-	if diagnostic != "" {
-		result["diagnostic"] = diagnostic
-	}
+	result := operatorResult(operation, operationID, success, exitClass, diagnostic)
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
 		return 1
 	}
@@ -208,11 +202,19 @@ func writeOperatorResult(stdout io.Writer, operation, operationID string, succes
 }
 
 func writeOperatorFailure(stdout io.Writer, operation, operationID, class string, code int, message string) int {
-	_ = json.NewEncoder(stdout).Encode(map[string]any{
-		"schema": "database.operator.result/v1", "operation": operation, "operation_id": operationID,
-		"success": false, "exit_class": class, "diagnostic": message,
-	})
+	_ = json.NewEncoder(stdout).Encode(operatorResult(operation, operationID, false, class, message))
 	return code
+}
+
+func operatorResult(operation, operationID string, success bool, exitClass, diagnostic string) map[string]any {
+	result := map[string]any{
+		"schema": "database.operator.result/v1", "operation": operation, "operation_id": operationID,
+		"success": success, "exit_class": exitClass,
+	}
+	if diagnostic != "" {
+		result["diagnostic"] = diagnostic
+	}
+	return result
 }
 
 func createBackup(directory, output string) error {
