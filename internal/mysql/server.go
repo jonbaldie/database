@@ -317,10 +317,26 @@ type preparedParameterType struct {
 	unsigned bool
 }
 
-type queryExecutor struct{ *session }
+// queryExecutor is the protocol-facing text-query adapter. Statement routing
+// lives in textStatementExecutor so the protocol seam is not also the SQL
+// language implementation.
+type queryExecutor struct{ statements textStatementExecutor }
+
+type textStatementExecutor struct{ *session }
+
+type transactionExecutor struct{ *session }
+
+type catalogExecutor struct{ *session }
+
+type relationExecutor struct{ *session }
+
+type informationSchemaExecutor struct{ *session }
+
+func newQueryExecutor(session *session) *queryExecutor {
+	return &queryExecutor{statements: textStatementExecutor{session}}
+}
 
 type preparedExecutor struct{ *session }
-
 type authenticationResult struct {
 	connection   net.Conn
 	accountName  string
@@ -520,10 +536,18 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
-	return writeResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
+	return writeResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.statements.server.config.MaxAllowedPacket)
 }
 
 func (s *queryExecutor) execute(query string) (*queryResult, error) {
+	return s.statements.execute(query)
+}
+
+func (s *queryExecutor) useDatabase(name string) { s.statements.useDatabase(name) }
+
+func (s *queryExecutor) databaseExists(name string) error { return s.statements.databaseExists(name) }
+
+func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
 	lower := strings.ToLower(query)
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
@@ -686,7 +710,7 @@ func (s *queryExecutor) execute(query string) (*queryResult, error) {
 	return nil, sqlFailure{1064, "42000", "unsupported query: " + query}
 }
 
-func (s *queryExecutor) use(name string) error {
+func (s *textStatementExecutor) use(name string) error {
 	name = identifier(name)
 	if err := s.databaseExists(name); err != nil {
 		return err
@@ -694,12 +718,12 @@ func (s *queryExecutor) use(name string) error {
 	s.database = name
 	return nil
 }
-func (s *queryExecutor) useDatabase(name string) { _ = s.use(name) }
-func (s *queryExecutor) databaseExists(name string) error {
+func (s *textStatementExecutor) useDatabase(name string) { _ = s.use(name) }
+func (s *textStatementExecutor) databaseExists(name string) error {
 	return s.server.auth.databaseExists(identifier(name))
 }
 
-func (s *queryExecutor) metadataDefinition() catalog.Definition {
+func (s *textStatementExecutor) metadataDefinition() catalog.Definition {
 	if s.transaction {
 		return s.transactionSnapshot
 	}
@@ -709,14 +733,14 @@ func (s *queryExecutor) metadataDefinition() catalog.Definition {
 	return s.server.config.Catalog.Snapshot()
 }
 
-func (s *queryExecutor) snapshotNamespace(name string) (catalog.Namespace, bool) {
+func (s *textStatementExecutor) snapshotNamespace(name string) (catalog.Namespace, bool) {
 	if s.server.config.Catalog == nil {
 		return catalog.Namespace{}, false
 	}
 	ns, ok := s.server.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]
 	return ns, ok
 }
-func (s *queryExecutor) createDatabase(query string) error {
+func (s *textStatementExecutor) createDatabase(query string) error {
 	lower := strings.ToLower(query)
 	keyword := "database "
 	if strings.HasPrefix(lower, "create schema ") {
@@ -737,7 +761,7 @@ func (s *queryExecutor) createDatabase(query string) error {
 	}
 	return nil
 }
-func createTable(s *queryExecutor, query string) error {
+func createTable(s *textStatementExecutor, query string) error {
 	open := strings.Index(query, "(")
 	close := strings.LastIndex(query, ")")
 	if open < 0 || close <= open {
@@ -783,7 +807,7 @@ func createTable(s *queryExecutor, query string) error {
 	return nil
 }
 
-func (s *queryExecutor) showCreateDatabase(query string) (*queryResult, error) {
+func (s *textStatementExecutor) showCreateDatabase(query string) (*queryResult, error) {
 	name := strings.TrimSpace(query)
 	if strings.HasPrefix(strings.ToLower(name), "show create database ") {
 		name = strings.TrimSpace(name[len("SHOW CREATE DATABASE "):])
@@ -814,7 +838,7 @@ func (s *queryExecutor) showCreateDatabase(query string) (*queryResult, error) {
 	}, nil
 }
 
-func (s *queryExecutor) showCreateTable(query string) (*queryResult, error) {
+func (s *textStatementExecutor) showCreateTable(query string) (*queryResult, error) {
 	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
 	namespaceName, tableName := s.database, target
 	parts, valid := splitQualifiedIdentifier(target)
@@ -876,7 +900,7 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
-func insert(s *queryExecutor, query string) error {
+func insert(s *textStatementExecutor, query string) error {
 	rest := strings.TrimSpace(query[len("INSERT INTO "):])
 	valuesAt := strings.Index(strings.ToLower(rest), "values")
 	if valuesAt < 0 {
@@ -914,7 +938,7 @@ func insert(s *queryExecutor, query string) error {
 	}
 	return nil
 }
-func (s *queryExecutor) selectQuery(query string) (*queryResult, error) {
+func (s *textStatementExecutor) selectQuery(query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	lower := strings.ToLower(expression)
 	if from := strings.Index(lower, " from "); from >= 0 {
@@ -954,7 +978,7 @@ func (s *queryExecutor) selectQuery(query string) (*queryResult, error) {
 // tableTarget resolves an unqualified table against the current namespace and
 // a qualified table against its named namespace. Keeping this resolution at
 // the protocol seam makes DDL, writes, and reads agree about namespace scope.
-func (s *queryExecutor) tableTarget(parts []string) (string, string, error) {
+func (s *textStatementExecutor) tableTarget(parts []string) (string, string, error) {
 	namespace, table := s.database, ""
 	if len(parts) == 2 {
 		namespace, table = parts[0], parts[1]
@@ -1044,7 +1068,7 @@ func parseLiteralResult(expression string) literalQueryResult {
 	return literalQueryResult{}
 }
 
-func (s *queryExecutor) selectInformationSchema(query string) (*queryResult, error) {
+func (s *textStatementExecutor) selectInformationSchema(query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	lower := strings.ToLower(expression)
 	from := strings.Index(lower, " from ")
@@ -1282,7 +1306,7 @@ func (s *preparedExecutor) prepare(connection net.Conn, sequence byte, query str
 
 func (s *preparedExecutor) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
-	queries := &queryExecutor{s.session}
+	queries := newQueryExecutor(s.session)
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
 		return nil, sqlFailure{1064, "42000", "prepared statements support SELECT only"}
 	}
@@ -1330,7 +1354,7 @@ func (s *preparedExecutor) preparedColumns(query string) ([]columnMetadata, erro
 }
 
 func (s *preparedExecutor) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
-	queries := &queryExecutor{s.session}
+	queries := newQueryExecutor(s.session)
 	if len(payload) < 5 {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", "malformed prepared statement"))
 	}
