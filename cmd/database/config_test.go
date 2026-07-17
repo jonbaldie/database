@@ -47,6 +47,10 @@ func TestResolveConfigurationRejectsInvalidSources(t *testing.T) {
 		{name: "empty environment", env: []string{"DATABASE_SERVER_MAX_CONNECTIONS="}},
 		{name: "duplicate toml", args: []string{"--config", file}},
 		{name: "malformed integer", args: []string{"--max-connections=zero"}},
+		{name: "statement timeout exceeds duration representation", args: []string{"--statement-timeout-ms=9223372036855"}},
+		{name: "lock wait timeout exceeds duration representation", args: []string{"--lock-wait-timeout-ms=9223372036855"}},
+		{name: "idle transaction timeout exceeds duration representation", args: []string{"--idle-in-transaction-timeout-ms=9223372036855"}},
+		{name: "idle session timeout exceeds duration representation", args: []string{"--idle-session-timeout-ms=9223372036855"}},
 		{name: "contradictory budgets", args: []string{"--execution-memory-limit-bytes=2", "--aggregate-execution-memory-limit-bytes=1"}},
 		{name: "one TLS path", args: []string{"--tls-certificate-file=" + filepath.Join(temporary, "cert.pem")}},
 	}
