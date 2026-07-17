@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/instance"
 	"github.com/jonbaldie/database/internal/mysql"
 )
 
@@ -69,6 +71,18 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 	var listener net.Listener
 	var mysqlServer *mysql.Server
 	var httpServer *http.Server
+	var metadata instance.Metadata
+	var store *catalog.Store
+	if opts.DataDirectory != "" {
+		metadata, err = instance.Load(opts.DataDirectory)
+		if err != nil {
+			return fmt.Errorf("load instance metadata: %w", err)
+		}
+		store, err = catalog.Open(opts.DataDirectory)
+		if err != nil {
+			return fmt.Errorf("open catalog: %w", err)
+		}
+	}
 	if opts.DiagnosticsAddress != "" {
 		listener, err = net.Listen("tcp", opts.DiagnosticsAddress)
 		if err != nil {
@@ -78,7 +92,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		go func() { _ = httpServer.Serve(listener) }()
 	}
 	if opts.MySQLAddress != "" {
-		mysqlServer, err = mysql.New(opts.MySQLAddress)
+		mysqlServer, err = mysql.NewWithConfig(opts.MySQLAddress, mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash})
 		if err != nil {
 			return fmt.Errorf("listen for mysql: %w", err)
 		}
@@ -162,15 +176,11 @@ func validateInstance(directory string) error {
 	if !info.IsDir() {
 		return errors.New("data directory is not a directory")
 	}
-	metadata, err := os.ReadFile(filepath.Join(directory, "instance.json"))
+	instanceMetadata, err := instance.Load(directory)
 	if err != nil {
 		return errors.New("data directory is not initialized")
 	}
-	var instance struct {
-		Schema string `json:"schema"`
-		State  string `json:"state"`
-	}
-	if err := json.Unmarshal(metadata, &instance); err != nil || instance.Schema != "database.instance/v1" || instance.State != "stopped" {
+	if instanceMetadata.State != "stopped" {
 		return errors.New("data directory has invalid instance metadata")
 	}
 	return nil

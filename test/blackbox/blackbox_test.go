@@ -2,8 +2,11 @@ package blackbox_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -240,4 +243,334 @@ func TestCommandFailureIsObservable(t *testing.T) {
 	if errors.Is(result.Err, context.Canceled) {
 		t.Fatal("unexpected cancellation")
 	}
+}
+
+func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("secret-password\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initialized := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json")
+	if initialized.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", initialized)
+	}
+
+	diagnostics := freeAddress(t)
+	mysql := freeAddress(t)
+	state := filepath.Join(t.TempDir(), "server.state")
+	process, err := runner.Start(context.Background(), "serve", "--data-dir", directory, "--mysql-address", mysql, "--diagnostics-address", diagnostics, "--format=json", "--state-file", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	var event map[string]any
+	if err := process.NextJSONEvent(context.Background(), &event); err != nil || event["state"] != "ready" {
+		t.Fatalf("ready event: %#v %v", event, err)
+	}
+
+	client := newWireClient(t, mysql, "admin", "secret-password")
+	defer client.close()
+	if got := client.query("CREATE DATABASE app"); got.err != "" {
+		t.Fatalf("create database: %#v", got)
+	}
+	if got := client.query("USE app"); got.err != "" {
+		t.Fatalf("use database: %#v", got)
+	}
+	if got := client.query("CREATE TABLE users (id INT, name VARCHAR(32))"); got.err != "" {
+		t.Fatalf("create table: %#v", got)
+	}
+	if got := client.query("INSERT INTO users VALUES (1, 'Ada')"); got.err != "" {
+		t.Fatalf("insert row: %#v", got)
+	}
+	rows := client.query("SELECT * FROM users")
+	if rows.err != "" || len(rows.rows) != 1 || strings.Join(rows.rows[0], ",") != "1,Ada" || strings.Join(rows.columns, ",") != "id,name" {
+		t.Fatalf("select result: %#v", rows)
+	}
+	prepared := client.prepare("SELECT 1")
+	if prepared.err != "" {
+		t.Fatalf("prepare: %#v", prepared)
+	}
+	preparedResult := client.executePrepared(prepared.id)
+	if preparedResult.err != "" || len(preparedResult.rows) != 1 || preparedResult.rows[0][0] != "1" {
+		t.Fatalf("prepared result: %#v", preparedResult)
+	}
+	client.closePrepared(prepared.id)
+	if err := client.reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.query("SELECT DATABASE()"); got.err != "" || got.rows[0][0] != "" {
+		t.Fatalf("reset did not restore initial namespace: %#v", got)
+	}
+
+	if err := client.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.ExitCode != 0 {
+		t.Fatalf("stop: %#v", result)
+	}
+	process = nil
+	process, err = runner.Start(context.Background(), "serve", "--data-dir", directory, "--mysql-address", mysql, "--format=json", "--state-file", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restarted map[string]any
+	if err := process.NextJSONEvent(context.Background(), &restarted); err != nil || restarted["state"] != "ready" {
+		t.Fatalf("restart: %#v %v", restarted, err)
+	}
+	reopened := newWireClient(t, mysql, "admin", "secret-password")
+	defer reopened.close()
+	rows = reopened.query("USE app")
+	if rows.err != "" {
+		t.Fatalf("reopen database: %#v", rows)
+	}
+	rows = reopened.query("SELECT * FROM users")
+	if rows.err != "" || len(rows.rows) != 1 || strings.Join(rows.rows[0], ",") != "1,Ada" {
+		t.Fatalf("durable row: %#v", rows)
+	}
+}
+
+type wireResult struct {
+	columns []string
+	rows    [][]string
+	err     string
+}
+
+type preparedStatement struct {
+	id  uint32
+	err string
+}
+
+type wireClient struct {
+	t    *testing.T
+	conn net.Conn
+	seq  byte
+}
+
+func newWireClient(t *testing.T, address, username, password string) *wireClient {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := readWirePacket(t, conn)
+	versionEnd := bytesIndex(payload[1:], 0) + 1
+	position := versionEnd + 1
+	position += 4
+	nonce := append([]byte(nil), payload[position:position+8]...)
+	position += 8 + 1
+	lower := binary.LittleEndian.Uint16(payload[position : position+2])
+	position += 2 + 1 + 2
+	upper := binary.LittleEndian.Uint16(payload[position : position+2])
+	position += 2
+	authLength := int(payload[position])
+	position++
+	position += 10
+	nonce = append(nonce, payload[position:position+authLength-1]...)
+	for len(nonce) > 0 && nonce[len(nonce)-1] == 0 {
+		nonce = nonce[:len(nonce)-1]
+	}
+	capabilities := uint32(lower) | uint32(upper)<<16
+	stage1 := sha256.Sum256([]byte(password))
+	stage2 := sha256.Sum256(stage1[:])
+	scrambleInput := append(append([]byte{}, stage2[:]...), nonce...)
+	scramble := sha256.Sum256(scrambleInput)
+	token := make([]byte, len(stage1))
+	for i := range token {
+		token[i] = stage1[i] ^ scramble[i]
+	}
+	response := make([]byte, 0, 64)
+	response = append(response, byte(capabilities), byte(capabilities>>8), byte(capabilities>>16), byte(capabilities>>24))
+	response = append(response, 0, 0, 0, 0, 33)
+	response = append(response, make([]byte, 23)...)
+	response = append(response, username...)
+	response = append(response, 0, byte(len(token)))
+	response = append(response, token...)
+	response = append(response, []byte("caching_sha2_password")...)
+	response = append(response, 0)
+	writeWirePacket(t, conn, 1, response)
+	if auth := readWirePacket(t, conn); len(auth) == 0 || auth[0] != 0x00 {
+		conn.Close()
+		t.Fatalf("authentication failed: %x", auth)
+	}
+	return &wireClient{t: t, conn: conn}
+}
+
+func (c *wireClient) query(query string) wireResult {
+	writeWirePacket(c.t, c.conn, 0, append([]byte{0x03}, query...))
+	return c.readResult()
+}
+
+func (c *wireClient) prepare(query string) preparedStatement {
+	writeWirePacket(c.t, c.conn, 0, append([]byte{0x16}, query...))
+	payload := readWirePacket(c.t, c.conn)
+	if len(payload) < 5 || payload[0] != 0 {
+		return preparedStatement{err: fmt.Sprintf("prepare response %x", payload)}
+	}
+	return preparedStatement{id: binary.LittleEndian.Uint32(payload[1:5])}
+}
+
+func (c *wireClient) executePrepared(id uint32) wireResult {
+	payload := []byte{0x17, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), 0, 0, 0, 0, 0}
+	writeWirePacket(c.t, c.conn, 0, payload)
+	return c.readResult()
+}
+
+func (c *wireClient) closePrepared(id uint32) {
+	payload := []byte{0x19, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24)}
+	writeWirePacket(c.t, c.conn, 0, payload)
+}
+
+func (c *wireClient) reset() error {
+	writeWirePacket(c.t, c.conn, 0, []byte{0x1f})
+	if payload := readWirePacket(c.t, c.conn); len(payload) == 0 || payload[0] != 0 {
+		return fmt.Errorf("reset response %x", payload)
+	}
+	return nil
+}
+
+func (c *wireClient) close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	writeWirePacket(c.t, c.conn, 0, []byte{0x01})
+	return c.conn.Close()
+}
+
+func (c *wireClient) readResult() wireResult {
+	payload := readWirePacket(c.t, c.conn)
+	if len(payload) == 0 {
+		return wireResult{err: "empty result"}
+	}
+	if payload[0] == 0xff {
+		return wireResult{err: string(payload[4:])}
+	}
+	columnCount, _, ok := readLengthInt(payload, 0)
+	if !ok {
+		return wireResult{err: fmt.Sprintf("malformed column count %x", payload)}
+	}
+	result := wireResult{columns: make([]string, columnCount)}
+	for i := range result.columns {
+		definition := readWirePacket(c.t, c.conn)
+		name, ok := readColumnName(definition)
+		if !ok {
+			return wireResult{err: fmt.Sprintf("malformed column definition %x", definition)}
+		}
+		result.columns[i] = name
+	}
+	_ = readWirePacket(c.t, c.conn)
+	for {
+		row := readWirePacket(c.t, c.conn)
+		if len(row) == 0 {
+			return wireResult{err: "empty row packet"}
+		}
+		if row[0] == 0xfe && len(row) < 9 {
+			break
+		}
+		values := make([]string, 0, columnCount)
+		offset := 0
+		for i := 0; i < columnCount; i++ {
+			value, next, valid := readLengthString(row, offset)
+			if !valid {
+				return wireResult{err: fmt.Sprintf("malformed row %x", row)}
+			}
+			values = append(values, value)
+			offset = next
+		}
+		result.rows = append(result.rows, values)
+	}
+	return result
+}
+
+func freeAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+	return address
+}
+
+func readWirePacket(t *testing.T, conn net.Conn) []byte {
+	t.Helper()
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, int(header[0])|int(header[1])<<8|int(header[2])<<16)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func writeWirePacket(t *testing.T, conn net.Conn, sequence byte, payload []byte) {
+	t.Helper()
+	header := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), sequence}
+	if _, err := conn.Write(append(header, payload...)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readLengthInt(payload []byte, offset int) (int, int, bool) {
+	if offset >= len(payload) {
+		return 0, offset, false
+	}
+	prefix := payload[offset]
+	offset++
+	switch prefix {
+	case 0xfc:
+		if offset+2 > len(payload) {
+			return 0, offset, false
+		}
+		return int(binary.LittleEndian.Uint16(payload[offset : offset+2])), offset + 2, true
+	case 0xfd:
+		if offset+3 > len(payload) {
+			return 0, offset, false
+		}
+		return int(payload[offset]) | int(payload[offset+1])<<8 | int(payload[offset+2])<<16, offset + 3, true
+	case 0xfe:
+		if offset+8 > len(payload) {
+			return 0, offset, false
+		}
+		return int(binary.LittleEndian.Uint64(payload[offset : offset+8])), offset + 8, true
+	default:
+		return int(prefix), offset, true
+	}
+}
+
+func readLengthString(payload []byte, offset int) (string, int, bool) {
+	length, next, ok := readLengthInt(payload, offset)
+	if !ok || next+length > len(payload) {
+		return "", next, false
+	}
+	return string(payload[next : next+length]), next + length, true
+}
+
+func readColumnName(payload []byte) (string, bool) {
+	offset := 0
+	for i := 0; i < 4; i++ {
+		_, next, ok := readLengthString(payload, offset)
+		if !ok {
+			return "", false
+		}
+		offset = next
+	}
+	name, _, ok := readLengthString(payload, offset)
+	return name, ok
+}
+
+func bytesIndex(value []byte, target byte) int {
+	for index, item := range value {
+		if item == target {
+			return index
+		}
+	}
+	return -1
 }

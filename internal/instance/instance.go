@@ -22,6 +22,21 @@ type Metadata struct {
 	PasswordHash string `json:"password_hash"`
 }
 
+func Load(directory string) (Metadata, error) {
+	contents, err := os.ReadFile(filepath.Join(directory, "instance.json"))
+	if err != nil {
+		return Metadata{}, err
+	}
+	var metadata Metadata
+	if err := json.Unmarshal(contents, &metadata); err != nil {
+		return Metadata{}, fmt.Errorf("decode instance metadata: %w", err)
+	}
+	if metadata.Schema != "database.instance/v1" || metadata.InstanceID == "" || metadata.AdminAccount == "" || metadata.PasswordHash == "" {
+		return Metadata{}, errors.New("invalid instance metadata")
+	}
+	return metadata, nil
+}
+
 // Initialize creates one new, stopped instance in an empty directory.
 func Initialize(directory, account, password string) (Metadata, error) {
 	if directory == "" || account == "" || password == "" {

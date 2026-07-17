@@ -18,7 +18,8 @@ type Namespace struct {
 	Tables map[string]Table `json:"tables"`
 }
 type Table struct {
-	Columns []string `json:"columns"`
+	Columns []string   `json:"columns"`
+	Rows    [][]string `json:"rows,omitempty"`
 }
 type Store struct {
 	mu         sync.Mutex
@@ -70,7 +71,57 @@ func (s *Store) CreateTable(namespace, name string, columns []string) error {
 		return nil
 	})
 }
-func (s *Store) Snapshot() Definition { s.mu.Lock(); defer s.mu.Unlock(); return s.definition }
+
+func (s *Store) Insert(namespace, table string, row []string) error {
+	return s.mutate(func() error {
+		ns, ok := s.definition.Namespaces[strings.ToLower(namespace)]
+		if !ok {
+			return errors.New("namespace does not exist")
+		}
+		key := strings.ToLower(table)
+		definition, ok := ns.Tables[key]
+		if !ok {
+			return errors.New("table does not exist")
+		}
+		if len(row) != len(definition.Columns) {
+			return errors.New("column count does not match value count")
+		}
+		definition.Rows = append(definition.Rows, append([]string(nil), row...))
+		ns.Tables[key] = definition
+		s.definition.Namespaces[strings.ToLower(namespace)] = ns
+		return nil
+	})
+}
+
+func (s *Store) Snapshot() Definition {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneDefinition(s.definition)
+}
+
+func cloneDefinition(source Definition) Definition {
+	copy := Definition{Namespaces: make(map[string]Namespace, len(source.Namespaces))}
+	for namespace, value := range source.Namespaces {
+		cloned := Namespace{Tables: make(map[string]Table, len(value.Tables))}
+		for table, definition := range value.Tables {
+			cloned.Tables[table] = Table{
+				Columns: append([]string(nil), definition.Columns...),
+				Rows:    cloneRows(definition.Rows),
+			}
+		}
+		copy.Namespaces[namespace] = cloned
+	}
+	return copy
+}
+
+func cloneRows(rows [][]string) [][]string {
+	copy := make([][]string, len(rows))
+	for index, row := range rows {
+		copy[index] = append([]string(nil), row...)
+	}
+	return copy
+}
+
 func (s *Store) mutate(action func() error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -82,5 +133,15 @@ func (s *Store) mutate(action func() error) error {
 		return err
 	}
 	b = append(b, '\n')
-	return os.WriteFile(s.path, b, 0o600)
+	file, err := os.OpenFile(s.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = file.Write(b); err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
