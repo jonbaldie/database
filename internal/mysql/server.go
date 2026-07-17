@@ -1096,6 +1096,22 @@ func parseLiteralResult(expression string) literalQueryResult {
 		metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag
 		return literalQueryResult{value: value, metadata: metadata, supported: true}
 	}
+	if _, err := strconv.ParseUint(value, 10, 64); err == nil {
+		metadata.characterSet = mysqlCharsetBinary
+		metadata.length = uint32(len(value))
+		metadata.typ = mysqlTypeLongLong
+		metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag | mysqlUnsignedFlag
+		return literalQueryResult{value: value, metadata: metadata, supported: true}
+	}
+	if strings.ContainsAny(value, ".eE") {
+		if _, err := strconv.ParseFloat(value, 64); err == nil {
+			metadata.characterSet = mysqlCharsetBinary
+			metadata.length = 8
+			metadata.typ = mysqlTypeDouble
+			metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag
+			return literalQueryResult{value: value, metadata: metadata, supported: true}
+		}
+	}
 	return literalQueryResult{}
 }
 
@@ -1280,12 +1296,29 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	s.statements[id] = statement
 	metadata := preparedColumns(query)
 	response := []byte{0x00, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), byte(len(metadata)), 0, byte(parameters), byte(parameters >> 8), 0, 0, 0}
-	if err := writePacket(connection, sequence, response); err != nil {
+	maximum := s.server.config.MaxAllowedPacket
+	if int64(len(response)) > maximum {
+		delete(s.statements, id)
+		return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
+	}
+	for i := 0; i < parameters; i++ {
+		if int64(len(columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar}))) > maximum {
+			delete(s.statements, id)
+			return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
+		}
+	}
+	for _, definition := range metadata {
+		if int64(len(columnDefinition(definition))) > maximum {
+			delete(s.statements, id)
+			return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
+		}
+	}
+	if err := writeBoundedPacket(connection, sequence, response, maximum); err != nil {
 		return err
 	}
 	if parameters > 0 {
 		for i := 0; i < parameters; i++ {
-			if err := writePacket(connection, sequence+byte(i)+1, columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar})); err != nil {
+			if err := writeBoundedPacket(connection, sequence+byte(i)+1, columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar}), maximum); err != nil {
 				return err
 			}
 		}
@@ -1297,7 +1330,7 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 		sequence++
 	}
 	for index, definition := range metadata {
-		if err := writePacket(connection, sequence+byte(index), columnDefinition(definition)); err != nil {
+		if err := writeBoundedPacket(connection, sequence+byte(index), columnDefinition(definition), maximum); err != nil {
 			return err
 		}
 	}
@@ -1839,6 +1872,14 @@ func binaryRow(row []string, rowIndex int, nulls [][]bool, metadata []columnMeta
 			}
 			encoded := make([]byte, 4)
 			binary.LittleEndian.PutUint32(encoded, uint32(value))
+			payload = append(payload, encoded...)
+		case mysqlTypeDouble:
+			value, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return nil, err
+			}
+			encoded := make([]byte, 8)
+			binary.LittleEndian.PutUint64(encoded, math.Float64bits(value))
 			payload = append(payload, encoded...)
 		default:
 			payload = append(payload, lengthEncodedString(value)...)

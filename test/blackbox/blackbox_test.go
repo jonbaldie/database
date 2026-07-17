@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net"
 	"os"
@@ -418,6 +419,16 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	}
 	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, value: []byte("Ada")}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "Ada" {
 		t.Fatalf("bound result: %#v", result)
+	}
+	uint64Value := make([]byte, 8)
+	binary.LittleEndian.PutUint64(uint64Value, math.MaxUint64)
+	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0x08, unsigned: true, value: uint64Value}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "18446744073709551615" {
+		t.Fatalf("unsigned bound result: %#v", result)
+	}
+	floatValue := make([]byte, 8)
+	binary.LittleEndian.PutUint64(floatValue, math.Float64bits(1.5))
+	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0x05, value: floatValue}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "1.5" {
+		t.Fatalf("float bound result: %#v", result)
 	}
 	longValue := strings.Repeat("x", 16*1024*1024)
 	client.sendLongData(bound.id, 0, []byte(longValue[:8*1024*1024]))
@@ -1260,6 +1271,12 @@ func (c *wireClient) readPreparedResult() wireResult {
 				} else {
 					values[index] = strconv.FormatInt(int64(binary.LittleEndian.Uint64(row[offset:offset+8])), 10)
 				}
+				offset += 8
+			case 0x05:
+				if offset+8 > len(row) {
+					return wireResult{err: "truncated float binary row"}
+				}
+				values[index] = strconv.FormatFloat(math.Float64frombits(binary.LittleEndian.Uint64(row[offset:offset+8])), 'g', -1, 64)
 				offset += 8
 			default:
 				value, next, valid := readLengthString(row, offset)
