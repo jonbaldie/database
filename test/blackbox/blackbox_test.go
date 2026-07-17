@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -380,6 +381,78 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	rows = reopened.query("SELECT * FROM users")
 	if rows.err != "" || len(rows.rows) != 1 || strings.Join(rows.rows[0], ",") != "1,Ada" {
 		t.Fatalf("durable row: %#v", rows)
+	}
+}
+
+func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("prepared-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, mysqlAddress := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, mysqlAddress, "admin", "prepared-secret")
+	defer client.close()
+
+	text := client.query("SELECT 7")
+	statement := client.prepare("SELECT 7")
+	if text.err != "" || statement.err != "" {
+		t.Fatalf("text=%#v prepare=%#v", text, statement)
+	}
+	binaryResult := client.executePrepared(statement.id)
+	if binaryResult.err != "" || len(binaryResult.rows) != 1 || len(binaryResult.rows[0]) != 1 || binaryResult.rows[0][0] != "7" || len(binaryResult.metadata) != 1 || len(text.metadata) != 1 || binaryResult.metadata[0] != text.metadata[0] {
+		t.Fatalf("prepared binary result differs from text: text=%#v binary=%#v", text, binaryResult)
+	}
+
+	bound := client.prepare("SELECT ?")
+	if bound.err != "" {
+		t.Fatalf("prepare bound statement: %#v", bound)
+	}
+	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, value: []byte("Ada")}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "Ada" {
+		t.Fatalf("bound result: %#v", result)
+	}
+	client.sendLongData(bound.id, 0, []byte("long "))
+	client.sendLongData(bound.id, 0, []byte("value"))
+	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, long: true}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "long value" {
+		t.Fatalf("long-data result: %#v", result)
+	}
+	if err := client.resetPrepared(bound.id); err != nil {
+		t.Fatal(err)
+	}
+	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, value: []byte("fresh")}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "fresh" {
+		t.Fatalf("statement reset did not clear long data: %#v", result)
+	}
+	client.closePrepared(bound.id)
+	if result := client.executePrepared(bound.id); result.err == "" {
+		t.Fatalf("closed statement executed: %#v", result)
+	}
+
+	if result := client.query("BEGIN"); result.err != "" {
+		t.Fatalf("begin: %#v", result)
+	}
+	if result := client.query("CREATE DATABASE reset_rollback"); result.err != "" {
+		t.Fatalf("transactional create: %#v", result)
+	}
+	resetStatement := client.prepare("SELECT 1")
+	if resetStatement.err != "" {
+		t.Fatalf("prepare before connection reset: %#v", resetStatement)
+	}
+	if err := client.reset(); err != nil {
+		t.Fatal(err)
+	}
+	if result := client.query("USE reset_rollback"); result.err == "" {
+		t.Fatalf("connection reset did not roll back work: %#v", result)
+	}
+	if result := client.executePrepared(resetStatement.id); result.err == "" {
+		t.Fatalf("connection reset retained prepared statement: %#v", result)
+	}
+	if result := client.query("SELECT 1"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "1" {
+		t.Fatalf("connection reset lost authentication: %#v", result)
 	}
 }
 
@@ -744,14 +817,23 @@ func TestServeEmitsTerminalOperatorResult(t *testing.T) {
 }
 
 type wireResult struct {
-	columns []string
-	rows    [][]string
-	err     string
+	columns  []string
+	rows     [][]string
+	metadata []wireColumn
+	err      string
 }
 
 type preparedStatement struct {
 	id  uint32
 	err string
+}
+
+type preparedParameter struct {
+	typ      byte
+	unsigned bool
+	null     bool
+	long     bool
+	value    []byte
 }
 
 type wireClient struct {
@@ -966,8 +1048,22 @@ func (c *wireClient) query(query string) wireResult {
 func (c *wireClient) prepare(query string) preparedStatement {
 	writeWirePacket(c.t, c.conn, 0, append([]byte{0x16}, query...))
 	payload := readWirePacket(c.t, c.conn)
-	if len(payload) < 5 || payload[0] != 0 {
+	if len(payload) < 12 || payload[0] != 0 {
 		return preparedStatement{err: fmt.Sprintf("prepare response %x", payload)}
+	}
+	parameters := int(binary.LittleEndian.Uint16(payload[7:9]))
+	columns := int(binary.LittleEndian.Uint16(payload[5:7]))
+	for _, count := range []int{parameters, columns} {
+		for range count {
+			if _, ok := parseColumnDefinition(readWirePacket(c.t, c.conn)); !ok {
+				return preparedStatement{err: "malformed prepared metadata"}
+			}
+		}
+		if count > 0 {
+			if terminator := readWirePacket(c.t, c.conn); len(terminator) == 0 || terminator[0] != 0xfe {
+				return preparedStatement{err: fmt.Sprintf("malformed prepared metadata terminator %x", terminator)}
+			}
+		}
 	}
 	return preparedStatement{id: binary.LittleEndian.Uint32(payload[1:5])}
 }
@@ -975,7 +1071,59 @@ func (c *wireClient) prepare(query string) preparedStatement {
 func (c *wireClient) executePrepared(id uint32) wireResult {
 	payload := []byte{0x17, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), 0, 0, 0, 0, 0}
 	writeWirePacket(c.t, c.conn, 0, payload)
-	return c.readResult()
+	return c.readPreparedResult()
+}
+
+func (c *wireClient) executePreparedValues(id uint32, parameters []preparedParameter) wireResult {
+	payload := []byte{0x17, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), 0, 0, 0, 0, 0}
+	nullBytes := make([]byte, (len(parameters)+7)/8)
+	for index, parameter := range parameters {
+		if parameter.null {
+			nullBytes[index/8] |= 1 << (index % 8)
+		}
+	}
+	payload = append(payload, nullBytes...)
+	payload = append(payload, 1)
+	for _, parameter := range parameters {
+		unsigned := byte(0)
+		if parameter.unsigned {
+			unsigned = 0x80
+		}
+		payload = append(payload, parameter.typ, unsigned)
+	}
+	for _, parameter := range parameters {
+		if !parameter.null && !parameter.long {
+			switch parameter.typ {
+			case 0x0f, 0xfd, 0xfe, 0xfc, 0xfb, 0xfa, 0xf9, 0xf5, 0xf6:
+				payload = append(payload, lengthEncodedWire(parameter.value)...)
+			default:
+				payload = append(payload, parameter.value...)
+			}
+		}
+	}
+	writeWirePacket(c.t, c.conn, 0, payload)
+	return c.readPreparedResult()
+}
+
+func lengthEncodedWire(value []byte) []byte {
+	if len(value) < 251 {
+		return append([]byte{byte(len(value))}, value...)
+	}
+	return append([]byte{0xfc, byte(len(value)), byte(len(value) >> 8)}, value...)
+}
+
+func (c *wireClient) sendLongData(id uint32, parameter uint16, value []byte) {
+	payload := []byte{0x18, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), byte(parameter), byte(parameter >> 8)}
+	writeWirePacket(c.t, c.conn, 0, append(payload, value...))
+}
+
+func (c *wireClient) resetPrepared(id uint32) error {
+	payload := []byte{0x1a, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24)}
+	writeWirePacket(c.t, c.conn, 0, payload)
+	if result := readWirePacket(c.t, c.conn); len(result) == 0 || result[0] != 0 {
+		return fmt.Errorf("prepared reset response %x", result)
+	}
+	return nil
 }
 
 func (c *wireClient) closePrepared(id uint32) {
@@ -1016,14 +1164,14 @@ func (c *wireClient) readResult() wireResult {
 	if !ok {
 		return wireResult{err: fmt.Sprintf("malformed column count %x", payload)}
 	}
-	result := wireResult{columns: make([]string, columnCount)}
+	result := wireResult{columns: make([]string, columnCount), metadata: make([]wireColumn, columnCount)}
 	for i := range result.columns {
 		definition := readWirePacket(c.t, c.conn)
-		name, ok := readColumnName(definition)
+		column, ok := parseColumnDefinition(definition)
 		if !ok {
 			return wireResult{err: fmt.Sprintf("malformed column definition %x", definition)}
 		}
-		result.columns[i] = name
+		result.columns[i], result.metadata[i] = column.name, column
 	}
 	_ = readWirePacket(c.t, c.conn)
 	for {
@@ -1047,6 +1195,74 @@ func (c *wireClient) readResult() wireResult {
 		result.rows = append(result.rows, values)
 	}
 	return result
+}
+
+func (c *wireClient) readPreparedResult() wireResult {
+	payload := readWirePacket(c.t, c.conn)
+	if len(payload) == 0 {
+		return wireResult{err: "empty result"}
+	}
+	if payload[0] == 0xff {
+		return wireResult{err: string(payload[4:])}
+	}
+	if payload[0] == 0x00 {
+		return wireResult{}
+	}
+	columnCount, _, ok := readLengthInt(payload, 0)
+	if !ok {
+		return wireResult{err: fmt.Sprintf("malformed column count %x", payload)}
+	}
+	result := wireResult{columns: make([]string, columnCount), metadata: make([]wireColumn, columnCount)}
+	for index := range result.columns {
+		column, valid := parseColumnDefinition(readWirePacket(c.t, c.conn))
+		if !valid {
+			return wireResult{err: "malformed prepared column definition"}
+		}
+		result.columns[index], result.metadata[index] = column.name, column
+	}
+	_ = readWirePacket(c.t, c.conn)
+	for {
+		row := readWirePacket(c.t, c.conn)
+		if len(row) == 0 {
+			return wireResult{err: "empty prepared row"}
+		}
+		if row[0] == 0xfe && len(row) < 9 {
+			return result
+		}
+		if row[0] != 0 {
+			return wireResult{err: fmt.Sprintf("not a binary row %x", row)}
+		}
+		nullBytes := (columnCount + 9) / 8
+		if len(row) < 1+nullBytes {
+			return wireResult{err: fmt.Sprintf("truncated binary row %x", row)}
+		}
+		offset := 1 + nullBytes
+		values := make([]string, columnCount)
+		for index, column := range result.metadata {
+			if row[1+(index+2)/8]&(1<<((index+2)%8)) != 0 {
+				continue
+			}
+			switch column.typ {
+			case 0x08:
+				if offset+8 > len(row) {
+					return wireResult{err: "truncated integer binary row"}
+				}
+				if column.flags&0x20 != 0 {
+					values[index] = strconv.FormatUint(binary.LittleEndian.Uint64(row[offset:offset+8]), 10)
+				} else {
+					values[index] = strconv.FormatInt(int64(binary.LittleEndian.Uint64(row[offset:offset+8])), 10)
+				}
+				offset += 8
+			default:
+				value, next, valid := readLengthString(row, offset)
+				if !valid {
+					return wireResult{err: fmt.Sprintf("malformed binary row %x", row)}
+				}
+				values[index], offset = value, next
+			}
+		}
+		result.rows = append(result.rows, values)
+	}
 }
 
 func freeAddress(t *testing.T) string {

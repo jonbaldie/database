@@ -118,7 +118,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		go func() { _ = httpServer.Serve(listener) }()
 	}
 	if opts.MySQLAddress != "" && opts.MySQLEnabled {
-		mysqlServer, err = mysql.NewWithConfig(opts.MySQLAddress, mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile})
+		mysqlServer, err = mysql.NewWithConfig(opts.MySQLAddress, mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile, MaxPreparedStmtCount: opts.MaxPreparedStmtCount})
 		if err != nil {
 			return fmt.Errorf("listen for mysql: %w", err)
 		}

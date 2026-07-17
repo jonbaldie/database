@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -44,19 +45,28 @@ const (
 	mysqlCharsetBinary           uint16 = 63
 	mysqlTypeLongLong            byte   = 0x08
 	mysqlTypeNull                byte   = 0x06
+	mysqlTypeTiny                byte   = 0x01
+	mysqlTypeShort               byte   = 0x02
+	mysqlTypeLong                byte   = 0x03
+	mysqlTypeFloat               byte   = 0x04
+	mysqlTypeDouble              byte   = 0x05
 	mysqlTypeVarchar             byte   = 0x0f
 	mysqlTypeVarString           byte   = 0xfd
 	mysqlNotNullFlag             uint16 = 1
 	mysqlBinaryFlag              uint16 = 1 << 7
+	mysqlUnsignedFlag            uint16 = 1 << 5
+	maxPreparedParameters               = 65535
+	maxPreparedLongDataBytes            = 16 * 1024 * 1024
 )
 
 type Config struct {
-	Catalog      *catalog.Store
-	Username     string
-	PasswordHash string
-	Version      string
-	TLSCertFile  string
-	TLSKeyFile   string
+	Catalog              *catalog.Store
+	Username             string
+	PasswordHash         string
+	Version              string
+	TLSCertFile          string
+	TLSKeyFile           string
+	MaxPreparedStmtCount int
 }
 
 type Server struct {
@@ -85,6 +95,9 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 	}
 	if config.Version == "" {
 		config.Version = "0.1.0-dev"
+	}
+	if config.MaxPreparedStmtCount == 0 {
+		config.MaxPreparedStmtCount = 4096
 	}
 	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
 		_ = listener.Close()
@@ -198,12 +211,23 @@ type session struct {
 	username            string
 	database            string
 	initialDB           string
-	statements          map[uint32]string
-	parameters          map[uint32]int
+	statements          map[uint32]*preparedStatement
 	nextStmtID          uint32
 	transaction         bool
 	transactionSnapshot catalog.Definition
 	savepoints          map[string]catalog.Definition
+}
+
+type preparedStatement struct {
+	query      string
+	parameters int
+	types      []preparedParameterType
+	longData   map[uint16][]byte
+}
+
+type preparedParameterType struct {
+	typ      byte
+	unsigned bool
 }
 
 func (s *Server) serveConnection(connection net.Conn) {
@@ -228,7 +252,7 @@ func (s *Server) serveConnection(connection net.Conn) {
 	if err := writePacket(connection, authentication.nextSequence, okPacket()); err != nil {
 		return
 	}
-	session := &session{server: s, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]string{}, parameters: map[uint32]int{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
+	session := &session{server: s, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]*preparedStatement{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
 	current = session
 	for {
 		sequence, payload, err := readPacket(connection)
@@ -282,12 +306,30 @@ func (s *Server) serveConnection(connection net.Conn) {
 			if len(payload) >= 5 {
 				id := binary.LittleEndian.Uint32(payload[1:5])
 				delete(session.statements, id)
-				delete(session.parameters, id)
+			}
+		case 0x18: // COM_STMT_SEND_LONG_DATA
+			if err := session.sendLongData(payload); err != nil {
+				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
+					return
+				}
+			}
+		case 0x1a: // COM_STMT_RESET
+			if err := session.resetPrepared(payload); err != nil {
+				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
+					return
+				}
+				continue
+			}
+			if writePacket(connection, sequence+1, okPacket()) != nil {
+				return
 			}
 		case 0x1f: // COM_RESET_CONNECTION
-			session.database = session.initialDB
-			session.statements = map[uint32]string{}
-			session.parameters = map[uint32]int{}
+			if err := session.resetConnection(); err != nil {
+				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
+					return
+				}
+				continue
+			}
 			if writePacket(connection, sequence+1, okPacket()) != nil {
 				return
 			}
@@ -1220,49 +1262,90 @@ func sortedTables(namespace catalog.Namespace) []catalog.Table {
 }
 
 func (s *session) prepare(connection net.Conn, sequence byte, query string) error {
+	parameters := parameterCount(query)
+	if parameters > maxPreparedParameters {
+		return writePacket(connection, sequence, errorPacket(1390, "HY000", "prepared statement contains too many placeholders"))
+	}
+	if len(s.statements) >= s.server.config.MaxPreparedStmtCount {
+		return writePacket(connection, sequence, errorPacket(1461, "HY000", "can't create more than max_prepared_stmt_count statements"))
+	}
 	id := s.nextStmtID
 	s.nextStmtID++
-	s.statements[id] = query
-	params := strings.Count(query, "?")
-	s.parameters[id] = params
-	columns := 0
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "select") {
-		columns = 1
-	}
-	response := []byte{0x00, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), byte(columns), 0, byte(params), 0, 0, 0, 0}
+	statement := &preparedStatement{query: query, parameters: parameters, longData: make(map[uint16][]byte)}
+	s.statements[id] = statement
+	metadata := preparedColumns(query)
+	response := []byte{0x00, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), byte(len(metadata)), 0, byte(parameters), byte(parameters >> 8), 0, 0, 0}
 	if err := writePacket(connection, sequence, response); err != nil {
 		return err
 	}
-	if params > 0 {
-		for i := 0; i < params; i++ {
+	if parameters > 0 {
+		for i := 0; i < parameters; i++ {
 			if err := writePacket(connection, sequence+byte(i)+1, columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar})); err != nil {
 				return err
 			}
 		}
-		return writePacket(connection, sequence+byte(params)+1, eofPacket())
+		if err := writePacket(connection, sequence+byte(parameters)+1, eofPacket()); err != nil {
+			return err
+		}
+		sequence += byte(parameters) + 2
+	} else {
+		sequence++
+	}
+	for index, definition := range metadata {
+		if err := writePacket(connection, sequence+byte(index), columnDefinition(definition)); err != nil {
+			return err
+		}
+	}
+	if len(metadata) > 0 {
+		return writePacket(connection, sequence+byte(len(metadata)), eofPacket())
 	}
 	return nil
 }
+
+func preparedColumns(query string) []columnMetadata {
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	if !strings.HasPrefix(strings.ToLower(query), "select ") {
+		return nil
+	}
+	expression := strings.TrimSpace(query[len("select "):])
+	if strings.Contains(expression, "?") {
+		return []columnMetadata{{catalog: "def", name: expression, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}}
+	}
+	if literal := parseLiteralResult(expression); literal.supported {
+		return []columnMetadata{literal.metadata}
+	}
+	return []columnMetadata{{catalog: "def", name: expression, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}}
+}
+
 func (s *session) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
 	if len(payload) < 5 {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", "malformed prepared statement"))
 	}
 	id := binary.LittleEndian.Uint32(payload[1:5])
-	query, ok := s.statements[id]
+	statement, ok := s.statements[id]
 	if !ok {
 		return writePacket(connection, sequence, errorPacket(1243, "HY000", "unknown prepared statement handler"))
 	}
-	params, err := preparedValues(payload, s.parameters[id])
+	params, err := preparedValues(payload, statement)
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
-	for _, value := range params {
-		query = strings.Replace(query, "?", value, 1)
+	query, err := bindPreparedQuery(statement.query, params)
+	if err != nil {
+		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
-	return s.writeQueryResult(connection, sequence, query)
+	result, err := s.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	if err != nil {
+		return writePacket(connection, sequence, mysqlError(err))
+	}
+	if result == nil {
+		return writePacket(connection, sequence, okPacket())
+	}
+	return writeBinaryResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata)
 }
 
-func preparedValues(payload []byte, count int) ([]string, error) {
+func preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
+	count := statement.parameters
 	if count == 0 {
 		return nil, nil
 	}
@@ -1271,40 +1354,206 @@ func preparedValues(payload []byte, count int) ([]string, error) {
 		return nil, errors.New("malformed prepared statement parameters")
 	}
 	offset := 10 + nullBytes
-	if payload[offset] == 0 {
-		return make([]string, count), nil
-	}
+	newTypes := payload[offset]
 	offset++
-	types := payload[offset:]
-	if len(types) < count*2 {
-		return nil, errors.New("malformed prepared statement types")
+	if newTypes != 0 {
+		if len(payload[offset:]) < count*2 {
+			return nil, errors.New("malformed prepared statement types")
+		}
+		statement.types = make([]preparedParameterType, count)
+		for i := range statement.types {
+			statement.types[i] = preparedParameterType{typ: payload[offset+i*2], unsigned: payload[offset+i*2+1]&0x80 != 0}
+		}
+		offset += count * 2
+	} else if len(statement.types) != count {
+		return nil, errors.New("prepared statement parameter types are unavailable")
 	}
-	offset += count * 2
 	values := make([]string, count)
 	for i := 0; i < count; i++ {
-		typ := types[i*2]
-		switch typ {
-		case 0x03:
-			if offset+4 > len(payload) {
-				return nil, errors.New("malformed integer parameter")
-			}
-			values[i] = strconv.FormatInt(int64(binary.LittleEndian.Uint32(payload[offset:offset+4])), 10)
-			offset += 4
-		case 0x08:
-			if offset+8 > len(payload) {
-				return nil, errors.New("malformed integer parameter")
-			}
-			values[i] = strconv.FormatInt(int64(binary.LittleEndian.Uint64(payload[offset:offset+8])), 10)
-			offset += 8
-		case 0x0f, 0xfd:
-			var raw []byte
-			raw, offset, _ = readLengthEncoded(payload, offset)
-			values[i] = quote(string(raw))
+		if payload[10+i/8]&(1<<uint(i%8)) != 0 {
+			values[i] = "NULL"
+			continue
+		}
+		if long, ok := statement.longData[uint16(i)]; ok {
+			values[i] = quote(string(long))
+			continue
+		}
+		value, next, err := readPreparedValue(payload, offset, statement.types[i])
+		if err != nil {
+			return nil, err
+		}
+		values[i], offset = value, next
+	}
+	statement.longData = make(map[uint16][]byte)
+	return values, nil
+}
+
+func readPreparedValue(payload []byte, offset int, typ preparedParameterType) (string, int, error) {
+	need := func(size int) error {
+		if offset+size > len(payload) {
+			return errors.New("malformed prepared parameter")
+		}
+		return nil
+	}
+	integer := func(size int) (string, int, error) {
+		if err := need(size); err != nil {
+			return "", offset, err
+		}
+		var value uint64
+		for i := 0; i < size; i++ {
+			value |= uint64(payload[offset+i]) << (8 * i)
+		}
+		if typ.unsigned {
+			return strconv.FormatUint(value, 10), offset + size, nil
+		}
+		switch size {
+		case 1:
+			return strconv.FormatInt(int64(int8(value)), 10), offset + size, nil
+		case 2:
+			return strconv.FormatInt(int64(int16(value)), 10), offset + size, nil
+		case 4:
+			return strconv.FormatInt(int64(int32(value)), 10), offset + size, nil
 		default:
-			return nil, errors.New("unsupported prepared parameter type")
+			return strconv.FormatInt(int64(value), 10), offset + size, nil
 		}
 	}
-	return values, nil
+	switch typ.typ {
+	case mysqlTypeNull:
+		return "NULL", offset, nil
+	case mysqlTypeTiny:
+		return integer(1)
+	case mysqlTypeShort:
+		return integer(2)
+	case mysqlTypeLong:
+		return integer(4)
+	case mysqlTypeLongLong:
+		return integer(8)
+	case mysqlTypeFloat:
+		if err := need(4); err != nil {
+			return "", offset, err
+		}
+		return strconv.FormatFloat(float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[offset:offset+4]))), 'g', -1, 32), offset + 4, nil
+	case mysqlTypeDouble:
+		if err := need(8); err != nil {
+			return "", offset, err
+		}
+		return strconv.FormatFloat(math.Float64frombits(binary.LittleEndian.Uint64(payload[offset:offset+8])), 'g', -1, 64), offset + 8, nil
+	case mysqlTypeVarchar, mysqlTypeVarString, 0xfe, 0xfc, 0xfb, 0xfa, 0xf9, 0xf5, 0xf6:
+		raw, next, ok := readLengthEncoded(payload, offset)
+		if !ok {
+			return "", offset, errors.New("malformed string prepared parameter")
+		}
+		return quote(string(raw)), next, nil
+	default:
+		return "", offset, errors.New("unsupported prepared parameter type")
+	}
+}
+
+func (s *session) sendLongData(payload []byte) error {
+	if len(payload) < 7 {
+		return sqlFailure{1210, "HY000", "malformed prepared statement long data"}
+	}
+	id := binary.LittleEndian.Uint32(payload[1:5])
+	statement, ok := s.statements[id]
+	if !ok {
+		return sqlFailure{1243, "HY000", "unknown prepared statement handler"}
+	}
+	parameter := binary.LittleEndian.Uint16(payload[5:7])
+	if int(parameter) >= statement.parameters {
+		return sqlFailure{1210, "HY000", "prepared statement parameter index out of range"}
+	}
+	if len(statement.longData[parameter])+len(payload[7:]) > maxPreparedLongDataBytes {
+		return sqlFailure{1153, "08S01", "prepared statement long data exceeds maximum size"}
+	}
+	statement.longData[parameter] = append(statement.longData[parameter], payload[7:]...)
+	return nil
+}
+
+func (s *session) resetPrepared(payload []byte) error {
+	if len(payload) < 5 {
+		return sqlFailure{1210, "HY000", "malformed prepared statement reset"}
+	}
+	statement, ok := s.statements[binary.LittleEndian.Uint32(payload[1:5])]
+	if !ok {
+		return sqlFailure{1243, "HY000", "unknown prepared statement handler"}
+	}
+	statement.longData = make(map[uint16][]byte)
+	return nil
+}
+
+func (s *session) resetConnection() error {
+	if err := s.rollbackTransaction(); err != nil {
+		return err
+	}
+	s.database = s.initialDB
+	s.statements = make(map[uint32]*preparedStatement)
+	s.savepoints = make(map[string]catalog.Definition)
+	return nil
+}
+
+func (s *session) rollbackTransaction() error {
+	if s.transaction && s.server.config.Catalog != nil {
+		if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
+			return sqlFailure{1105, "HY000", err.Error()}
+		}
+	}
+	s.transaction = false
+	s.transactionSnapshot = catalog.Definition{}
+	s.savepoints = make(map[string]catalog.Definition)
+	return nil
+}
+
+func parameterCount(query string) int { return len(preparedPlaceholders(query)) }
+
+func bindPreparedQuery(query string, values []string) (string, error) {
+	positions := preparedPlaceholders(query)
+	if len(positions) != len(values) {
+		return "", errors.New("prepared statement parameter count does not match")
+	}
+	var result strings.Builder
+	result.Grow(len(query) + len(values)*8)
+	start := 0
+	for index, position := range positions {
+		result.WriteString(query[start:position])
+		result.WriteString(values[index])
+		start = position + 1
+	}
+	result.WriteString(query[start:])
+	return result.String(), nil
+}
+
+func preparedPlaceholders(query string) []int {
+	positions := make([]int, 0)
+	quote, escaped := byte(0), false
+	for index := 0; index < len(query); index++ {
+		character := query[index]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if character == '\\' {
+				escaped = true
+				continue
+			}
+			if character == quote {
+				if quote == '\'' && index+1 < len(query) && query[index+1] == quote {
+					index++
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		if character == '\'' || character == '"' || character == '`' {
+			quote = character
+			continue
+		}
+		if character == '?' {
+			positions = append(positions, index)
+		}
+	}
+	return positions
 }
 
 func identifier(value string) string {
@@ -1485,6 +1734,83 @@ func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]
 	}
 	return writePacket(connection, sequence, eofPacket())
 }
+
+func writeBinaryResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool, metadata []columnMetadata) error {
+	if err := writePacket(connection, sequence, lengthEncodedInt(len(columns))); err != nil {
+		return err
+	}
+	definitions := make([]columnMetadata, len(columns))
+	for index, name := range columns {
+		definition := columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
+		if index < len(metadata) {
+			definition = metadata[index]
+		}
+		definitions[index] = definition
+		if err := writePacket(connection, sequence+byte(index)+1, columnDefinition(definition)); err != nil {
+			return err
+		}
+	}
+	sequence += byte(len(columns)) + 1
+	if err := writePacket(connection, sequence, eofPacket()); err != nil {
+		return err
+	}
+	sequence++
+	for rowIndex, row := range rows {
+		payload, err := binaryRow(row, rowIndex, nulls, definitions)
+		if err != nil {
+			return err
+		}
+		if err := writePacket(connection, sequence, payload); err != nil {
+			return err
+		}
+		sequence++
+	}
+	return writePacket(connection, sequence, eofPacket())
+}
+
+func binaryRow(row []string, rowIndex int, nulls [][]bool, metadata []columnMetadata) ([]byte, error) {
+	payload := make([]byte, 1+(len(metadata)+9)/8)
+	for index, value := range row {
+		if rowIndex < len(nulls) && index < len(nulls[rowIndex]) && nulls[rowIndex][index] {
+			payload[1+(index+2)/8] |= 1 << uint((index+2)%8)
+			continue
+		}
+		definition := columnMetadata{typ: mysqlTypeVarString}
+		if index < len(metadata) {
+			definition = metadata[index]
+		}
+		switch definition.typ {
+		case mysqlTypeLongLong:
+			encoded := make([]byte, 8)
+			if definition.flags&mysqlUnsignedFlag != 0 {
+				value, err := strconv.ParseUint(value, 10, 64)
+				if err != nil {
+					return nil, err
+				}
+				binary.LittleEndian.PutUint64(encoded, value)
+			} else {
+				value, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					return nil, err
+				}
+				binary.LittleEndian.PutUint64(encoded, uint64(value))
+			}
+			payload = append(payload, encoded...)
+		case mysqlTypeLong:
+			value, err := strconv.ParseInt(value, 10, 32)
+			if err != nil {
+				return nil, err
+			}
+			encoded := make([]byte, 4)
+			binary.LittleEndian.PutUint32(encoded, uint32(value))
+			payload = append(payload, encoded...)
+		default:
+			payload = append(payload, lengthEncodedString(value)...)
+		}
+	}
+	return payload, nil
+}
+
 func columnDefinition(definition columnMetadata) []byte {
 	payload := append(lengthEncodedString(definition.catalog), lengthEncodedString(definition.schema)...)
 	payload = append(payload, lengthEncodedString(definition.table)...)
