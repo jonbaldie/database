@@ -143,6 +143,23 @@ func TestServeReportsReadinessAndWritesCleanStateOnShutdown(t *testing.T) {
 	}
 }
 
+func TestServeReleasesDataDirectoryClaimWhenStateMarkerFails(t *testing.T) {
+	directory := initializedDirectory(t)
+	stateParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(stateParent, []byte("file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join(stateParent, "server.state")
+	if err := Serve(context.Background(), Options{DataDirectory: directory, StateFile: stateFile}, func(Event) {}); err == nil {
+		t.Fatal("Serve accepted a state file whose parent is not a directory")
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	stop()
+	if err := Serve(ctx, Options{DataDirectory: directory}, func(Event) {}); err != nil {
+		t.Fatalf("Serve did not release the failed state claim: %v", err)
+	}
+}
+
 func initializedDirectory(t *testing.T) string {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "instance")
