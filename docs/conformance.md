@@ -16,3 +16,10 @@ The normative [operator automation contract](operator-automation.md) defines
 the complete command, stream, progress, result, diagnostic, and exit-class
 surface. Implementations must preserve that contract even while individual
 workflow coverage is delivered by separate tickets.
+
+The normative [performance acceptance scenario](performance-acceptance.md)
+defines the fixed corpus, application-visible operations, load boundary,
+measurement and repetition rules, clean-start gate, and published release
+evidence. `scripts/performance.sh` is the current repeatable verification
+entry point; running it does not by itself establish the release acceptance
+judgment or turn performance into a CI gate.

@@ -24,6 +24,11 @@ exact command inputs, secret boundary, progress records, terminal results,
 diagnostics, exit classes, and compatibility rules for automating every
 supported operator workflow.
 
+The [performance acceptance scenario](docs/performance-acceptance.md) defines
+the versioned non-domain corpus, application-visible gates, reference
+environment, measurement rules, and release evidence for v0.1. It is a release
+gate, not an automated CI benchmark or a universal deployment guarantee.
+
 The executable delivery spine currently provides the public process seams used
 by black-box verification. These examples show the current partial delivery
 syntax; the complete, normative automation syntax is in the
