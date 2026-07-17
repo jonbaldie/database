@@ -558,6 +558,26 @@ func TestMySQLPreparedStatementCountIsBounded(t *testing.T) {
 	}
 }
 
+func TestMySQLSessionCeilingRejectsAdditionalConnections(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory, "--max-connections=1")
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+
+	client := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer client.close()
+	second, err := sql.Open("mysql", "admin:lifecycle-secret@tcp("+address+")/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	context, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := second.PingContext(context); err == nil {
+		t.Fatal("authenticated session beyond max_connections was admitted")
+	}
+}
+
 func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")

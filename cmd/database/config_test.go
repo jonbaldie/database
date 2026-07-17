@@ -215,6 +215,41 @@ func TestResolveConfigurationRejectsInvalidSources(t *testing.T) {
 	}
 }
 
+func TestResolveConfigurationClassifiesSourceFailures(t *testing.T) {
+	directory := t.TempDir()
+	tests := []struct {
+		name  string
+		args  []string
+		env   []string
+		class string
+	}{
+		{name: "unknown flag", args: []string{"--not-a-setting=x"}, class: "invalid_input"},
+		{name: "unknown environment", env: []string{"DATABASE_SERVER_NOT_A_SETTING=x"}, class: "invalid_input"},
+		{name: "malformed file", args: []string{"--config=" + configurationFile(t, directory, "not a setting")}, class: "invalid_input"},
+		{name: "unreadable selected file", args: []string{"--config=" + filepath.Join(directory, "missing.toml")}, class: "precondition"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := resolveConfiguration(test.args, test.env)
+			if err == nil {
+				t.Fatal("expected configuration rejection")
+			}
+			if class := configurationClass(err); class != test.class {
+				t.Fatalf("configuration class = %q, want %q", class, test.class)
+			}
+		})
+	}
+}
+
+func configurationFile(t *testing.T, directory, contents string) string {
+	t.Helper()
+	path := filepath.Join(directory, "server.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestResolveConfigurationAcceptsBracketedIPv6(t *testing.T) {
 	config, err := resolveConfiguration([]string{"--data-directory", "/tmp/database-instance", "--mysql-listen-address", "[::1]:3306"}, nil)
 	if err != nil {

@@ -3,10 +3,29 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestMainExitsWithTheCommandResult(t *testing.T) {
+	previousArgs, previousExit := os.Args, exitProcess
+	t.Cleanup(func() {
+		os.Args = previousArgs
+		exitProcess = previousExit
+	})
+	os.Args = []string{"database", "unknown"}
+	exitCode := -1
+	exitProcess = func(code int) { exitCode = code }
+
+	main()
+
+	if exitCode != 2 {
+		t.Fatalf("process exit code = %d, want 2", exitCode)
+	}
+}
 
 func TestUnsupportedOperatorOperationsFailExplicitly(t *testing.T) {
 	tests := []struct {
@@ -58,6 +77,43 @@ func TestOperatorRejectsUnknownFlags(t *testing.T) {
 	}
 }
 
+func TestCommandHandlersRouteEverySupportedWorkflow(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		handler commandHandler
+	}{
+		{name: "version", args: []string{"version"}, handler: versionCommand},
+		{name: "initialization", args: []string{"init"}, handler: initializeCommand},
+		{name: "backup", args: []string{"backup", "inspect"}, handler: operatorCommandHandler},
+		{name: "restore", args: []string{"restore"}, handler: operatorCommandHandler},
+		{name: "upgrade", args: []string{"upgrade"}, handler: operatorCommandHandler},
+		{name: "data", args: []string{"data", "validate"}, handler: operatorCommandHandler},
+		{name: "shutdown", args: []string{"shutdown"}, handler: operatorCommandHandler},
+		{name: "configuration", args: []string{"config", "validate"}, handler: configCommandHandler},
+		{name: "serve", args: []string{"serve"}, handler: serveCommand},
+		{name: "help", args: []string{"help"}, handler: helpCommand},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler, ok := commandHandlerFor(test.args[0])
+			if !ok {
+				t.Fatalf("handler missing for %q", test.args[0])
+			}
+			if fmt.Sprintf("%p", handler) != fmt.Sprintf("%p", test.handler) {
+				t.Fatalf("handler for %q changed workflow ownership", test.args[0])
+			}
+		})
+	}
+}
+
+func TestCommandHandlersRejectUnknownCommand(t *testing.T) {
+	if _, ok := commandHandlerFor("unknown"); ok {
+		t.Fatal("unknown command received a handler")
+	}
+}
+
 func TestConfigValidateHumanOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"config", "validate", "--format=text", "--data-directory=" + filepath.Join(t.TempDir(), "instance")}, &stdout, &stderr); code != 0 {
@@ -105,5 +161,26 @@ func TestConfigValidateJSONFailureIncludesStableExitClass(t *testing.T) {
 	}
 	if operationID, ok := result["operation_id"].(string); !ok || operationID == "" {
 		t.Fatalf("operation_id = %#v", result["operation_id"])
+	}
+}
+
+func TestConfigOutputFormatPreservesConfigurationArguments(t *testing.T) {
+	format, arguments, err := configOutputFormat([]string{"validate", "--format", "json", "--data-directory=/tmp/database"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "json" {
+		t.Fatalf("format = %q", format)
+	}
+	if got, want := strings.Join(arguments, " "), "validate --data-directory=/tmp/database"; got != want {
+		t.Fatalf("arguments = %q, want %q", got, want)
+	}
+}
+
+func TestConfigOutputFormatRejectsRepeatedAndMissingValues(t *testing.T) {
+	for _, arguments := range [][]string{{"--format=json", "--format=text"}, {"--format"}} {
+		if _, _, err := configOutputFormat(arguments); err == nil {
+			t.Fatalf("configOutputFormat(%q) accepted invalid output format", arguments)
+		}
 	}
 }
