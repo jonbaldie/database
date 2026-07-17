@@ -84,7 +84,11 @@ func claimInitialization(directory string) (initializationClaim, error) {
 		}
 		return initializationClaim{}, fmt.Errorf("claim data directory initialization: %w", err)
 	}
-	return initializationClaim{directory: directory, staging: staging}, nil
+	claim := initializationClaim{directory: directory, staging: staging}
+	if err := claim.validateExclusiveTarget(); err != nil {
+		return initializationClaim{}, joinInitializationErrors(err, claim.discard())
+	}
+	return claim, nil
 }
 
 func prepareDirectory(directory string) error {
@@ -93,7 +97,7 @@ func prepareDirectory(directory string) error {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return fmt.Errorf("create data directory: %w", err)
 		}
-		return nil
+		return ValidateInitializationTarget(directory)
 	}
 	return validateInitializationTarget(directory, info, err)
 }
@@ -144,6 +148,17 @@ func (claim initializationClaim) discard() error {
 	return joinInitializationErrors(paths.removeTemporary(), removeDirectory(claim.staging))
 }
 
+func (claim initializationClaim) validateExclusiveTarget() error {
+	entries, err := os.ReadDir(claim.directory)
+	if err != nil {
+		return fmt.Errorf("inspect data directory: %w", err)
+	}
+	if hasOnlyInitializationLock(entries) {
+		return nil
+	}
+	return errors.New("data directory is not empty")
+}
+
 func joinInitializationErrors(primary, cleanup error) error { return errors.Join(primary, cleanup) }
 
 func removeDirectory(path string) error {
@@ -191,7 +206,6 @@ func (paths initializationPaths) writeStaged(metadata []byte) error {
 		return fmt.Errorf("write catalog: %w", err)
 	}
 	if err := writeDurable(paths.metadataTemporary(), metadata); err != nil {
-		_ = os.Remove(paths.catalogTemporary())
 		return fmt.Errorf("write instance metadata: %w", err)
 	}
 	return nil
@@ -199,16 +213,36 @@ func (paths initializationPaths) writeStaged(metadata []byte) error {
 
 func (paths initializationPaths) commit() (err error) {
 	defer func() { err = joinInitializationErrors(err, paths.removeTemporary()) }()
-	if err := os.Rename(paths.catalogTemporary(), paths.catalog()); err != nil {
-		return fmt.Errorf("install catalog: %w", err)
+	catalogInstalled, err := installStaged(paths.catalogTemporary(), paths.catalog())
+	if err != nil {
+		return joinInitializationErrors(fmt.Errorf("install catalog: %w", err), paths.removeInstalled(catalogInstalled, false))
 	}
-	if err := os.Rename(paths.metadataTemporary(), paths.metadata()); err != nil {
-		if removeErr := os.Remove(paths.catalog()); removeErr != nil {
-			return fmt.Errorf("install instance metadata: %w; remove partial catalog: %v", err, removeErr)
-		}
-		return fmt.Errorf("install instance metadata: %w", err)
+	metadataInstalled, err := installStaged(paths.metadataTemporary(), paths.metadata())
+	if err != nil {
+		return joinInitializationErrors(fmt.Errorf("install instance metadata: %w", err), paths.removeInstalled(catalogInstalled, metadataInstalled))
 	}
 	return nil
+}
+
+func installStaged(source, destination string) (bool, error) {
+	if err := os.Link(source, destination); err != nil {
+		return false, err
+	}
+	if err := os.Remove(source); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func (paths initializationPaths) removeInstalled(catalog, metadata bool) error {
+	var cleanup error
+	if metadata {
+		cleanup = joinInitializationErrors(cleanup, removeFile(paths.metadata()))
+	}
+	if catalog {
+		cleanup = joinInitializationErrors(cleanup, removeFile(paths.catalog()))
+	}
+	return cleanup
 }
 
 func (paths initializationPaths) removeTemporary() error {

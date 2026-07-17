@@ -91,6 +91,34 @@ func TestFailedInstallRemovesPartialCatalogAndClaim(t *testing.T) {
 	}
 }
 
+func TestInstallDoesNotOverwriteConcurrentCatalog(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	claim, err := claimInitialization(directory)
+	if err != nil {
+		t.Fatalf("claim initialization: %v", err)
+	}
+	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
+	if err := paths.writeStaged([]byte("metadata")); err != nil {
+		t.Fatalf("stage instance files: %v", err)
+	}
+	if err := os.WriteFile(paths.catalog(), []byte("existing"), 0o600); err != nil {
+		t.Fatalf("create concurrent catalog: %v", err)
+	}
+	if err := paths.commit(); err == nil {
+		t.Fatal("commit overwrote an existing catalog")
+	}
+	contents, err := os.ReadFile(paths.catalog())
+	if err != nil {
+		t.Fatalf("read concurrent catalog: %v", err)
+	}
+	if string(contents) != "existing" {
+		t.Fatalf("concurrent catalog = %q", contents)
+	}
+	if err := claim.discard(); err != nil {
+		t.Fatalf("discard failed initialization: %v", err)
+	}
+}
+
 type initializationResult struct {
 	metadata Metadata
 	err      error
