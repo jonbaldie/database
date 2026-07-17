@@ -217,6 +217,7 @@ type session struct {
 	initialDB           string
 	statements          map[uint32]*preparedStatement
 	nextStmtID          uint32
+	longDataBytes       int
 	transaction         bool
 	transactionSnapshot catalog.Definition
 	savepoints          map[string]catalog.Definition
@@ -309,7 +310,7 @@ func (s *Server) serveConnection(connection net.Conn) {
 		case 0x19: // COM_STMT_CLOSE
 			if len(payload) >= 5 {
 				id := binary.LittleEndian.Uint32(payload[1:5])
-				delete(session.statements, id)
+				session.closePrepared(id)
 			}
 		case 0x18: // COM_STMT_SEND_LONG_DATA
 			if err := session.sendLongData(payload); err != nil {
@@ -1330,7 +1331,7 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 	if !ok {
 		return writePacket(connection, sequence, errorPacket(1243, "HY000", "unknown prepared statement handler"))
 	}
-	params, err := preparedValues(payload, statement)
+	params, err := s.preparedValues(payload, statement)
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
@@ -1348,7 +1349,7 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 	return writeBinaryResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
 }
 
-func preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
+func (s *session) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
 	count := statement.parameters
 	if len(payload) < 10 {
 		return nil, errors.New("malformed prepared statement")
@@ -1397,7 +1398,7 @@ func preparedValues(payload []byte, statement *preparedStatement) ([]string, err
 	if offset != len(payload) {
 		return nil, errors.New("malformed prepared statement trailing data")
 	}
-	statement.longData = make(map[uint16][]byte)
+	s.clearLongData(statement)
 	return values, nil
 }
 
@@ -1475,10 +1476,11 @@ func (s *session) sendLongData(payload []byte) error {
 	if int(parameter) >= statement.parameters {
 		return sqlFailure{1210, "HY000", "prepared statement parameter index out of range"}
 	}
-	if len(statement.longData[parameter])+len(payload[7:]) > maxPreparedLongDataBytes {
+	if s.longDataBytes+len(payload[7:]) > maxPreparedLongDataBytes {
 		return sqlFailure{1153, "08S01", "prepared statement long data exceeds maximum size"}
 	}
 	statement.longData[parameter] = append(statement.longData[parameter], payload[7:]...)
+	s.longDataBytes += len(payload[7:])
 	return nil
 }
 
@@ -1490,7 +1492,7 @@ func (s *session) resetPrepared(payload []byte) error {
 	if !ok {
 		return sqlFailure{1243, "HY000", "unknown prepared statement handler"}
 	}
-	statement.longData = make(map[uint16][]byte)
+	s.clearLongData(statement)
 	return nil
 }
 
@@ -1500,8 +1502,23 @@ func (s *session) resetConnection() error {
 	}
 	s.database = s.initialDB
 	s.statements = make(map[uint32]*preparedStatement)
+	s.longDataBytes = 0
 	s.savepoints = make(map[string]catalog.Definition)
 	return nil
+}
+
+func (s *session) closePrepared(id uint32) {
+	if statement, ok := s.statements[id]; ok {
+		s.clearLongData(statement)
+	}
+	delete(s.statements, id)
+}
+
+func (s *session) clearLongData(statement *preparedStatement) {
+	for _, value := range statement.longData {
+		s.longDataBytes -= len(value)
+	}
+	statement.longData = make(map[uint16][]byte)
 }
 
 func (s *session) rollbackTransaction() error {
@@ -1927,7 +1944,7 @@ func readPacket(r io.Reader, maximum int64) (byte, []byte, error) {
 			return 0, nil, err
 		}
 		if frame == 0 {
-			sequence, expected = header[3], header[3]
+			sequence, expected = header[3], header[3]+1
 		} else if header[3] != expected {
 			return 0, nil, errors.New("packet continuation sequence mismatch")
 		}
