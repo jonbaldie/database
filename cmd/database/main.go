@@ -351,52 +351,62 @@ func initialize(args []string, stdout, stderr io.Writer) int {
 	passwordFile := ""
 	passwordStdin := false
 	format := "human"
+	formatSet := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			if directory != "" {
+				return initFailure(stdout, "invalid_input", 2, "multiple data directories")
+			}
+			directory = arg
+			continue
+		}
 		if strings.HasPrefix(arg, "--password=") {
 			return initFailure(stdout, "invalid_input", 2, "inline passwords are not supported")
 		}
 		name, value, hasValue := strings.Cut(arg, "=")
-		if !hasValue {
-			switch name {
-			case "--password-file":
-				if i+1 >= len(args) {
-					return initFailure(stdout, "invalid_input", 2, "--password-file requires a value")
+		switch name {
+		case "--password-file":
+			if passwordFile != "" || passwordStdin {
+				return initFailure(stdout, "invalid_input", 2, "password input may be specified once")
+			}
+			if !hasValue {
+				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+					return initFailure(stdout, "invalid_input", 2, "--password-file requires a non-empty value")
 				}
 				i++
 				value = args[i]
-			case "--password-stdin":
-				passwordStdin = true
-				continue
-			case "--format":
-				if i+1 >= len(args) {
+			}
+			if value == "" {
+				return initFailure(stdout, "invalid_input", 2, "--password-file requires a non-empty value")
+			}
+			passwordFile = value
+		case "--password-stdin":
+			if hasValue {
+				return initFailure(stdout, "invalid_input", 2, "--password-stdin does not take a value")
+			}
+			if passwordFile != "" || passwordStdin {
+				return initFailure(stdout, "invalid_input", 2, "password input may be specified once")
+			}
+			passwordStdin = true
+		case "--format":
+			if formatSet {
+				return initFailure(stdout, "invalid_input", 2, "--format may be specified once")
+			}
+			if !hasValue {
+				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
 					return initFailure(stdout, "invalid_input", 2, "--format requires a value")
 				}
 				i++
 				value = args[i]
-			default:
-				if strings.HasPrefix(arg, "-") {
-					return initFailure(stdout, "invalid_input", 2, fmt.Sprintf("unknown flag %q", arg))
-				}
-				if directory != "" {
-					return initFailure(stdout, "invalid_input", 2, "multiple data directories")
-				}
-				directory = arg
-				continue
 			}
-		}
-		switch name {
-		case "--password-file":
-			passwordFile = value
-		case "--password-stdin":
-			passwordStdin = true
-		case "--format":
+			if value == "" {
+				return initFailure(stdout, "invalid_input", 2, "--format requires a value")
+			}
+			formatSet = true
 			format = value
 		default:
-			if directory != "" {
-				return initFailure(stdout, "invalid_input", 2, "multiple data directories")
-			}
-			directory = name
+			return initFailure(stdout, "invalid_input", 2, fmt.Sprintf("unknown flag %q", name))
 		}
 	}
 	if directory == "" || (passwordFile == "" && !passwordStdin) || (passwordFile != "" && passwordStdin) || (format != "human" && format != "json") {
