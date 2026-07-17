@@ -34,33 +34,38 @@ type configurationValue struct {
 	source string
 }
 
-var configurationDefaults = map[string]string{
-	"data_directory":                          "",
-	"mysql_listen_address":                    "127.0.0.1:3306",
-	"tls_certificate_file":                    "",
-	"tls_private_key_file":                    "",
-	"diagnostics_listen_address":              "",
-	"log_format":                              "json",
-	"statement_timeout_ms":                    "300000",
-	"lock_wait_timeout_ms":                    "5000",
-	"idle_in_transaction_timeout_ms":          "300000",
-	"idle_session_timeout_ms":                 "3600000",
-	"execution_memory_limit_bytes":            "67108864",
-	"aggregate_execution_memory_limit_bytes":  "2147483648",
-	"temporary_storage_limit_bytes":           "17179869184",
-	"aggregate_temporary_storage_limit_bytes": "34359738368",
-	"max_connections":                         "100",
-	"max_allowed_packet":                      "67108864",
-	"max_prepared_stmt_count":                 "4096",
+type configurationSetting struct {
+	defaultValue string
+	flag         string
+	minimum      int64
+	maximum      int64
 }
 
-var configurationNames = func() map[string]bool {
-	result := make(map[string]bool, len(configurationDefaults))
-	for name := range configurationDefaults {
-		result[name] = true
-	}
-	return result
-}()
+var configurationRegistry = map[string]configurationSetting{
+	"data_directory":                          {defaultValue: "", flag: "--data-directory"},
+	"mysql_listen_address":                    {defaultValue: "127.0.0.1:3306", flag: "--mysql-listen-address"},
+	"tls_certificate_file":                    {defaultValue: "", flag: "--tls-certificate-file"},
+	"tls_private_key_file":                    {defaultValue: "", flag: "--tls-private-key-file"},
+	"diagnostics_listen_address":              {defaultValue: "", flag: "--diagnostics-listen-address"},
+	"log_format":                              {defaultValue: "json", flag: "--log-format"},
+	"statement_timeout_ms":                    numericConfigurationSetting("300000", "--statement-timeout-ms", 1, maximumInt64),
+	"lock_wait_timeout_ms":                    numericConfigurationSetting("5000", "--lock-wait-timeout-ms", 1, maximumInt64),
+	"idle_in_transaction_timeout_ms":          numericConfigurationSetting("300000", "--idle-in-transaction-timeout-ms", 1, maximumInt64),
+	"idle_session_timeout_ms":                 numericConfigurationSetting("3600000", "--idle-session-timeout-ms", 1, maximumInt64),
+	"execution_memory_limit_bytes":            numericConfigurationSetting("67108864", "--execution-memory-limit-bytes", 1, maximumInt64),
+	"aggregate_execution_memory_limit_bytes":  numericConfigurationSetting("2147483648", "--aggregate-execution-memory-limit-bytes", 1, maximumInt64),
+	"temporary_storage_limit_bytes":           numericConfigurationSetting("17179869184", "--temporary-storage-limit-bytes", 1, maximumInt64),
+	"aggregate_temporary_storage_limit_bytes": numericConfigurationSetting("34359738368", "--aggregate-temporary-storage-limit-bytes", 1, maximumInt64),
+	"max_connections":                         numericConfigurationSetting("100", "--max-connections", 1, 2147483647),
+	"max_allowed_packet":                      numericConfigurationSetting("67108864", "--max-allowed-packet", 1024, 1073741824),
+	"max_prepared_stmt_count":                 numericConfigurationSetting("4096", "--max-prepared-stmt-count", 1, 2147483647),
+}
+
+const maximumInt64 = int64(1<<63 - 1)
+
+func numericConfigurationSetting(defaultValue, flag string, minimum, maximum int64) configurationSetting {
+	return configurationSetting{defaultValue: defaultValue, flag: flag, minimum: minimum, maximum: maximum}
+}
 
 // parseServeFlags is retained as the compatibility seam used by the serve
 // command and package tests. It now resolves all three public input sources.
@@ -73,38 +78,14 @@ func parseServeFlags(args []string) (lifecycle.Options, error) {
 }
 
 func resolveConfiguration(args, environment []string) (configuration, error) {
-	values := make(map[string]configurationValue, len(configurationDefaults))
-	for name, value := range configurationDefaults {
-		values[name] = configurationValue{value: value, source: "default"}
-	}
-
-	configPath, flags, err := parseConfigurationFlags(args)
+	inputs, err := parseConfigurationInputs(args, environment)
 	if err != nil {
 		return configuration{}, err
 	}
-	envValues, envConfigPath, err := parseConfigurationEnvironment(environment)
+	values, err := resolvedConfigurationValues(inputs)
 	if err != nil {
 		return configuration{}, err
 	}
-	if configPath == "" {
-		configPath = envConfigPath
-	}
-	if configPath != "" {
-		fileValues, err := readConfigurationFile(configPath)
-		if err != nil {
-			return configuration{}, err
-		}
-		for name, value := range fileValues {
-			values[name] = configurationValue{value: value, source: "file:" + configPath}
-		}
-	}
-	for name, value := range envValues {
-		values[name] = configurationValue{value: value, source: "environment"}
-	}
-	for name, value := range flags {
-		values[name] = configurationValue{value: value, source: "flag"}
-	}
-
 	config, err := makeConfiguration(values)
 	if err != nil {
 		return configuration{}, err
@@ -115,109 +96,218 @@ func resolveConfiguration(args, environment []string) (configuration, error) {
 	return config, nil
 }
 
-func parseConfigurationFlags(args []string) (string, map[string]string, error) {
-	values := make(map[string]string)
-	seen := make(map[string]bool)
-	configPath := ""
-	configSeen := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		name, value, hasValue := strings.Cut(arg, "=")
-		if !hasValue {
-			switch name {
-			case "--config", "--log-format", "--data-directory", "--mysql-listen-address", "--tls-certificate-file", "--tls-private-key-file", "--diagnostics-listen-address", "--statement-timeout-ms", "--lock-wait-timeout-ms", "--idle-in-transaction-timeout-ms", "--idle-session-timeout-ms", "--execution-memory-limit-bytes", "--aggregate-execution-memory-limit-bytes", "--temporary-storage-limit-bytes", "--aggregate-temporary-storage-limit-bytes", "--max-connections", "--max-allowed-packet", "--max-prepared-stmt-count":
-				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
-					return "", nil, invalidConfiguration(name + " requires a non-empty value")
-				}
-				i++
-				value = args[i]
-			default:
-				return "", nil, invalidConfiguration(fmt.Sprintf("unknown flag %q", arg))
-			}
-		}
-		if value == "" {
-			return "", nil, invalidConfiguration(fmt.Sprintf("%s has an empty value", name))
-		}
-		if name == "--config" {
-			if configSeen {
-				return "", nil, invalidConfiguration("repeated setting config")
-			}
-			configSeen = true
-			configPath = value
-			continue
-		}
-		canonical, normalized, ok := flagSetting(name, value)
-		if !ok {
-			return "", nil, invalidConfiguration(fmt.Sprintf("unknown flag %q", name))
-		}
-		if seen[canonical] {
-			return "", nil, invalidConfiguration("repeated setting " + canonical)
-		}
-		seen[canonical] = true
-		values[canonical] = normalized
+type configurationInputs struct {
+	flags, environment map[string]string
+	path               string
+}
+
+func parseConfigurationInputs(args, environment []string) (configurationInputs, error) {
+	path, flags, err := parseConfigurationFlags(args)
+	if err != nil {
+		return configurationInputs{}, err
 	}
-	return configPath, values, nil
+	values, environmentPath, err := parseConfigurationEnvironment(environment)
+	if err != nil {
+		return configurationInputs{}, err
+	}
+	if path == "" {
+		path = environmentPath
+	}
+	return configurationInputs{flags: flags, environment: values, path: path}, nil
+}
+
+func resolvedConfigurationValues(inputs configurationInputs) (map[string]configurationValue, error) {
+	values := defaultConfigurationValues()
+	if inputs.path != "" {
+		fileValues, err := readConfigurationFile(inputs.path)
+		if err != nil {
+			return nil, err
+		}
+		applyConfigurationValues(values, fileValues, "file:"+inputs.path)
+	}
+	applyConfigurationValues(values, inputs.environment, "environment")
+	applyConfigurationValues(values, inputs.flags, "flag")
+	return values, nil
+}
+
+func defaultConfigurationValues() map[string]configurationValue {
+	values := make(map[string]configurationValue, len(configurationRegistry))
+	for name, setting := range configurationRegistry {
+		values[name] = configurationValue{value: setting.defaultValue, source: "default"}
+	}
+	return values
+}
+
+func applyConfigurationValues(destination map[string]configurationValue, source map[string]string, label string) {
+	for name, value := range source {
+		destination[name] = configurationValue{value: value, source: label}
+	}
+}
+
+func parseConfigurationFlags(args []string) (string, map[string]string, error) {
+	parser := configurationFlagParser{values: map[string]string{}, seen: map[string]bool{}}
+	for index, count := 0, len(args); index < count; {
+		next, err := parser.consume(args, index)
+		if err != nil {
+			return "", nil, err
+		}
+		index = next
+	}
+	return parser.path, parser.values, nil
+}
+
+type configurationFlagParser struct {
+	values   map[string]string
+	seen     map[string]bool
+	path     string
+	pathSeen bool
+}
+
+func (parser *configurationFlagParser) consume(args []string, index int) (int, error) {
+	name, value, next, err := configurationFlagValue(args, index)
+	if err != nil {
+		return 0, err
+	}
+	if name == "--config" {
+		return next, parser.setPath(value)
+	}
+	canonical, normalized, ok := flagSetting(name, value)
+	if !ok {
+		return 0, invalidConfiguration(fmt.Sprintf("unknown flag %q", name))
+	}
+	return next, parser.add(canonical, normalized)
+}
+
+func configurationFlagValue(args []string, index int) (string, string, int, error) {
+	argument := args[index]
+	name, value, hasValue := strings.Cut(argument, "=")
+	if hasValue {
+		return checkedConfigurationFlagValue(name, value, index+1)
+	}
+	if !knownConfigurationFlag(name) {
+		return "", "", 0, invalidConfiguration(fmt.Sprintf("unknown flag %q", argument))
+	}
+	if index+1 >= len(args) || strings.HasPrefix(args[index+1], "-") {
+		return "", "", 0, invalidConfiguration(name + " requires a non-empty value")
+	}
+	return checkedConfigurationFlagValue(name, args[index+1], index+2)
+}
+
+func checkedConfigurationFlagValue(name, value string, next int) (string, string, int, error) {
+	if value == "" {
+		return "", "", 0, invalidConfiguration(fmt.Sprintf("%s has an empty value", name))
+	}
+	return name, value, next, nil
+}
+
+func knownConfigurationFlag(name string) bool {
+	return name == "--config" || configurationFlagNames[name] != ""
+}
+
+func (parser *configurationFlagParser) add(name, value string) error {
+	if parser.seen[name] {
+		return invalidConfiguration("repeated setting " + name)
+	}
+	parser.seen[name], parser.values[name] = true, value
+	return nil
+}
+
+func (parser *configurationFlagParser) setPath(path string) error {
+	if parser.pathSeen {
+		return invalidConfiguration("repeated setting config")
+	}
+	parser.pathSeen, parser.path = true, path
+	return nil
 }
 
 func flagSetting(name, value string) (string, string, bool) {
-	canonical := map[string]string{
-		"--data-directory":             "data_directory",
-		"--mysql-listen-address":       "mysql_listen_address",
-		"--tls-certificate-file":       "tls_certificate_file",
-		"--tls-private-key-file":       "tls_private_key_file",
-		"--diagnostics-listen-address": "diagnostics_listen_address",
-		"--log-format":                 "log_format",
-		"--statement-timeout-ms":       "statement_timeout_ms", "--lock-wait-timeout-ms": "lock_wait_timeout_ms",
-		"--idle-in-transaction-timeout-ms": "idle_in_transaction_timeout_ms", "--idle-session-timeout-ms": "idle_session_timeout_ms",
-		"--execution-memory-limit-bytes": "execution_memory_limit_bytes", "--aggregate-execution-memory-limit-bytes": "aggregate_execution_memory_limit_bytes",
-		"--temporary-storage-limit-bytes": "temporary_storage_limit_bytes", "--aggregate-temporary-storage-limit-bytes": "aggregate_temporary_storage_limit_bytes",
-		"--max-connections": "max_connections", "--max-allowed-packet": "max_allowed_packet", "--max-prepared-stmt-count": "max_prepared_stmt_count",
-	}
-	key, ok := canonical[name]
-	if !ok {
+	canonical := configurationFlagNames[name]
+	if canonical == "" {
 		return "", "", false
 	}
-	return key, value, true
+	return canonical, value, true
+}
+
+var configurationFlagNames = configurationFlags()
+
+func configurationFlags() map[string]string {
+	flags := make(map[string]string, len(configurationRegistry))
+	for name, setting := range configurationRegistry {
+		if setting.flag != "" {
+			flags[setting.flag] = name
+		}
+	}
+	return flags
 }
 
 func parseConfigurationEnvironment(environment []string) (map[string]string, string, error) {
-	values := make(map[string]string)
-	configPath := ""
-	seen := make(map[string]bool)
+	parser := configurationEnvironmentParser{values: map[string]string{}, seen: map[string]bool{}}
 	for _, entry := range environment {
-		name, value, ok := strings.Cut(entry, "=")
-		if !ok || !strings.HasPrefix(name, "DATABASE_SERVER_") {
-			continue
+		if err := parser.add(entry); err != nil {
+			return nil, "", err
 		}
-		if name == "DATABASE_SERVER_CONFIG" {
-			if seen[name] {
-				return nil, "", invalidConfiguration("repeated setting config")
-			}
-			seen[name] = true
-			if strings.TrimSpace(value) == "" {
-				return nil, "", invalidConfiguration("DATABASE_SERVER_CONFIG has an empty value")
-			}
-			configPath = value
-			continue
-		}
-		canonical := strings.TrimPrefix(name, "DATABASE_SERVER_")
-		if canonical != strings.ToUpper(canonical) {
-			return nil, "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
-		}
-		canonical = strings.ToLower(canonical)
-		if !configurationNames[canonical] {
-			return nil, "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
-		}
-		if seen[name] {
-			return nil, "", invalidConfiguration("repeated environment setting " + canonical)
-		}
-		seen[name] = true
-		if strings.TrimSpace(value) == "" {
-			return nil, "", invalidConfiguration(name + " has an empty value")
-		}
-		values[canonical] = value
 	}
-	return values, configPath, nil
+	return parser.values, parser.path, nil
+}
+
+type configurationEnvironmentParser struct {
+	values map[string]string
+	seen   map[string]bool
+	path   string
+}
+
+func (parser *configurationEnvironmentParser) add(entry string) error {
+	name, value, belongs := configurationEnvironmentEntry(entry)
+	if !belongs {
+		return nil
+	}
+	if name == "DATABASE_SERVER_CONFIG" {
+		return parser.addPath(name, value)
+	}
+	return parser.addValue(name, value)
+}
+
+func configurationEnvironmentEntry(entry string) (string, string, bool) {
+	name, value, valid := strings.Cut(entry, "=")
+	return name, value, valid && strings.HasPrefix(name, "DATABASE_SERVER_")
+}
+
+func (parser *configurationEnvironmentParser) addPath(name, value string) error {
+	if parser.seen[name] {
+		return invalidConfiguration("repeated setting config")
+	}
+	if strings.TrimSpace(value) == "" {
+		return invalidConfiguration(name + " has an empty value")
+	}
+	parser.seen[name], parser.path = true, value
+	return nil
+}
+
+func (parser *configurationEnvironmentParser) addValue(name, value string) error {
+	canonical, err := canonicalEnvironmentName(name)
+	if err != nil {
+		return err
+	}
+	if parser.seen[name] {
+		return invalidConfiguration("repeated environment setting " + canonical)
+	}
+	if strings.TrimSpace(value) == "" {
+		return invalidConfiguration(name + " has an empty value")
+	}
+	parser.seen[name], parser.values[canonical] = true, value
+	return nil
+}
+
+func canonicalEnvironmentName(name string) (string, error) {
+	suffix := strings.TrimPrefix(name, "DATABASE_SERVER_")
+	if suffix != strings.ToUpper(suffix) {
+		return "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
+	}
+	canonical := strings.ToLower(suffix)
+	if !isConfigurationSetting(canonical) {
+		return "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
+	}
+	return canonical, nil
 }
 
 func readConfigurationFile(path string) (map[string]string, error) {
@@ -226,197 +316,276 @@ func readConfigurationFile(path string) (map[string]string, error) {
 		return nil, &configurationError{class: "precondition", message: fmt.Sprintf("read config file: %v", err)}
 	}
 	defer file.Close()
-	values := make(map[string]string)
-	seen := make(map[string]bool)
+	parser := configurationFileParser{values: map[string]string{}, seen: map[string]bool{}}
 	scanner := bufio.NewScanner(file)
-	lineNumber := 0
 	for scanner.Scan() {
-		lineNumber++
-		line := strings.TrimSpace(stripTOMLComment(scanner.Text()))
-		if line == "" {
-			continue
+		if err := parser.add(scanner.Text()); err != nil {
+			return nil, err
 		}
-		if strings.HasPrefix(line, "[") {
-			return nil, invalidConfiguration(fmt.Sprintf("config line %d: tables are not supported", lineNumber))
-		}
-		key, raw, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, invalidConfiguration(fmt.Sprintf("config line %d: expected one key=value pair", lineNumber))
-		}
-		key = strings.TrimSpace(key)
-		if !configurationNames[key] {
-			return nil, invalidConfiguration(fmt.Sprintf("config line %d: unknown setting %q", lineNumber, key))
-		}
-		if seen[key] {
-			return nil, invalidConfiguration("duplicate config setting " + key)
-		}
-		seen[key] = true
-		value, err := tomlValue(strings.TrimSpace(raw))
-		if err != nil {
-			return nil, invalidConfiguration(fmt.Sprintf("config line %d: %s", lineNumber, err))
-		}
-		if value == "" {
-			return nil, invalidConfiguration("config setting " + key + " has an empty value")
-		}
-		values[key] = value
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, &configurationError{class: "precondition", message: fmt.Sprintf("read config file: %v", err)}
 	}
-	return values, nil
+	return parser.values, nil
+}
+
+type configurationFileParser struct {
+	values     map[string]string
+	seen       map[string]bool
+	lineNumber int
+}
+
+func (parser *configurationFileParser) add(raw string) error {
+	parser.lineNumber++
+	line := strings.TrimSpace(stripTOMLComment(raw))
+	if line == "" {
+		return nil
+	}
+	key, value, err := parseConfigurationFileLine(line, parser.lineNumber)
+	if err != nil {
+		return err
+	}
+	if parser.seen[key] {
+		return invalidConfiguration("duplicate config setting " + key)
+	}
+	parser.seen[key], parser.values[key] = true, value
+	return nil
+}
+
+func parseConfigurationFileLine(line string, lineNumber int) (string, string, error) {
+	if strings.HasPrefix(line, "[") {
+		return "", "", invalidConfiguration(fmt.Sprintf("config line %d: tables are not supported", lineNumber))
+	}
+	key, raw, valid := strings.Cut(line, "=")
+	if !valid {
+		return "", "", invalidConfiguration(fmt.Sprintf("config line %d: expected one key=value pair", lineNumber))
+	}
+	key = strings.TrimSpace(key)
+	if !isConfigurationSetting(key) {
+		return "", "", invalidConfiguration(fmt.Sprintf("config line %d: unknown setting %q", lineNumber, key))
+	}
+	value, err := tomlValue(strings.TrimSpace(raw))
+	if err != nil {
+		return "", "", invalidConfiguration(fmt.Sprintf("config line %d: %s", lineNumber, err))
+	}
+	if value == "" {
+		return "", "", invalidConfiguration("config setting " + key + " has an empty value")
+	}
+	return key, value, nil
+}
+
+func isConfigurationSetting(name string) bool {
+	_, exists := configurationRegistry[name]
+	return exists
 }
 
 func stripTOMLComment(line string) string {
-	quoted := byte(0)
-	escaped := false
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if quoted != 0 {
-			if quoted == '"' && escaped {
-				escaped = false
-				continue
-			}
-			if quoted == '"' && c == '\\' {
-				escaped = true
-				continue
-			}
-			if c == quoted {
-				quoted = 0
-			}
-			continue
-		}
-		if c == '"' || c == '\'' {
-			quoted = c
-		} else if c == '#' {
-			return line[:i]
+	state := tomlCommentState{}
+	for index, count := 0, len(line); index < count; index++ {
+		if state.isComment(line[index]) {
+			return line[:index]
 		}
 	}
 	return line
 }
 
-func tomlValue(raw string) (string, error) {
-	if len(raw) >= 2 && ((raw[0] == '"' && raw[len(raw)-1] == '"') || (raw[0] == '\'' && raw[len(raw)-1] == '\'')) {
-		if raw[0] == '\'' {
-			return raw[1 : len(raw)-1], nil
-		}
-		value, err := strconv.Unquote(raw)
-		if err != nil {
-			return "", errors.New("invalid quoted value")
-		}
-		return value, nil
+type tomlCommentState struct {
+	quote   byte
+	escaped bool
+}
+
+func (state *tomlCommentState) isComment(character byte) bool {
+	if state.quote != 0 {
+		state.consumeQuoted(character)
+		return false
 	}
-	if raw == "" || strings.Trim(raw, "0123456789") != "" {
+	return state.consumeUnquoted(character)
+}
+
+func (state *tomlCommentState) consumeQuoted(character byte) {
+	if state.quote == '"' && state.escaped {
+		state.escaped = false
+		return
+	}
+	if state.quote == '"' && character == '\\' {
+		state.escaped = true
+		return
+	}
+	if character == state.quote {
+		state.quote = 0
+	}
+}
+
+func (state *tomlCommentState) consumeUnquoted(character byte) bool {
+	if character == '"' || character == '\'' {
+		state.quote = character
+		return false
+	}
+	return character == '#'
+}
+
+func tomlValue(raw string) (string, error) {
+	if isQuotedTOMLValue(raw) {
+		return quotedTOMLValue(raw)
+	}
+	if !isBareDecimalTOMLValue(raw) {
 		return "", errors.New("invalid TOML value")
 	}
 	return raw, nil
 }
 
+func isQuotedTOMLValue(raw string) bool {
+	if len(raw) < 2 {
+		return false
+	}
+	return raw[0] == '"' && raw[len(raw)-1] == '"' || raw[0] == '\'' && raw[len(raw)-1] == '\''
+}
+
+func quotedTOMLValue(raw string) (string, error) {
+	if raw[0] == '\'' {
+		return raw[1 : len(raw)-1], nil
+	}
+	value, err := strconv.Unquote(raw)
+	if err != nil {
+		return "", errors.New("invalid quoted value")
+	}
+	return value, nil
+}
+
+func isBareDecimalTOMLValue(raw string) bool {
+	return raw != "" && strings.Trim(raw, "0123456789") == ""
+}
+
 func makeConfiguration(values map[string]configurationValue) (configuration, error) {
-	get := func(name string) string { return values[name].value }
+	parts, err := buildConfigurationParts(configurationValueLookup(values))
+	if err != nil {
+		return configuration{}, err
+	}
+	return configuration{options: parts.options(), values: values}, nil
+}
+
+func configurationValueLookup(values map[string]configurationValue) func(string) string {
+	return func(name string) string { return values[name].value }
+}
+
+type configurationParts struct {
+	dataDirectory, mysqlAddress, diagnosticsAddress, certificate, key, format string
+	limits                                                                    configurationLimits
+}
+
+func buildConfigurationParts(get func(string) string) (configurationParts, error) {
+	paths, err := configurationPaths(get)
+	if err != nil {
+		return configurationParts{}, err
+	}
+	addresses, err := configurationAddresses(get)
+	if err != nil {
+		return configurationParts{}, err
+	}
+	if err := validateTLS(paths.certificate, paths.key); err != nil {
+		return configurationParts{}, err
+	}
+	format, err := configurationFormat(get("log_format"))
+	if err != nil {
+		return configurationParts{}, err
+	}
+	limits, err := configurationNumbers(get)
+	if err != nil {
+		return configurationParts{}, err
+	}
+	parts := configurationParts{dataDirectory: paths.dataDirectory, certificate: paths.certificate, key: paths.key, mysqlAddress: addresses.mysql, diagnosticsAddress: addresses.diagnostics, format: format, limits: limits}
+	return parts, validateConfigurationParts(parts)
+}
+
+type configurationPathsResult struct{ dataDirectory, certificate, key string }
+
+func configurationPaths(get func(string) string) (configurationPathsResult, error) {
 	dataDirectory, err := absolutePath("data_directory", get("data_directory"), false)
 	if err != nil {
-		return configuration{}, err
+		return configurationPathsResult{}, err
 	}
-	mysqlAddress, err := networkAddress("mysql_listen_address", get("mysql_listen_address"))
+	certificate, err := absolutePath("tls_certificate_file", get("tls_certificate_file"), true)
 	if err != nil {
-		return configuration{}, err
-	}
-	diagnosticsAddress := ""
-	if get("diagnostics_listen_address") != "" {
-		diagnosticsAddress, err = networkAddress("diagnostics_listen_address", get("diagnostics_listen_address"))
-		if err != nil {
-			return configuration{}, err
-		}
-	}
-	cert, err := absolutePath("tls_certificate_file", get("tls_certificate_file"), true)
-	if err != nil {
-		return configuration{}, err
+		return configurationPathsResult{}, err
 	}
 	key, err := absolutePath("tls_private_key_file", get("tls_private_key_file"), true)
+	return configurationPathsResult{dataDirectory, certificate, key}, err
+}
+
+type configurationAddressesResult struct{ mysql, diagnostics string }
+
+func configurationAddresses(get func(string) string) (configurationAddressesResult, error) {
+	mysql, err := networkAddress("mysql_listen_address", get("mysql_listen_address"))
 	if err != nil {
-		return configuration{}, err
+		return configurationAddressesResult{}, err
 	}
-	if (cert == "") != (key == "") {
-		return configuration{}, invalidConfiguration("tls_certificate_file and tls_private_key_file must be provided together")
+	diagnostics := ""
+	if get("diagnostics_listen_address") != "" {
+		diagnostics, err = networkAddress("diagnostics_listen_address", get("diagnostics_listen_address"))
 	}
-	if cert != "" {
-		if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
-			return configuration{}, invalidConfiguration(fmt.Sprintf("invalid TLS certificate/key pair: %v", err))
-		}
+	return configurationAddressesResult{mysql, diagnostics}, err
+}
+
+func validateTLS(certificate, key string) error {
+	if (certificate == "") != (key == "") {
+		return invalidConfiguration("tls_certificate_file and tls_private_key_file must be provided together")
 	}
-	format := get("log_format")
+	if certificate == "" {
+		return nil
+	}
+	if _, err := tls.LoadX509KeyPair(certificate, key); err != nil {
+		return invalidConfiguration(fmt.Sprintf("invalid TLS certificate/key pair: %v", err))
+	}
+	return nil
+}
+
+func configurationFormat(format string) (string, error) {
 	if format != "json" && format != "text" {
-		return configuration{}, invalidConfiguration("log_format must be json or text")
+		return "", invalidConfiguration("log_format must be json or text")
 	}
-	positive := func(name string) (int64, error) { return positiveInteger(name, get(name), 1, int64(^uint64(0)>>1)) }
-	statement, err := positive("statement_timeout_ms")
-	if err != nil {
-		return configuration{}, err
+	return format, nil
+}
+
+func validateConfigurationParts(parts configurationParts) error {
+	if parts.limits.executionMemory > parts.limits.aggregateMemory {
+		return invalidConfiguration("execution_memory_limit_bytes cannot exceed aggregate_execution_memory_limit_bytes")
 	}
-	lockWait, err := positive("lock_wait_timeout_ms")
-	if err != nil {
-		return configuration{}, err
+	if parts.limits.temporaryStorage > parts.limits.aggregateTemporaryStorage {
+		return invalidConfiguration("temporary_storage_limit_bytes cannot exceed aggregate_temporary_storage_limit_bytes")
 	}
-	idleTransaction, err := positive("idle_in_transaction_timeout_ms")
-	if err != nil {
-		return configuration{}, err
+	if parts.diagnosticsAddress != "" && parts.diagnosticsAddress == parts.mysqlAddress {
+		return invalidConfiguration("MySQL and diagnostics listeners must use different addresses")
 	}
-	idleSession, err := positive("idle_session_timeout_ms")
-	if err != nil {
-		return configuration{}, err
-	}
-	memory, err := positive("execution_memory_limit_bytes")
-	if err != nil {
-		return configuration{}, err
-	}
-	aggregateMemory, err := positive("aggregate_execution_memory_limit_bytes")
-	if err != nil {
-		return configuration{}, err
-	}
-	temporary, err := positive("temporary_storage_limit_bytes")
-	if err != nil {
-		return configuration{}, err
-	}
-	aggregateTemporary, err := positive("aggregate_temporary_storage_limit_bytes")
-	if err != nil {
-		return configuration{}, err
-	}
-	connections, err := positiveInteger("max_connections", get("max_connections"), 1, 2147483647)
-	if err != nil {
-		return configuration{}, err
-	}
-	packet, err := positiveInteger("max_allowed_packet", get("max_allowed_packet"), 1024, 1073741824)
-	if err != nil {
-		return configuration{}, err
-	}
-	prepared, err := positiveInteger("max_prepared_stmt_count", get("max_prepared_stmt_count"), 1, 2147483647)
-	if err != nil {
-		return configuration{}, err
-	}
-	if memory > aggregateMemory {
-		return configuration{}, invalidConfiguration("execution_memory_limit_bytes cannot exceed aggregate_execution_memory_limit_bytes")
-	}
-	if temporary > aggregateTemporary {
-		return configuration{}, invalidConfiguration("temporary_storage_limit_bytes cannot exceed aggregate_temporary_storage_limit_bytes")
-	}
-	if diagnosticsAddress != "" && diagnosticsAddress == mysqlAddress {
-		return configuration{}, invalidConfiguration("MySQL and diagnostics listeners must use different addresses")
-	}
-	// Options is the configuration boundary between this closed-registry
-	// resolver and the server subsystems that apply the individual limits.
-	options := lifecycle.Options{
-		DataDirectory: dataDirectory, MySQLAddress: mysqlAddress, TLSCertFile: cert, TLSKeyFile: key,
-		DiagnosticsAddress: diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: statement,
-		LockWaitTimeoutMilliseconds: lockWait, IdleInTransactionTimeoutMilliseconds: idleTransaction,
-		IdleSessionTimeoutMilliseconds: idleSession, ExecutionMemoryLimitBytes: memory,
-		AggregateMemoryLimitBytes: aggregateMemory, TemporaryStorageLimitBytes: temporary,
-		AggregateTemporaryLimitBytes: aggregateTemporary, MaxConnections: int(connections), MaxAllowedPacket: packet,
-		MaxPreparedStmtCount: int(prepared), MySQLEnabled: true,
-	}
+	return nil
+}
+
+func (parts configurationParts) options() lifecycle.Options {
+	format := parts.format
 	if format == "text" {
-		options.Format = "human"
+		format = "human"
 	}
-	return configuration{options: options, values: values}, nil
+	return lifecycle.Options{DataDirectory: parts.dataDirectory, MySQLAddress: parts.mysqlAddress, TLSCertFile: parts.certificate, TLSKeyFile: parts.key, DiagnosticsAddress: parts.diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: parts.limits.statementTimeout, LockWaitTimeoutMilliseconds: parts.limits.lockWaitTimeout, IdleInTransactionTimeoutMilliseconds: parts.limits.idleTransactionTimeout, IdleSessionTimeoutMilliseconds: parts.limits.idleSessionTimeout, ExecutionMemoryLimitBytes: parts.limits.executionMemory, AggregateMemoryLimitBytes: parts.limits.aggregateMemory, TemporaryStorageLimitBytes: parts.limits.temporaryStorage, AggregateTemporaryLimitBytes: parts.limits.aggregateTemporaryStorage, MaxConnections: int(parts.limits.maxConnections), MaxAllowedPacket: parts.limits.maxAllowedPacket, MaxPreparedStmtCount: int(parts.limits.maxPreparedStatements), MySQLEnabled: true}
+}
+
+type configurationLimits struct {
+	statementTimeout, lockWaitTimeout, idleTransactionTimeout, idleSessionTimeout int64
+	executionMemory, aggregateMemory, temporaryStorage, aggregateTemporaryStorage int64
+	maxConnections, maxAllowedPacket, maxPreparedStatements                       int64
+}
+
+func configurationNumbers(get func(string) string) (configurationLimits, error) {
+	values := make(map[string]int64, len(configurationRegistry))
+	for name, setting := range configurationRegistry {
+		if setting.minimum == 0 {
+			continue
+		}
+		value, err := positiveInteger(name, get(name), setting.minimum, setting.maximum)
+		if err != nil {
+			return configurationLimits{}, err
+		}
+		values[name] = value
+	}
+	return configurationLimits{statementTimeout: values["statement_timeout_ms"], lockWaitTimeout: values["lock_wait_timeout_ms"], idleTransactionTimeout: values["idle_in_transaction_timeout_ms"], idleSessionTimeout: values["idle_session_timeout_ms"], executionMemory: values["execution_memory_limit_bytes"], aggregateMemory: values["aggregate_execution_memory_limit_bytes"], temporaryStorage: values["temporary_storage_limit_bytes"], aggregateTemporaryStorage: values["aggregate_temporary_storage_limit_bytes"], maxConnections: values["max_connections"], maxAllowedPacket: values["max_allowed_packet"], maxPreparedStatements: values["max_prepared_stmt_count"]}, nil
 }
 
 func absolutePath(name, value string, optional bool) (string, error) {
