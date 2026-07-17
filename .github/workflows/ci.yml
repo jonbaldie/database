@@ -25,3 +25,5 @@ jobs:
         run: go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@v0.0.0-20251226130216-48d0401f00fb
       - name: Changed-code mutation threshold
         run: make mutation
+        env:
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
