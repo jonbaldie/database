@@ -1195,30 +1195,11 @@ func (c *wireClient) close() error {
 }
 
 func (c *wireClient) readResult() wireResult {
-	payload := readWirePacket(c.t, c.conn)
-	if len(payload) == 0 {
-		return wireResult{err: "empty result"}
+	result, complete := c.readResultHeader()
+	if complete {
+		return result
 	}
-	if payload[0] == 0xff {
-		return wireResult{err: string(payload[4:])}
-	}
-	if payload[0] == 0x00 {
-		return wireResult{}
-	}
-	columnCount, _, ok := readLengthInt(payload, 0)
-	if !ok {
-		return wireResult{err: fmt.Sprintf("malformed column count %x", payload)}
-	}
-	result := wireResult{columns: make([]string, columnCount), metadata: make([]wireColumn, columnCount)}
-	for i := range result.columns {
-		definition := readWirePacket(c.t, c.conn)
-		column, ok := parseColumnDefinition(definition)
-		if !ok {
-			return wireResult{err: fmt.Sprintf("malformed column definition %x", definition)}
-		}
-		result.columns[i], result.metadata[i] = column.name, column
-	}
-	_ = readWirePacket(c.t, c.conn)
+	columnCount := len(result.columns)
 	for {
 		row := readWirePacket(c.t, c.conn)
 		if len(row) == 0 {
@@ -1243,29 +1224,11 @@ func (c *wireClient) readResult() wireResult {
 }
 
 func (c *wireClient) readPreparedResult() wireResult {
-	payload := readWirePacket(c.t, c.conn)
-	if len(payload) == 0 {
-		return wireResult{err: "empty result"}
+	result, complete := c.readResultHeader()
+	if complete {
+		return result
 	}
-	if payload[0] == 0xff {
-		return wireResult{err: string(payload[4:])}
-	}
-	if payload[0] == 0x00 {
-		return wireResult{}
-	}
-	columnCount, _, ok := readLengthInt(payload, 0)
-	if !ok {
-		return wireResult{err: fmt.Sprintf("malformed column count %x", payload)}
-	}
-	result := wireResult{columns: make([]string, columnCount), metadata: make([]wireColumn, columnCount)}
-	for index := range result.columns {
-		column, valid := parseColumnDefinition(readWirePacket(c.t, c.conn))
-		if !valid {
-			return wireResult{err: "malformed prepared column definition"}
-		}
-		result.columns[index], result.metadata[index] = column.name, column
-	}
-	_ = readWirePacket(c.t, c.conn)
+	columnCount := len(result.columns)
 	for {
 		row := readWirePacket(c.t, c.conn)
 		if len(row) == 0 {
@@ -1308,6 +1271,34 @@ func (c *wireClient) readPreparedResult() wireResult {
 		}
 		result.rows = append(result.rows, values)
 	}
+}
+
+func (c *wireClient) readResultHeader() (wireResult, bool) {
+	payload := readWirePacket(c.t, c.conn)
+	if len(payload) == 0 {
+		return wireResult{err: "empty result"}, true
+	}
+	if payload[0] == 0xff {
+		return wireResult{err: string(payload[4:])}, true
+	}
+	if payload[0] == 0x00 {
+		return wireResult{}, true
+	}
+	columnCount, _, ok := readLengthInt(payload, 0)
+	if !ok {
+		return wireResult{err: fmt.Sprintf("malformed column count %x", payload)}, true
+	}
+	result := wireResult{columns: make([]string, columnCount), metadata: make([]wireColumn, columnCount)}
+	for index := range result.columns {
+		definition := readWirePacket(c.t, c.conn)
+		column, valid := parseColumnDefinition(definition)
+		if !valid {
+			return wireResult{err: fmt.Sprintf("malformed column definition %x", definition)}, true
+		}
+		result.columns[index], result.metadata[index] = column.name, column
+	}
+	_ = readWirePacket(c.t, c.conn)
+	return result, false
 }
 
 func freeAddress(t *testing.T) string {
@@ -1396,19 +1387,6 @@ func readLengthString(payload []byte, offset int) (string, int, bool) {
 		return "", next, false
 	}
 	return string(payload[next : next+length]), next + length, true
-}
-
-func readColumnName(payload []byte) (string, bool) {
-	offset := 0
-	for i := 0; i < 4; i++ {
-		_, next, ok := readLengthString(payload, offset)
-		if !ok {
-			return "", false
-		}
-		offset = next
-	}
-	name, _, ok := readLengthString(payload, offset)
-	return name, ok
 }
 
 func bytesIndex(value []byte, target byte) int {
