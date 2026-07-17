@@ -416,10 +416,10 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, value: []byte("Ada")}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "Ada" {
 		t.Fatalf("bound result: %#v", result)
 	}
-	client.sendLongData(bound.id, 0, []byte("long "))
-	client.sendLongData(bound.id, 0, []byte("value"))
-	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, long: true}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "long value" {
-		t.Fatalf("long-data result: %#v", result)
+	longValue := strings.Repeat("long value ", 7000)
+	client.sendLongData(bound.id, 0, []byte(longValue))
+	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, long: true}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != longValue {
+		t.Fatalf("long-data result: err=%q rows=%d", result.err, len(result.rows))
 	}
 	if err := client.resetPrepared(bound.id); err != nil {
 		t.Fatal(err)
@@ -453,6 +453,33 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	}
 	if result := client.query("SELECT 1"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "1" {
 		t.Fatalf("connection reset lost authentication: %#v", result)
+	}
+}
+
+func TestMySQLPreparedStatementCountIsBounded(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("prepared-limit-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, mysqlAddress := startMySQLServer(t, runner, directory, "--max-prepared-stmt-count", "1")
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, mysqlAddress, "admin", "prepared-limit-secret")
+	defer client.close()
+	first := client.prepare("SELECT 1")
+	if first.err != "" {
+		t.Fatalf("first prepared statement: %#v", first)
+	}
+	if second := client.prepare("SELECT 2"); second.err == "" {
+		t.Fatalf("prepared statement limit was not enforced: %#v", second)
+	}
+	client.closePrepared(first.id)
+	if replacement := client.prepare("SELECT 3"); replacement.err != "" {
+		t.Fatalf("closing statement did not release limit: %#v", replacement)
 	}
 }
 
@@ -549,6 +576,14 @@ func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 	var value string
 	if err := driver.QueryRowContext(context.Background(), "SELECT 'Ada'").Scan(&value); err != nil || value != "Ada" {
 		t.Fatalf("go-sql-driver text query: value=%q err=%v", value, err)
+	}
+	statement, err := driver.PrepareContext(context.Background(), "SELECT ?")
+	if err != nil {
+		t.Fatalf("go-sql-driver prepare: %v", err)
+	}
+	defer statement.Close()
+	if err := statement.QueryRowContext(context.Background(), "Ada").Scan(&value); err != nil || value != "Ada" {
+		t.Fatalf("go-sql-driver prepared query: value=%q err=%v", value, err)
 	}
 }
 
@@ -698,12 +733,15 @@ func TestMySQLMetadataIsHonestEscapedAndCommittedConsistent(t *testing.T) {
 	}
 }
 
-func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string) (*blackbox.Process, string) {
+func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string, extraArguments ...string) (*blackbox.Process, string) {
 	t.Helper()
 	diagnostics := freeAddress(t)
 	mysqlAddress := freeAddress(t)
 	state := filepath.Join(t.TempDir(), "server.state")
-	process, err := runner.Start(context.Background(), "serve", "--data-dir", directory, "--mysql-address", mysqlAddress, "--diagnostics-address", diagnostics, "--format=json", "--state-file", state)
+	arguments := []string{"serve", "--data-dir", directory, "--mysql-address", mysqlAddress, "--diagnostics-address", diagnostics}
+	arguments = append(arguments, extraArguments...)
+	arguments = append(arguments, "--format=json", "--state-file", state)
+	process, err := runner.Start(context.Background(), arguments...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1109,7 +1147,10 @@ func lengthEncodedWire(value []byte) []byte {
 	if len(value) < 251 {
 		return append([]byte{byte(len(value))}, value...)
 	}
-	return append([]byte{0xfc, byte(len(value)), byte(len(value) >> 8)}, value...)
+	if len(value) <= 0xffff {
+		return append([]byte{0xfc, byte(len(value)), byte(len(value) >> 8)}, value...)
+	}
+	return append([]byte{0xfd, byte(len(value)), byte(len(value) >> 8), byte(len(value) >> 16)}, value...)
 }
 
 func (c *wireClient) sendLongData(id uint32, parameter uint16, value []byte) {

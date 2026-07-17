@@ -1346,6 +1346,9 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 
 func preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
 	count := statement.parameters
+	if len(payload) < 10 {
+		return nil, errors.New("malformed prepared statement")
+	}
 	if count == 0 {
 		return nil, nil
 	}
@@ -1825,7 +1828,13 @@ func lengthEncodedInt(value int) []byte {
 	if value < 251 {
 		return []byte{byte(value)}
 	}
-	return []byte{0xfc, byte(value), byte(value >> 8)}
+	if value <= 0xffff {
+		return []byte{0xfc, byte(value), byte(value >> 8)}
+	}
+	if value <= 0xffffff {
+		return []byte{0xfd, byte(value), byte(value >> 8), byte(value >> 16)}
+	}
+	return []byte{0xfe, byte(value), byte(value >> 8), byte(value >> 16), byte(value >> 24), byte(value >> 32), byte(value >> 40), byte(value >> 48), byte(value >> 56)}
 }
 func lengthEncodedString(value string) []byte {
 	return append(lengthEncodedInt(len(value)), []byte(value)...)
@@ -1845,6 +1854,22 @@ func readLengthEncoded(payload []byte, offset int) ([]byte, int, bool) {
 		}
 		length = int(binary.LittleEndian.Uint16(payload[offset : offset+2]))
 		offset += 2
+	} else if length == 0xfd {
+		if offset+3 > len(payload) {
+			return nil, offset, false
+		}
+		length = int(payload[offset]) | int(payload[offset+1])<<8 | int(payload[offset+2])<<16
+		offset += 3
+	} else if length == 0xfe {
+		if offset+8 > len(payload) {
+			return nil, offset, false
+		}
+		length64 := binary.LittleEndian.Uint64(payload[offset : offset+8])
+		if length64 > uint64(len(payload)-offset-8) {
+			return nil, offset, false
+		}
+		length = int(length64)
+		offset += 8
 	}
 	if offset+length > len(payload) {
 		return nil, offset, false
