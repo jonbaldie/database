@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -32,6 +33,8 @@ type Config struct {
 	Username     string
 	PasswordHash string
 	Version      string
+	TLSCertFile  string
+	TLSKeyFile   string
 }
 
 type Server struct {
@@ -52,6 +55,18 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 	}
 	if config.Version == "" {
 		config.Version = "0.1.0-dev"
+	}
+	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
+		_ = listener.Close()
+		return nil, errors.New("TLS certificate and key must be provided together")
+	}
+	if config.TLSCertFile != "" {
+		certificate, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
+		if err != nil {
+			_ = listener.Close()
+			return nil, fmt.Errorf("load TLS certificate: %w", err)
+		}
+		listener = tls.NewListener(listener, &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}})
 	}
 	return &Server{Listener: listener, config: config}, nil
 }

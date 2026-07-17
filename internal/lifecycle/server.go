@@ -26,6 +26,8 @@ import (
 type Options struct {
 	DataDirectory      string
 	MySQLAddress       string
+	TLSCertFile        string
+	TLSKeyFile         string
 	DiagnosticsAddress string
 	StateFile          string
 	Format             string
@@ -92,7 +94,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		go func() { _ = httpServer.Serve(listener) }()
 	}
 	if opts.MySQLAddress != "" {
-		mysqlServer, err = mysql.NewWithConfig(opts.MySQLAddress, mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash})
+		mysqlServer, err = mysql.NewWithConfig(opts.MySQLAddress, mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile})
 		if err != nil {
 			return fmt.Errorf("listen for mysql: %w", err)
 		}
