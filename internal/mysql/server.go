@@ -1326,7 +1326,12 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	s.nextStmtID++
 	statement := &preparedStatement{query: query, parameters: parameters, longData: make(map[uint16][]byte)}
 	s.statements[id] = statement
-	metadata := preparedColumns(query)
+	metadata, err := s.preparedColumns(query)
+	if err != nil {
+		delete(s.statements, id)
+		s.server.releasePreparedStatement()
+		return writePacket(connection, sequence, mysqlError(err))
+	}
 	response := []byte{0x00, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), byte(len(metadata)), 0, byte(parameters), byte(parameters >> 8), 0, 0, 0}
 	maximum := s.server.config.MaxAllowedPacket
 	if int64(len(response)) > maximum {
@@ -1375,19 +1380,33 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	return nil
 }
 
-func preparedColumns(query string) []columnMetadata {
+func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
-		return nil
+		return nil, nil
 	}
 	expression := strings.TrimSpace(query[len("select "):])
 	if strings.Contains(expression, "?") {
-		return []columnMetadata{{catalog: "def", name: expression, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}}
+		return []columnMetadata{{catalog: "def", name: expression, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}}, nil
 	}
 	if literal := parseLiteralResult(expression); literal.supported {
-		return []columnMetadata{literal.metadata}
+		return []columnMetadata{literal.metadata}, nil
 	}
-	return []columnMetadata{{catalog: "def", name: expression, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}}
+	result, err := s.execute(query)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, nil
+	}
+	metadata := make([]columnMetadata, len(result.columns))
+	for index, name := range result.columns {
+		metadata[index] = columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
+		if index < len(result.metadata) {
+			metadata[index] = result.metadata[index]
+		}
+	}
+	return metadata, nil
 }
 
 func (s *session) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
@@ -1441,16 +1460,17 @@ func (s *session) preparedValues(payload []byte, statement *preparedStatement) (
 	if newTypes > 1 {
 		return nil, errors.New("malformed prepared statement type flag")
 	}
+	types := statement.types
 	if newTypes != 0 {
 		if len(payload[offset:]) < count*2 {
 			return nil, errors.New("malformed prepared statement types")
 		}
-		statement.types = make([]preparedParameterType, count)
-		for i := range statement.types {
-			statement.types[i] = preparedParameterType{typ: payload[offset+i*2], unsigned: payload[offset+i*2+1]&0x80 != 0}
+		types = make([]preparedParameterType, count)
+		for i := range types {
+			types[i] = preparedParameterType{typ: payload[offset+i*2], unsigned: payload[offset+i*2+1]&0x80 != 0}
 		}
 		offset += count * 2
-	} else if len(statement.types) != count {
+	} else if len(types) != count {
 		return nil, errors.New("prepared statement parameter types are unavailable")
 	}
 	values := make([]string, count)
@@ -1463,7 +1483,7 @@ func (s *session) preparedValues(payload []byte, statement *preparedStatement) (
 			values[i] = quote(string(long))
 			continue
 		}
-		value, next, err := readPreparedValue(payload, offset, statement.types[i])
+		value, next, err := readPreparedValue(payload, offset, types[i])
 		if err != nil {
 			return nil, err
 		}
@@ -1472,6 +1492,7 @@ func (s *session) preparedValues(payload []byte, statement *preparedStatement) (
 	if offset != len(payload) {
 		return nil, errors.New("malformed prepared statement trailing data")
 	}
+	statement.types = types
 	s.clearLongData(statement)
 	return values, nil
 }
