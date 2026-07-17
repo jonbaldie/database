@@ -93,6 +93,7 @@ type session struct {
 	nextStmtID          uint32
 	transaction         bool
 	transactionSnapshot catalog.Definition
+	savepoints          map[string]catalog.Definition
 }
 
 func (s *Server) serveConnection(connection net.Conn) {
@@ -115,7 +116,7 @@ func (s *Server) serveConnection(connection net.Conn) {
 	if err := writePacket(connection, 2, okPacket()); err != nil {
 		return
 	}
-	session := &session{server: s, username: username, database: database, initialDB: database, statements: map[uint32]string{}, parameters: map[uint32]int{}, nextStmtID: 1}
+	session := &session{server: s, username: username, database: database, initialDB: database, statements: map[uint32]string{}, parameters: map[uint32]int{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
 	current = session
 	for {
 		sequence, payload, err := readPacket(connection)
@@ -326,6 +327,36 @@ func (s *session) execute(query string) (*queryResult, error) {
 	if lower == "commit" {
 		s.transaction = false
 		s.transactionSnapshot = catalog.Definition{}
+		return nil, nil
+	}
+	if strings.HasPrefix(lower, "savepoint ") {
+		if s.server.config.Catalog == nil {
+			return nil, sqlFailure{1105, "HY000", "database is not initialized"}
+		}
+		name := identifier(strings.TrimSpace(query[len("SAVEPOINT "):]))
+		s.savepoints[strings.ToLower(name)] = s.server.config.Catalog.Snapshot()
+		return nil, nil
+	}
+	if strings.HasPrefix(lower, "rollback to savepoint ") {
+		if s.server.config.Catalog == nil {
+			return nil, sqlFailure{1105, "HY000", "database is not initialized"}
+		}
+		name := identifier(strings.TrimSpace(query[len("ROLLBACK TO SAVEPOINT "):]))
+		snapshot, ok := s.savepoints[strings.ToLower(name)]
+		if !ok {
+			return nil, sqlFailure{1305, "42000", "savepoint does not exist"}
+		}
+		if err := s.server.config.Catalog.Replace(snapshot); err != nil {
+			return nil, sqlFailure{1105, "HY000", err.Error()}
+		}
+		return nil, nil
+	}
+	if strings.HasPrefix(lower, "release savepoint ") {
+		name := identifier(strings.TrimSpace(query[len("RELEASE SAVEPOINT "):]))
+		if _, ok := s.savepoints[strings.ToLower(name)]; !ok {
+			return nil, sqlFailure{1305, "42000", "savepoint does not exist"}
+		}
+		delete(s.savepoints, strings.ToLower(name))
 		return nil, nil
 	}
 	if lower == "rollback" {
