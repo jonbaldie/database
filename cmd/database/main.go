@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -46,8 +48,151 @@ func operatorCommand(args []string, stdout io.Writer) int {
 	if len(args) < 2 {
 		return initFailure(stdout, "invalid_input", 2, "operator command requires an operation")
 	}
+	var err error
+	switch args[0] + " " + args[1] {
+	case "backup create":
+		err = createBackup(option(args[2:], "--data-dir"), option(args[2:], "--output"))
+	case "backup inspect":
+		err = inspectBackup(option(args[2:], "--input"))
+	case "restore":
+		err = restoreBackup(option(args[2:], "--input"), option(args[2:], "--data-dir"))
+	}
+	if err != nil {
+		_ = json.NewEncoder(stdout).Encode(map[string]any{"schema": "database.operator.result/v1", "operation": strings.Join(args[:2], " "), "operation_id": fmt.Sprintf("op-%d", time.Now().UnixNano()), "success": false, "exit_class": "operation_failed", "diagnostic": err.Error()})
+		return 1
+	}
 	_ = json.NewEncoder(stdout).Encode(map[string]any{"schema": "database.operator.result/v1", "operation": strings.Join(args[:2], " "), "operation_id": fmt.Sprintf("op-%d", time.Now().UnixNano()), "success": true, "exit_class": "success"})
 	return 0
+}
+
+func option(args []string, name string) string {
+	for index, arg := range args {
+		if strings.HasPrefix(arg, name+"=") {
+			return strings.TrimPrefix(arg, name+"=")
+		}
+		if arg == name && index+1 < len(args) {
+			return args[index+1]
+		}
+	}
+	return ""
+}
+
+func createBackup(directory, output string) error {
+	if directory == "" || output == "" {
+		return errors.New("backup create requires --data-dir and --output")
+	}
+	info, err := os.Stat(directory)
+	if err != nil || !info.IsDir() {
+		return errors.New("data directory does not exist")
+	}
+	file, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	archive := tar.NewWriter(file)
+	defer archive.Close()
+	return filepath.Walk(directory, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == directory {
+			return nil
+		}
+		relative, err := filepath.Rel(directory, path)
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(relative)
+		if err := archive.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		_, err = io.Copy(archive, input)
+		return err
+	})
+}
+
+func inspectBackup(input string) error {
+	file, err := os.Open(input)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	archive := tar.NewReader(file)
+	if _, err := archive.Next(); err != nil && !errors.Is(err, io.EOF) {
+		return errors.New("invalid backup archive")
+	}
+	return nil
+}
+
+func restoreBackup(input, directory string) error {
+	if input == "" || directory == "" {
+		return errors.New("restore requires --input and --data-dir")
+	}
+	if _, err := os.Stat(directory); err == nil {
+		entries, readErr := os.ReadDir(directory)
+		if readErr != nil || len(entries) != 0 {
+			return errors.New("restore destination must be new or empty")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	} else if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	file, err := os.Open(input)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	archive := tar.NewReader(file)
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return errors.New("invalid backup archive")
+		}
+		name := filepath.Clean(header.Name)
+		if name == "." || filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			return errors.New("unsafe backup path")
+		}
+		path := filepath.Join(directory, name)
+		if header.FileInfo().IsDir() {
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(output, archive)
+		closeErr := output.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
 }
 
 func initialize(args []string, stdout, stderr io.Writer) int {
