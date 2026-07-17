@@ -63,7 +63,37 @@ func TestRestoreRejectsUnsafeArtifact(t *testing.T) {
 	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", filepath.Join(t.TempDir(), "restored")}, "restore", "operation_failed", 1)
 }
 
-func assertOperatorSuccess(t *testing.T, args []string, operation string) {
+func TestRestoreRejectsMalformedArtifact(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "malformed.tar")
+	writeBackupFixture(t, archive, "not a tar archive")
+
+	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", filepath.Join(t.TempDir(), "restored")}, "restore", "operation_failed", 1)
+}
+
+func TestRestoreReportsExtractionFailure(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "conflicting.tar")
+	writeExtractionFailureArchive(t, archive)
+	destination := filepath.Join(t.TempDir(), "restored")
+
+	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", destination}, "restore", "operation_failed", 1)
+	if _, err := os.Stat(filepath.Join(destination, "entry")); err != nil {
+		t.Fatalf("restore did not preserve first archive entry before extraction failure: %v", err)
+	}
+}
+
+func TestBackupWorkflowReportsDistinctTerminalOperationIdentities(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+
+	createResult := assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	inspectResult := assertOperatorSuccess(t, []string{"backup", "inspect", "--input", archive}, "backup inspect")
+	if createResult["operation_id"] == inspectResult["operation_id"] {
+		t.Fatalf("workflow confirmations reused operation identity %q", createResult["operation_id"])
+	}
+}
+
+func assertOperatorSuccess(t *testing.T, args []string, operation string) map[string]any {
 	t.Helper()
 	result, code := operatorResultForTest(t, args)
 	if code != 0 {
@@ -72,6 +102,7 @@ func assertOperatorSuccess(t *testing.T, args []string, operation string) {
 	if result["operation"] != operation || result["success"] != true || result["exit_class"] != "success" {
 		t.Fatalf("%v result = %#v", args, result)
 	}
+	return result
 }
 
 func assertOperatorFailure(t *testing.T, args []string, operation, exitClass string, code int) {
@@ -117,6 +148,33 @@ func writeUnsafeArchive(t *testing.T, path string) {
 	}
 	if err := file.Close(); err != nil {
 		t.Fatalf("close archive file: %v", err)
+	}
+}
+
+func writeExtractionFailureArchive(t *testing.T, path string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("open archive: %v", err)
+	}
+	archive := tar.NewWriter(file)
+	writeArchiveEntry(t, archive, "entry", "file")
+	writeArchiveEntry(t, archive, "entry/nested", "conflict")
+	if err := archive.Close(); err != nil {
+		t.Fatalf("close archive: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close archive file: %v", err)
+	}
+}
+
+func writeArchiveEntry(t *testing.T, archive *tar.Writer, name, contents string) {
+	t.Helper()
+	if err := archive.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(contents))}); err != nil {
+		t.Fatalf("write archive header: %v", err)
+	}
+	if _, err := archive.Write([]byte(contents)); err != nil {
+		t.Fatalf("write archive contents: %v", err)
 	}
 }
 
