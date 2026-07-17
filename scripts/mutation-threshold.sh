@@ -4,8 +4,17 @@ set -euo pipefail
 # Mutation testing is deliberately changed-code scoped. The CI job checks out
 # the complete history so this script can compare the PR with its merge base.
 threshold="${MUTATION_THRESHOLD:-0.80}"
-base="${GITHUB_BASE_SHA:-${GITHUB_BASE_REF:-origin/main}}"
-if ! git rev-parse --verify "$base" >/dev/null 2>&1; then
+base="${GITHUB_BASE_SHA:-}"
+if [[ -z "$base" ]]; then
+	base_ref="${GITHUB_BASE_REF:-main}"
+	for candidate in "origin/$base_ref" "$base_ref" origin/main; do
+		if git rev-parse --verify "$candidate" >/dev/null 2>&1; then
+			base="$candidate"
+			break
+		fi
+	done
+fi
+if [[ -z "$base" ]]; then
 	base="$(git merge-base HEAD origin/main 2>/dev/null || true)"
 fi
 if [[ -z "$base" ]]; then
