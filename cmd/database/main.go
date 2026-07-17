@@ -1,19 +1,14 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/jonbaldie/database/internal/buildinfo"
-	"github.com/jonbaldie/database/internal/lifecycle"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -189,153 +184,6 @@ func version(args []string, stdout, stderr io.Writer) int {
 		info.ProductVersion, info.BuildIdentity, info.Platform, info.GoVersion,
 		info.DataCompatibility, info.BackupCompatibility, info.MySQLApplicationCompatibilityProfile)
 	return 0
-}
-
-func serve(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: database serve [--format=human|json] [--config PATH] [--data-directory PATH] [--mysql-listen-address HOST:PORT] [--tls-certificate-file PATH --tls-private-key-file PATH] [--diagnostics-listen-address HOST:PORT] [--log-format=json|text]")
-		return 0
-	}
-	outputFormat, configurationArgs, err := configOutputFormat(args)
-	if err != nil {
-		fmt.Fprintf(stderr, "database serve: invalid_input: %v\n", err)
-		return 2
-	}
-	opts, err := parseServeFlags(configurationArgs)
-	if err != nil {
-		fmt.Fprintf(stderr, "database serve: %s: %v\n", configurationClass(err), err)
-		return 2
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	operationID := newOperationID()
-	emit := func(event lifecycle.Event) {
-		event.OperationID = operationID
-		if outputFormat == "json" {
-			_ = json.NewEncoder(stdout).Encode(event)
-			return
-		}
-		if event.State == "ready" {
-			if event.DiagnosticsAddress == "" {
-				fmt.Fprintln(stdout, "database: ready")
-			} else {
-				fmt.Fprintf(stdout, "database: ready (diagnostics=%s)\n", event.DiagnosticsAddress)
-			}
-		} else {
-			fmt.Fprintf(stdout, "database: %s\n", event.State)
-		}
-	}
-	if err := lifecycle.Serve(ctx, opts, emit); err != nil {
-		if outputFormat == "json" {
-			return writeOperatorFailure(stdout, "serve", operationID, "operation_failed", 1, err.Error())
-		}
-		fmt.Fprintf(stderr, "database serve: %v\n", err)
-		return 1
-	}
-	if outputFormat == "json" {
-		return writeOperatorResult(stdout, "serve", operationID, true, "success", "")
-	}
-	fmt.Fprintf(stdout, "database serve: success (operation_id=%s)\n", operationID)
-	return 0
-}
-
-func configCommand(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: database config validate [--config PATH] [configuration flags]")
-		return 0
-	}
-	format, parsedArgs, err := configOutputFormat(args)
-	operationID := newOperationID()
-	if err != nil {
-		return writeConfigFailure(stdout, "invalid_input", err.Error(), "config validate", operationID, format)
-	}
-	if len(parsedArgs) == 0 || parsedArgs[0] != "validate" {
-		operation := "config"
-		if len(parsedArgs) > 0 {
-			operation += " " + parsedArgs[0]
-		}
-		return writeConfigFailure(stdout, "invalid_input", "config requires the validate operation", operation, operationID, format)
-	}
-	configurationArgs := parsedArgs[1:]
-	config, err := resolveConfiguration(configurationArgs, os.Environ())
-	if err != nil {
-		return writeConfigFailure(stdout, configurationClass(err), err.Error(), "config validate", operationID, format)
-	}
-	result := configurationResult(config, operationID)
-	result["operation"] = "config validate"
-	result["success"] = true
-	result["exit_class"] = "success"
-	if format == "json" {
-		_ = json.NewEncoder(stdout).Encode(result)
-	} else {
-		writeConfigurationHuman(stdout, config, operationID)
-	}
-	return 0
-}
-
-func configOutputFormat(args []string) (string, []string, error) {
-	format := "human"
-	seen := false
-	filtered := make([]string, 0, len(args))
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		if arg != "--format" && !strings.HasPrefix(arg, "--format=") {
-			filtered = append(filtered, arg)
-			continue
-		}
-		if seen {
-			return format, nil, errors.New("repeated output format")
-		}
-		seen = true
-		value := "json"
-		if arg == "--format" {
-			if index+1 >= len(args) {
-				return format, nil, errors.New("--format requires a value")
-			}
-			index++
-			value = args[index]
-		} else if strings.HasPrefix(arg, "--format=") {
-			value = strings.TrimPrefix(arg, "--format=")
-		}
-		switch value {
-		case "json":
-			format = "json"
-		case "human", "text":
-			format = "human"
-		default:
-			return format, nil, fmt.Errorf("format must be human, text, or json")
-		}
-	}
-	return format, filtered, nil
-}
-
-func writeConfigFailure(stdout io.Writer, class, message, operation, operationID, format string) int {
-	if format != "json" {
-		fmt.Fprintf(stdout, "configuration invalid [%s] (operation_id=%s): %s\n", class, operationID, message)
-		return operatorExitCode(class)
-	}
-	_ = json.NewEncoder(stdout).Encode(map[string]any{
-		"schema": "database.operator.result/v1", "operation": operation, "operation_id": operationID,
-		"success": false, "exit_class": class, "diagnostic": message,
-	})
-	return operatorExitCode(class)
-}
-
-func writeConfigurationHuman(stdout io.Writer, config configuration, operationID string) {
-	fmt.Fprintf(stdout, "configuration valid (operation_id=%s)\n", operationID)
-	names := make([]string, 0, len(config.values))
-	for name := range config.values {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		setting := config.values[name]
-		value := setting.value
-		if name == "tls_private_key_file" && value != "" {
-			value = "[redacted]"
-		}
-		fmt.Fprintf(stdout, "%s=%s (%s)\n", name, value, setting.source)
-	}
 }
 
 func formatFlag(args []string) (string, bool) {

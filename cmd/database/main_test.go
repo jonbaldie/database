@@ -145,3 +145,24 @@ func TestConfigValidateJSONFailureIncludesStableExitClass(t *testing.T) {
 		t.Fatalf("operation_id = %#v", result["operation_id"])
 	}
 }
+
+func TestConfigOutputFormatPreservesConfigurationArguments(t *testing.T) {
+	format, arguments, err := configOutputFormat([]string{"validate", "--format", "json", "--data-directory=/tmp/database"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "json" {
+		t.Fatalf("format = %q", format)
+	}
+	if got, want := strings.Join(arguments, " "), "validate --data-directory=/tmp/database"; got != want {
+		t.Fatalf("arguments = %q, want %q", got, want)
+	}
+}
+
+func TestConfigOutputFormatRejectsRepeatedAndMissingValues(t *testing.T) {
+	for _, arguments := range [][]string{{"--format=json", "--format=text"}, {"--format"}} {
+		if _, _, err := configOutputFormat(arguments); err == nil {
+			t.Fatalf("configOutputFormat(%q) accepted invalid output format", arguments)
+		}
+	}
+}
