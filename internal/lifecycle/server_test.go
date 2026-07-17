@@ -103,6 +103,63 @@ func TestDiagnosticsReadinessTracksStartupAndShutdown(t *testing.T) {
 	_ = server.Shutdown(context.Background())
 }
 
+func TestServeReportsReadinessAndWritesCleanStateOnShutdown(t *testing.T) {
+	directory := initializedDirectory(t)
+	stateFile := filepath.Join(t.TempDir(), "server.state")
+	if err := os.WriteFile(stateFile, []byte("running\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	events := make(chan Event, 3)
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, Options{
+			DataDirectory:      directory,
+			DiagnosticsAddress: "127.0.0.1:0",
+			StateFile:          stateFile,
+		}, func(event Event) { events <- event })
+	}()
+	ready := receiveEvent(t, events, "ready")
+	if !ready.Recovered {
+		t.Fatal("ready event did not report recovery from the running state")
+	}
+	status, response := healthResponse(t, ready.DiagnosticsAddress, "/ready")
+	if status != http.StatusOK || response["status"] != "ready" {
+		t.Fatalf("running readiness = status %d body %#v", status, response)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatalf("Serve shutdown: %v", err)
+	}
+	receiveEvent(t, events, "stopping")
+	receiveEvent(t, events, "stopped")
+	contents, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "stopped\n" {
+		t.Fatalf("state after clean shutdown = %q, want stopped", contents)
+	}
+}
+
+func TestServeReleasesDataDirectoryClaimWhenStateMarkerFails(t *testing.T) {
+	directory := initializedDirectory(t)
+	stateParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(stateParent, []byte("file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join(stateParent, "server.state")
+	if err := Serve(context.Background(), Options{DataDirectory: directory, StateFile: stateFile}, func(Event) {}); err == nil {
+		t.Fatal("Serve accepted a state file whose parent is not a directory")
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	stop()
+	if err := Serve(ctx, Options{DataDirectory: directory}, func(Event) {}); err != nil {
+		t.Fatalf("Serve did not release the failed state claim: %v", err)
+	}
+}
+
 func initializedDirectory(t *testing.T) string {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "instance")
@@ -124,4 +181,18 @@ func healthResponse(t *testing.T, address, path string) (int, map[string]string)
 		t.Fatal(err)
 	}
 	return response.StatusCode, body
+}
+
+func receiveEvent(t *testing.T, events <-chan Event, state string) Event {
+	t.Helper()
+	select {
+	case event := <-events:
+		if event.State != state {
+			t.Fatalf("event state = %q, want %q", event.State, state)
+		}
+		return event
+	case <-time.After(5 * time.Second):
+		t.Fatalf("did not receive %q event", state)
+		return Event{}
+	}
 }

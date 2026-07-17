@@ -564,7 +564,22 @@ func (parts configurationParts) options() lifecycle.Options {
 	if format == "text" {
 		format = "human"
 	}
-	return lifecycle.Options{DataDirectory: parts.dataDirectory, MySQLAddress: parts.mysqlAddress, TLSCertFile: parts.certificate, TLSKeyFile: parts.key, DiagnosticsAddress: parts.diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: parts.limits.statementTimeout, LockWaitTimeoutMilliseconds: parts.limits.lockWaitTimeout, IdleInTransactionTimeoutMilliseconds: parts.limits.idleTransactionTimeout, IdleSessionTimeoutMilliseconds: parts.limits.idleSessionTimeout, ExecutionMemoryLimitBytes: parts.limits.executionMemory, AggregateMemoryLimitBytes: parts.limits.aggregateMemory, TemporaryStorageLimitBytes: parts.limits.temporaryStorage, AggregateTemporaryLimitBytes: parts.limits.aggregateTemporaryStorage, MaxConnections: int(parts.limits.maxConnections), MaxAllowedPacket: parts.limits.maxAllowedPacket, MaxPreparedStmtCount: int(parts.limits.maxPreparedStatements), MySQLEnabled: true}
+	return lifecycle.Options{
+		DataDirectory: parts.dataDirectory, MySQLAddress: parts.mysqlAddress, TLSCertFile: parts.certificate,
+		TLSKeyFile: parts.key, DiagnosticsAddress: parts.diagnosticsAddress, Format: format, MySQLEnabled: true,
+		Timeouts: lifecycle.Timeouts{
+			StatementTimeoutMilliseconds: parts.limits.statementTimeout, LockWaitTimeoutMilliseconds: parts.limits.lockWaitTimeout,
+			IdleInTransactionTimeoutMilliseconds: parts.limits.idleTransactionTimeout, IdleSessionTimeoutMilliseconds: parts.limits.idleSessionTimeout,
+		},
+		ResourceLimits: lifecycle.ResourceLimits{
+			ExecutionMemoryLimitBytes: parts.limits.executionMemory, AggregateMemoryLimitBytes: parts.limits.aggregateMemory,
+			TemporaryStorageLimitBytes: parts.limits.temporaryStorage, AggregateTemporaryLimitBytes: parts.limits.aggregateTemporaryStorage,
+		},
+		ConnectionLimits: lifecycle.ConnectionLimits{
+			MaxConnections: int(parts.limits.maxConnections), MaxAllowedPacket: parts.limits.maxAllowedPacket,
+			MaxPreparedStmtCount: int(parts.limits.maxPreparedStatements),
+		},
+	}
 }
 
 type configurationLimits struct {
