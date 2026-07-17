@@ -469,7 +469,6 @@ func version(args []string, stdout, stderr io.Writer) int {
 func serve(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Fprintln(stdout, "Usage: database serve [--config PATH] [--data-directory PATH] [--mysql-listen-address HOST:PORT] [--tls-certificate-file PATH --tls-private-key-file PATH] [--diagnostics-listen-address HOST:PORT] [--log-format=json|text]")
-		fmt.Fprintln(stdout, "Compatibility aliases: --data-dir, --mysql-address, --tls-cert, --tls-key, --diagnostics-address, --format, --state-file")
 		return 0
 	}
 	opts, err := parseServeFlags(args)

@@ -72,8 +72,8 @@ func TestExecutableVersionAndLifecycleArePublic(t *testing.T) {
 		t.Fatalf("incomplete version contract: %#v", version)
 	}
 
-	state := filepath.Join(t.TempDir(), "state", "server.state")
-	process, address, _ := startServer(t, runner, state)
+	directory := initializedInstance(t, runner)
+	process, address := startServer(t, runner, directory)
 	var live map[string]string
 	status, err := blackbox.HTTPJSON(ctx, address, "/live", &live)
 	if err != nil || status != 200 || live["status"] != "live" {
@@ -89,27 +89,6 @@ func TestExecutableVersionAndLifecycleArePublic(t *testing.T) {
 	}
 	if result := process.Wait(); result.ExitCode != 0 {
 		t.Fatalf("graceful stop: %#v", result)
-	}
-	if contents, _ := os.ReadFile(state); string(contents) != "stopped\n" {
-		t.Fatalf("state after graceful stop = %q", contents)
-	}
-
-	process, _, _ = startServer(t, runner, state)
-	if err := process.Crash(); err != nil {
-		t.Fatal(err)
-	}
-	if result := process.Wait(); result.Err == nil {
-		t.Fatalf("crash should be visible: %#v", result)
-	}
-	process, _, recovered := startServer(t, runner, state)
-	if !recovered {
-		t.Fatal("restart did not expose the prior unclean stop")
-	}
-	if err := process.Stop(); err != nil {
-		t.Fatal(err)
-	}
-	if result := process.Wait(); result.ExitCode != 0 {
-		t.Fatalf("final stop: %#v", result)
 	}
 }
 
@@ -216,7 +195,20 @@ func TestInitializeRejectsAmbiguousOrMalformedSecretInputs(t *testing.T) {
 	}
 }
 
-func startServer(t *testing.T, runner blackbox.Runner, state string) (*blackbox.Process, string, bool) {
+func initializedInstance(t *testing.T, runner blackbox.Runner) string {
+	t.Helper()
+	directory := filepath.Join(t.TempDir(), "instance")
+	password := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(password, []byte("lifecycle-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", password, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize instance: %#v", result)
+	}
+	return directory
+}
+
+func startServer(t *testing.T, runner blackbox.Runner, directory string) (*blackbox.Process, string) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -224,7 +216,7 @@ func startServer(t *testing.T, runner blackbox.Runner, state string) (*blackbox.
 	}
 	address := listener.Addr().String()
 	_ = listener.Close()
-	process, err := runner.Start(context.Background(), "serve", "--format=json", "--diagnostics-address="+address, "--state-file="+state)
+	process, err := runner.Start(context.Background(), "serve", "--format=json", "--data-directory="+directory, "--mysql-listen-address="+freeAddress(t), "--diagnostics-listen-address="+address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +235,7 @@ func startServer(t *testing.T, runner blackbox.Runner, state string) (*blackbox.
 	if event.State != "ready" || event.Address != address {
 		t.Fatalf("ready event: %#v", event)
 	}
-	return process, address, event.Recovered
+	return process, address
 }
 
 func TestMySQLProbeRecognizesClassicHandshake(t *testing.T) {
@@ -298,8 +290,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 
 	diagnostics := freeAddress(t)
 	mysql := freeAddress(t)
-	state := filepath.Join(t.TempDir(), "server.state")
-	process, err := runner.Start(context.Background(), "serve", "--data-dir", directory, "--mysql-address", mysql, "--diagnostics-address", diagnostics, "--format=json", "--state-file", state)
+	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", mysql, "--diagnostics-listen-address", diagnostics, "--format=json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +356,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 		t.Fatalf("stop: %#v", result)
 	}
 	process = nil
-	process, err = runner.Start(context.Background(), "serve", "--data-dir", directory, "--mysql-address", mysql, "--format=json", "--state-file", state)
+	process, err = runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", mysql, "--format=json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +570,7 @@ func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 	}
 	certificate, key := testTLSCertificate(t)
 	address := freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-dir", directory, "--mysql-address", address, "--tls-cert", certificate, "--tls-key", key, "--format=json", "--state-file", filepath.Join(t.TempDir(), "state"))
+	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", address, "--tls-certificate-file", certificate, "--tls-private-key-file", key, "--format=json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -821,10 +812,9 @@ func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string, ex
 	t.Helper()
 	diagnostics := freeAddress(t)
 	mysqlAddress := freeAddress(t)
-	state := filepath.Join(t.TempDir(), "server.state")
-	arguments := []string{"serve", "--data-dir", directory, "--mysql-address", mysqlAddress, "--diagnostics-address", diagnostics}
+	arguments := []string{"serve", "--data-directory", directory, "--mysql-listen-address", mysqlAddress, "--diagnostics-listen-address", diagnostics}
 	arguments = append(arguments, extraArguments...)
-	arguments = append(arguments, "--format=json", "--state-file", state)
+	arguments = append(arguments, "--format=json")
 	process, err := runner.Start(context.Background(), arguments...)
 	if err != nil {
 		t.Fatal(err)
@@ -852,7 +842,7 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 	}
 
 	process, address := startMySQLServer(t, runner, directory)
-	second := runner.Run(context.Background(), "serve", "--data-dir", directory, "--mysql-address", freeAddress(t), "--format=json")
+	second := runner.Run(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", freeAddress(t), "--format=json")
 	if second.ExitCode != 1 || !strings.Contains(second.Stdout, "already in use") {
 		t.Fatalf("second owner: %#v", second)
 	}
@@ -894,7 +884,7 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 	if err := os.Remove(filepath.Join(damaged, "catalog.json")); err != nil {
 		t.Fatal(err)
 	}
-	if result := runner.Run(context.Background(), "serve", "--data-dir", damaged, "--mysql-address", freeAddress(t), "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stdout, "catalog") {
+	if result := runner.Run(context.Background(), "serve", "--data-directory", damaged, "--mysql-listen-address", freeAddress(t), "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stdout, "catalog") {
 		t.Fatalf("damaged directory: %#v", result)
 	}
 }

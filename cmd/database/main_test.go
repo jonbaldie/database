@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -59,7 +60,7 @@ func TestOperatorRejectsUnknownFlags(t *testing.T) {
 
 func TestConfigValidateHumanOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"config", "validate", "--format=text"}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"config", "validate", "--format=text", "--data-directory=" + filepath.Join(t.TempDir(), "instance")}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit code = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if strings.HasPrefix(strings.TrimSpace(stdout.String()), "{") || !strings.Contains(stdout.String(), "configuration valid") {
@@ -72,7 +73,7 @@ func TestConfigValidateHumanOutput(t *testing.T) {
 
 func TestConfigValidateJSONOutputIncludesOperationIdentity(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"config", "validate", "--format=json"}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"config", "validate", "--format=json", "--data-directory=" + filepath.Join(t.TempDir(), "instance")}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit code = %d; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	var result map[string]any
