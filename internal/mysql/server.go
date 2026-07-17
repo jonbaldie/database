@@ -2,12 +2,17 @@
 package mysql
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -22,12 +27,27 @@ import (
 
 const (
 	clientLongPassword     = 1
+	clientFoundRows        = 1 << 1
+	clientLongFlag         = 1 << 2
 	clientConnectWithDB    = 1 << 3
+	clientLocalFiles       = 1 << 7
 	clientProtocol41       = 1 << 9
 	clientTransactions     = 1 << 13
 	clientSecureConnection = 1 << 15
+	clientMultiResults     = 1 << 17
 	clientPluginAuth       = 1 << 19
+	clientConnectAttrs     = 1 << 20
 	clientPluginLenencData = 1 << 21
+	clientSSL              = 1 << 11
+
+	mysqlCharsetUTF8MB4GeneralCI uint16 = 45
+	mysqlCharsetBinary           uint16 = 63
+	mysqlTypeLongLong            byte   = 0x08
+	mysqlTypeNull                byte   = 0x06
+	mysqlTypeVarchar             byte   = 0x0f
+	mysqlTypeVarString           byte   = 0xfd
+	mysqlNotNullFlag             uint16 = 1
+	mysqlBinaryFlag              uint16 = 1 << 7
 )
 
 type Config struct {
@@ -40,8 +60,10 @@ type Config struct {
 }
 
 type Server struct {
-	Listener net.Listener
-	config   Config
+	Listener  net.Listener
+	config    Config
+	tlsConfig *tls.Config
+	rsaKey    *rsa.PrivateKey
 
 	mu          sync.Mutex
 	stopping    bool
@@ -68,15 +90,22 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 		_ = listener.Close()
 		return nil, errors.New("TLS certificate and key must be provided together")
 	}
+	server := &Server{Listener: listener, config: config, connections: make(map[net.Conn]struct{})}
 	if config.TLSCertFile != "" {
 		certificate, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
 		if err != nil {
 			_ = listener.Close()
 			return nil, fmt.Errorf("load TLS certificate: %w", err)
 		}
-		listener = tls.NewListener(listener, &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}})
+		server.tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
 	}
-	return &Server{Listener: listener, config: config, connections: make(map[net.Conn]struct{})}, nil
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("generate authentication key: %w", err)
+	}
+	server.rsaKey = key
+	return server, nil
 }
 
 func (s *Server) Serve() {
@@ -187,18 +216,19 @@ func (s *Server) serveConnection(connection net.Conn) {
 		}
 	}()
 	nonce := makeNonce()
-	if err := writePacket(connection, 0, handshake(s.config.Version, nonce)); err != nil {
+	if err := writePacket(connection, 0, handshake(s.config.Version, nonce, s.tlsConfig != nil)); err != nil {
 		return
 	}
-	username, database, err := s.authenticate(connection, nonce)
+	authentication, err := s.authenticate(connection, nonce)
 	if err != nil {
-		_ = writePacket(connection, 2, errorPacket(1045, "28000", err.Error()))
+		_ = writePacket(authentication.connection, authentication.nextSequence, mysqlError(err))
 		return
 	}
-	if err := writePacket(connection, 2, okPacket()); err != nil {
+	connection = authentication.connection
+	if err := writePacket(connection, authentication.nextSequence, okPacket()); err != nil {
 		return
 	}
-	session := &session{server: s, username: username, database: database, initialDB: database, statements: map[uint32]string{}, parameters: map[uint32]int{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
+	session := &session{server: s, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]string{}, parameters: map[uint32]int{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
 	current = session
 	for {
 		sequence, payload, err := readPacket(connection)
@@ -269,31 +299,60 @@ func (s *Server) serveConnection(connection net.Conn) {
 	}
 }
 
-func (s *Server) authenticate(connection net.Conn, nonce []byte) (string, string, error) {
-	_, payload, err := readPacket(connection)
+type authenticationResult struct {
+	connection   net.Conn
+	username     string
+	database     string
+	nextSequence byte
+}
+
+func (s *Server) authenticate(connection net.Conn, nonce []byte) (authenticationResult, error) {
+	sequence, payload, err := readPacket(connection)
 	if err != nil {
-		return "", "", err
+		return authenticationResult{connection: connection, nextSequence: 2}, err
+	}
+	secure := false
+	if len(payload) == 32 && binary.LittleEndian.Uint32(payload[:4])&clientSSL != 0 {
+		if s.tlsConfig == nil {
+			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "TLS capability is not supported"}
+		}
+		tlsConnection := tls.Server(connection, s.tlsConfig)
+		if err := tlsConnection.Handshake(); err != nil {
+			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
+		}
+		connection = tlsConnection
+		sequence, payload, err = readPacket(connection)
+		if err != nil {
+			return authenticationResult{connection: connection, nextSequence: 3}, err
+		}
+		secure = true
 	}
 	if len(payload) < 32 {
-		return "", "", errors.New("malformed handshake response")
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed handshake response"}
 	}
-	capabilities := binary.LittleEndian.Uint32(payload[:4]) | uint32(binary.LittleEndian.Uint16(payload[4:6]))<<16
+	capabilities := binary.LittleEndian.Uint32(payload[:4])
+	if capabilities&^acceptedClientCapabilities(s.tlsConfig != nil) != 0 {
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "unsupported client capabilities"}
+	}
+	if capabilities&clientProtocol41 == 0 || capabilities&clientSecureConnection == 0 || capabilities&clientPluginAuth == 0 {
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "required protocol capabilities are missing"}
+	}
 	offset := 32
 	username, offset, ok := readNullString(payload, offset)
 	if !ok {
-		return "", "", errors.New("malformed username")
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed username"}
 	}
 	var token []byte
 	if capabilities&clientPluginLenencData != 0 {
 		token, offset, ok = readLengthEncoded(payload, offset)
 	} else if capabilities&clientSecureConnection != 0 {
 		if offset >= len(payload) {
-			return "", "", errors.New("missing authentication response")
+			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "missing authentication response"}
 		}
 		length := int(payload[offset])
 		offset++
 		if offset+length > len(payload) {
-			return "", "", errors.New("malformed authentication response")
+			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed authentication response"}
 		}
 		token, offset = payload[offset:offset+length], offset+length
 	} else {
@@ -301,7 +360,7 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (string, string
 		ok = token != nil
 	}
 	if !ok {
-		return "", "", errors.New("malformed authentication response")
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed authentication response"}
 	}
 	database := ""
 	if capabilities&clientConnectWithDB != 0 {
@@ -310,18 +369,55 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (string, string
 			offset = next
 		}
 	}
+	plugin, _, pluginOK := readNullString(payload, offset)
+	if !pluginOK || plugin != "caching_sha2_password" {
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1251, "08004", "client does not support caching_sha2_password"}
+	}
 	if s.config.Username != "" && username != s.config.Username {
-		return "", "", errors.New("access denied")
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
 	}
 	if s.config.PasswordHash != "" && !validPasswordToken(token, nonce, s.config.PasswordHash) {
-		return "", "", errors.New("access denied")
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
 	}
 	if database != "" {
 		if err := s.databaseExists(database); err != nil {
-			return "", "", err
+			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
 		}
 	}
-	return username, database, nil
+	// Do not downgrade a full caching_sha2_password exchange to an accepted
+	// scramble. A secure channel receives the clear password only inside TLS;
+	// an insecure channel must request and use the server's RSA public key.
+	if err := writePacket(connection, sequence+1, []byte{0x01, 0x04}); err != nil {
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
+	}
+	sequence, response, err := readPacket(connection)
+	if err != nil {
+		return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
+	}
+	var password []byte
+	if secure {
+		password = response
+	} else {
+		if len(response) != 1 || response[0] != 0x02 {
+			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "secure authentication exchange required"}
+		}
+		if err := writePacket(connection, sequence+1, publicKeyPacket(s.rsaKey)); err != nil {
+			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
+		}
+		sequence, response, err = readPacket(connection)
+		if err != nil {
+			return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
+		}
+		password, err = decryptPassword(s.rsaKey, response, nonce)
+		if err != nil {
+			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
+		}
+	}
+	password = bytes.TrimSuffix(password, []byte{0})
+	if !validPlainPassword(password, s.config.PasswordHash) {
+		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
+	}
+	return authenticationResult{connection: connection, username: username, database: database, nextSequence: sequence + 1}, nil
 }
 
 func (s *Server) databaseExists(name string) error {
@@ -363,8 +459,24 @@ func validPasswordToken(token, nonce []byte, encodedHash string) bool {
 	return subtle.ConstantTimeCompare(recovered, stage1) == 1
 }
 
-func handshake(version string, nonce []byte) []byte {
+func serverCapabilities(tlsEnabled bool) uint32 {
 	capabilities := uint32(clientLongPassword | clientProtocol41 | clientTransactions | clientSecureConnection | clientPluginAuth | clientPluginLenencData)
+	if tlsEnabled {
+		capabilities |= clientSSL
+	}
+	return capabilities
+}
+
+// acceptedClientCapabilities includes harmless client-side preferences that
+// current drivers send even when the server has not advertised the reciprocal
+// feature. They do not negotiate a server feature; unsupported commands still
+// receive their explicit command error.
+func acceptedClientCapabilities(tlsEnabled bool) uint32 {
+	return serverCapabilities(tlsEnabled) | clientFoundRows | clientLongFlag | clientLocalFiles | clientMultiResults | clientConnectAttrs
+}
+
+func handshake(version string, nonce []byte, tlsEnabled bool) []byte {
+	capabilities := serverCapabilities(tlsEnabled)
 	p := []byte{0x0a}
 	p = append(p, []byte("database-"+version)...)
 	p = append(p, 0)
@@ -378,6 +490,34 @@ func handshake(version string, nonce []byte) []byte {
 	p = append(p, []byte("caching_sha2_password")...)
 	p = append(p, 0)
 	return p
+}
+
+func validPlainPassword(password []byte, encodedHash string) bool {
+	if encodedHash == "" {
+		return len(password) == 0
+	}
+	expected, err := hex.DecodeString(encodedHash)
+	if err != nil || len(expected) != sha256.Size {
+		return false
+	}
+	actual := sha256.Sum256(password)
+	return subtle.ConstantTimeCompare(actual[:], expected) == 1
+}
+
+func publicKeyPacket(key *rsa.PrivateKey) []byte {
+	encoded, _ := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	return append([]byte{0x01}, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: encoded})...)
+}
+
+func decryptPassword(key *rsa.PrivateKey, encrypted, nonce []byte) ([]byte, error) {
+	plain, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, key, encrypted, nil)
+	if err != nil {
+		return nil, err
+	}
+	for index := range plain {
+		plain[index] ^= nonce[index%len(nonce)]
+	}
+	return plain, nil
 }
 
 type sqlFailure struct {
@@ -395,12 +535,24 @@ func mysqlError(err error) []byte {
 }
 
 type queryResult struct {
-	columns []string
-	rows    [][]string
+	columns  []string
+	rows     [][]string
+	metadata []columnMetadata
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
 	nulls [][]bool
+}
+
+// columnMetadata is the complete ColumnDefinition41 contract for one result
+// field. Empty table and original-name fields are intentional for expressions.
+type columnMetadata struct {
+	catalog, schema, table, originalTable, name, originalName string
+	characterSet                                              uint16
+	length                                                    uint32
+	typ                                                       byte
+	flags                                                     uint16
+	decimals                                                  byte
 }
 
 const informationSchemaName = "information_schema"
@@ -452,7 +604,7 @@ func (s *session) writeQueryResult(connection net.Conn, sequence byte, query str
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
-	return writeResult(connection, sequence, result.columns, result.rows, result.nulls)
+	return writeResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata)
 }
 
 func (s *session) execute(query string) (*queryResult, error) {
@@ -862,11 +1014,42 @@ func (s *session) selectQuery(query string) (*queryResult, error) {
 		}
 		return &queryResult{columns: table.Columns, rows: table.Rows}, nil
 	}
-	value := scalar(expression)
-	if value == "" && !strings.Contains(expression, "''") {
+	literal := parseLiteralResult(expression)
+	if !literal.supported {
 		return nil, sqlFailure{1064, "42000", "unsupported expression"}
 	}
-	return &queryResult{columns: []string{expression}, rows: [][]string{{value}}}, nil
+	return &queryResult{columns: []string{expression}, rows: [][]string{{literal.value}}, nulls: [][]bool{{literal.isNull}}, metadata: []columnMetadata{literal.metadata}}, nil
+}
+
+type literalQueryResult struct {
+	value     string
+	metadata  columnMetadata
+	isNull    bool
+	supported bool
+}
+
+func parseLiteralResult(expression string) literalQueryResult {
+	value := strings.TrimSpace(expression)
+	metadata := columnMetadata{catalog: "def", name: value, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString, flags: mysqlNotNullFlag}
+	if strings.EqualFold(value, "null") {
+		metadata.characterSet = mysqlCharsetBinary
+		metadata.typ = mysqlTypeNull
+		metadata.flags = mysqlBinaryFlag
+		return literalQueryResult{metadata: metadata, isNull: true, supported: true}
+	}
+	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+		text := strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+		metadata.length = uint32(len([]rune(text)) * 4)
+		return literalQueryResult{value: text, metadata: metadata, supported: true}
+	}
+	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+		metadata.characterSet = mysqlCharsetBinary
+		metadata.length = uint32(len(value))
+		metadata.typ = mysqlTypeLongLong
+		metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag
+		return literalQueryResult{value: value, metadata: metadata, supported: true}
+	}
+	return literalQueryResult{}
 }
 
 func (s *session) selectInformationSchema(query string) (*queryResult, error) {
@@ -1052,7 +1235,7 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	}
 	if params > 0 {
 		for i := 0; i < params; i++ {
-			if err := writePacket(connection, sequence+byte(i)+1, columnDefinition("", fmt.Sprintf("param%d", i+1), 0x0f)); err != nil {
+			if err := writePacket(connection, sequence+byte(i)+1, columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar})); err != nil {
 				return err
 			}
 		}
@@ -1268,12 +1451,16 @@ func splitCSV(value string) []string {
 	return result
 }
 
-func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool) error {
+func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool, metadata []columnMetadata) error {
 	if err := writePacket(connection, sequence, lengthEncodedInt(len(columns))); err != nil {
 		return err
 	}
 	for index, name := range columns {
-		if err := writePacket(connection, sequence+byte(index)+1, columnDefinition("", name, 0xfd)); err != nil {
+		definition := columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
+		if index < len(metadata) {
+			definition = metadata[index]
+		}
+		if err := writePacket(connection, sequence+byte(index)+1, columnDefinition(definition)); err != nil {
 			return err
 		}
 	}
@@ -1298,16 +1485,16 @@ func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]
 	}
 	return writePacket(connection, sequence, eofPacket())
 }
-func columnDefinition(schema, name string, typ byte) []byte {
-	payload := append(lengthEncodedString("def"), lengthEncodedString(schema)...)
-	payload = append(payload, lengthEncodedString("")...)
-	payload = append(payload, lengthEncodedString("")...)
-	payload = append(payload, lengthEncodedString(name)...)
-	payload = append(payload, lengthEncodedString(name)...)
-	payload = append(payload, 0x0c, 45, 0, 0, 0, 0x00, 0x04, 0, typ, 0, 0, 0)
+func columnDefinition(definition columnMetadata) []byte {
+	payload := append(lengthEncodedString(definition.catalog), lengthEncodedString(definition.schema)...)
+	payload = append(payload, lengthEncodedString(definition.table)...)
+	payload = append(payload, lengthEncodedString(definition.originalTable)...)
+	payload = append(payload, lengthEncodedString(definition.name)...)
+	payload = append(payload, lengthEncodedString(definition.originalName)...)
+	payload = append(payload, 0x0c, byte(definition.characterSet), byte(definition.characterSet>>8), byte(definition.length), byte(definition.length>>8), byte(definition.length>>16), byte(definition.length>>24), definition.typ, byte(definition.flags), byte(definition.flags>>8), definition.decimals, 0, 0)
 	return payload
 }
-func eofPacket() []byte { return []byte{0xfe, 0, 0, 2, 0, 0, 0} }
+func eofPacket() []byte { return []byte{0xfe, 0, 0, 2, 0} }
 func lengthEncodedInt(value int) []byte {
 	if value < 251 {
 		return []byte{byte(value)}
