@@ -1,0 +1,795 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jonbaldie/database/query-explanation/explain-v1.schema.json",
+  "title": "Database v0.1 query explanation format 1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "format_version",
+    "server_version",
+    "mode",
+    "partial",
+    "statement",
+    "timing",
+    "plan",
+    "warnings"
+  ],
+  "properties": {
+    "format_version": { "const": 1 },
+    "server_version": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["plan", "analyze", "snapshot"] },
+    "partial": { "type": "boolean" },
+    "statement": { "$ref": "#/$defs/statement" },
+    "timing": { "$ref": "#/$defs/timing" },
+    "plan": { "$ref": "#/$defs/operator" },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/warning" }
+    },
+    "snapshot": { "$ref": "#/$defs/snapshot" }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "mode": { "const": "plan" } }, "required": ["mode"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "partial": { "const": false },
+          "timing": { "$ref": "#/$defs/planTiming" }
+        },
+        "not": { "type": "object", "required": ["snapshot"] }
+      }
+    },
+    {
+      "if": { "type": "object", "properties": { "mode": { "const": "analyze" } }, "required": ["mode"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "partial": { "const": false },
+          "statement": {
+            "allOf": [
+              { "$ref": "#/$defs/statement" },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": { "const": "select" },
+                  "read_only": { "const": true },
+                  "locking_read": { "const": false }
+                }
+              }
+            ]
+          },
+          "timing": { "$ref": "#/$defs/completeTiming" }
+        },
+        "not": { "type": "object", "required": ["snapshot"] }
+      }
+    },
+    {
+      "if": { "type": "object", "properties": { "mode": { "const": "snapshot" } }, "required": ["mode"] },
+      "then": {
+        "type": "object",
+        "required": ["snapshot"],
+        "properties": {
+          "partial": { "const": true },
+          "timing": { "$ref": "#/$defs/partialTiming" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonNegativeNumber": { "type": "number", "minimum": 0 },
+    "nonNegativeInteger": { "type": "integer", "minimum": 0 },
+    "nullableNonNegativeNumber": {
+      "anyOf": [
+        { "$ref": "#/$defs/nonNegativeNumber" },
+        { "type": "null" }
+      ]
+    },
+    "statement": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind", "sql", "read_only", "locking_read", "parameters", "planning_settings"],
+      "properties": {
+        "kind": { "enum": ["select", "insert", "replace", "update", "delete"] },
+        "sql": { "type": "string", "minLength": 1 },
+        "read_only": { "type": "boolean" },
+        "locking_read": { "type": "boolean" },
+        "current_database": { "type": "string", "minLength": 1 },
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/parameter" }
+        },
+        "planning_settings": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              { "type": "string" },
+              { "type": "number" },
+              { "type": "integer" },
+              { "type": "boolean" }
+            ]
+          }
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["position", "type"],
+      "not": {
+        "anyOf": [
+          { "required": ["value"] },
+          { "required": ["bound_value"] },
+          { "required": ["parameter_value"] },
+          { "required": ["raw_value"] }
+        ]
+      },
+      "properties": {
+        "position": { "type": "integer", "minimum": 1 },
+        "type": { "type": "string", "minLength": 1 }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["planning_ms"],
+      "properties": {
+        "planning_ms": { "$ref": "#/$defs/nonNegativeNumber" },
+        "execution": { "$ref": "#/$defs/executionTiming" }
+      }
+    },
+    "planTiming": {
+      "allOf": [
+        { "$ref": "#/$defs/timing" },
+        { "type": "object", "not": { "type": "object", "required": ["execution"] } }
+      ]
+    },
+    "completeTiming": {
+      "allOf": [
+        { "$ref": "#/$defs/timing" },
+        {
+          "type": "object",
+          "required": ["execution"],
+          "properties": {
+            "execution": {
+              "allOf": [
+                { "$ref": "#/$defs/executionTiming" },
+                { "type": "object", "properties": { "complete": { "const": true } } }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "partialTiming": {
+      "allOf": [
+        { "$ref": "#/$defs/timing" },
+        {
+          "type": "object",
+          "required": ["execution"],
+          "properties": {
+            "execution": {
+              "allOf": [
+                { "$ref": "#/$defs/executionTiming" },
+                { "type": "object", "properties": { "complete": { "const": false } } }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "executionTiming": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["elapsed_ms", "complete"],
+      "properties": {
+        "elapsed_ms": { "$ref": "#/$defs/nonNegativeNumber" },
+        "complete": { "type": "boolean" }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["connection_id", "captured_at"],
+      "properties": {
+        "connection_id": { "type": "integer", "minimum": 1 },
+        "captured_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "operator": {
+      "oneOf": [
+        { "$ref": "#/$defs/valuesOperator" },
+        { "$ref": "#/$defs/scanOperator" },
+        { "$ref": "#/$defs/lookupOperator" },
+        { "$ref": "#/$defs/filterOperator" },
+        { "$ref": "#/$defs/projectOperator" },
+        { "$ref": "#/$defs/joinOperator" },
+        { "$ref": "#/$defs/aggregateOperator" },
+        { "$ref": "#/$defs/windowOperator" },
+        { "$ref": "#/$defs/sortOperator" },
+        { "$ref": "#/$defs/limitOperator" },
+        { "$ref": "#/$defs/distinctOperator" },
+        { "$ref": "#/$defs/setOperationOperator" },
+        { "$ref": "#/$defs/materializeOperator" },
+        { "$ref": "#/$defs/lockOperator" },
+        { "$ref": "#/$defs/constraintCheckOperator" },
+        { "$ref": "#/$defs/mutationOperator" }
+      ]
+    },
+    "operatorCommon": {
+      "type": "object",
+      "required": ["id", "kind", "summary", "operation", "estimates", "output", "warnings", "children"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1 },
+        "kind": {
+          "enum": [
+            "values", "scan", "lookup", "filter", "project", "join",
+            "aggregate", "window", "sort", "limit", "distinct",
+            "set_operation", "materialize", "lock", "constraint_check", "mutation"
+          ]
+        },
+        "summary": { "type": "string", "minLength": 1 },
+        "operation": { "type": "object" },
+        "estimates": { "$ref": "#/$defs/estimates" },
+        "output": { "$ref": "#/$defs/output" },
+        "warnings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/warning" }
+        },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/operator" }
+        },
+        "strategy": { "$ref": "#/$defs/strategy" },
+        "objects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/objectReference" }
+        },
+        "predicates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/predicate" }
+        },
+        "choice": { "$ref": "#/$defs/choice" },
+        "statistics": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/statistic" }
+        },
+        "opportunities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/opportunity" }
+        },
+        "actual": { "$ref": "#/$defs/actual" }
+      }
+    },
+    "valuesOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "values" },
+            "operation": { "$ref": "#/$defs/valuesOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "scanOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "scan" },
+            "operation": { "$ref": "#/$defs/scanOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "lookupOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "lookup" },
+            "operation": { "$ref": "#/$defs/lookupOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "filterOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "filter" },
+            "operation": { "$ref": "#/$defs/filterOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "projectOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "project" },
+            "operation": { "$ref": "#/$defs/projectOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "joinOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "join" },
+            "operation": { "$ref": "#/$defs/joinOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "aggregateOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "aggregate" },
+            "operation": { "$ref": "#/$defs/aggregateOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "windowOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "window" },
+            "operation": { "$ref": "#/$defs/windowOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "sortOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "sort" },
+            "operation": { "$ref": "#/$defs/sortOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "limitOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "limit" },
+            "operation": { "$ref": "#/$defs/limitOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "distinctOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "distinct" },
+            "operation": { "$ref": "#/$defs/distinctOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "setOperationOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "set_operation" },
+            "operation": { "$ref": "#/$defs/setOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "materializeOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "materialize" },
+            "operation": { "$ref": "#/$defs/materializeOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "lockOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "lock" },
+            "operation": { "$ref": "#/$defs/lockOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "constraintCheckOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "constraint_check" },
+            "operation": { "$ref": "#/$defs/constraintCheckOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "mutationOperator": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/operatorCommon" },
+        {
+          "properties": {
+            "kind": { "const": "mutation" },
+            "operation": { "$ref": "#/$defs/mutationOperation" }
+          }
+        }
+      ],
+      "unevaluatedProperties": true
+    },
+    "valuesOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["row_count"],
+      "properties": { "row_count": { "$ref": "#/$defs/nonNegativeInteger" } }
+    },
+    "scanOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["source", "direction"],
+      "properties": {
+        "source": { "enum": ["table", "index"] },
+        "direction": { "enum": ["forward", "backward"] }
+      }
+    },
+    "lookupOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["lookup_type", "unique"],
+      "properties": {
+        "lookup_type": { "enum": ["point", "range"] },
+        "unique": { "type": "boolean" }
+      }
+    },
+    "filterOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["role"],
+      "properties": {
+        "role": { "enum": ["where", "having", "post_join", "constraint"] }
+      }
+    },
+    "projectOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["expression_count"],
+      "properties": {
+        "expression_count": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "joinOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["join_type"],
+      "properties": {
+        "join_type": { "enum": ["inner", "cross", "left", "right", "semi", "anti"] }
+      }
+    },
+    "aggregateOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["scope", "aggregate_count"],
+      "properties": {
+        "scope": { "enum": ["global", "grouped"] },
+        "aggregate_count": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "windowOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["window_count", "function_count"],
+      "properties": {
+        "window_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "function_count": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "sortOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["purpose"],
+      "properties": {
+        "purpose": { "enum": ["order_by", "window", "grouping", "set_operation", "distinct"] }
+      }
+    },
+    "limitOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["offset_present"],
+      "properties": { "offset_present": { "type": "boolean" } }
+    },
+    "distinctOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["scope"],
+      "properties": { "scope": { "const": "row" } }
+    },
+    "setOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["set_operation", "all"],
+      "properties": {
+        "set_operation": { "enum": ["union", "intersect", "except"] },
+        "all": { "type": "boolean" }
+      }
+    },
+    "materializeOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["reason"],
+      "properties": {
+        "reason": { "enum": ["reuse", "blocking", "subquery", "cte", "derived_table", "set_operation"] }
+      }
+    },
+    "lockOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["mode", "wait_policy"],
+      "properties": {
+        "mode": { "enum": ["update", "share"] },
+        "wait_policy": { "enum": ["wait", "nowait", "skip_locked"] }
+      }
+    },
+    "constraintCheckOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["constraint_type"],
+      "properties": {
+        "constraint_type": { "enum": ["not_null", "check", "unique", "foreign_key"] },
+        "constraint_name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "mutationOperation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["mutation_type"],
+      "properties": {
+        "mutation_type": {
+          "enum": ["insert", "update", "delete", "replace", "cascade_update", "cascade_delete"]
+        }
+      }
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "summary"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "objectReference": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "name"],
+      "properties": {
+        "type": { "enum": ["database", "table", "index", "constraint", "column"] },
+        "database": { "type": "string", "minLength": 1 },
+        "table": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "alias": { "type": "string", "minLength": 1 }
+      }
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["role", "expression", "sources"],
+      "properties": {
+        "role": { "enum": ["access", "join", "residual", "constraint"] },
+        "expression": { "type": "string", "minLength": 1 },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/predicateSource" }
+        }
+      }
+    },
+    "predicateSource": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["clause", "fragment"],
+      "properties": {
+        "clause": {
+          "enum": ["where", "on", "using", "having", "check", "foreign_key", "order_by", "group_by", "window", "mutation", "derived"]
+        },
+        "fragment": { "type": "string", "minLength": 1 }
+      }
+    },
+    "estimates": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["rows", "row_width_bytes", "cost", "peak_memory_bytes"],
+      "properties": {
+        "rows": { "$ref": "#/$defs/nonNegativeNumber" },
+        "row_width_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "cost": { "$ref": "#/$defs/nonNegativeNumber" },
+        "peak_memory_bytes": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["columns", "ordering", "unique_keys"],
+      "properties": {
+        "columns": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "ordering": { "type": "array", "items": { "$ref": "#/$defs/orderingTerm" } },
+        "unique_keys": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "orderingTerm": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["expression", "direction"],
+      "properties": {
+        "expression": { "type": "string", "minLength": 1 },
+        "direction": { "enum": ["asc", "desc"] }
+      }
+    },
+    "choice": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["selected", "reason", "alternatives"],
+      "properties": {
+        "selected": { "type": "string", "minLength": 1 },
+        "reason": { "$ref": "#/$defs/codeSummary" },
+        "alternatives": {
+          "type": "array",
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/alternative" }
+        }
+      }
+    },
+    "alternative": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "estimated_cost", "reason"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "estimated_cost": { "$ref": "#/$defs/nonNegativeNumber" },
+        "reason": { "$ref": "#/$defs/codeSummary" }
+      }
+    },
+    "statistic": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["object", "kind", "collected_at", "observed_rows", "stale", "limitations"],
+      "properties": {
+        "object": { "$ref": "#/$defs/objectReference" },
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "collected_at": { "type": "string", "format": "date-time" },
+        "observed_rows": { "$ref": "#/$defs/nonNegativeInteger" },
+        "stale": { "type": "boolean" },
+        "limitations": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "opportunity": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["code", "summary", "evidence"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "summary": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "actual": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "invocations", "input_rows", "output_rows", "filtered_rows", "first_row_ms", "total_ms",
+        "peak_memory_bytes", "spill_count", "spill_bytes", "temporary_storage_bytes",
+        "storage", "wait", "rows_vs_estimate_ratio", "warnings"
+      ],
+      "properties": {
+        "invocations": { "$ref": "#/$defs/nonNegativeInteger" },
+        "input_rows": { "$ref": "#/$defs/nonNegativeInteger" },
+        "output_rows": { "$ref": "#/$defs/nonNegativeInteger" },
+        "filtered_rows": { "$ref": "#/$defs/nonNegativeInteger" },
+        "first_row_ms": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "total_ms": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "peak_memory_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "spill_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "spill_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "temporary_storage_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "storage": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["logical_reads", "physical_reads", "bytes_read"],
+          "properties": {
+            "logical_reads": { "$ref": "#/$defs/nonNegativeInteger" },
+            "physical_reads": { "$ref": "#/$defs/nonNegativeInteger" },
+            "bytes_read": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "wait": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["lock_ms", "other_ms"],
+          "properties": {
+            "lock_ms": { "$ref": "#/$defs/nonNegativeNumber" },
+            "other_ms": { "$ref": "#/$defs/nonNegativeNumber" }
+          }
+        },
+        "rows_vs_estimate_ratio": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/warning" } }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["code", "severity", "summary"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "severity": { "enum": ["info", "warning"] },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "codeSummary": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["code", "summary"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

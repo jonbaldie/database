@@ -10,6 +10,10 @@ patent grant. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms,
 [COMPATIBILITY.md](COMPATIBILITY.md) for release and public compatibility
 commitments.
 
+The versioned [query explanation contract](docs/query-explanation/README.md)
+defines the stable JSON and tabular explanation formats that implementation
+tickets must expose.
+
 The executable delivery spine currently provides the public process seams used by black-box verification:
 
 ```sh

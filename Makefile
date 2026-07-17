@@ -3,7 +3,7 @@ BUILD_IDENTITY ?= local
 GO ?= go
 LDFLAGS = -s -w -X github.com/jonbaldie/database/internal/buildinfo.ProductVersion=$(VERSION) -X github.com/jonbaldie/database/internal/buildinfo.BuildIdentity=$(BUILD_IDENTITY)
 
-.PHONY: build test vet fmt-check quality mutation
+.PHONY: build test vet fmt-check validate-query-explanation quality mutation
 
 build:
 	mkdir -p bin
@@ -17,6 +17,9 @@ vet:
 
 fmt-check:
 	@test -z "$$($(GO)fmt -l .)" || (echo 'gofmt required:'; $(GO)fmt -l .; exit 1)
+
+validate-query-explanation:
+	./scripts/validate-query-explanation-schema.sh
 
 quality: fmt-check vet test build
 
