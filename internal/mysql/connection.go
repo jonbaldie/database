@@ -76,7 +76,7 @@ func (c *conversation) authenticate() bool {
 		return false
 	}
 	c.session = newSession(c.server, authentication)
-	c.queries = &queryExecutor{c.session}
+	c.queries = newQueryExecutor(c.session)
 	c.prepared = &preparedExecutor{c.session}
 	return true
 }
