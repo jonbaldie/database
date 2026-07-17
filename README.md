@@ -15,6 +15,10 @@ The versioned [query explanation contract](docs/query-explanation/README.md)
 defines the stable JSON and tabular explanation formats that implementation
 tickets must expose.
 
+The closed [server configuration registry](docs/server-configuration.md)
+defines every startup setting, exact input form, precedence rule, default, and
+validation boundary.
+
 The executable delivery spine currently provides the public process seams used by black-box verification:
 
 ```sh

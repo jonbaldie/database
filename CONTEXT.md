@@ -33,6 +33,20 @@ introspection rules for database accounts and grants. Its normative detail is
 in [docs/account-administration.md](docs/account-administration.md).
 _Avoid_: General MySQL user administration, implicit account creation
 
+**Server configuration registry**:
+The closed catalog of v0.1 server startup settings, with canonical names,
+value types, defaults, allowed values, secret treatment, and corresponding
+file, environment-variable, and command-line forms. It excludes session
+settings and implementation-only tuning controls.
+_Avoid_: Open-ended configuration, hidden tuning knobs, session settings registry
+
+**Session settings registry**:
+The closed catalog of application-facing settings owned by one live database
+session, including their defaults, allowed values, and reset behaviour. It may
+tighten applicable server configuration registry safeguards but cannot disable
+or exceed them.
+_Avoid_: Server configuration registry, open-ended session variables
+
 ## Scope boundary
 
 v0.1 does not define a representative application workload. In particular, the

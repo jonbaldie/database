@@ -105,6 +105,87 @@ func TestConfigurationFileRejectsNonTOMLStrings(t *testing.T) {
 	}
 }
 
+func TestConfigurationFileRejectsNonTOMLBasicStringEscapes(t *testing.T) {
+	temporary := t.TempDir()
+	file := filepath.Join(temporary, "server.toml")
+	if err := os.WriteFile(file, []byte("data_directory = \"\\x2ftmp/database-instance\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveConfiguration([]string{"--config=" + file}, nil); err == nil {
+		t.Fatal("expected non-TOML basic string escape to be rejected")
+	}
+}
+
+func TestConfigurationFileRequiresTOMLRegistryValueForms(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{name: "quoted numeric value", contents: "data_directory = \"" + directory + "\"\nmax_connections = \"100\"\n"},
+		{name: "leading zero numeric value", contents: "data_directory = \"" + directory + "\"\nmax_connections = 001\n"},
+		{name: "literal string has unescaped quote", contents: "data_directory = '" + directory + "'b'\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "server.toml")
+			if err := os.WriteFile(file, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := resolveConfiguration([]string{"--config=" + file}, nil); err == nil {
+				t.Fatal("expected invalid TOML registry value form to be rejected")
+			}
+		})
+	}
+}
+
+func TestConfigurationFileRejectsTOMLStringsWithRawControlCharacters(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{name: "basic string", contents: "data_directory = \"" + directory + "\tinstance\"\n"},
+		{name: "literal string", contents: "data_directory = '" + directory + "\tinstance'\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "server.toml")
+			if err := os.WriteFile(file, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := resolveConfiguration([]string{"--config=" + file}, nil); err == nil {
+				t.Fatal("expected TOML string with a raw control character to be rejected")
+			}
+		})
+	}
+}
+
+func TestConfigurationFileRejectsTOMLStringsWithInvalidUTF8(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	tests := []struct {
+		name   string
+		prefix string
+		suffix string
+	}{
+		{name: "basic string", prefix: "data_directory = \"" + directory, suffix: "instance\"\n"},
+		{name: "literal string", prefix: "data_directory = '" + directory, suffix: "instance'\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			contents := append([]byte(test.prefix), 0xff)
+			contents = append(contents, test.suffix...)
+			file := filepath.Join(t.TempDir(), "server.toml")
+			if err := os.WriteFile(file, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := resolveConfiguration([]string{"--config=" + file}, nil); err == nil {
+				t.Fatal("expected TOML string with invalid UTF-8 to be rejected")
+			}
+		})
+	}
+}
+
 func TestResolveConfigurationRejectsInvalidSources(t *testing.T) {
 	temporary := t.TempDir()
 	file := filepath.Join(temporary, "duplicate.toml")
