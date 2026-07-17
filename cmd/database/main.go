@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/jonbaldie/database/internal/buildinfo"
-	"github.com/jonbaldie/database/internal/instance"
 	"github.com/jonbaldie/database/internal/lifecycle"
 )
 
@@ -332,102 +331,6 @@ func restoreBackup(input, directory string) error {
 		}
 	}
 	return nil
-}
-
-func initialize(args []string, stdout, stderr io.Writer) int {
-	directory := ""
-	passwordFile := ""
-	passwordStdin := false
-	format := "human"
-	formatSet := false
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") {
-			if directory != "" {
-				return initFailure(stdout, "invalid_input", 2, "multiple data directories")
-			}
-			directory = arg
-			continue
-		}
-		if strings.HasPrefix(arg, "--password=") {
-			return initFailure(stdout, "invalid_input", 2, "inline passwords are not supported")
-		}
-		name, value, hasValue := strings.Cut(arg, "=")
-		switch name {
-		case "--password-file":
-			if passwordFile != "" || passwordStdin {
-				return initFailure(stdout, "invalid_input", 2, "password input may be specified once")
-			}
-			if !hasValue {
-				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-					return initFailure(stdout, "invalid_input", 2, "--password-file requires a non-empty value")
-				}
-				i++
-				value = args[i]
-			}
-			if value == "" {
-				return initFailure(stdout, "invalid_input", 2, "--password-file requires a non-empty value")
-			}
-			passwordFile = value
-		case "--password-stdin":
-			if hasValue {
-				return initFailure(stdout, "invalid_input", 2, "--password-stdin does not take a value")
-			}
-			if passwordFile != "" || passwordStdin {
-				return initFailure(stdout, "invalid_input", 2, "password input may be specified once")
-			}
-			passwordStdin = true
-		case "--format":
-			if formatSet {
-				return initFailure(stdout, "invalid_input", 2, "--format may be specified once")
-			}
-			if !hasValue {
-				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-					return initFailure(stdout, "invalid_input", 2, "--format requires a value")
-				}
-				i++
-				value = args[i]
-			}
-			if value == "" {
-				return initFailure(stdout, "invalid_input", 2, "--format requires a value")
-			}
-			formatSet = true
-			format = value
-		default:
-			return initFailure(stdout, "invalid_input", 2, fmt.Sprintf("unknown flag %q", name))
-		}
-	}
-	if directory == "" || (passwordFile == "" && !passwordStdin) || (passwordFile != "" && passwordStdin) || (format != "human" && format != "json") {
-		return initFailure(stdout, "invalid_input", 2, "usage: database init DIRECTORY (--password-file FILE | --password-stdin) [--format=human|json]")
-	}
-	if info, err := os.Stat(directory); err == nil {
-		if info.IsDir() {
-			entries, readErr := os.ReadDir(directory)
-			if readErr == nil && len(entries) != 0 {
-				return initFailure(stdout, "precondition", 3, "data directory is not empty")
-			}
-		}
-	}
-	password, err := instance.ReadPassword(passwordFile, os.Stdin)
-	if err != nil {
-		return initFailure(stdout, "invalid_input", 2, "unable to read password")
-	}
-	metadata, err := instance.Initialize(directory, "admin", password)
-	if err != nil {
-		return initFailure(stdout, "precondition", 3, err.Error())
-	}
-	result := map[string]any{"schema": "database.operator.result/v1", "operation": "init", "operation_id": newOperationID(), "success": true, "exit_class": "success", "instance_id": metadata.InstanceID, "data_directory": directory, "admin_account": metadata.AdminAccount}
-	if format == "json" {
-		_ = json.NewEncoder(stdout).Encode(result)
-	} else {
-		fmt.Fprintf(stdout, "initialized database instance %s\n", metadata.InstanceID)
-	}
-	return 0
-}
-
-func initFailure(stdout io.Writer, exitClass string, code int, message string) int {
-	_ = json.NewEncoder(stdout).Encode(map[string]any{"schema": "database.operator.result/v1", "operation": "init", "operation_id": newOperationID(), "success": false, "exit_class": exitClass, "diagnostic": message})
-	return code
 }
 
 func version(args []string, stdout, stderr io.Writer) int {
