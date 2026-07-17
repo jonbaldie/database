@@ -160,6 +160,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if lower == "show processlist" || strings.HasPrefix(lower, "kill ") {
 		return writePacket(connection, sequence, okPacket())
 	}
+	if strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset ") {
+		return writePacket(connection, sequence, okPacket())
+	}
 	if strings.Contains(lower, "sleep(") || strings.Contains(lower, "max_execution_time") {
 		return writePacket(connection, sequence, errorPacket(3024, "HY000", "query execution was interrupted"))
 	}
