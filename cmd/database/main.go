@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/tar"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -40,89 +38,41 @@ func operatorCommand(args []string, stdout io.Writer) int {
 	if len(args) == 0 {
 		return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, "operator command requires an operation")
 	}
+	if args[0] == "backup" || args[0] == "restore" {
+		return backupRestoreCommand(args, stdout)
+	}
+	return unsupportedOperatorCommand(args, stdout, operation, operationID)
+}
 
-	var err error
-	class := "operation_failed"
-	switch args[0] {
-	case "backup":
-		if len(args) < 2 {
-			return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, "backup requires create or inspect")
-		}
-		operation = strings.Join(args[:2], " ")
-		switch args[1] {
-		case "create":
-			var options map[string]string
-			options, err = operatorOptions(args[2:], "--data-dir", "--output")
-			if err != nil {
-				class = "invalid_input"
-			}
-			if err == nil {
-				if options["--data-dir"] == "" || options["--output"] == "" {
-					class = "invalid_input"
-					err = errors.New("backup create requires --data-dir and --output")
-				} else {
-					err = createBackup(options["--data-dir"], options["--output"])
-				}
-			}
-		case "inspect":
-			var options map[string]string
-			options, err = operatorOptions(args[2:], "--input")
-			if err != nil {
-				class = "invalid_input"
-			}
-			if err == nil {
-				if options["--input"] == "" {
-					class = "invalid_input"
-					err = errors.New("backup inspect requires --input")
-				} else {
-					err = inspectBackup(options["--input"])
-				}
-			}
-		default:
-			return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, fmt.Sprintf("unsupported backup operation %q", args[1]))
-		}
-	case "restore":
-		var options map[string]string
-		options, err = operatorOptions(args[1:], "--input", "--data-dir")
-		if err != nil {
-			class = "invalid_input"
-		}
-		if err == nil {
-			if options["--input"] == "" || options["--data-dir"] == "" {
-				class = "invalid_input"
-				err = errors.New("restore requires --input and --data-dir")
-			} else {
-				err = restoreBackup(options["--input"], options["--data-dir"])
-			}
-		}
-	case "upgrade", "shutdown":
-		if hasUnknownOperatorFlag(args[1:]) {
-			class = "invalid_input"
-			err = errors.New("unknown operator flag")
-		} else {
-			err = fmt.Errorf("%s is not implemented", args[0])
-		}
-	case "data":
-		if len(args) < 2 {
-			return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, "data requires validate or inspect")
-		}
-		operation = strings.Join(args[:2], " ")
-		if args[1] != "validate" && args[1] != "inspect" {
-			return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, fmt.Sprintf("unsupported data operation %q", args[1]))
-		}
-		if hasUnknownOperatorFlag(args[2:]) {
-			class = "invalid_input"
-			err = errors.New("unknown operator flag")
-		} else {
-			err = fmt.Errorf("%s is not implemented", operation)
-		}
-	default:
-		return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, fmt.Sprintf("unsupported operator command %q", args[0]))
+func unsupportedOperatorCommand(args []string, stdout io.Writer, operation, operationID string) int {
+	if args[0] == "data" {
+		return unsupportedDataCommand(args, stdout, operation, operationID)
 	}
-	if err != nil {
-		return writeOperatorFailure(stdout, operation, operationID, class, operatorExitCode(class), err.Error())
+	if args[0] == "upgrade" || args[0] == "shutdown" {
+		return unsupportedSimpleOperatorCommand(args, stdout, operation, operationID)
 	}
-	return writeOperatorResult(stdout, operation, operationID, true, "success", "")
+	return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, fmt.Sprintf("unsupported operator command %q", args[0]))
+}
+
+func unsupportedDataCommand(args []string, stdout io.Writer, operation, operationID string) int {
+	if len(args) < 2 {
+		return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, "data requires validate or inspect")
+	}
+	operation = strings.Join(args[:2], " ")
+	if args[1] != "validate" && args[1] != "inspect" {
+		return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, fmt.Sprintf("unsupported data operation %q", args[1]))
+	}
+	if hasUnknownOperatorFlag(args[2:]) {
+		return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, "unknown operator flag")
+	}
+	return writeOperatorFailure(stdout, operation, operationID, "operation_failed", 1, fmt.Sprintf("%s is not implemented", operation))
+}
+
+func unsupportedSimpleOperatorCommand(args []string, stdout io.Writer, operation, operationID string) int {
+	if hasUnknownOperatorFlag(args[1:]) {
+		return writeOperatorFailure(stdout, operation, operationID, "invalid_input", 2, "unknown operator flag")
+	}
+	return writeOperatorFailure(stdout, operation, operationID, "operation_failed", 1, fmt.Sprintf("%s is not implemented", args[0]))
 }
 
 func operatorName(args []string) string {
@@ -215,124 +165,6 @@ func operatorResult(operation, operationID string, success bool, exitClass, diag
 		result["diagnostic"] = diagnostic
 	}
 	return result
-}
-
-func createBackup(directory, output string) error {
-	if directory == "" || output == "" {
-		return errors.New("backup create requires --data-dir and --output")
-	}
-	info, err := os.Stat(directory)
-	if err != nil || !info.IsDir() {
-		return errors.New("data directory does not exist")
-	}
-	file, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	archive := tar.NewWriter(file)
-	defer archive.Close()
-	return filepath.Walk(directory, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if path == directory {
-			return nil
-		}
-		relative, err := filepath.Rel(directory, path)
-		if err != nil {
-			return err
-		}
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		header.Name = filepath.ToSlash(relative)
-		if err := archive.WriteHeader(header); err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		input, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer input.Close()
-		_, err = io.Copy(archive, input)
-		return err
-	})
-}
-
-func inspectBackup(input string) error {
-	file, err := os.Open(input)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	archive := tar.NewReader(file)
-	if _, err := archive.Next(); err != nil && !errors.Is(err, io.EOF) {
-		return errors.New("invalid backup archive")
-	}
-	return nil
-}
-
-func restoreBackup(input, directory string) error {
-	if input == "" || directory == "" {
-		return errors.New("restore requires --input and --data-dir")
-	}
-	if _, err := os.Stat(directory); err == nil {
-		entries, readErr := os.ReadDir(directory)
-		if readErr != nil || len(entries) != 0 {
-			return errors.New("restore destination must be new or empty")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	} else if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	file, err := os.Open(input)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	archive := tar.NewReader(file)
-	for {
-		header, err := archive.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return errors.New("invalid backup archive")
-		}
-		name := filepath.Clean(header.Name)
-		if name == "." || filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
-			return errors.New("unsafe backup path")
-		}
-		path := filepath.Join(directory, name)
-		if header.FileInfo().IsDir() {
-			if err := os.MkdirAll(path, 0o700); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
-		}
-		output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-		if err != nil {
-			return err
-		}
-		_, copyErr := io.Copy(output, archive)
-		closeErr := output.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-	}
-	return nil
 }
 
 func version(args []string, stdout, stderr io.Writer) int {
