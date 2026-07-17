@@ -299,6 +299,9 @@ func stripTOMLComment(line string) string {
 
 func tomlValue(raw string) (string, bool, error) {
 	if len(raw) >= 2 && ((raw[0] == '"' && raw[len(raw)-1] == '"') || (raw[0] == '\'' && raw[len(raw)-1] == '\'')) {
+		if err := validateTOMLStringCharacters(raw); err != nil {
+			return "", false, err
+		}
 		if raw[0] == '\'' {
 			if strings.Contains(raw[1:len(raw)-1], "'") {
 				return "", false, errors.New("invalid TOML literal string")
@@ -318,6 +321,15 @@ func tomlValue(raw string) (string, bool, error) {
 		return "", false, errors.New("invalid TOML value")
 	}
 	return raw, false, nil
+}
+
+func validateTOMLStringCharacters(raw string) error {
+	for _, character := range raw[1 : len(raw)-1] {
+		if character <= 0x1f || character == 0x7f {
+			return errors.New("invalid TOML string character")
+		}
+	}
+	return nil
 }
 
 func numericConfigurationSetting(name string) bool {

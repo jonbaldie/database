@@ -139,6 +139,28 @@ func TestConfigurationFileRequiresTOMLRegistryValueForms(t *testing.T) {
 	}
 }
 
+func TestConfigurationFileRejectsTOMLStringsWithRawControlCharacters(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{name: "basic string", contents: "data_directory = \"" + directory + "\tinstance\"\n"},
+		{name: "literal string", contents: "data_directory = '" + directory + "\tinstance'\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "server.toml")
+			if err := os.WriteFile(file, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := resolveConfiguration([]string{"--config=" + file}, nil); err == nil {
+				t.Fatal("expected TOML string with a raw control character to be rejected")
+			}
+		})
+	}
+}
+
 func TestResolveConfigurationRejectsInvalidSources(t *testing.T) {
 	temporary := t.TempDir()
 	file := filepath.Join(temporary, "duplicate.toml")
