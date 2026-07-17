@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"encoding/json"
 	"os"
@@ -8,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestBackupRestoreWorkflowCreatesAndRestoresCompleteArtifact(t *testing.T) {
+func TestBackupRestoreWorkflowCreatesAndRestoresCompleteArtifactWithTerminalConfirmation(t *testing.T) {
 	source := t.TempDir()
 	writeBackupFixture(t, filepath.Join(source, "nested", "record.txt"), "preserved")
 	archive := filepath.Join(t.TempDir(), "instance.tar")
@@ -45,9 +46,26 @@ func TestBackupInspectRejectsInvalidArtifact(t *testing.T) {
 	assertOperatorFailure(t, []string{"backup", "inspect", "--input", archive}, "backup inspect", "operation_failed", 1)
 }
 
+func TestBackupCreateRejectsMissingSource(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	missingSource := filepath.Join(t.TempDir(), "missing")
+
+	assertOperatorFailure(t, []string{"backup", "create", "--data-dir", missingSource, "--output", archive}, "backup create", "operation_failed", 1)
+	if _, err := os.Stat(archive); !os.IsNotExist(err) {
+		t.Fatalf("failed backup created artifact: %v", err)
+	}
+}
+
+func TestRestoreRejectsUnsafeArtifact(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "unsafe.tar")
+	writeUnsafeArchive(t, archive)
+
+	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", filepath.Join(t.TempDir(), "restored")}, "restore", "operation_failed", 1)
+}
+
 func assertOperatorSuccess(t *testing.T, args []string, operation string) {
 	t.Helper()
-	result, code := operatorResult(t, args)
+	result, code := operatorResultForTest(t, args)
 	if code != 0 {
 		t.Fatalf("%v exit code = %d, result = %#v", args, code, result)
 	}
@@ -58,7 +76,7 @@ func assertOperatorSuccess(t *testing.T, args []string, operation string) {
 
 func assertOperatorFailure(t *testing.T, args []string, operation, exitClass string, code int) {
 	t.Helper()
-	result, gotCode := operatorResult(t, args)
+	result, gotCode := operatorResultForTest(t, args)
 	if gotCode != code {
 		t.Fatalf("%v exit code = %d, want %d; result = %#v", args, gotCode, code, result)
 	}
@@ -67,7 +85,7 @@ func assertOperatorFailure(t *testing.T, args []string, operation, exitClass str
 	}
 }
 
-func operatorResult(t *testing.T, args []string) (map[string]any, int) {
+func operatorResultForTest(t *testing.T, args []string) (map[string]any, int) {
 	t.Helper()
 	var stdout bytes.Buffer
 	code := run(args, &stdout, &bytes.Buffer{})
@@ -75,10 +93,31 @@ func operatorResult(t *testing.T, args []string) (map[string]any, int) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("%v result is not JSON: %v; output=%q", args, err, stdout.String())
 	}
-	if result["operation_id"] == "" {
+	if result["schema"] != "database.operator.result/v1" || result["operation_id"] == "" {
 		t.Fatalf("%v lacks operation identity: %#v", args, result)
 	}
 	return result, code
+}
+
+func writeUnsafeArchive(t *testing.T, path string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("open archive: %v", err)
+	}
+	archive := tar.NewWriter(file)
+	if err := archive.WriteHeader(&tar.Header{Name: "../outside", Mode: 0o600, Size: int64(len("unsafe"))}); err != nil {
+		t.Fatalf("write archive header: %v", err)
+	}
+	if _, err := archive.Write([]byte("unsafe")); err != nil {
+		t.Fatalf("write archive contents: %v", err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatalf("close archive: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close archive file: %v", err)
+	}
 }
 
 func writeBackupFixture(t *testing.T, path, contents string) {
