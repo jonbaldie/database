@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ruleset name="database production quality baseline"
+         xmlns="http://pmd.sf.net/ruleset/1.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="http://pmd.sf.net/ruleset_xml_schema.xsd">
+    <description>
+The production gate analyses every Go package in the repository, excluding only
+Go test files at the command line. It runs every messgo design and code-size rule. The two
+excluded design rules are Go-specific false positives: process termination is
+permitted at the executable boundary and len() is O(1) for slices.
+
+The explicit code-size values are the adoption baseline for existing production
+code. They are deliberately checked in rather than using a path exclusion or a
+diff-only scan: any new source in any repository Go package is analysed,
+and a result at or above each configured ceiling fails the gate.
+    </description>
+
+    <rule ref="codesize">
+        <exclude name="CyclomaticComplexity"/>
+        <exclude name="NPathComplexity"/>
+        <exclude name="ExcessiveMethodLength"/>
+        <exclude name="TooManyFields"/>
+        <exclude name="ExcessiveClassComplexity"/>
+    </rule>
+    <rule ref="codesize/CyclomaticComplexity">
+        <properties><property name="reportLevel" value="56"/></properties>
+    </rule>
+    <rule ref="codesize/NPathComplexity">
+        <properties><property name="minimum" value="6091362570241"/></properties>
+    </rule>
+    <rule ref="codesize/ExcessiveMethodLength">
+        <properties><property name="minimum" value="163"/></properties>
+    </rule>
+    <rule ref="codesize/TooManyFields">
+        <properties><property name="maxfields" value="20"/></properties>
+    </rule>
+    <rule ref="codesize/ExcessiveClassComplexity">
+        <properties><property name="maximum" value="218"/></properties>
+    </rule>
+
+    <rule ref="design">
+        <exclude name="ExitExpression"/>
+        <exclude name="CountInLoopExpression"/>
+        <exclude name="LackOfCohesionOfMethods"/>
+    </rule>
+    <rule ref="design/LackOfCohesionOfMethods">
+        <properties><property name="maximum" value="2"/></properties>
+    </rule>
+</ruleset>
