@@ -1455,20 +1455,7 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
-	if len(statement.types) == 1 && parameterCount(statement.query) == 1 && len(result.metadata) == 1 {
-		result.metadata[0] = preparedResultMetadata(result.metadata[0], statement.types[0])
-	}
 	return writeBinaryResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
-}
-
-func preparedResultMetadata(metadata columnMetadata, parameter preparedParameterType) columnMetadata {
-	switch parameter.typ {
-	case 0xfc, 0xfb, 0xfa, 0xf9:
-		metadata.characterSet = mysqlCharsetBinary
-		metadata.typ = 0xfc
-		metadata.flags = mysqlBinaryFlag
-	}
-	return metadata
 }
 
 func (s *session) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
