@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/buildinfo"
 	"github.com/jonbaldie/database/internal/instance"
@@ -45,7 +46,7 @@ func operatorCommand(args []string, stdout io.Writer) int {
 	if len(args) < 2 {
 		return initFailure(stdout, "invalid_input", 2, "operator command requires an operation")
 	}
-	_ = json.NewEncoder(stdout).Encode(map[string]any{"schema": "database.operator.result/v1", "operation": strings.Join(args[:2], " "), "success": true, "exit_class": "success"})
+	_ = json.NewEncoder(stdout).Encode(map[string]any{"schema": "database.operator.result/v1", "operation": strings.Join(args[:2], " "), "operation_id": fmt.Sprintf("op-%d", time.Now().UnixNano()), "success": true, "exit_class": "success"})
 	return 0
 }
 
