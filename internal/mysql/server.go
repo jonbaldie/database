@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -133,25 +134,38 @@ func errorPacket(code uint16, state, message string) []byte {
 }
 
 func writeQueryResult(connection net.Conn, sequence byte, query string) error {
-	if strings.EqualFold(strings.TrimSpace(query), "select 1") {
-		if err := writePacket(connection, sequence, []byte{1}); err != nil {
-			return err
+	trimmed := strings.TrimSpace(query)
+	if strings.HasPrefix(strings.ToLower(trimmed), "select ") {
+		value := strings.TrimSpace(trimmed[len("select "):])
+		if number, err := strconv.Atoi(value); err == nil {
+			return writeScalarResult(connection, sequence, strconv.Itoa(number))
 		}
-		definition := []byte{3}
-		definition = append(definition, []byte("def")...)
-		definition = append(definition, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-		if err := writePacket(connection, sequence+1, definition); err != nil {
-			return err
-		}
-		if err := writePacket(connection, sequence+2, []byte{0xfe, 0, 0, 2, 0, 0, 0}); err != nil {
-			return err
-		}
-		if err := writePacket(connection, sequence+3, []byte{1, '1'}); err != nil {
-			return err
-		}
-		return writePacket(connection, sequence+4, []byte{0xfe, 0, 0, 2, 0, 0, 0})
 	}
-	return writePacket(connection, sequence, errorPacket(1064, "42000", fmt.Sprintf("unsupported query %q", strings.TrimSpace(query))))
+	if strings.HasPrefix(strings.ToLower(trimmed), "insert ") || strings.HasPrefix(strings.ToLower(trimmed), "update ") || strings.HasPrefix(strings.ToLower(trimmed), "delete ") || strings.HasPrefix(strings.ToLower(trimmed), "replace ") {
+		return writePacket(connection, sequence, okPacket())
+	}
+	return writePacket(connection, sequence, errorPacket(1064, "42000", fmt.Sprintf("unsupported query %q", trimmed)))
+}
+
+func writeScalarResult(connection net.Conn, sequence byte, value string) error {
+	if err := writePacket(connection, sequence, []byte{1}); err != nil {
+		return err
+	}
+	definition := []byte{3}
+	definition = append(definition, []byte("def")...)
+	definition = append(definition, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	if err := writePacket(connection, sequence+1, definition); err != nil {
+		return err
+	}
+	if err := writePacket(connection, sequence+2, []byte{0xfe, 0, 0, 2, 0, 0, 0}); err != nil {
+		return err
+	}
+	row := []byte{byte(len(value))}
+	row = append(row, []byte(value)...)
+	if err := writePacket(connection, sequence+3, row); err != nil {
+		return err
+	}
+	return writePacket(connection, sequence+4, []byte{0xfe, 0, 0, 2, 0, 0, 0})
 }
 
 func readPacket(r io.Reader) (byte, []byte, error) {
