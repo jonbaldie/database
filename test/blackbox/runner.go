@@ -146,12 +146,10 @@ func (p *Process) NextJSONEvent(ctx context.Context, target any) error {
 
 // Wait waits for process exit and returns its observed result.
 func (p *Process) Wait() Result {
-	err := p.control.wait()
+	err := p.control.command.Wait()
 	p.control.read.Wait()
 	return p.output.result(p.control.command, err)
 }
-
-func (control *processControl) wait() error { return control.command.Wait() }
 
 func (output *processOutput) result(command *exec.Cmd, err error) Result {
 	output.mu.Lock()
@@ -161,17 +159,13 @@ func (output *processOutput) result(command *exec.Cmd, err error) Result {
 
 // Stop requests the same graceful signal used by an operator stop command.
 func (p *Process) Stop() error {
-	return p.control.stop()
+	return p.control.command.Process.Signal(syscall.SIGTERM)
 }
-
-func (control *processControl) stop() error { return control.command.Process.Signal(syscall.SIGTERM) }
 
 // Crash terminates the process without giving it a graceful shutdown path.
 func (p *Process) Crash() error {
-	return p.control.crash()
+	return p.control.command.Process.Kill()
 }
-
-func (control *processControl) crash() error { return control.command.Process.Kill() }
 
 func (output *processOutput) appendStdout(line string) {
 	output.mu.Lock()
