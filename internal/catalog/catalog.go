@@ -53,9 +53,34 @@ func Open(directory string) (*Store, error) {
 		return nil, fmt.Errorf("decode catalog: %w", err)
 	}
 	if s.definition.Namespaces == nil {
-		s.definition.Namespaces = map[string]Namespace{}
+		return nil, errors.New("catalog namespaces are missing")
+	}
+	if err := validateDefinition(s.definition); err != nil {
+		return nil, fmt.Errorf("invalid catalog: %w", err)
 	}
 	return s, nil
+}
+
+func validateDefinition(definition Definition) error {
+	for namespaceName, namespace := range definition.Namespaces {
+		if namespace.Tables == nil {
+			return fmt.Errorf("namespace %q has no table registry", namespaceName)
+		}
+		for tableName, table := range namespace.Tables {
+			if table.Columns == nil {
+				return fmt.Errorf("table %q has no columns", tableName)
+			}
+			if len(table.ColumnTypes) != 0 && len(table.ColumnTypes) != len(table.Columns) {
+				return fmt.Errorf("table %q has an invalid column type count", tableName)
+			}
+			for rowIndex, row := range table.Rows {
+				if len(row) != len(table.Columns) {
+					return fmt.Errorf("table %q row %d has an invalid column count", tableName, rowIndex)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) CreateNamespace(name string) error {

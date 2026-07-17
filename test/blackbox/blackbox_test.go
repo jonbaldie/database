@@ -596,6 +596,45 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 	}
 }
 
+func TestServeEmitsTerminalOperatorResult(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("result-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, _ := startMySQLServer(t, runner, directory)
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	result := process.Wait()
+	if result.ExitCode != 0 {
+		t.Fatalf("graceful shutdown: %#v", result)
+	}
+	var readyOperationID, resultOperationID string
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("invalid serve output line %q: %v", line, err)
+		}
+		if event["schema"] == "database.lifecycle/v1" && event["state"] == "ready" {
+			readyOperationID, _ = event["operation_id"].(string)
+		}
+		if event["schema"] == "database.operator.result/v1" && event["operation"] == "serve" {
+			if event["success"] != true || event["exit_class"] != "success" {
+				t.Fatalf("terminal serve result = %#v", event)
+			}
+			resultOperationID, _ = event["operation_id"].(string)
+		}
+	}
+	if readyOperationID == "" || resultOperationID == "" || readyOperationID != resultOperationID {
+		t.Fatalf("serve result did not correlate lifecycle progress: ready=%q result=%q output=%q", readyOperationID, resultOperationID, result.Stdout)
+	}
+}
+
 type wireResult struct {
 	columns []string
 	rows    [][]string

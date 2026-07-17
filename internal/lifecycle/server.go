@@ -55,6 +55,7 @@ type Options struct {
 type Event struct {
 	Schema             string `json:"schema"`
 	State              string `json:"state"`
+	OperationID        string `json:"operation_id,omitempty"`
 	DiagnosticsAddress string `json:"diagnostics_address,omitempty"`
 	Recovered          bool   `json:"recovered,omitempty"`
 }

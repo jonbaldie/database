@@ -23,6 +23,16 @@ func TestServeRejectsDamagedInitializedDirectory(t *testing.T) {
 	}
 }
 
+func TestServeRejectsStructurallyDamagedCatalog(t *testing.T) {
+	directory := initializedDirectory(t)
+	if err := os.WriteFile(filepath.Join(directory, "catalog.json"), []byte(`{"namespaces":{"bad":null}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Serve(context.Background(), Options{DataDirectory: directory}, func(Event) {}); err == nil {
+		t.Fatal("Serve accepted a catalog with an invalid namespace entry")
+	}
+}
+
 func TestServeRejectsConcurrentOwnerAndAllowsRestart(t *testing.T) {
 	directory := initializedDirectory(t)
 	contextOne, stopOne := context.WithCancel(context.Background())

@@ -160,6 +160,12 @@ func (s *Server) beginStatement() bool {
 
 func (s *Server) endStatement() { s.statementW.Done() }
 
+func (s *Server) acceptingWork() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.stopping
+}
+
 func waitGroup(ctx context.Context, group *sync.WaitGroup) error {
 	done := make(chan struct{})
 	go func() {
@@ -213,6 +219,9 @@ func (s *Server) serveConnection(connection net.Conn) {
 	for {
 		sequence, payload, err := readPacket(connection)
 		if err != nil || len(payload) == 0 {
+			return
+		}
+		if !s.acceptingWork() {
 			return
 		}
 		switch payload[0] {
