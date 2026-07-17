@@ -1383,6 +1383,14 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
+		lower := strings.ToLower(query)
+		valid := lower == "begin" || lower == "start transaction" || lower == "commit" || lower == "rollback" ||
+			strings.HasPrefix(lower, "savepoint ") || strings.HasPrefix(lower, "rollback to savepoint ") || strings.HasPrefix(lower, "release savepoint ") ||
+			strings.HasPrefix(lower, "use ") || strings.HasPrefix(lower, "create database ") || strings.HasPrefix(lower, "create schema ") ||
+			strings.HasPrefix(lower, "create table ") || strings.HasPrefix(lower, "insert into ")
+		if !valid {
+			return nil, sqlFailure{1064, "42000", "unsupported prepared statement"}
+		}
 		return nil, nil
 	}
 	expression := strings.TrimSpace(query[len("select "):])
@@ -2110,6 +2118,9 @@ func writePacket(w io.Writer, sequence byte, payload []byte) error {
 func okPacket() []byte { return []byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00} }
 
 func errorPacket(code uint16, state, message string) []byte {
+	if len(message) > 255 {
+		message = message[:252] + "..."
+	}
 	payload := []byte{0xff, byte(code), byte(code >> 8), '#'}
 	payload = append(payload, state...)
 	payload = append(payload, message...)
