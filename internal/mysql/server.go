@@ -160,6 +160,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if lower == "show processlist" || strings.HasPrefix(lower, "kill ") {
 		return writePacket(connection, sequence, okPacket())
 	}
+	if lower == "show databases" || lower == "show tables" || strings.HasPrefix(lower, "show create ") || strings.HasPrefix(lower, "select * from information_schema") {
+		return writeScalarResult(connection, sequence, "database")
+	}
 	if strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset ") {
 		return writePacket(connection, sequence, okPacket())
 	}

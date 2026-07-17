@@ -27,7 +27,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return version(args[1:], stdout, stderr)
 	case "init":
 		return initialize(args[1:], stdout, stderr)
-	case "backup", "restore", "config":
+	case "backup", "restore", "config", "upgrade", "data":
 		return operatorCommand(args, stdout)
 	case "serve":
 		return serve(args[1:], stdout, stderr)
