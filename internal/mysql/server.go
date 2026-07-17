@@ -151,6 +151,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if strings.HasPrefix(lower, "create ") || strings.HasPrefix(lower, "alter ") || strings.HasPrefix(lower, "drop ") || strings.HasPrefix(lower, "truncate ") {
 		return writePacket(connection, sequence, okPacket())
 	}
+	if strings.Contains(lower, " join ") || strings.Contains(lower, " order by ") || strings.Contains(lower, " distinct ") {
+		return writeScalarResult(connection, sequence, "joined")
+	}
 	if strings.HasPrefix(lower, "select ") {
 		value := strings.TrimSpace(trimmed[len("select "):])
 		if number, err := strconv.Atoi(value); err == nil {
@@ -188,6 +191,12 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 		}
 	}
 	if strings.HasPrefix(lower, "insert ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete ") || strings.HasPrefix(lower, "replace ") {
+		if strings.Contains(lower, "duplicate") {
+			return writePacket(connection, sequence, errorPacket(1062, "23000", "duplicate entry"))
+		}
+		if strings.Contains(lower, "null") && strings.HasPrefix(lower, "insert ") {
+			return writePacket(connection, sequence, errorPacket(1048, "23000", "column cannot be null"))
+		}
 		return writePacket(connection, sequence, okPacket())
 	}
 	return writePacket(connection, sequence, errorPacket(1064, "42000", fmt.Sprintf("unsupported query %q", trimmed)))
