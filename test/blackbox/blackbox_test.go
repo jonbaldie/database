@@ -273,6 +273,18 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 
 	client := newWireClient(t, mysql, "admin", "secret-password")
 	defer client.close()
+	if got := client.query("BEGIN"); got.err != "" {
+		t.Fatalf("begin: %#v", got)
+	}
+	if got := client.query("CREATE DATABASE rolled_back"); got.err != "" {
+		t.Fatalf("transactional create: %#v", got)
+	}
+	if got := client.query("ROLLBACK"); got.err != "" {
+		t.Fatalf("rollback: %#v", got)
+	}
+	if got := client.query("USE rolled_back"); got.err == "" {
+		t.Fatalf("rolled back namespace remained: %#v", got)
+	}
 	if got := client.query("CREATE DATABASE app"); got.err != "" {
 		t.Fatalf("create database: %#v", got)
 	}
