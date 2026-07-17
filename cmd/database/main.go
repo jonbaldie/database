@@ -11,7 +11,9 @@ import (
 	"github.com/jonbaldie/database/internal/buildinfo"
 )
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+func main() { terminate(os.Exit, run(os.Args[1:], os.Stdout, os.Stderr)) }
+
+func terminate(exit func(int), code int) { exit(code) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -89,7 +91,7 @@ func operatorOptions(args []string, allowed ...string) (map[string]string, error
 		known[name] = true
 	}
 	values := make(map[string]string, len(allowed))
-	for index := 0; index < len(args); index++ {
+	for index, argumentCount := 0, len(args); index < argumentCount; index++ {
 		arg := args[index]
 		name, value, hasValue := strings.Cut(arg, "=")
 		if !hasValue {
@@ -188,7 +190,7 @@ func version(args []string, stdout, stderr io.Writer) int {
 
 func formatFlag(args []string) (string, bool) {
 	format := "human"
-	for i := 0; i < len(args); i++ {
+	for i, argumentCount := 0, len(args); i < argumentCount; i++ {
 		arg := args[i]
 		if strings.HasPrefix(arg, "--format=") {
 			format = strings.TrimPrefix(arg, "--format=")

@@ -128,10 +128,13 @@ func (r Runner) Start(ctx context.Context, args ...string) (*Process, error) {
 
 // NextJSONEvent waits for and decodes the next JSON line from stdout.
 func (p *Process) NextJSONEvent(ctx context.Context, target any) error {
+	p.mu.Lock()
+	lines := p.lines
+	p.mu.Unlock()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case line, ok := <-p.lines:
+	case line, ok := <-lines:
 		if !ok {
 			return io.EOF
 		}
@@ -152,10 +155,18 @@ func (p *Process) Wait() Result {
 }
 
 // Stop requests the same graceful signal used by an operator stop command.
-func (p *Process) Stop() error { return p.command.Process.Signal(syscall.SIGTERM) }
+func (p *Process) Stop() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.command.Process.Signal(syscall.SIGTERM)
+}
 
 // Crash terminates the process without giving it a graceful shutdown path.
-func (p *Process) Crash() error { return p.command.Process.Kill() }
+func (p *Process) Crash() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.command.Process.Kill()
+}
 
 // HTTPJSON performs one diagnostics request and decodes its JSON response.
 func HTTPJSON(ctx context.Context, address, path string, target any) (int, error) {

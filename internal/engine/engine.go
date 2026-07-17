@@ -43,34 +43,47 @@ func (e *Engine) Execute(query string) Result {
 	if query == "" {
 		return Result{Err: errors.New("empty statement")}
 	}
-	lower := strings.ToLower(query)
-	switch {
-	case lower == "begin", lower == "start transaction", lower == "commit", lower == "rollback":
-		return Result{}
-	case strings.HasPrefix(lower, "create database ") || strings.HasPrefix(lower, "create schema "):
-		return e.createNamespace(query)
-	case strings.HasPrefix(lower, "use "):
-		return e.useNamespace(query)
-	case strings.HasPrefix(lower, "create table "):
-		return e.createTable(query)
-	case strings.HasPrefix(lower, "insert "):
-		return e.insert(query)
-	case strings.HasPrefix(lower, "update "):
-		return e.update(query)
-	case strings.HasPrefix(lower, "delete "):
-		return e.delete(query)
-	case strings.HasPrefix(lower, "select "):
-		return e.selectRows(query)
-	case lower == "show databases":
-		return e.showDatabases()
-	case lower == "show tables":
-		return e.showTables()
-	default:
-		return Result{Err: fmt.Errorf("unsupported query %q", query)}
+	if handler := queryHandler(strings.ToLower(query)); handler != nil {
+		return handler(e, query)
 	}
+	return Result{Err: fmt.Errorf("unsupported query %q", query)}
 }
 
-func (e *Engine) createNamespace(query string) Result {
+type queryHandlerFunc func(*Engine, string) Result
+
+var exactQueryHandlers = map[string]queryHandlerFunc{
+	"begin":             ignoreTransaction,
+	"start transaction": ignoreTransaction,
+	"commit":            ignoreTransaction,
+	"rollback":          ignoreTransaction,
+	"show databases":    func(e *Engine, _ string) Result { return showDatabases(e) },
+	"show tables":       func(e *Engine, _ string) Result { return showTables(e) },
+}
+
+var prefixQueryHandlers = []struct {
+	prefix  string
+	handler queryHandlerFunc
+}{
+	{"create database ", createNamespace}, {"create schema ", createNamespace},
+	{"use ", useNamespace}, {"create table ", createTable}, {"insert ", insert},
+	{"update ", update}, {"delete ", deleteRows}, {"select ", selectRows},
+}
+
+func queryHandler(lower string) queryHandlerFunc {
+	if handler := exactQueryHandlers[lower]; handler != nil {
+		return handler
+	}
+	for _, candidate := range prefixQueryHandlers {
+		if strings.HasPrefix(lower, candidate.prefix) {
+			return candidate.handler
+		}
+	}
+	return nil
+}
+
+func ignoreTransaction(_ *Engine, _ string) Result { return Result{} }
+
+func createNamespace(e *Engine, query string) Result {
 	parts := strings.Fields(query)
 	if len(parts) < 3 {
 		return Result{Err: errors.New("namespace name is required")}
@@ -85,7 +98,7 @@ func (e *Engine) createNamespace(query string) Result {
 	return Result{Affected: 1}
 }
 
-func (e *Engine) useNamespace(query string) Result {
+func useNamespace(e *Engine, query string) Result {
 	parts := strings.Fields(query)
 	if len(parts) != 2 {
 		return Result{Err: errors.New("namespace name is required")}
@@ -100,7 +113,7 @@ func (e *Engine) useNamespace(query string) Result {
 	return Result{}
 }
 
-func (e *Engine) createTable(query string) Result {
+func createTable(e *Engine, query string) Result {
 	open := strings.Index(query, "(")
 	close := strings.LastIndex(query, ")")
 	if open < 0 || close <= open {
@@ -112,18 +125,7 @@ func (e *Engine) createTable(query string) Result {
 		return Result{Err: errors.New("table name is required")}
 	}
 	name := normalize(parts[2])
-	columns := make([]Column, 0)
-	for _, definition := range splitTopLevel(query[open+1:close], ',') {
-		fields := strings.Fields(strings.TrimSpace(definition))
-		if len(fields) == 0 {
-			continue
-		}
-		first := strings.ToLower(strings.Trim(fields[0], "`"))
-		if first == "primary" || first == "unique" || first == "foreign" || first == "check" || first == "constraint" {
-			continue
-		}
-		columns = append(columns, Column{Name: normalize(fields[0])})
-	}
+	columns := tableColumns(query[open+1 : close])
 	if len(columns) == 0 {
 		return Result{Err: errors.New("at least one column is required")}
 	}
@@ -137,27 +139,37 @@ func (e *Engine) createTable(query string) Result {
 	return Result{Affected: 1}
 }
 
-func (e *Engine) insert(query string) Result {
-	lower := strings.ToLower(query)
-	into := strings.Index(lower, "into ")
-	valuesAt := strings.Index(lower, " values")
-	if into < 0 || valuesAt < 0 {
-		return Result{Err: errors.New("invalid insert statement")}
-	}
-	target := strings.TrimSpace(query[into+5 : valuesAt])
-	columns := []string{}
-	if open := strings.Index(target, "("); open >= 0 {
-		close := strings.LastIndex(target, ")")
-		if close < open {
-			return Result{Err: errors.New("invalid insert columns")}
+func tableColumns(definitions string) []Column {
+	columns := make([]Column, 0)
+	for _, definition := range splitTopLevel(definitions, ',') {
+		if column, ok := columnDefinition(definition); ok {
+			columns = append(columns, column)
 		}
-		columns = splitTopLevel(target[open+1:close], ',')
-		target = strings.TrimSpace(target[:open])
 	}
-	name := normalize(target)
-	groups := parseValueGroups(query[valuesAt+7:])
-	if len(groups) == 0 {
-		return Result{Err: errors.New("insert values are required")}
+	return columns
+}
+
+func columnDefinition(definition string) (Column, bool) {
+	fields := strings.Fields(strings.TrimSpace(definition))
+	if len(fields) == 0 || tableConstraint(fields[0]) {
+		return Column{}, false
+	}
+	return Column{Name: normalize(fields[0])}, true
+}
+
+func tableConstraint(name string) bool {
+	switch strings.ToLower(strings.Trim(name, "`")) {
+	case "primary", "unique", "foreign", "check", "constraint":
+		return true
+	default:
+		return false
+	}
+}
+
+func insert(e *Engine, query string) Result {
+	name, columns, groups, err := insertParts(query)
+	if err != nil {
+		return Result{Err: err}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -166,34 +178,81 @@ func (e *Engine) insert(query string) Result {
 		return Result{Err: errors.New("unknown table")}
 	}
 	copyTable := cloneTable(original)
-	if len(columns) == 0 {
-		for _, c := range copyTable.Columns {
-			columns = append(columns, c.Name)
-		}
-	}
-	indexes := make(map[string]int, len(copyTable.Columns))
-	for i, c := range copyTable.Columns {
-		indexes[normalize(c.Name)] = i
-	}
-	for _, group := range groups {
-		if len(group) != len(columns) {
-			return Result{Err: errors.New("column count does not match value count")}
-		}
-		row := make([]string, len(copyTable.Columns))
-		for i, col := range columns {
-			index, ok := indexes[normalize(col)]
-			if !ok {
-				return Result{Err: fmt.Errorf("unknown column %q", col)}
-			}
-			row[index] = unquote(group[i])
-		}
-		copyTable.Rows = append(copyTable.Rows, row)
+	if err := insertRows(copyTable, columns, groups); err != nil {
+		return Result{Err: err}
 	}
 	e.namespaces[e.current].Tables[name] = copyTable
 	return Result{Affected: uint64(len(groups))}
 }
 
-func (e *Engine) update(query string) Result {
+func insertParts(query string) (string, []string, [][]string, error) {
+	lower := strings.ToLower(query)
+	into, valuesAt := strings.Index(lower, "into "), strings.Index(lower, " values")
+	if into < 0 || valuesAt < 0 {
+		return "", nil, nil, errors.New("invalid insert statement")
+	}
+	target, columns, err := insertTarget(strings.TrimSpace(query[into+5 : valuesAt]))
+	if err != nil {
+		return "", nil, nil, err
+	}
+	groups := parseValueGroups(query[valuesAt+7:])
+	if len(groups) == 0 {
+		return "", nil, nil, errors.New("insert values are required")
+	}
+	return normalize(target), columns, groups, nil
+}
+
+func insertTarget(target string) (string, []string, error) {
+	open := strings.Index(target, "(")
+	if open < 0 {
+		return target, nil, nil
+	}
+	close := strings.LastIndex(target, ")")
+	if close < open {
+		return "", nil, errors.New("invalid insert columns")
+	}
+	return strings.TrimSpace(target[:open]), splitTopLevel(target[open+1:close], ','), nil
+}
+
+func insertRows(table *Table, columns []string, groups [][]string) error {
+	if len(columns) == 0 {
+		columns = columnNames(table.Columns)
+	}
+	indexes := columnIndexes(table)
+	for _, group := range groups {
+		row, err := insertedRow(table.Columns, indexes, columns, group)
+		if err != nil {
+			return err
+		}
+		table.Rows = append(table.Rows, row)
+	}
+	return nil
+}
+
+func columnNames(columns []Column) []string {
+	names := make([]string, len(columns))
+	for index, column := range columns {
+		names[index] = column.Name
+	}
+	return names
+}
+
+func insertedRow(columns []Column, indexes map[string]int, names, values []string) ([]string, error) {
+	if len(values) != len(names) {
+		return nil, errors.New("column count does not match value count")
+	}
+	row := make([]string, len(columns))
+	for index, name := range names {
+		column, ok := indexes[normalize(name)]
+		if !ok {
+			return nil, fmt.Errorf("unknown column %q", name)
+		}
+		row[column] = unquote(values[index])
+	}
+	return row, nil
+}
+
+func update(e *Engine, query string) Result {
 	lower := strings.ToLower(query)
 	setAt := strings.Index(lower, " set ")
 	if setAt < 0 {
@@ -222,22 +281,30 @@ func (e *Engine) update(query string) Result {
 			continue
 		}
 		for _, assignment := range assignments {
-			bits := strings.SplitN(assignment, "=", 2)
-			if len(bits) != 2 {
-				return Result{Err: errors.New("invalid assignment")}
+			index, value, err := assignmentValue(indexes, assignment)
+			if err != nil {
+				return Result{Err: err}
 			}
-			index, ok := indexes[normalize(bits[0])]
-			if !ok {
-				return Result{Err: errors.New("unknown column")}
-			}
-			copyTable.Rows[i][index] = unquote(strings.TrimSpace(bits[1]))
+			copyTable.Rows[i][index] = value
 		}
 	}
 	e.namespaces[e.current].Tables[tableName] = copyTable
 	return Result{Affected: uint64(len(copyTable.Rows))}
 }
 
-func (e *Engine) delete(query string) Result {
+func assignmentValue(indexes map[string]int, assignment string) (int, string, error) {
+	bits := strings.SplitN(assignment, "=", 2)
+	if len(bits) != 2 {
+		return 0, "", errors.New("invalid assignment")
+	}
+	index, ok := indexes[normalize(bits[0])]
+	if !ok {
+		return 0, "", errors.New("unknown column")
+	}
+	return index, unquote(strings.TrimSpace(bits[1])), nil
+}
+
+func deleteRows(e *Engine, query string) Result {
 	lower := strings.ToLower(query)
 	fromAt := strings.Index(lower, "from ")
 	if fromAt < 0 {
@@ -271,100 +338,133 @@ func (e *Engine) delete(query string) Result {
 	return Result{Affected: uint64(affected)}
 }
 
-func (e *Engine) selectRows(query string) Result {
+func selectRows(e *Engine, query string) Result {
 	lower := strings.ToLower(query)
 	fromAt := strings.Index(lower, " from ")
 	if fromAt < 0 {
 		return selectLiteral(strings.TrimSpace(query[7:]))
 	}
-	projection := strings.TrimSpace(query[7:fromAt])
-	rest := query[fromAt+6:]
-	restLower := strings.ToLower(rest)
-	positions := []int{}
-	for _, keyword := range []string{" where ", " order by ", " limit "} {
-		if p := strings.Index(restLower, keyword); p >= 0 {
-			positions = append(positions, p)
-		}
-	}
-	clauseEnd := len(rest)
-	for _, p := range positions {
-		if p < clauseEnd {
-			clauseEnd = p
-		}
-	}
-	tableName := normalize(strings.TrimSpace(rest[:clauseEnd]))
-	whereText, orderText, limitText := "", "", ""
-	if p := strings.Index(restLower, " where "); p >= 0 {
-		end := len(rest)
-		for _, k := range []string{" order by ", " limit "} {
-			if q := strings.Index(restLower[p+7:], k); q >= 0 && p+7+q < end {
-				end = p + 7 + q
-			}
-		}
-		whereText = strings.TrimSpace(rest[p+7 : end])
-	}
-	if p := strings.Index(restLower, " order by "); p >= 0 {
-		end := len(rest)
-		if q := strings.Index(restLower[p+10:], " limit "); q >= 0 {
-			end = p + 10 + q
-		}
-		orderText = strings.TrimSpace(rest[p+10 : end])
-	}
-	if p := strings.Index(restLower, " limit "); p >= 0 {
-		limitText = strings.TrimSpace(rest[p+7:])
-	}
+	statement := parseSelect(query, fromAt)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	table := e.namespaces[e.current].Tables[tableName]
+	table := e.namespaces[e.current].Tables[statement.table]
 	if table == nil {
 		return Result{Err: errors.New("unknown table")}
 	}
 	indexes := columnIndexes(table)
-	selected := []int{}
-	columns := []string{}
-	if projection == "*" {
-		for i, c := range table.Columns {
-			selected = append(selected, i)
-			columns = append(columns, c.Name)
-		}
-	} else {
-		for _, name := range splitTopLevel(projection, ',') {
-			index, ok := indexes[normalize(name)]
-			if !ok {
-				return Result{Err: errors.New("unknown column")}
-			}
-			selected = append(selected, index)
-			columns = append(columns, table.Columns[index].Name)
-		}
+	selected, columns, err := selectedColumns(table, indexes, statement.projection)
+	if err != nil {
+		return Result{Err: err}
 	}
-	rows := [][]string{}
-	for _, row := range table.Rows {
-		if whereText != "" && !matches(row, indexes, whereText) {
-			continue
-		}
-		projected := make([]string, len(selected))
-		for i, index := range selected {
-			projected[i] = row[index]
-		}
-		rows = append(rows, projected)
-	}
-	if orderText != "" {
-		orderBits := strings.Fields(orderText)
-		index := indexes[normalize(orderBits[0])]
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i][index] < rows[j][index] })
-		if len(orderBits) > 1 && strings.EqualFold(orderBits[1], "desc") {
-			sort.SliceStable(rows, func(i, j int) bool { return rows[i][index] > rows[j][index] })
-		}
-	}
-	if limitText != "" {
-		if limit, err := strconv.Atoi(strings.Fields(limitText)[0]); err == nil && limit >= 0 && len(rows) > limit {
-			rows = rows[:limit]
-		}
-	}
+	rows := projectedRows(table.Rows, indexes, statement.where, selected)
+	sortSelectedRows(rows, indexes, statement.order)
+	rows = limitedRows(rows, statement.limit)
 	return Result{Columns: columns, Rows: rows}
 }
 
-func (e *Engine) showDatabases() Result {
+type selectStatement struct{ projection, table, where, order, limit string }
+
+func parseSelect(query string, fromAt int) selectStatement {
+	rest := query[fromAt+6:]
+	lower := strings.ToLower(rest)
+	return selectStatement{projection: strings.TrimSpace(query[7:fromAt]), table: normalize(strings.TrimSpace(rest[:firstClause(lower)])), where: clauseValue(rest, lower, " where ", []string{" order by ", " limit "}), order: clauseValue(rest, lower, " order by ", []string{" limit "}), limit: clauseValue(rest, lower, " limit ", nil)}
+}
+
+func firstClause(text string) int {
+	end := len(text)
+	for _, keyword := range []string{" where ", " order by ", " limit "} {
+		if index := strings.Index(text, keyword); index >= 0 && index < end {
+			end = index
+		}
+	}
+	return end
+}
+
+func clauseValue(text, lower, marker string, endings []string) string {
+	start := strings.Index(lower, marker)
+	if start < 0 {
+		return ""
+	}
+	start += len(marker)
+	end := len(text)
+	for _, marker := range endings {
+		if index := strings.Index(lower[start:], marker); index >= 0 && start+index < end {
+			end = start + index
+		}
+	}
+	return strings.TrimSpace(text[start:end])
+}
+
+func selectedColumns(table *Table, indexes map[string]int, projection string) ([]int, []string, error) {
+	if projection == "*" {
+		return allColumns(table.Columns)
+	}
+	selected, columns := []int{}, []string{}
+	for _, name := range splitTopLevel(projection, ',') {
+		index, ok := indexes[normalize(name)]
+		if !ok {
+			return nil, nil, errors.New("unknown column")
+		}
+		selected, columns = append(selected, index), append(columns, table.Columns[index].Name)
+	}
+	return selected, columns, nil
+}
+
+func allColumns(columns []Column) ([]int, []string, error) {
+	selected, names := make([]int, len(columns)), make([]string, len(columns))
+	for index, column := range columns {
+		selected[index], names[index] = index, column.Name
+	}
+	return selected, names, nil
+}
+
+func projectedRows(source [][]string, indexes map[string]int, where string, selected []int) [][]string {
+	rows := [][]string{}
+	for _, row := range source {
+		if where == "" || matches(row, indexes, where) {
+			rows = append(rows, projectRow(row, selected))
+		}
+	}
+	return rows
+}
+
+func projectRow(row []string, selected []int) []string {
+	projected := make([]string, len(selected))
+	for index, column := range selected {
+		projected[index] = row[column]
+	}
+	return projected
+}
+
+func sortSelectedRows(rows [][]string, indexes map[string]int, order string) {
+	if order == "" {
+		return
+	}
+	bits := strings.Fields(order)
+	index := indexes[normalize(bits[0])]
+	descending := len(bits) > 1 && strings.EqualFold(bits[1], "desc")
+	sort.SliceStable(rows, func(i, j int) bool { return orderedBefore(rows[i][index], rows[j][index], descending) })
+}
+
+func orderedBefore(left, right string, descending bool) bool {
+	if descending {
+		return left > right
+	}
+	return left < right
+}
+
+func limitedRows(rows [][]string, limitText string) [][]string {
+	if limitText == "" {
+		return rows
+	}
+	limit, err := strconv.Atoi(strings.Fields(limitText)[0])
+	if err == nil && limit >= 0 && len(rows) > limit {
+		return rows[:limit]
+	}
+	return rows
+}
+
+func showDatabases(e *Engine) Result {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	rows := [][]string{}
@@ -374,7 +474,7 @@ func (e *Engine) showDatabases() Result {
 	sort.Slice(rows, func(i, j int) bool { return rows[i][0] < rows[j][0] })
 	return Result{Columns: []string{"Database"}, Rows: rows}
 }
-func (e *Engine) showTables() Result {
+func showTables(e *Engine) Result {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	rows := [][]string{}
@@ -430,21 +530,14 @@ func splitTopLevel(s string, separator rune) []string {
 	quote := rune(0)
 	for i, r := range s {
 		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
+			quote = closingQuote(quote, r)
 			continue
 		}
-		if r == '\'' || r == '"' {
+		if quoteDelimiter(r) {
 			quote = r
 			continue
 		}
-		if r == '(' {
-			depth++
-		}
-		if r == ')' {
-			depth--
-		}
+		depth = parenthesisDepth(depth, r)
 		if r == separator && depth == 0 {
 			result = append(result, strings.TrimSpace(s[start:i]))
 			start = i + 1
@@ -453,38 +546,35 @@ func splitTopLevel(s string, separator rune) []string {
 	result = append(result, strings.TrimSpace(s[start:]))
 	return result
 }
+
+func closingQuote(quote, character rune) rune {
+	if character == quote {
+		return 0
+	}
+	return quote
+}
+
+func quoteDelimiter(character rune) bool { return character == '\'' || character == '"' }
+
+func parenthesisDepth(depth int, character rune) int {
+	if character == '(' {
+		return depth + 1
+	}
+	if character == ')' {
+		return depth - 1
+	}
+	return depth
+}
+
 func parseValueGroups(s string) [][]string {
 	groups := [][]string{}
-	for i := 0; i < len(s); {
+	for i, length := 0, len(s); i < length; {
 		open := strings.IndexByte(s[i:], '(')
 		if open < 0 {
 			break
 		}
 		open += i
-		depth, quote, close := 0, byte(0), -1
-		for j := open; j < len(s); j++ {
-			c := s[j]
-			if quote != 0 {
-				if c == quote {
-					quote = 0
-				}
-				continue
-			}
-			if c == '\'' || c == '"' {
-				quote = c
-				continue
-			}
-			if c == '(' {
-				depth++
-			}
-			if c == ')' {
-				depth--
-				if depth == 0 {
-					close = j
-					break
-				}
-			}
-		}
+		close := closingParenthesis(s, open, length)
 		if close < 0 {
 			break
 		}
@@ -492,4 +582,43 @@ func parseValueGroups(s string) [][]string {
 		i = close + 1
 	}
 	return groups
+}
+
+func closingParenthesis(text string, open, length int) int {
+	depth, quote := 0, byte(0)
+	for index := open; index < length; index++ {
+		character := text[index]
+		if quote != 0 {
+			quote = closingByteQuote(quote, character)
+			continue
+		}
+		if byteQuoteDelimiter(character) {
+			quote = character
+			continue
+		}
+		depth = byteParenthesisDepth(depth, character)
+		if depth == 0 {
+			return index
+		}
+	}
+	return -1
+}
+
+func closingByteQuote(quote, character byte) byte {
+	if character == quote {
+		return 0
+	}
+	return quote
+}
+
+func byteQuoteDelimiter(character byte) bool { return character == '\'' || character == '"' }
+
+func byteParenthesisDepth(depth int, character byte) int {
+	if character == '(' {
+		return depth + 1
+	}
+	if character == ')' {
+		return depth - 1
+	}
+	return depth
 }
