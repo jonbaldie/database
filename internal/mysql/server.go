@@ -147,6 +147,12 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 		if number, err := strconv.Atoi(value); err == nil {
 			return writeScalarResult(connection, sequence, strconv.Itoa(number))
 		}
+		if number, err := strconv.ParseFloat(value, 64); err == nil {
+			return writeScalarResult(connection, sequence, strconv.FormatFloat(number, 'g', -1, 64))
+		}
+		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			return writeScalarResult(connection, sequence, value[1:len(value)-1])
+		}
 	}
 	if strings.HasPrefix(lower, "insert ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete ") || strings.HasPrefix(lower, "replace ") {
 		return writePacket(connection, sequence, okPacket())

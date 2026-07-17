@@ -61,13 +61,27 @@ func Initialize(directory, account, password string) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("encode instance metadata: %w", err)
 	}
 	contents = append(contents, '\n')
-	if err := os.WriteFile(filepath.Join(directory, "instance.json"), contents, 0o600); err != nil {
+	if err := writeDurable(filepath.Join(directory, "instance.json"), contents); err != nil {
 		return Metadata{}, fmt.Errorf("write instance metadata: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "catalog.json"), []byte("{\n  \"namespaces\": {}\n}\n"), 0o600); err != nil {
+	if err := writeDurable(filepath.Join(directory, "catalog.json"), []byte("{\n  \"namespaces\": {}\n}\n")); err != nil {
 		return Metadata{}, fmt.Errorf("write catalog: %w", err)
 	}
 	return metadata, nil
+}
+
+func writeDurable(path string, contents []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = file.Write(contents); err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // ReadPassword obtains a secret from a named file or standard input.
