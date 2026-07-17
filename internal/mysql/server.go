@@ -2,7 +2,6 @@
 package mysql
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -26,20 +25,24 @@ import (
 	"github.com/jonbaldie/database/internal/catalog"
 )
 
+// maximumPendingConnections is a private handshake-resource safeguard. It is
+// intentionally not part of the server configuration registry or public
+// compatibility profile; MaxConnections remains the session ceiling.
 const (
-	clientLongPassword     = 1
-	clientFoundRows        = 1 << 1
-	clientLongFlag         = 1 << 2
-	clientConnectWithDB    = 1 << 3
-	clientLocalFiles       = 1 << 7
-	clientProtocol41       = 1 << 9
-	clientTransactions     = 1 << 13
-	clientSecureConnection = 1 << 15
-	clientMultiResults     = 1 << 17
-	clientPluginAuth       = 1 << 19
-	clientConnectAttrs     = 1 << 20
-	clientPluginLenencData = 1 << 21
-	clientSSL              = 1 << 11
+	maximumPendingConnections = 16
+	clientLongPassword        = 1
+	clientFoundRows           = 1 << 1
+	clientLongFlag            = 1 << 2
+	clientConnectWithDB       = 1 << 3
+	clientLocalFiles          = 1 << 7
+	clientProtocol41          = 1 << 9
+	clientTransactions        = 1 << 13
+	clientSecureConnection    = 1 << 15
+	clientMultiResults        = 1 << 17
+	clientPluginAuth          = 1 << 19
+	clientConnectAttrs        = 1 << 20
+	clientPluginLenencData    = 1 << 21
+	clientSSL                 = 1 << 11
 
 	mysqlCharsetUTF8MB4GeneralCI uint16 = 45
 	mysqlCharsetBinary           uint16 = 63
@@ -67,6 +70,7 @@ type Config struct {
 	TLSCertFile          string
 	TLSKeyFile           string
 	MaxPreparedStmtCount int
+	MaxConnections       int
 	MaxAllowedPacket     int64
 }
 
@@ -86,6 +90,10 @@ type connectionRegistry struct {
 	connections   map[net.Conn]struct{}
 	connectionW   sync.WaitGroup
 	statementW    sync.WaitGroup
+	pendingMax    int
+	pendingCount  int
+	sessionMax    int
+	sessionCount  int
 	preparedCount int
 	preparedLimit int
 }
@@ -101,41 +109,63 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	config = normalizedConfig(config)
+	if err := validateTLSConfig(config); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	auth, err := newAuthenticator(config)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	registry := &connectionRegistry{
+		connections:   make(map[net.Conn]struct{}),
+		pendingMax:    maximumPendingConnections,
+		sessionMax:    config.MaxConnections,
+		preparedLimit: config.MaxPreparedStmtCount,
+	}
+	return &Server{Listener: listener, config: config, connections: registry, auth: auth}, nil
+}
+
+func normalizedConfig(config Config) Config {
 	if config.Version == "" {
 		config.Version = "0.1.0-dev"
 	}
 	if config.MaxPreparedStmtCount == 0 {
 		config.MaxPreparedStmtCount = 4096
 	}
+	if config.MaxConnections == 0 {
+		config.MaxConnections = 100
+	}
 	if config.MaxAllowedPacket == 0 {
 		config.MaxAllowedPacket = 64 * 1024 * 1024
 	}
+	return config
+}
+
+func validateTLSConfig(config Config) error {
 	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
-		_ = listener.Close()
-		return nil, errors.New("TLS certificate and key must be provided together")
+		return errors.New("TLS certificate and key must be provided together")
 	}
-	registry := &connectionRegistry{
-		connections:   make(map[net.Conn]struct{}),
-		preparedLimit: config.MaxPreparedStmtCount,
-	}
-	server := &Server{Listener: listener, config: config, connections: registry}
+	return nil
+}
+
+func newAuthenticator(config Config) (authenticator, error) {
 	auth := authenticator{config: config}
 	if config.TLSCertFile != "" {
 		certificate, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
 		if err != nil {
-			_ = listener.Close()
-			return nil, fmt.Errorf("load TLS certificate: %w", err)
+			return authenticator{}, fmt.Errorf("load TLS certificate: %w", err)
 		}
 		auth.tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		_ = listener.Close()
-		return nil, fmt.Errorf("generate authentication key: %w", err)
+		return authenticator{}, fmt.Errorf("generate authentication key: %w", err)
 	}
 	auth.rsaKey = key
-	server.auth = auth
-	return server, nil
+	return auth, nil
 }
 
 func (s *Server) Serve() {
@@ -148,7 +178,7 @@ func (s *Server) Serve() {
 			_ = connection.Close()
 			continue
 		}
-		go connectionWorker{server: s}.serve(connection)
+		go newConversation(s, connection).serve()
 	}
 }
 
@@ -166,19 +196,39 @@ func (s *Server) Close() error { return s.Listener.Close() }
 func (r *connectionRegistry) register(connection net.Conn) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.stopping {
+	if r.stopping || r.pendingCount >= r.pendingMax {
 		return false
 	}
 	r.connections[connection] = struct{}{}
+	r.pendingCount++
 	r.connectionW.Add(1)
 	return true
 }
 
-func (r *connectionRegistry) unregister(connection net.Conn) {
+func (r *connectionRegistry) unregister(connection net.Conn, admitted bool) {
 	r.mu.Lock()
 	delete(r.connections, connection)
+	if admitted && r.sessionCount > 0 {
+		r.sessionCount--
+	}
+	if !admitted && r.pendingCount > 0 {
+		r.pendingCount--
+	}
 	r.mu.Unlock()
 	r.connectionW.Done()
+}
+
+func (r *connectionRegistry) admitSession() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopping || r.sessionCount >= r.sessionMax {
+		return false
+	}
+	if r.pendingCount > 0 {
+		r.pendingCount--
+	}
+	r.sessionCount++
+	return true
 }
 
 func (r *connectionRegistry) beginStatement() bool {
@@ -267,145 +317,13 @@ type preparedParameterType struct {
 	unsigned bool
 }
 
-// connectionWorker owns one authenticated classic-protocol conversation. Its
-// collaborators deliberately separate wire dispatch, SQL/catalog behaviour,
-// and prepared-statement behaviour for the follow-on strict-gate slices.
-type connectionWorker struct{ server *Server }
-
 type queryExecutor struct{ *session }
 
 type preparedExecutor struct{ *session }
 
-func (w connectionWorker) serve(connection net.Conn) {
-	defer connection.Close()
-	defer w.server.connections.unregister(connection)
-	var transactionSession *session
-	var prepared *preparedExecutor
-	defer func() {
-		if transactionSession != nil && transactionSession.transaction && w.server.config.Catalog != nil {
-			_ = w.server.config.Catalog.Replace(transactionSession.transactionSnapshot)
-		}
-		if prepared != nil {
-			prepared.closeAllPrepared()
-		}
-	}()
-	nonce := makeNonce()
-	if err := writePacket(connection, 0, handshake(w.server.config.Version, nonce, w.server.auth.tlsConfig != nil)); err != nil {
-		return
-	}
-	authentication, err := w.server.auth.authenticate(connection, nonce)
-	if err != nil {
-		_ = writePacket(authentication.connection, authentication.nextSequence, mysqlError(err))
-		return
-	}
-	connection = authentication.connection
-	if err := writePacket(connection, authentication.nextSequence, okPacket()); err != nil {
-		return
-	}
-	session := &session{server: w.server, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]*preparedStatement{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
-	transactionSession = session
-	queries := &queryExecutor{session}
-	prepared = &preparedExecutor{session}
-	for {
-		sequence, payload, err := readPacket(connection, w.server.config.MaxAllowedPacket)
-		if err != nil || len(payload) == 0 {
-			return
-		}
-		if !w.server.connections.acceptingWork() {
-			return
-		}
-		switch payload[0] {
-		case 0x01: // COM_QUIT
-			return
-		case 0x02: // COM_INIT_DB
-			queries.useDatabase(string(payload[1:]))
-			if err := queries.databaseExists(session.database); err != nil {
-				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
-					return
-				}
-				continue
-			}
-			if writePacket(connection, sequence+1, okPacket()); err != nil {
-				return
-			}
-		case 0x03: // COM_QUERY
-			if !w.server.connections.beginStatement() {
-				return
-			}
-			err := queries.writeQueryResult(connection, sequence+1, string(payload[1:]))
-			w.server.connections.endStatement()
-			if err != nil {
-				return
-			}
-		case 0x0e: // COM_PING
-			if writePacket(connection, sequence+1, okPacket()) != nil {
-				return
-			}
-		case 0x16: // COM_STMT_PREPARE
-			if err := prepared.prepare(connection, sequence+1, string(payload[1:])); err != nil {
-				return
-			}
-		case 0x17: // COM_STMT_EXECUTE
-			if !w.server.connections.beginStatement() {
-				return
-			}
-			err := prepared.executePrepared(connection, sequence+1, payload)
-			w.server.connections.endStatement()
-			if err != nil {
-				return
-			}
-		case 0x19: // COM_STMT_CLOSE
-			if len(payload) != 5 {
-				if writePacket(connection, sequence+1, errorPacket(1210, "HY000", "malformed prepared statement close")) != nil {
-					return
-				}
-				continue
-			}
-			id := binary.LittleEndian.Uint32(payload[1:5])
-			prepared.closePrepared(id)
-		case 0x18: // COM_STMT_SEND_LONG_DATA
-			if err := prepared.sendLongData(payload); err != nil {
-				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
-					return
-				}
-			}
-		case 0x1a: // COM_STMT_RESET
-			if err := prepared.resetPrepared(payload); err != nil {
-				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
-					return
-				}
-				continue
-			}
-			if writePacket(connection, sequence+1, okPacket()) != nil {
-				return
-			}
-		case 0x1f: // COM_RESET_CONNECTION
-			if len(payload) != 1 {
-				if writePacket(connection, sequence+1, errorPacket(1210, "HY000", "malformed connection reset")) != nil {
-					return
-				}
-				continue
-			}
-			if err := prepared.resetConnection(); err != nil {
-				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
-					return
-				}
-				continue
-			}
-			if writePacket(connection, sequence+1, okPacket()) != nil {
-				return
-			}
-		default:
-			if writePacket(connection, sequence+1, errorPacket(1047, "08S01", "unsupported command")) != nil {
-				return
-			}
-		}
-	}
-}
-
 type authenticationResult struct {
 	connection   net.Conn
-	username     string
+	accountName  string
 	database     string
 	nextSequence byte
 }
@@ -416,120 +334,6 @@ type authenticator struct {
 	config    Config
 	tlsConfig *tls.Config
 	rsaKey    *rsa.PrivateKey
-}
-
-func (a authenticator) authenticate(connection net.Conn, nonce []byte) (authenticationResult, error) {
-	sequence, payload, err := readPacket(connection, a.config.MaxAllowedPacket)
-	if err != nil {
-		return authenticationResult{connection: connection, nextSequence: 2}, err
-	}
-	secure := false
-	if len(payload) == 32 && binary.LittleEndian.Uint32(payload[:4])&clientSSL != 0 {
-		if a.tlsConfig == nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "TLS capability is not supported"}
-		}
-		tlsConnection := tls.Server(connection, a.tlsConfig)
-		if err := tlsConnection.Handshake(); err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
-		}
-		connection = tlsConnection
-		sequence, payload, err = readPacket(connection, a.config.MaxAllowedPacket)
-		if err != nil {
-			return authenticationResult{connection: connection, nextSequence: 3}, err
-		}
-		secure = true
-	}
-	if len(payload) < 32 {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed handshake response"}
-	}
-	capabilities := binary.LittleEndian.Uint32(payload[:4])
-	if capabilities&^acceptedClientCapabilities(a.tlsConfig != nil) != 0 {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "unsupported client capabilities"}
-	}
-	if capabilities&clientProtocol41 == 0 || capabilities&clientSecureConnection == 0 || capabilities&clientPluginAuth == 0 {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "required protocol capabilities are missing"}
-	}
-	offset := 32
-	username, offset, ok := readNullString(payload, offset)
-	if !ok {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed username"}
-	}
-	var token []byte
-	if capabilities&clientPluginLenencData != 0 {
-		token, offset, ok = readLengthEncoded(payload, offset)
-	} else if capabilities&clientSecureConnection != 0 {
-		if offset >= len(payload) {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "missing authentication response"}
-		}
-		length := int(payload[offset])
-		offset++
-		if offset+length > len(payload) {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed authentication response"}
-		}
-		token, offset = payload[offset:offset+length], offset+length
-	} else {
-		token, offset = readNullBytes(payload, offset)
-		ok = token != nil
-	}
-	if !ok {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed authentication response"}
-	}
-	database := ""
-	if capabilities&clientConnectWithDB != 0 {
-		if databaseName, next, found := readNullString(payload, offset); found {
-			database = databaseName
-			offset = next
-		}
-	}
-	plugin, _, pluginOK := readNullString(payload, offset)
-	if !pluginOK || plugin != "caching_sha2_password" {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1251, "08004", "client does not support caching_sha2_password"}
-	}
-	if a.config.Username != "" && username != a.config.Username {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
-	}
-	if a.config.PasswordHash != "" && !validPasswordToken(token, nonce, a.config.PasswordHash) {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
-	}
-	if database != "" {
-		if err := a.databaseExists(database); err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
-		}
-	}
-	// Do not downgrade a full caching_sha2_password exchange to an accepted
-	// scramble. A secure channel receives the clear password only inside TLS;
-	// an insecure channel must request and use the server's RSA public key.
-	if err := writePacket(connection, sequence+1, []byte{0x01, 0x04}); err != nil {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
-	}
-	sequence, response, err := readPacket(connection, a.config.MaxAllowedPacket)
-	if err != nil {
-		return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
-	}
-	var password []byte
-	if secure {
-		password = response
-	} else {
-		if len(response) != 1 || response[0] != 0x02 {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "secure authentication exchange required"}
-		}
-		if err := writePacket(connection, sequence+1, publicKeyPacket(a.rsaKey)); err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
-		}
-		sequence, response, err = readPacket(connection, a.config.MaxAllowedPacket)
-		if err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
-		}
-		password, err = decryptPassword(a.rsaKey, response, nonce)
-		if err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
-		}
-	}
-	password = bytes.TrimSuffix(password, []byte{0})
-	if !validPlainPassword(password, a.config.PasswordHash) {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
-	}
-	return authenticationResult{connection: connection, username: username, database: database, nextSequence: sequence + 1}, nil
 }
 
 func (a authenticator) databaseExists(name string) error {

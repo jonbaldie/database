@@ -224,7 +224,7 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 	if opts.MySQLAddress == "" || !opts.MySQLEnabled {
 		return nil, nil
 	}
-	config := mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile, MaxPreparedStmtCount: opts.MaxPreparedStmtCount, MaxAllowedPacket: opts.MaxAllowedPacket}
+	config := mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile, MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount, MaxAllowedPacket: opts.MaxAllowedPacket}
 	server, err := mysql.NewWithConfig(opts.MySQLAddress, config)
 	if err != nil {
 		return nil, fmt.Errorf("listen for mysql: %w", err)
