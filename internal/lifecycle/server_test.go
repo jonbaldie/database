@@ -39,7 +39,11 @@ func TestServeRejectsConcurrentOwnerAndAllowsRestart(t *testing.T) {
 	ready := make(chan Event, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- Serve(contextOne, Options{DataDirectory: directory}, func(event Event) { ready <- event })
+		done <- Serve(contextOne, Options{DataDirectory: directory}, func(event Event) {
+			if event.State == "ready" {
+				ready <- event
+			}
+		})
 	}()
 	select {
 	case event := <-ready:

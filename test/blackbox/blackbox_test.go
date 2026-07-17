@@ -550,7 +550,7 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 
 	process, address := startMySQLServer(t, runner, directory)
 	second := runner.Run(context.Background(), "serve", "--data-dir", directory, "--mysql-address", freeAddress(t), "--format=json")
-	if second.ExitCode != 1 || !strings.Contains(second.Stderr, "already in use") {
+	if second.ExitCode != 1 || !strings.Contains(second.Stdout, "already in use") {
 		t.Fatalf("second owner: %#v", second)
 	}
 
@@ -591,7 +591,7 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 	if err := os.Remove(filepath.Join(damaged, "catalog.json")); err != nil {
 		t.Fatal(err)
 	}
-	if result := runner.Run(context.Background(), "serve", "--data-dir", damaged, "--mysql-address", freeAddress(t), "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stderr, "catalog") {
+	if result := runner.Run(context.Background(), "serve", "--data-dir", damaged, "--mysql-address", freeAddress(t), "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stdout, "catalog") {
 		t.Fatalf("damaged directory: %#v", result)
 	}
 }
