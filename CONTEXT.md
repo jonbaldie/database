@@ -15,3 +15,13 @@ _Avoid_: Black-box performance
 **Query explanation**:
 A stable, machine-readable and human-readable account of how the database planned and executed a query, including both its choices and observed operator-level behaviour.
 _Avoid_: Query log, debug text
+
+## Scope boundary
+
+v0.1 does not define a representative application workload. In particular, the
+product contract does not invent application fixtures, schemas, row counts,
+arbitrary representative queries, or transaction mixes. Its specified
+performance-acceptance operations remain required; their exact corpus and
+harness mechanics are implementation work. Later design decisions must be
+grounded in the documented external database contract rather than an arbitrary
+surrogate application.
