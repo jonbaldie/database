@@ -1,0 +1,102 @@
+{
+  "format_version": 1,
+  "server_version": "0.1.0",
+  "mode": "plan",
+  "partial": false,
+  "statement": {
+    "kind": "select",
+    "sql": "SELECT id, total FROM orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT 20",
+    "read_only": true,
+    "locking_read": false,
+    "current_database": "app",
+    "parameters": [
+      { "position": 1, "type": "BIGINT UNSIGNED" }
+    ],
+    "planning_settings": {
+      "sql_mode": "STRICT_ALL_TABLES,ONLY_FULL_GROUP_BY,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO"
+    }
+  },
+  "timing": { "planning_ms": 0.31 },
+  "plan": {
+    "id": 1,
+    "kind": "limit",
+    "summary": "Stop after the first 20 rows in requested order.",
+    "operation": { "offset_present": false },
+    "estimates": {
+      "rows": 20,
+      "row_width_bytes": 24,
+      "cost": 8.6,
+      "peak_memory_bytes": 0
+    },
+    "output": {
+      "columns": ["orders.id", "orders.total"],
+      "ordering": [{ "expression": "orders.created_at", "direction": "desc" }],
+      "unique_keys": [["orders.id"]]
+    },
+    "warnings": [],
+    "children": [
+      {
+        "id": 2,
+        "kind": "lookup",
+        "summary": "Read this customer's newest orders directly from the composite index.",
+        "operation": { "lookup_type": "range", "unique": false },
+        "strategy": {
+          "name": "index_range",
+          "summary": "Traverse the matching index range in descending order."
+        },
+        "objects": [
+          { "type": "table", "database": "app", "name": "orders" },
+          { "type": "index", "database": "app", "table": "orders", "name": "orders_customer_created" }
+        ],
+        "predicates": [
+          {
+            "role": "access",
+            "expression": "orders.customer_id = ?",
+            "sources": [{ "clause": "where", "fragment": "customer_id = ?" }]
+          }
+        ],
+        "estimates": {
+          "rows": 47,
+          "row_width_bytes": 24,
+          "cost": 8.4,
+          "peak_memory_bytes": 0
+        },
+        "output": {
+          "columns": ["orders.id", "orders.total", "orders.created_at"],
+          "ordering": [{ "expression": "orders.created_at", "direction": "desc" }],
+          "unique_keys": [["orders.id"]]
+        },
+        "choice": {
+          "selected": "orders_customer_created",
+          "reason": {
+            "code": "FILTER_AND_ORDER_SUPPORTED",
+            "summary": "The index supports both the customer predicate and requested ordering."
+          },
+          "alternatives": [
+            {
+              "name": "table_scan_then_sort",
+              "estimated_cost": 924.2,
+              "reason": {
+                "code": "MORE_ROWS_AND_SORT",
+                "summary": "The alternative reads the whole table and requires a sort."
+              }
+            }
+          ]
+        },
+        "statistics": [
+          {
+            "object": { "type": "table", "database": "app", "name": "orders" },
+            "kind": "table_and_index_distribution",
+            "collected_at": "2026-07-15T09:30:00Z",
+            "observed_rows": 184203,
+            "stale": false,
+            "limitations": []
+          }
+        ],
+        "warnings": [],
+        "children": []
+      }
+    ]
+  },
+  "warnings": []
+}

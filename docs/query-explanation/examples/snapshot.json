@@ -1,0 +1,77 @@
+{
+  "format_version": 1,
+  "server_version": "0.1.0",
+  "mode": "snapshot",
+  "partial": true,
+  "statement": {
+    "kind": "select",
+    "sql": "SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id ORDER BY SUM(total) DESC",
+    "read_only": true,
+    "locking_read": false,
+    "current_database": "app",
+    "parameters": [],
+    "planning_settings": {
+      "sql_mode": "STRICT_ALL_TABLES,ONLY_FULL_GROUP_BY,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO"
+    }
+  },
+  "timing": {
+    "planning_ms": 0.52,
+    "execution": { "elapsed_ms": 412.7, "complete": false }
+  },
+  "plan": {
+    "id": 1,
+    "kind": "sort",
+    "summary": "Order customer totals from largest to smallest.",
+    "operation": { "purpose": "order_by" },
+    "strategy": {
+      "name": "external_sort",
+      "summary": "Sort using bounded memory and temporary storage when needed."
+    },
+    "estimates": {
+      "rows": 11800,
+      "row_width_bytes": 24,
+      "cost": 4820.4,
+      "peak_memory_bytes": 8388608
+    },
+    "output": {
+      "columns": ["orders.customer_id", "SUM(orders.total)"],
+      "ordering": [{ "expression": "SUM(orders.total)", "direction": "desc" }],
+      "unique_keys": [["orders.customer_id"]]
+    },
+    "actual": {
+      "invocations": 1,
+      "input_rows": 6200,
+      "output_rows": 0,
+      "filtered_rows": 0,
+      "first_row_ms": null,
+      "total_ms": 412.4,
+      "peak_memory_bytes": 8388608,
+      "spill_count": 2,
+      "spill_bytes": 50331648,
+      "temporary_storage_bytes": 50331648,
+      "storage": { "logical_reads": 0, "physical_reads": 0, "bytes_read": 0 },
+      "wait": { "lock_ms": 0, "other_ms": 6.1 },
+      "rows_vs_estimate_ratio": null,
+      "warnings": [
+        {
+          "code": "PARTIAL_RUNTIME_EVIDENCE",
+          "severity": "info",
+          "summary": "Runtime counters were captured before this operator completed."
+        }
+      ]
+    },
+    "warnings": [],
+    "children": []
+  },
+  "warnings": [
+    {
+      "code": "PARTIAL_SNAPSHOT",
+      "severity": "info",
+      "summary": "Counters describe work observed through the capture time and are not final totals."
+    }
+  ],
+  "snapshot": {
+    "connection_id": 184,
+    "captured_at": "2026-07-16T12:34:56.789Z"
+  }
+}
