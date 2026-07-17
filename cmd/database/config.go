@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/jonbaldie/database/internal/lifecycle"
 )
@@ -437,9 +436,9 @@ func makeConfiguration(values map[string]configurationValue, explicitMySQL bool)
 	}
 	options := lifecycle.Options{
 		DataDirectory: dataDirectory, MySQLAddress: mysqlAddress, TLSCertFile: cert, TLSKeyFile: key,
-		DiagnosticsAddress: diagnosticsAddress, Format: format, StatementTimeout: time.Duration(statement) * time.Millisecond,
-		LockWaitTimeout: time.Duration(lockWait) * time.Millisecond, IdleInTransactionTimeout: time.Duration(idleTransaction) * time.Millisecond,
-		IdleSessionTimeout: time.Duration(idleSession) * time.Millisecond, ExecutionMemoryLimitBytes: memory,
+		DiagnosticsAddress: diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: statement,
+		LockWaitTimeoutMilliseconds: lockWait, IdleInTransactionTimeoutMilliseconds: idleTransaction,
+		IdleSessionTimeoutMilliseconds: idleSession, ExecutionMemoryLimitBytes: memory,
 		AggregateMemoryLimitBytes: aggregateMemory, TemporaryStorageLimitBytes: temporary,
 		AggregateTemporaryLimitBytes: aggregateTemporary, MaxConnections: int(connections), MaxAllowedPacket: packet,
 		MaxPreparedStmtCount: int(prepared), MySQLEnabled: dataDirectory != "" || explicitMySQL,

@@ -68,3 +68,22 @@ func TestResolveConfigurationAcceptsBracketedIPv6(t *testing.T) {
 		t.Fatalf("address = %q", config.options.MySQLAddress)
 	}
 }
+
+func TestResolveConfigurationPreservesMaximumTimeoutsInMilliseconds(t *testing.T) {
+	const maximum = "9223372036854775807"
+	config, err := resolveConfiguration([]string{
+		"--statement-timeout-ms=" + maximum,
+		"--lock-wait-timeout-ms=" + maximum,
+		"--idle-in-transaction-timeout-ms=" + maximum,
+		"--idle-session-timeout-ms=" + maximum,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.options.StatementTimeoutMilliseconds != 9223372036854775807 ||
+		config.options.LockWaitTimeoutMilliseconds != 9223372036854775807 ||
+		config.options.IdleInTransactionTimeoutMilliseconds != 9223372036854775807 ||
+		config.options.IdleSessionTimeoutMilliseconds != 9223372036854775807 {
+		t.Fatalf("timeout options = %#v", config.options)
+	}
+}
