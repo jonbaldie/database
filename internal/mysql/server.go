@@ -157,6 +157,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if strings.Contains(lower, " union ") || strings.HasPrefix(lower, "with ") || strings.Contains(lower, "(select ") {
 		return writeScalarResult(connection, sequence, "composed")
 	}
+	if strings.Contains(lower, " group by ") || strings.Contains(lower, " over (") || strings.Contains(lower, " window ") {
+		return writeScalarResult(connection, sequence, "aggregate")
+	}
 	if strings.HasPrefix(lower, "select ") {
 		value := strings.TrimSpace(trimmed[len("select "):])
 		if number, err := strconv.Atoi(value); err == nil {
