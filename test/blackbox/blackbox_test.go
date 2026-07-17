@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -370,7 +371,11 @@ func newWireClient(t *testing.T, address, username, password string) *wireClient
 	authLength := int(payload[position])
 	position++
 	position += 10
-	nonce = append(nonce, payload[position:position+authLength-1]...)
+	remainingNonce := authLength - 1 - 8
+	if remainingNonce < 0 || position+remainingNonce > len(payload) {
+		t.Fatalf("malformed authentication salt")
+	}
+	nonce = append(nonce, payload[position:position+remainingNonce]...)
 	for len(nonce) > 0 && nonce[len(nonce)-1] == 0 {
 		nonce = nonce[:len(nonce)-1]
 	}
@@ -438,7 +443,9 @@ func (c *wireClient) close() error {
 		return nil
 	}
 	writeWirePacket(c.t, c.conn, 0, []byte{0x01})
-	return c.conn.Close()
+	err := c.conn.Close()
+	c.conn = nil
+	return err
 }
 
 func (c *wireClient) readResult() wireResult {
@@ -448,6 +455,9 @@ func (c *wireClient) readResult() wireResult {
 	}
 	if payload[0] == 0xff {
 		return wireResult{err: string(payload[4:])}
+	}
+	if payload[0] == 0x00 {
+		return wireResult{}
 	}
 	columnCount, _, ok := readLengthInt(payload, 0)
 	if !ok {

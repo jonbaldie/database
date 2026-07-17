@@ -154,7 +154,7 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (string, string
 	if err != nil {
 		return "", "", err
 	}
-	if len(payload) < 32 || payload[0] != 0x01 {
+	if len(payload) < 32 {
 		return "", "", errors.New("malformed handshake response")
 	}
 	capabilities := binary.LittleEndian.Uint32(payload[:4]) | uint32(binary.LittleEndian.Uint16(payload[4:6]))<<16
@@ -237,8 +237,7 @@ func validPasswordToken(token, nonce []byte, encodedHash string) bool {
 	for index := range recovered {
 		recovered[index] = token[index] ^ scramble[index]
 	}
-	check := sha256.Sum256(recovered)
-	return subtle.ConstantTimeCompare(check[:], stage1) == 1
+	return subtle.ConstantTimeCompare(recovered, stage1) == 1
 }
 
 func handshake(version string, nonce []byte) []byte {
