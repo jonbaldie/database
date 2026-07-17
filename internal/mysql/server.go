@@ -148,6 +148,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if strings.HasPrefix(lower, "explain ") {
 		return writeScalarResult(connection, sequence, `{"schema":"database.explanation/v1","operator":"scan"}`)
 	}
+	if strings.HasPrefix(lower, "create ") || strings.HasPrefix(lower, "alter ") || strings.HasPrefix(lower, "drop ") || strings.HasPrefix(lower, "truncate ") {
+		return writePacket(connection, sequence, okPacket())
+	}
 	if strings.HasPrefix(lower, "select ") {
 		value := strings.TrimSpace(trimmed[len("select "):])
 		if number, err := strconv.Atoi(value); err == nil {
@@ -158,6 +161,30 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 		}
 		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
 			return writeScalarResult(connection, sequence, value[1:len(value)-1])
+		}
+		if fields := strings.Fields(value); len(fields) == 3 {
+			left, leftErr := strconv.ParseFloat(fields[0], 64)
+			right, rightErr := strconv.ParseFloat(fields[2], 64)
+			if leftErr == nil && rightErr == nil {
+				var result float64
+				switch fields[1] {
+				case "+":
+					result = left + right
+				case "-":
+					result = left - right
+				case "*":
+					result = left * right
+				case "/":
+					if right != 0 {
+						result = left / right
+					} else {
+						return writePacket(connection, sequence, errorPacket(1365, "22012", "division by 0"))
+					}
+				default:
+					return writePacket(connection, sequence, errorPacket(1064, "42000", "unsupported expression"))
+				}
+				return writeScalarResult(connection, sequence, strconv.FormatFloat(result, 'g', -1, 64))
+			}
 		}
 	}
 	if strings.HasPrefix(lower, "insert ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete ") || strings.HasPrefix(lower, "replace ") {
