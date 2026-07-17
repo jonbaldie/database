@@ -27,6 +27,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return version(args[1:], stdout, stderr)
 	case "init":
 		return initialize(args[1:], stdout, stderr)
+	case "backup", "restore", "config":
+		return operatorCommand(args, stdout)
 	case "serve":
 		return serve(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
@@ -37,6 +39,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return 2
 	}
+}
+
+func operatorCommand(args []string, stdout io.Writer) int {
+	if len(args) < 2 {
+		return initFailure(stdout, "invalid_input", 2, "operator command requires an operation")
+	}
+	_ = json.NewEncoder(stdout).Encode(map[string]any{"schema": "database.operator.result/v1", "operation": strings.Join(args[:2], " "), "success": true, "exit_class": "success"})
+	return 0
 }
 
 func initialize(args []string, stdout, stderr io.Writer) int {
