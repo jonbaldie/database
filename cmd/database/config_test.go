@@ -161,6 +161,31 @@ func TestConfigurationFileRejectsTOMLStringsWithRawControlCharacters(t *testing.
 	}
 }
 
+func TestConfigurationFileRejectsTOMLStringsWithInvalidUTF8(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	tests := []struct {
+		name   string
+		prefix string
+		suffix string
+	}{
+		{name: "basic string", prefix: "data_directory = \"" + directory, suffix: "instance\"\n"},
+		{name: "literal string", prefix: "data_directory = '" + directory, suffix: "instance'\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			contents := append([]byte(test.prefix), 0xff)
+			contents = append(contents, test.suffix...)
+			file := filepath.Join(t.TempDir(), "server.toml")
+			if err := os.WriteFile(file, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := resolveConfiguration([]string{"--config=" + file}, nil); err == nil {
+				t.Fatal("expected TOML string with invalid UTF-8 to be rejected")
+			}
+		})
+	}
+}
+
 func TestResolveConfigurationRejectsInvalidSources(t *testing.T) {
 	temporary := t.TempDir()
 	file := filepath.Join(temporary, "duplicate.toml")

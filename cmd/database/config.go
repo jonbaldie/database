@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jonbaldie/database/internal/lifecycle"
 )
@@ -324,6 +325,9 @@ func tomlValue(raw string) (string, bool, error) {
 }
 
 func validateTOMLStringCharacters(raw string) error {
+	if !utf8.ValidString(raw[1 : len(raw)-1]) {
+		return errors.New("invalid TOML string UTF-8")
+	}
 	for _, character := range raw[1 : len(raw)-1] {
 		if character <= 0x1f || character == 0x7f {
 			return errors.New("invalid TOML string character")
