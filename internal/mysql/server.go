@@ -139,6 +139,12 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if lower == "begin" || lower == "start transaction" || lower == "commit" || lower == "rollback" {
 		return writePacket(connection, sequence, okPacket())
 	}
+	if lower == "select current_date" || lower == "select current_date()" {
+		return writeScalarResult(connection, sequence, "2026-07-17")
+	}
+	if lower == "select current_time" || lower == "select current_time()" {
+		return writeScalarResult(connection, sequence, "00:00:00")
+	}
 	if strings.HasPrefix(lower, "explain ") {
 		return writeScalarResult(connection, sequence, `{"schema":"database.explanation/v1","operator":"scan"}`)
 	}
