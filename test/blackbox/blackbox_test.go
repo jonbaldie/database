@@ -178,6 +178,30 @@ func TestInitializeAcceptsStdinAndRejectsInlinePassword(t *testing.T) {
 	}
 }
 
+func TestInitializeRejectsAmbiguousOrMalformedSecretInputs(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	secret := "must-not-be-consumed"
+	for _, args := range [][]string{
+		{"init", filepath.Join(t.TempDir(), "empty-file"), "--password-file=", "--format=json"},
+		{"init", filepath.Join(t.TempDir(), "valued-stdin"), "--password-stdin=unexpected", "--format=json"},
+		{"init", filepath.Join(t.TempDir(), "unknown-flag"), "--unknown=unexpected", "--password-stdin", "--format=json"},
+		{"init", "-password=" + secret, "--password-stdin", "--format=json"},
+		{"init", filepath.Join(t.TempDir(), "repeated-source"), "--password-stdin", "--password-stdin", "--format=json"},
+	} {
+		result := runner.RunWithStdin(context.Background(), secret+"\n", args...)
+		if result.ExitCode != 2 || result.Stderr != "" || strings.Contains(result.Stdout+result.Stderr, secret) {
+			t.Fatalf("invalid init arguments %q: %#v", args, result)
+		}
+		var failure struct {
+			Success   bool   `json:"success"`
+			ExitClass string `json:"exit_class"`
+		}
+		if err := json.Unmarshal([]byte(result.Stdout), &failure); err != nil || failure.Success || failure.ExitClass != "invalid_input" {
+			t.Fatalf("invalid input result %q: %v", result.Stdout, err)
+		}
+	}
+}
+
 func startServer(t *testing.T, runner blackbox.Runner, state string) (*blackbox.Process, string, bool) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
