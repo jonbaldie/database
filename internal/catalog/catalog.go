@@ -236,34 +236,60 @@ func (s *Store) mutate(action func(*Definition) error) error {
 }
 
 func (s *Store) persistLocked(definition Definition) error {
-	b, err := json.MarshalIndent(definition, "", "  ")
+	b, err := catalogJSON(definition)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	file, err := os.CreateTemp(filepath.Dir(s.path), ".catalog-*.tmp")
+	temporary, err := writeCatalogTemp(filepath.Dir(s.path), b)
 	if err != nil {
 		return err
 	}
-	temporary := file.Name()
 	defer os.Remove(temporary)
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err = file.Write(b); err == nil {
-		err = file.Sync()
-	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
 	if err := os.Rename(temporary, s.path); err != nil {
 		return err
 	}
-	directory, err := os.Open(filepath.Dir(s.path))
+	return syncCatalogDirectory(s.path)
+}
+
+func catalogJSON(definition Definition) ([]byte, error) {
+	b, err := json.MarshalIndent(definition, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+func writeCatalogTemp(directory string, content []byte) (string, error) {
+	file, err := os.CreateTemp(directory, ".catalog-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	temporary := file.Name()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	if err := writeCatalogFile(file, content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	return temporary, nil
+}
+
+func writeCatalogFile(file *os.File, content []byte) error {
+	if _, err := file.Write(content); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	return file.Close()
+}
+
+func syncCatalogDirectory(path string) error {
+	directory, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
