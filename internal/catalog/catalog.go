@@ -24,6 +24,16 @@ type Table struct {
 	ColumnTypes []string   `json:"column_types,omitempty"`
 	Rows        [][]string `json:"rows,omitempty"`
 }
+
+// ColumnType reports the recorded logical type without inventing a fallback
+// for catalog entries written before column types were persisted.
+func (t Table) ColumnType(index int) (string, bool) {
+	if index < 0 || index >= len(t.ColumnTypes) || strings.TrimSpace(t.ColumnTypes[index]) == "" {
+		return "", false
+	}
+	return t.ColumnTypes[index], true
+}
+
 type Store struct {
 	mu         sync.Mutex
 	path       string

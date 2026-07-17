@@ -378,7 +378,7 @@ func TestMySQLCatalogReturnsCanonicalCreateDefinitions(t *testing.T) {
 	}
 
 	databases := client.query("SHOW DATABASES")
-	if databases.err != "" || strings.Join(databases.columns, ",") != "Database" || len(databases.rows) != 2 || databases.rows[0][0] != "alpha" || databases.rows[1][0] != "zeta" {
+	if databases.err != "" || strings.Join(databases.columns, ",") != "Database" || len(databases.rows) != 3 || databases.rows[0][0] != "alpha" || databases.rows[1][0] != "information_schema" || databases.rows[2][0] != "zeta" {
 		t.Fatalf("sorted databases: %#v", databases)
 	}
 	tables := client.query("SHOW TABLES")
@@ -398,6 +398,98 @@ func TestMySQLCatalogReturnsCanonicalCreateDefinitions(t *testing.T) {
 	decimalDefinition := client.query("SHOW CREATE TABLE apple")
 	if decimalDefinition.err != "" || len(decimalDefinition.rows) != 1 || decimalDefinition.rows[0][1] != "CREATE TABLE `apple` (\n  `value` DECIMAL(10,2)\n)" {
 		t.Fatalf("parenthesized type definition: %#v", decimalDefinition)
+	}
+}
+
+func TestMySQLMetadataIsHonestEscapedAndCommittedConsistent(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("metadata-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, mysqlAddress := startMySQLServer(t, runner, directory)
+	defer func() {
+		_ = process.Stop()
+		_ = process.Wait()
+	}()
+
+	client := newWireClient(t, mysqlAddress, "admin", "metadata-secret")
+	defer client.close()
+	for _, query := range []string{
+		"CREATE DATABASE `odd``name`",
+		"USE `odd``name`",
+		"CREATE TABLE `part.name` (`id` INT, legacy)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+
+	database := client.query("SHOW CREATE DATABASE `odd``name`")
+	if database.err != "" || len(database.rows) != 1 || database.rows[0][1] != "CREATE DATABASE `odd``name`" {
+		t.Fatalf("escaped database definition: %#v", database)
+	}
+	table := client.query("SHOW CREATE TABLE `part.name`")
+	if table.err == "" || !strings.Contains(table.err, "type for column") || strings.Contains(table.err, "TEXT") {
+		t.Fatalf("unknown type was fabricated or hidden: %#v", table)
+	}
+
+	columns := client.query("SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE FROM information_schema.columns")
+	if columns.err != "" || strings.Join(columns.columns, ",") != "COLUMN_NAME,DATA_TYPE,COLUMN_TYPE" {
+		t.Fatalf("information_schema.columns projection: %#v", columns)
+	}
+	var unknown []string
+	for _, row := range columns.rows {
+		if row[0] == "legacy" {
+			unknown = row
+		}
+	}
+	if unknown == nil || unknown[1] != "" || unknown[2] != "" {
+		t.Fatalf("unknown type metadata: %#v", columns)
+	}
+
+	if result := client.query("USE information_schema"); result.err != "" {
+		t.Fatalf("use information_schema: %#v", result)
+	}
+	views := client.query("SHOW TABLES")
+	if views.err != "" || len(views.rows) != 3 || views.rows[0][0] != "schemata" || views.rows[1][0] != "tables" || views.rows[2][0] != "columns" {
+		t.Fatalf("information_schema views: %#v", views)
+	}
+	if result := client.query("CREATE TABLE rejected (id INT)"); result.err == "" || !strings.Contains(result.err, "read-only") {
+		t.Fatalf("information_schema mutation: %#v", result)
+	}
+	if result := client.query("SELECT * FROM information_schema.not_a_view"); result.err == "" || !strings.Contains(result.err, "unsupported information_schema view") {
+		t.Fatalf("unsupported metadata behavior: %#v", result)
+	}
+
+	if result := client.query("USE `odd``name`"); result.err != "" || client.query("BEGIN").err != "" {
+		t.Fatalf("begin transaction: %#v", result)
+	}
+	if result := client.query("CREATE TABLE pending (id INT)"); result.err != "" {
+		t.Fatalf("create pending table: %#v", result)
+	}
+	metadata := client.query("SELECT TABLE_NAME FROM information_schema.tables")
+	for _, row := range metadata.rows {
+		if row[0] == "pending" {
+			t.Fatalf("uncommitted table leaked into metadata: %#v", metadata)
+		}
+	}
+	if result := client.query("COMMIT"); result.err != "" {
+		t.Fatalf("commit: %#v", result)
+	}
+	metadata = client.query("SELECT TABLE_NAME FROM information_schema.tables")
+	found := false
+	for _, row := range metadata.rows {
+		if row[0] == "pending" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("committed table missing from metadata: %#v", metadata)
 	}
 }
 
@@ -642,6 +734,9 @@ func readLengthInt(payload []byte, offset int) (int, int, bool) {
 }
 
 func readLengthString(payload []byte, offset int) (string, int, bool) {
+	if offset < len(payload) && payload[offset] == 0xfb {
+		return "", offset + 1, true
+	}
 	length, next, ok := readLengthInt(payload, offset)
 	if !ok || next+length > len(payload) {
 		return "", next, false

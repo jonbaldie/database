@@ -231,6 +231,9 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (string, string
 }
 
 func (s *Server) databaseExists(name string) error {
+	if strings.EqualFold(identifier(name), informationSchemaName) {
+		return nil
+	}
 	if s.config.Catalog == nil {
 		return nil
 	}
@@ -300,6 +303,51 @@ func mysqlError(err error) []byte {
 type queryResult struct {
 	columns []string
 	rows    [][]string
+	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
+	// empty string. Metadata uses this for facts that the catalog does not
+	// retain, rather than inventing compatibility values.
+	nulls [][]bool
+}
+
+const informationSchemaName = "information_schema"
+
+type informationSchemaColumn struct {
+	name     string
+	typeName string
+}
+
+type informationSchemaView struct {
+	name    string
+	columns []informationSchemaColumn
+}
+
+// This is the deliberately small, read-only metadata subset. It exposes only
+// facts owned by the current catalog; unsupported MySQL physical attributes
+// are not represented.
+var informationSchemaViews = []informationSchemaView{
+	{
+		name:    "schemata",
+		columns: []informationSchemaColumn{{name: "SCHEMA_NAME", typeName: "VARCHAR(64)"}},
+	},
+	{
+		name: "tables",
+		columns: []informationSchemaColumn{
+			{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
+			{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
+			{name: "TABLE_TYPE", typeName: "VARCHAR(64)"},
+		},
+	},
+	{
+		name: "columns",
+		columns: []informationSchemaColumn{
+			{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
+			{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
+			{name: "COLUMN_NAME", typeName: "VARCHAR(64)"},
+			{name: "ORDINAL_POSITION", typeName: "INT"},
+			{name: "DATA_TYPE", typeName: "VARCHAR(64)"},
+			{name: "COLUMN_TYPE", typeName: "VARCHAR(255)"},
+		},
+	},
 }
 
 func (s *session) writeQueryResult(connection net.Conn, sequence byte, query string) error {
@@ -310,7 +358,7 @@ func (s *session) writeQueryResult(connection net.Conn, sequence byte, query str
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
-	return writeResult(connection, sequence, result.columns, result.rows)
+	return writeResult(connection, sequence, result.columns, result.rows, result.nulls)
 }
 
 func (s *session) execute(query string) (*queryResult, error) {
@@ -374,23 +422,29 @@ func (s *session) execute(query string) (*queryResult, error) {
 		return nil, nil
 	}
 	if lower == "select current_date" || lower == "select current_date()" {
-		return &queryResult{[]string{"CURRENT_DATE"}, [][]string{{"2026-07-17"}}}, nil
+		return &queryResult{columns: []string{"CURRENT_DATE"}, rows: [][]string{{"2026-07-17"}}}, nil
 	}
 	if lower == "select current_time" || lower == "select current_time()" {
-		return &queryResult{[]string{"CURRENT_TIME"}, [][]string{{"00:00:00"}}}, nil
+		return &queryResult{columns: []string{"CURRENT_TIME"}, rows: [][]string{{"00:00:00"}}}, nil
 	}
 	if lower == "select version()" || lower == "select @@version" {
-		return &queryResult{[]string{"VERSION()"}, [][]string{{s.server.config.Version}}}, nil
+		return &queryResult{columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}}, nil
 	}
 	if lower == "select database()" {
-		return &queryResult{[]string{"DATABASE()"}, [][]string{{s.database}}}, nil
+		return &queryResult{columns: []string{"DATABASE()"}, rows: [][]string{{s.database}}}, nil
+	}
+	if strings.HasPrefix(lower, "select ") && strings.Contains(lower, " from information_schema.") {
+		return s.selectInformationSchema(query)
 	}
 	if lower == "show databases" {
 		rows := make([][]string, 0)
 		if s.server.config.Catalog != nil {
-			namespaces := s.server.config.Catalog.Snapshot().Namespaces
+			namespaces := s.metadataDefinition().Namespaces
 			names := make([]string, 0, len(namespaces))
 			for key, namespace := range namespaces {
+				if strings.EqualFold(key, informationSchemaName) {
+					continue
+				}
 				name := namespace.Name
 				if name == "" {
 					name = key
@@ -401,8 +455,13 @@ func (s *session) execute(query string) (*queryResult, error) {
 			for _, name := range names {
 				rows = append(rows, []string{name})
 			}
+			rows = append(rows, []string{informationSchemaName})
 		}
-		return &queryResult{[]string{"Database"}, rows}, nil
+		if s.server.config.Catalog == nil {
+			rows = append(rows, []string{informationSchemaName})
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i][0] < rows[j][0] })
+		return &queryResult{columns: []string{"Database"}, rows: rows}, nil
 	}
 	if strings.HasPrefix(lower, "show create database ") || strings.HasPrefix(lower, "show create schema ") {
 		return s.showCreateDatabase(query)
@@ -414,7 +473,15 @@ func (s *session) execute(query string) (*queryResult, error) {
 		if s.database == "" {
 			return nil, sqlFailure{1046, "3D000", "no database selected"}
 		}
-		ns, ok := s.snapshotNamespace(s.database)
+		if strings.EqualFold(s.database, informationSchemaName) {
+			rows := make([][]string, 0, len(informationSchemaViews))
+			for _, view := range informationSchemaViews {
+				rows = append(rows, []string{view.name})
+			}
+			return &queryResult{columns: []string{"Tables_in_" + informationSchemaName}, rows: rows}, nil
+		}
+		definition := s.metadataDefinition()
+		ns, ok := definition.Namespaces[strings.ToLower(s.database)]
 		if !ok {
 			return nil, sqlFailure{1049, "42000", "unknown database"}
 		}
@@ -431,7 +498,7 @@ func (s *session) execute(query string) (*queryResult, error) {
 		for _, name := range names {
 			rows = append(rows, []string{name})
 		}
-		return &queryResult{[]string{"Tables_in_" + s.database}, rows}, nil
+		return &queryResult{columns: []string{"Tables_in_" + s.database}, rows: rows}, nil
 	}
 	if strings.HasPrefix(lower, "use ") {
 		return nil, s.use(strings.TrimSpace(query[4:]))
@@ -449,10 +516,10 @@ func (s *session) execute(query string) (*queryResult, error) {
 		return s.selectQuery(query)
 	}
 	if strings.HasPrefix(lower, "explain ") {
-		return &queryResult{[]string{"EXPLAIN"}, [][]string{{`{"schema":"database.explanation/v1","operator":"scan"}`}}}, nil
+		return &queryResult{columns: []string{"EXPLAIN"}, rows: [][]string{{`{"schema":"database.explanation/v1","operator":"scan"}`}}}, nil
 	}
 	if strings.HasPrefix(lower, "show processlist") {
-		return &queryResult{[]string{"Id"}, nil}, nil
+		return &queryResult{columns: []string{"Id"}}, nil
 	}
 	return nil, sqlFailure{1064, "42000", "unsupported query: " + query}
 }
@@ -467,6 +534,17 @@ func (s *session) use(name string) error {
 }
 func (s *session) useDatabase(name string)          { _ = s.use(name) }
 func (s *session) databaseExists(name string) error { return s.server.databaseExists(identifier(name)) }
+
+func (s *session) metadataDefinition() catalog.Definition {
+	if s.transaction {
+		return s.transactionSnapshot
+	}
+	if s.server.config.Catalog == nil {
+		return catalog.Definition{Namespaces: map[string]catalog.Namespace{}}
+	}
+	return s.server.config.Catalog.Snapshot()
+}
+
 func (s *session) snapshotNamespace(name string) (catalog.Namespace, bool) {
 	if s.server.config.Catalog == nil {
 		return catalog.Namespace{}, false
@@ -475,13 +553,17 @@ func (s *session) snapshotNamespace(name string) (catalog.Namespace, bool) {
 	return ns, ok
 }
 func (s *session) createDatabase(query string) error {
-	parts := strings.Fields(query)
-	if len(parts) < 3 {
+	lower := strings.ToLower(query)
+	keyword := "database "
+	if strings.HasPrefix(lower, "create schema ") {
+		keyword = "schema "
+	}
+	name, ok := singleIdentifier(strings.TrimSpace(query[len("create ")+len(keyword):]))
+	if !ok {
 		return sqlFailure{1064, "42000", "malformed CREATE DATABASE"}
 	}
-	name := identifier(parts[2])
-	if name == "" {
-		return sqlFailure{1064, "42000", "invalid database name"}
+	if strings.EqualFold(name, informationSchemaName) {
+		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
 	if s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
@@ -495,28 +577,36 @@ func (s *session) createTable(query string) error {
 	if s.database == "" {
 		return sqlFailure{1046, "3D000", "no database selected"}
 	}
+	if strings.EqualFold(s.database, informationSchemaName) {
+		return sqlFailure{1044, "42000", "information_schema is read-only"}
+	}
 	open := strings.Index(query, "(")
 	close := strings.LastIndex(query, ")")
 	if open < 0 || close <= open {
 		return sqlFailure{1064, "42000", "malformed CREATE TABLE"}
 	}
 	head := strings.TrimSpace(query[len("CREATE TABLE "):open])
-	name := identifier(strings.Fields(head)[0])
+	partsForTable, ok := splitQualifiedIdentifier(head)
+	if !ok || len(partsForTable) != 1 {
+		return sqlFailure{1064, "42000", "invalid table name"}
+	}
+	name := partsForTable[0]
 	parts := splitCSV(query[open+1 : close])
 	columns := make([]string, 0, len(parts))
 	columnTypes := make([]string, 0, len(parts))
 	for _, part := range parts {
-		fields := strings.Fields(strings.TrimSpace(part))
-		if len(fields) == 0 {
+		column, remainder, valid := consumeIdentifier(part)
+		if !valid {
 			return sqlFailure{1064, "42000", "invalid column definition"}
 		}
-		if strings.EqualFold(fields[0], "primary") || strings.EqualFold(fields[0], "constraint") {
+		fields := strings.Fields(remainder)
+		if strings.EqualFold(column, "primary") || strings.EqualFold(column, "constraint") {
 			continue
 		}
-		columns = append(columns, identifier(fields[0]))
-		columnType := "TEXT"
-		if len(fields) > 1 {
-			columnType = strings.ToUpper(fields[1])
+		columns = append(columns, column)
+		columnType := ""
+		if len(fields) > 0 {
+			columnType = strings.ToUpper(fields[0])
 		}
 		columnTypes = append(columnTypes, columnType)
 	}
@@ -536,12 +626,18 @@ func (s *session) showCreateDatabase(query string) (*queryResult, error) {
 	} else {
 		name = strings.TrimSpace(name[len("SHOW CREATE SCHEMA "):])
 	}
-	name = identifier(name)
+	name, ok := singleIdentifier(name)
+	if !ok {
+		return nil, sqlFailure{1064, "42000", "invalid database name"}
+	}
+	if strings.EqualFold(name, informationSchemaName) {
+		return nil, sqlFailure{1044, "42000", "information_schema is read-only"}
+	}
 	if name == "" || s.server.config.Catalog == nil {
 		return nil, sqlFailure{1049, "42000", "unknown database"}
 	}
 	key := strings.ToLower(name)
-	namespace, ok := s.server.config.Catalog.Snapshot().Namespaces[key]
+	namespace, ok := s.metadataDefinition().Namespaces[key]
 	if !ok {
 		return nil, sqlFailure{1049, "42000", "unknown database '" + name + "'"}
 	}
@@ -557,14 +653,23 @@ func (s *session) showCreateDatabase(query string) (*queryResult, error) {
 func (s *session) showCreateTable(query string) (*queryResult, error) {
 	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
 	namespaceName, tableName := s.database, target
-	if dot := strings.LastIndex(target, "."); dot >= 0 {
-		namespaceName, tableName = target[:dot], target[dot+1:]
+	parts, valid := splitQualifiedIdentifier(target)
+	if !valid || len(parts) > 2 {
+		return nil, sqlFailure{1064, "42000", "invalid table name"}
 	}
-	namespaceName, tableName = identifier(namespaceName), identifier(tableName)
+	if len(parts) == 2 {
+		namespaceName, tableName = parts[0], parts[1]
+	} else if len(parts) == 1 {
+		tableName = parts[0]
+	}
+	namespaceName = identifier(namespaceName)
 	if namespaceName == "" {
 		return nil, sqlFailure{1046, "3D000", "no database selected"}
 	}
-	namespace, ok := s.snapshotNamespace(namespaceName)
+	if strings.EqualFold(namespaceName, informationSchemaName) {
+		return nil, sqlFailure{1044, "42000", "information_schema definitions are virtual"}
+	}
+	namespace, ok := s.metadataDefinition().Namespaces[strings.ToLower(namespaceName)]
 	if !ok {
 		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
 	}
@@ -575,11 +680,14 @@ func (s *session) showCreateTable(query string) (*queryResult, error) {
 	if table.Name == "" {
 		table.Name = strings.ToLower(tableName)
 	}
-	definition := canonicalCreateTable(table)
+	definition, err := canonicalCreateTable(table)
+	if err != nil {
+		return nil, sqlFailure{1105, "HY000", err.Error()}
+	}
 	return &queryResult{columns: []string{"Table", "Create Table"}, rows: [][]string{{table.Name, definition}}}, nil
 }
 
-func canonicalCreateTable(table catalog.Table) string {
+func canonicalCreateTable(table catalog.Table) (string, error) {
 	var definition strings.Builder
 	definition.WriteString("CREATE TABLE ")
 	definition.WriteString(quoteIdentifier(table.Name))
@@ -591,14 +699,14 @@ func canonicalCreateTable(table catalog.Table) string {
 		definition.WriteString("  ")
 		definition.WriteString(quoteIdentifier(column))
 		definition.WriteString(" ")
-		columnType := "TEXT"
-		if index < len(table.ColumnTypes) && table.ColumnTypes[index] != "" {
-			columnType = table.ColumnTypes[index]
+		columnType, known := table.ColumnType(index)
+		if !known {
+			return "", fmt.Errorf("canonical DDL unavailable: type for column %q is unknown", column)
 		}
 		definition.WriteString(columnType)
 	}
 	definition.WriteString("\n)")
-	return definition.String()
+	return definition.String(), nil
 }
 
 func quoteIdentifier(value string) string {
@@ -607,6 +715,9 @@ func quoteIdentifier(value string) string {
 func (s *session) insert(query string) error {
 	if s.database == "" {
 		return sqlFailure{1046, "3D000", "no database selected"}
+	}
+	if strings.EqualFold(s.database, informationSchemaName) {
+		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
 	rest := strings.TrimSpace(query[len("INSERT INTO "):])
 	valuesAt := strings.Index(strings.ToLower(rest), "values")
@@ -640,6 +751,9 @@ func (s *session) selectQuery(query string) (*queryResult, error) {
 	if from := strings.Index(lower, " from "); from >= 0 {
 		projection := strings.TrimSpace(expression[:from])
 		source := strings.TrimSpace(expression[from+6:])
+		if strings.HasPrefix(strings.ToLower(source), informationSchemaName+".") || strings.HasPrefix(strings.ToLower(source), "`information_schema`.") {
+			return s.selectInformationSchema(query)
+		}
 		tableName := identifier(strings.Fields(source)[0])
 		ns, ok := s.snapshotNamespace(s.database)
 		if !ok {
@@ -652,13 +766,180 @@ func (s *session) selectQuery(query string) (*queryResult, error) {
 		if projection != "*" {
 			return nil, sqlFailure{1064, "42000", "only SELECT * is supported for tables"}
 		}
-		return &queryResult{table.Columns, table.Rows}, nil
+		return &queryResult{columns: table.Columns, rows: table.Rows}, nil
 	}
 	value := scalar(expression)
 	if value == "" && !strings.Contains(expression, "''") {
 		return nil, sqlFailure{1064, "42000", "unsupported expression"}
 	}
-	return &queryResult{[]string{expression}, [][]string{{value}}}, nil
+	return &queryResult{columns: []string{expression}, rows: [][]string{{value}}}, nil
+}
+
+func (s *session) selectInformationSchema(query string) (*queryResult, error) {
+	expression := strings.TrimSpace(query[len("SELECT "):])
+	lower := strings.ToLower(expression)
+	from := strings.Index(lower, " from ")
+	if from < 0 {
+		return nil, sqlFailure{1064, "42000", "information_schema queries require a FROM clause"}
+	}
+	projectionText := strings.TrimSpace(expression[:from])
+	sourceText := strings.TrimSpace(expression[from+6:])
+	parts, ok := splitQualifiedIdentifier(sourceText)
+	if !ok || len(parts) != 2 || !strings.EqualFold(parts[0], informationSchemaName) {
+		return nil, sqlFailure{1105, "HY000", "unsupported information_schema source; supported views are schemata, tables, and columns"}
+	}
+	view, ok := findInformationSchemaView(parts[1])
+	if !ok {
+		return nil, sqlFailure{1105, "HY000", "unsupported information_schema view '" + parts[1] + "'"}
+	}
+
+	projection := make([]int, 0, len(view.columns))
+	if projectionText == "*" {
+		for index := range view.columns {
+			projection = append(projection, index)
+		}
+	} else {
+		for _, item := range splitCSV(projectionText) {
+			name, valid := singleIdentifier(item)
+			if !valid {
+				return nil, sqlFailure{1064, "42000", "unsupported information_schema projection"}
+			}
+			index := -1
+			for candidate, column := range view.columns {
+				if strings.EqualFold(column.name, name) {
+					index = candidate
+					break
+				}
+			}
+			if index < 0 {
+				return nil, sqlFailure{1054, "42S22", "unknown information_schema column '" + name + "'"}
+			}
+			projection = append(projection, index)
+		}
+	}
+	if len(projection) == 0 {
+		return nil, sqlFailure{1064, "42000", "empty information_schema projection"}
+	}
+	if strings.TrimSpace(sourceText) != sourceText || strings.ContainsAny(sourceText, " \t\r\n") {
+		return nil, sqlFailure{1105, "HY000", "information_schema aliases and clauses are unsupported"}
+	}
+
+	rows := informationSchemaRows(view.name, s.metadataDefinition())
+	columns := make([]string, len(projection))
+	resultRows := make([][]string, len(rows))
+	resultNulls := make([][]bool, len(rows))
+	for resultIndex, sourceIndex := range projection {
+		columns[resultIndex] = view.columns[sourceIndex].name
+	}
+	for rowIndex, row := range rows {
+		resultRows[rowIndex] = make([]string, len(projection))
+		resultNulls[rowIndex] = make([]bool, len(projection))
+		for resultIndex, sourceIndex := range projection {
+			resultRows[rowIndex][resultIndex] = row[sourceIndex].value
+			resultNulls[rowIndex][resultIndex] = row[sourceIndex].null
+		}
+	}
+	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls}, nil
+}
+
+type metadataValue struct {
+	value string
+	null  bool
+}
+
+func findInformationSchemaView(name string) (informationSchemaView, bool) {
+	for _, view := range informationSchemaViews {
+		if strings.EqualFold(view.name, name) {
+			return view, true
+		}
+	}
+	return informationSchemaView{}, false
+}
+
+func informationSchemaRows(viewName string, definition catalog.Definition) [][]metadataValue {
+	rows := make([][]metadataValue, 0)
+	switch viewName {
+	case "schemata":
+		rows = append(rows, []metadataValue{{value: informationSchemaName}})
+		for _, namespace := range sortedNamespaces(definition) {
+			rows = append(rows, []metadataValue{{value: namespace.Name}})
+		}
+	case "tables":
+		for _, virtualView := range informationSchemaViews {
+			rows = append(rows, []metadataValue{{value: informationSchemaName}, {value: virtualView.name}, {value: "SYSTEM VIEW"}})
+		}
+		for _, namespace := range sortedNamespaces(definition) {
+			for _, table := range sortedTables(namespace) {
+				rows = append(rows, []metadataValue{{value: namespace.Name}, {value: table.Name}, {value: "BASE TABLE"}})
+			}
+		}
+	case "columns":
+		for _, virtualView := range informationSchemaViews {
+			for index, column := range virtualView.columns {
+				rows = append(rows, []metadataValue{
+					{value: informationSchemaName}, {value: virtualView.name}, {value: column.name},
+					{value: strconv.Itoa(index + 1)}, {value: baseType(column.typeName)}, {value: column.typeName},
+				})
+			}
+		}
+		for _, namespace := range sortedNamespaces(definition) {
+			for _, table := range sortedTables(namespace) {
+				for index, column := range table.Columns {
+					dataType, columnType := informationSchemaType(table, index)
+					rows = append(rows, []metadataValue{
+						{value: namespace.Name}, {value: table.Name}, {value: column}, {value: strconv.Itoa(index + 1)},
+						dataType, columnType,
+					})
+				}
+			}
+		}
+	}
+	return rows
+}
+
+func informationSchemaType(table catalog.Table, index int) (metadataValue, metadataValue) {
+	typeName, known := table.ColumnType(index)
+	if !known {
+		return metadataValue{null: true}, metadataValue{null: true}
+	}
+	return metadataValue{value: baseType(typeName)}, metadataValue{value: typeName}
+}
+
+func baseType(typeName string) string {
+	base := typeName
+	if open := strings.IndexByte(base, '('); open >= 0 {
+		base = base[:open]
+	}
+	return strings.ToLower(strings.TrimSpace(base))
+}
+
+func sortedNamespaces(definition catalog.Definition) []catalog.Namespace {
+	namespaces := make([]catalog.Namespace, 0, len(definition.Namespaces))
+	for key, namespace := range definition.Namespaces {
+		if strings.EqualFold(key, informationSchemaName) {
+			continue
+		}
+		if namespace.Name == "" {
+			namespace.Name = key
+		}
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Slice(namespaces, func(i, j int) bool {
+		return strings.ToLower(namespaces[i].Name) < strings.ToLower(namespaces[j].Name)
+	})
+	return namespaces
+}
+
+func sortedTables(namespace catalog.Namespace) []catalog.Table {
+	tables := make([]catalog.Table, 0, len(namespace.Tables))
+	for key, table := range namespace.Tables {
+		if table.Name == "" {
+			table.Name = key
+		}
+		tables = append(tables, table)
+	}
+	sort.Slice(tables, func(i, j int) bool { return strings.ToLower(tables[i].Name) < strings.ToLower(tables[j].Name) })
+	return tables
 }
 
 func (s *session) prepare(connection net.Conn, sequence byte, query string) error {
@@ -749,7 +1030,113 @@ func preparedValues(payload []byte, count int) ([]string, error) {
 	return values, nil
 }
 
-func identifier(value string) string { return strings.Trim(strings.TrimSpace(value), "`") }
+func identifier(value string) string {
+	name, ok := singleIdentifier(value)
+	if !ok {
+		return ""
+	}
+	return name
+}
+
+func singleIdentifier(value string) (string, bool) {
+	parts, ok := splitQualifiedIdentifier(value)
+	return firstPart(parts, ok)
+}
+
+func firstPart(parts []string, ok bool) (string, bool) {
+	if !ok || len(parts) != 1 || parts[0] == "" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+// splitQualifiedIdentifier parses MySQL-style backtick escaping while
+// keeping dots inside quoted identifiers. It intentionally accepts only a
+// complete identifier list, so trailing SQL cannot be mistaken for a name.
+func splitQualifiedIdentifier(value string) ([]string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, false
+	}
+	parts := make([]string, 0, 2)
+	for len(value) > 0 {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, false
+		}
+		if value[0] == '`' {
+			var name strings.Builder
+			closed := false
+			for index := 1; index < len(value); index++ {
+				if value[index] != '`' {
+					name.WriteByte(value[index])
+					continue
+				}
+				if index+1 < len(value) && value[index+1] == '`' {
+					name.WriteByte('`')
+					index++
+					continue
+				}
+				value = value[index+1:]
+				closed = true
+				break
+			}
+			if !closed {
+				return nil, false
+			}
+			parts = append(parts, name.String())
+		} else {
+			end := strings.IndexByte(value, '.')
+			if end < 0 {
+				parts = append(parts, strings.TrimSpace(value))
+				return parts, parts[len(parts)-1] != ""
+			}
+			name := strings.TrimSpace(value[:end])
+			if name == "" || strings.ContainsAny(name, " \t\r\n`") {
+				return nil, false
+			}
+			parts = append(parts, name)
+			value = value[end+1:]
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return parts, true
+		}
+		if value[0] != '.' {
+			return nil, false
+		}
+		value = value[1:]
+	}
+	return parts, len(parts) > 0
+}
+
+func consumeIdentifier(value string) (string, string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	if value[0] == '`' {
+		for index := 1; index < len(value); index++ {
+			if value[index] != '`' {
+				continue
+			}
+			if index+1 < len(value) && value[index+1] == '`' {
+				index++
+				continue
+			}
+			name, ok := singleIdentifier(value[:index+1])
+			return name, value[index+1:], ok
+		}
+		return "", "", false
+	}
+	end := 0
+	for end < len(value) && value[end] != ' ' && value[end] != '\t' && value[end] != '\r' && value[end] != '\n' {
+		end++
+	}
+	name, ok := singleIdentifier(value[:end])
+	return name, value[end:], ok
+}
 func scalar(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
@@ -787,7 +1174,7 @@ func splitCSV(value string) []string {
 	return result
 }
 
-func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]string) error {
+func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool) error {
 	if err := writePacket(connection, sequence, lengthEncodedInt(len(columns))); err != nil {
 		return err
 	}
@@ -801,9 +1188,13 @@ func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]
 		return err
 	}
 	sequence++
-	for _, row := range rows {
+	for rowIndex, row := range rows {
 		payload := []byte{}
-		for _, value := range row {
+		for columnIndex, value := range row {
+			if rowIndex < len(nulls) && columnIndex < len(nulls[rowIndex]) && nulls[rowIndex][columnIndex] {
+				payload = append(payload, 0xfb)
+				continue
+			}
 			payload = append(payload, lengthEncodedString(value)...)
 		}
 		if err := writePacket(connection, sequence, payload); err != nil {
