@@ -1387,6 +1387,9 @@ func (s *session) preparedValues(payload []byte, statement *preparedStatement) (
 	if len(payload) < 10 {
 		return nil, errors.New("malformed prepared statement")
 	}
+	if payload[5] != 0 || binary.LittleEndian.Uint32(payload[6:10]) != 1 {
+		return nil, errors.New("unsupported prepared statement execute header")
+	}
 	if count == 0 {
 		if len(payload) != 10 {
 			return nil, errors.New("malformed prepared statement trailing data")
@@ -1400,6 +1403,9 @@ func (s *session) preparedValues(payload []byte, statement *preparedStatement) (
 	offset := 10 + nullBytes
 	newTypes := payload[offset]
 	offset++
+	if newTypes > 1 {
+		return nil, errors.New("malformed prepared statement type flag")
+	}
 	if newTypes != 0 {
 		if len(payload[offset:]) < count*2 {
 			return nil, errors.New("malformed prepared statement types")
@@ -1487,7 +1493,7 @@ func readPreparedValue(payload []byte, offset int, typ preparedParameterType) (s
 		return strconv.FormatFloat(math.Float64frombits(binary.LittleEndian.Uint64(payload[offset:offset+8])), 'g', -1, 64), offset + 8, nil
 	case mysqlTypeVarchar, mysqlTypeVarString, 0xfe, 0xfc, 0xfb, 0xfa, 0xf9, 0xf5, 0xf6:
 		raw, next, ok := readLengthEncoded(payload, offset)
-		if !ok {
+		if !ok || raw == nil {
 			return "", offset, errors.New("malformed string prepared parameter")
 		}
 		return quote(string(raw)), next, nil
@@ -1526,6 +1532,7 @@ func (s *session) resetPrepared(payload []byte) error {
 		return sqlFailure{1243, "HY000", "unknown prepared statement handler"}
 	}
 	s.clearLongData(statement)
+	statement.types = nil
 	return nil
 }
 

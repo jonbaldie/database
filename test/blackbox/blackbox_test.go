@@ -405,7 +405,7 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	if text.err != "" || statement.err != "" {
 		t.Fatalf("text=%#v prepare=%#v", text, statement)
 	}
-	malformed := []byte{0x17, byte(statement.id), byte(statement.id >> 8), byte(statement.id >> 16), byte(statement.id >> 24), 0, 0, 0, 0, 0, 0}
+	malformed := []byte{0x17, byte(statement.id), byte(statement.id >> 8), byte(statement.id >> 16), byte(statement.id >> 24), 0, 1, 0, 0, 0, 0}
 	writeWirePacket(t, client.conn, 0, malformed)
 	assertWireError(t, readWirePacket(t, client.conn), 1210, "HY000")
 	binaryResult := client.executePrepared(statement.id)
@@ -1122,13 +1122,13 @@ func (c *wireClient) prepare(query string) preparedStatement {
 }
 
 func (c *wireClient) executePrepared(id uint32) wireResult {
-	payload := []byte{0x17, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), 0, 0, 0, 0, 0}
+	payload := []byte{0x17, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), 0, 1, 0, 0, 0}
 	writeWirePacket(c.t, c.conn, 0, payload)
 	return c.readPreparedResult()
 }
 
 func (c *wireClient) executePreparedValues(id uint32, parameters []preparedParameter) wireResult {
-	payload := []byte{0x17, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), 0, 0, 0, 0, 0}
+	payload := []byte{0x17, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), 0, 1, 0, 0, 0}
 	nullBytes := make([]byte, (len(parameters)+7)/8)
 	for index, parameter := range parameters {
 		if parameter.null {
