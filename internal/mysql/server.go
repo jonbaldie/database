@@ -1356,26 +1356,29 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	if err := writeBoundedPacket(connection, sequence, response, maximum); err != nil {
 		return err
 	}
+	sequence = nextPacketSequence(sequence, response)
 	if parameters > 0 {
 		for i := 0; i < parameters; i++ {
-			if err := writeBoundedPacket(connection, sequence+byte(i)+1, columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar}), maximum); err != nil {
+			payload := columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar})
+			if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
 				return err
 			}
+			sequence = nextPacketSequence(sequence, payload)
 		}
-		if err := writePacket(connection, sequence+byte(parameters)+1, eofPacket()); err != nil {
+		if err := writeBoundedPacket(connection, sequence, eofPacket(), maximum); err != nil {
 			return err
 		}
-		sequence += byte(parameters) + 2
-	} else {
-		sequence++
+		sequence = nextPacketSequence(sequence, eofPacket())
 	}
-	for index, definition := range metadata {
-		if err := writeBoundedPacket(connection, sequence+byte(index), columnDefinition(definition), maximum); err != nil {
+	for _, definition := range metadata {
+		payload := columnDefinition(definition)
+		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
 			return err
 		}
+		sequence = nextPacketSequence(sequence, payload)
 	}
 	if len(metadata) > 0 {
-		return writePacket(connection, sequence+byte(len(metadata)), eofPacket())
+		return writeBoundedPacket(connection, sequence, eofPacket(), maximum)
 	}
 	return nil
 }
@@ -1383,15 +1386,7 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
-		lower := strings.ToLower(query)
-		valid := lower == "begin" || lower == "start transaction" || lower == "commit" || lower == "rollback" ||
-			strings.HasPrefix(lower, "savepoint ") || strings.HasPrefix(lower, "rollback to savepoint ") || strings.HasPrefix(lower, "release savepoint ") ||
-			strings.HasPrefix(lower, "use ") || strings.HasPrefix(lower, "create database ") || strings.HasPrefix(lower, "create schema ") ||
-			strings.HasPrefix(lower, "create table ") || strings.HasPrefix(lower, "insert into ")
-		if !valid {
-			return nil, sqlFailure{1064, "42000", "unsupported prepared statement"}
-		}
-		return nil, nil
+		return nil, sqlFailure{1064, "42000", "prepared statements support SELECT only"}
 	}
 	expression := strings.TrimSpace(query[len("select "):])
 	parameters := make([]string, parameterCount(query))
@@ -1460,7 +1455,20 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
+	if len(statement.types) == 1 && parameterCount(statement.query) == 1 && len(result.metadata) == 1 {
+		result.metadata[0] = preparedResultMetadata(result.metadata[0], statement.types[0])
+	}
 	return writeBinaryResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
+}
+
+func preparedResultMetadata(metadata columnMetadata, parameter preparedParameterType) columnMetadata {
+	switch parameter.typ {
+	case 0xfc, 0xfb, 0xfa, 0xf9:
+		metadata.characterSet = mysqlCharsetBinary
+		metadata.typ = 0xfc
+		metadata.flags = mysqlBinaryFlag
+	}
+	return metadata
 }
 
 func (s *session) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
@@ -1615,7 +1623,6 @@ func (s *session) resetPrepared(payload []byte) error {
 		return sqlFailure{1243, "HY000", "unknown prepared statement handler"}
 	}
 	s.clearLongData(statement)
-	statement.types = nil
 	return nil
 }
 
@@ -2086,6 +2093,7 @@ func readPacket(r io.Reader, maximum int64) (byte, []byte, error) {
 		} else if header[3] != expected {
 			return 0, nil, errors.New("packet continuation sequence mismatch")
 		}
+		sequence = header[3]
 		expected++
 		length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
 		if int64(len(payload))+int64(length) > maximum {
