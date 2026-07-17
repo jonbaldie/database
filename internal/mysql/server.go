@@ -2,7 +2,6 @@
 package mysql
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -26,20 +25,24 @@ import (
 	"github.com/jonbaldie/database/internal/catalog"
 )
 
+// maximumPendingConnections is a private handshake-resource safeguard. It is
+// intentionally not part of the server configuration registry or public
+// compatibility profile; MaxConnections remains the session ceiling.
 const (
-	clientLongPassword     = 1
-	clientFoundRows        = 1 << 1
-	clientLongFlag         = 1 << 2
-	clientConnectWithDB    = 1 << 3
-	clientLocalFiles       = 1 << 7
-	clientProtocol41       = 1 << 9
-	clientTransactions     = 1 << 13
-	clientSecureConnection = 1 << 15
-	clientMultiResults     = 1 << 17
-	clientPluginAuth       = 1 << 19
-	clientConnectAttrs     = 1 << 20
-	clientPluginLenencData = 1 << 21
-	clientSSL              = 1 << 11
+	maximumPendingConnections = 16
+	clientLongPassword        = 1
+	clientFoundRows           = 1 << 1
+	clientLongFlag            = 1 << 2
+	clientConnectWithDB       = 1 << 3
+	clientLocalFiles          = 1 << 7
+	clientProtocol41          = 1 << 9
+	clientTransactions        = 1 << 13
+	clientSecureConnection    = 1 << 15
+	clientMultiResults        = 1 << 17
+	clientPluginAuth          = 1 << 19
+	clientConnectAttrs        = 1 << 20
+	clientPluginLenencData    = 1 << 21
+	clientSSL                 = 1 << 11
 
 	mysqlCharsetUTF8MB4GeneralCI uint16 = 45
 	mysqlCharsetBinary           uint16 = 63
@@ -52,11 +55,20 @@ const (
 	mysqlTypeDouble              byte   = 0x05
 	mysqlTypeVarchar             byte   = 0x0f
 	mysqlTypeVarString           byte   = 0xfd
+	mysqlTypeString              byte   = 0xfe
+	mysqlTypeBlob                byte   = 0xfc
+	mysqlTypeTinyBlob            byte   = 0xf9
+	mysqlTypeMediumBlob          byte   = 0xfa
+	mysqlTypeLongBlob            byte   = 0xfb
+	mysqlTypeJSON                byte   = 0xf5
+	mysqlTypeNewDecimal          byte   = 0xf6
 	mysqlNotNullFlag             uint16 = 1
 	mysqlBinaryFlag              uint16 = 1 << 7
 	mysqlUnsignedFlag            uint16 = 1 << 5
 	maxPreparedParameters               = 65535
 	maxPreparedLongDataBytes            = 16 * 1024 * 1024
+	preparedTypesUnchanged       byte   = 0
+	preparedTypesSupplied        byte   = 1
 )
 
 type Config struct {
@@ -67,21 +79,32 @@ type Config struct {
 	TLSCertFile          string
 	TLSKeyFile           string
 	MaxPreparedStmtCount int
+	MaxConnections       int
 	MaxAllowedPacket     int64
 }
 
 type Server struct {
-	Listener  net.Listener
-	config    Config
-	tlsConfig *tls.Config
-	rsaKey    *rsa.PrivateKey
+	Listener    net.Listener
+	config      Config
+	connections *connectionRegistry
+	auth        authenticator
+}
 
+// connectionRegistry owns admission and graceful-drain accounting. It is kept
+// separate from wire handling so transport lifecycle can evolve independently
+// of command and SQL compatibility work.
+type connectionRegistry struct {
 	mu            sync.Mutex
 	stopping      bool
 	connections   map[net.Conn]struct{}
 	connectionW   sync.WaitGroup
 	statementW    sync.WaitGroup
+	pendingMax    int
+	pendingCount  int
+	sessionMax    int
+	sessionCount  int
 	preparedCount int
+	preparedLimit int
 }
 
 // New retains a small unauthenticated protocol probe seam for callers that do
@@ -95,35 +118,63 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	config = normalizedConfig(config)
+	if err := validateTLSConfig(config); err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	auth, err := newAuthenticator(config)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
+	}
+	registry := &connectionRegistry{
+		connections:   make(map[net.Conn]struct{}),
+		pendingMax:    maximumPendingConnections,
+		sessionMax:    config.MaxConnections,
+		preparedLimit: config.MaxPreparedStmtCount,
+	}
+	return &Server{Listener: listener, config: config, connections: registry, auth: auth}, nil
+}
+
+func normalizedConfig(config Config) Config {
 	if config.Version == "" {
 		config.Version = "0.1.0-dev"
 	}
 	if config.MaxPreparedStmtCount == 0 {
 		config.MaxPreparedStmtCount = 4096
 	}
+	if config.MaxConnections == 0 {
+		config.MaxConnections = 100
+	}
 	if config.MaxAllowedPacket == 0 {
 		config.MaxAllowedPacket = 64 * 1024 * 1024
 	}
+	return config
+}
+
+func validateTLSConfig(config Config) error {
 	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
-		_ = listener.Close()
-		return nil, errors.New("TLS certificate and key must be provided together")
+		return errors.New("TLS certificate and key must be provided together")
 	}
-	server := &Server{Listener: listener, config: config, connections: make(map[net.Conn]struct{})}
+	return nil
+}
+
+func newAuthenticator(config Config) (authenticator, error) {
+	auth := authenticator{config: config}
 	if config.TLSCertFile != "" {
 		certificate, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
 		if err != nil {
-			_ = listener.Close()
-			return nil, fmt.Errorf("load TLS certificate: %w", err)
+			return authenticator{}, fmt.Errorf("load TLS certificate: %w", err)
 		}
-		server.tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
+		auth.tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		_ = listener.Close()
-		return nil, fmt.Errorf("generate authentication key: %w", err)
+		return authenticator{}, fmt.Errorf("generate authentication key: %w", err)
 	}
-	server.rsaKey = key
-	return server, nil
+	auth.rsaKey = key
+	return auth, nil
 }
 
 func (s *Server) Serve() {
@@ -132,11 +183,11 @@ func (s *Server) Serve() {
 		if err != nil {
 			return
 		}
-		if !s.registerConnection(connection) {
+		if !s.connections.register(connection) {
 			_ = connection.Close()
 			continue
 		}
-		go s.serveConnection(connection)
+		go newConversation(s, connection).serve()
 	}
 }
 
@@ -144,89 +195,110 @@ func (s *Server) Serve() {
 // then closes sessions. Closing a transaction-owning session triggers its
 // rollback before this method returns.
 func (s *Server) CloseGracefully() error {
-	s.mu.Lock()
-	if s.stopping {
-		s.mu.Unlock()
-		return nil
-	}
-	s.stopping = true
-	listener := s.Listener
-	s.mu.Unlock()
-
-	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		return err
-	}
-	s.statementW.Wait()
-
-	s.mu.Lock()
-	connections := make([]net.Conn, 0, len(s.connections))
-	for connection := range s.connections {
-		connections = append(connections, connection)
-	}
-	s.mu.Unlock()
-	for _, connection := range connections {
-		_ = connection.Close()
-	}
-	s.connectionW.Wait()
-	return nil
+	return s.connections.closeGracefully(s.Listener)
 }
 
 // Close retains the listener-close seam for callers that do not own the
 // lifecycle. Database shutdown uses CloseGracefully.
 func (s *Server) Close() error { return s.Listener.Close() }
 
-func (s *Server) registerConnection(connection net.Conn) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopping {
+func (r *connectionRegistry) register(connection net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopping || r.pendingCount >= r.pendingMax {
 		return false
 	}
-	s.connections[connection] = struct{}{}
-	s.connectionW.Add(1)
+	r.connections[connection] = struct{}{}
+	r.pendingCount++
+	r.connectionW.Add(1)
 	return true
 }
 
-func (s *Server) unregisterConnection(connection net.Conn) {
-	s.mu.Lock()
-	delete(s.connections, connection)
-	s.mu.Unlock()
-	s.connectionW.Done()
+func (r *connectionRegistry) unregister(connection net.Conn, admitted bool) {
+	r.mu.Lock()
+	delete(r.connections, connection)
+	if admitted && r.sessionCount > 0 {
+		r.sessionCount--
+	}
+	if !admitted && r.pendingCount > 0 {
+		r.pendingCount--
+	}
+	r.mu.Unlock()
+	r.connectionW.Done()
 }
 
-func (s *Server) beginStatement() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopping {
+func (r *connectionRegistry) admitSession() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopping || r.sessionCount >= r.sessionMax {
 		return false
 	}
-	s.statementW.Add(1)
+	if r.pendingCount > 0 {
+		r.pendingCount--
+	}
+	r.sessionCount++
 	return true
 }
 
-func (s *Server) endStatement() { s.statementW.Done() }
-
-func (s *Server) acceptingWork() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return !s.stopping
-}
-
-func (s *Server) reservePreparedStatement() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.preparedCount >= s.config.MaxPreparedStmtCount {
+func (r *connectionRegistry) beginStatement() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopping {
 		return false
 	}
-	s.preparedCount++
+	r.statementW.Add(1)
 	return true
 }
 
-func (s *Server) releasePreparedStatement() {
-	s.mu.Lock()
-	if s.preparedCount > 0 {
-		s.preparedCount--
+func (r *connectionRegistry) endStatement() { r.statementW.Done() }
+
+func (r *connectionRegistry) acceptingWork() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.stopping
+}
+
+func (r *connectionRegistry) reservePreparedStatement() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.preparedCount >= r.preparedLimit {
+		return false
 	}
-	s.mu.Unlock()
+	r.preparedCount++
+	return true
+}
+
+func (r *connectionRegistry) releasePreparedStatement() {
+	r.mu.Lock()
+	if r.preparedCount > 0 {
+		r.preparedCount--
+	}
+	r.mu.Unlock()
+}
+
+func (r *connectionRegistry) closeGracefully(listener net.Listener) error {
+	r.mu.Lock()
+	if r.stopping {
+		r.mu.Unlock()
+		return nil
+	}
+	r.stopping = true
+	r.mu.Unlock()
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	r.statementW.Wait()
+	r.mu.Lock()
+	connections := make([]net.Conn, 0, len(r.connections))
+	for connection := range r.connections {
+		connections = append(connections, connection)
+	}
+	r.mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	r.connectionW.Wait()
+	return nil
 }
 
 type session struct {
@@ -254,259 +326,58 @@ type preparedParameterType struct {
 	unsigned bool
 }
 
-func (s *Server) serveConnection(connection net.Conn) {
-	defer connection.Close()
-	defer s.unregisterConnection(connection)
-	var current *session
-	defer func() {
-		if current != nil && current.transaction && s.config.Catalog != nil {
-			_ = s.config.Catalog.Replace(current.transactionSnapshot)
-		}
-		if current != nil {
-			current.closeAllPrepared()
-		}
-	}()
-	nonce := makeNonce()
-	if err := writePacket(connection, 0, handshake(s.config.Version, nonce, s.tlsConfig != nil)); err != nil {
-		return
-	}
-	authentication, err := s.authenticate(connection, nonce)
-	if err != nil {
-		_ = writePacket(authentication.connection, authentication.nextSequence, mysqlError(err))
-		return
-	}
-	connection = authentication.connection
-	if err := writePacket(connection, authentication.nextSequence, okPacket()); err != nil {
-		return
-	}
-	session := &session{server: s, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]*preparedStatement{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
-	current = session
-	for {
-		sequence, payload, err := readPacket(connection, s.config.MaxAllowedPacket)
-		if err != nil || len(payload) == 0 {
-			return
-		}
-		if !s.acceptingWork() {
-			return
-		}
-		switch payload[0] {
-		case 0x01: // COM_QUIT
-			return
-		case 0x02: // COM_INIT_DB
-			session.useDatabase(string(payload[1:]))
-			if err := session.databaseExists(session.database); err != nil {
-				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
-					return
-				}
-				continue
-			}
-			if writePacket(connection, sequence+1, okPacket()); err != nil {
-				return
-			}
-		case 0x03: // COM_QUERY
-			if !s.beginStatement() {
-				return
-			}
-			err := session.writeQueryResult(connection, sequence+1, string(payload[1:]))
-			s.endStatement()
-			if err != nil {
-				return
-			}
-		case 0x0e: // COM_PING
-			if writePacket(connection, sequence+1, okPacket()) != nil {
-				return
-			}
-		case 0x16: // COM_STMT_PREPARE
-			if err := session.prepare(connection, sequence+1, string(payload[1:])); err != nil {
-				return
-			}
-		case 0x17: // COM_STMT_EXECUTE
-			if !s.beginStatement() {
-				return
-			}
-			err := session.executePrepared(connection, sequence+1, payload)
-			s.endStatement()
-			if err != nil {
-				return
-			}
-		case 0x19: // COM_STMT_CLOSE
-			if len(payload) != 5 {
-				if writePacket(connection, sequence+1, errorPacket(1210, "HY000", "malformed prepared statement close")) != nil {
-					return
-				}
-				continue
-			}
-			id := binary.LittleEndian.Uint32(payload[1:5])
-			session.closePrepared(id)
-		case 0x18: // COM_STMT_SEND_LONG_DATA
-			if err := session.sendLongData(payload); err != nil {
-				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
-					return
-				}
-			}
-		case 0x1a: // COM_STMT_RESET
-			if err := session.resetPrepared(payload); err != nil {
-				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
-					return
-				}
-				continue
-			}
-			if writePacket(connection, sequence+1, okPacket()) != nil {
-				return
-			}
-		case 0x1f: // COM_RESET_CONNECTION
-			if len(payload) != 1 {
-				if writePacket(connection, sequence+1, errorPacket(1210, "HY000", "malformed connection reset")) != nil {
-					return
-				}
-				continue
-			}
-			if err := session.resetConnection(); err != nil {
-				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
-					return
-				}
-				continue
-			}
-			if writePacket(connection, sequence+1, okPacket()) != nil {
-				return
-			}
-		default:
-			if writePacket(connection, sequence+1, errorPacket(1047, "08S01", "unsupported command")) != nil {
-				return
-			}
-		}
-	}
+// queryExecutor is the protocol-facing text-query adapter. Statement routing
+// lives in textStatementExecutor so the protocol seam is not also the SQL
+// language implementation.
+type queryExecutor struct{ statements textStatementExecutor }
+
+type textStatementExecutor struct{ *session }
+
+type transactionExecutor struct{ *session }
+
+type catalogExecutor struct{ *session }
+
+type databaseSelector struct{ *session }
+
+type relationExecutor struct{ *session }
+
+type informationSchemaExecutor struct{ *session }
+
+func newQueryExecutor(session *session) *queryExecutor {
+	return &queryExecutor{statements: textStatementExecutor{session}}
 }
+
+type preparedPreparation struct{ *session }
+
+type preparedExecution struct{ *session }
+
+// preparedLifecycle owns the session-bound prepared statement lifetime,
+// including long-data accumulation, reset, close, and quota release.
+type preparedLifecycle struct{ *session }
 
 type authenticationResult struct {
 	connection   net.Conn
-	username     string
+	accountName  string
 	database     string
 	nextSequence byte
 }
 
-func (s *Server) authenticate(connection net.Conn, nonce []byte) (authenticationResult, error) {
-	sequence, payload, err := readPacket(connection, s.config.MaxAllowedPacket)
-	if err != nil {
-		return authenticationResult{connection: connection, nextSequence: 2}, err
-	}
-	secure := false
-	if len(payload) == 32 && binary.LittleEndian.Uint32(payload[:4])&clientSSL != 0 {
-		if s.tlsConfig == nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "TLS capability is not supported"}
-		}
-		tlsConnection := tls.Server(connection, s.tlsConfig)
-		if err := tlsConnection.Handshake(); err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
-		}
-		connection = tlsConnection
-		sequence, payload, err = readPacket(connection, s.config.MaxAllowedPacket)
-		if err != nil {
-			return authenticationResult{connection: connection, nextSequence: 3}, err
-		}
-		secure = true
-	}
-	if len(payload) < 32 {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed handshake response"}
-	}
-	capabilities := binary.LittleEndian.Uint32(payload[:4])
-	if capabilities&^acceptedClientCapabilities(s.tlsConfig != nil) != 0 {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "unsupported client capabilities"}
-	}
-	if capabilities&clientProtocol41 == 0 || capabilities&clientSecureConnection == 0 || capabilities&clientPluginAuth == 0 {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "required protocol capabilities are missing"}
-	}
-	offset := 32
-	username, offset, ok := readNullString(payload, offset)
-	if !ok {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed username"}
-	}
-	var token []byte
-	if capabilities&clientPluginLenencData != 0 {
-		token, offset, ok = readLengthEncoded(payload, offset)
-	} else if capabilities&clientSecureConnection != 0 {
-		if offset >= len(payload) {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "missing authentication response"}
-		}
-		length := int(payload[offset])
-		offset++
-		if offset+length > len(payload) {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed authentication response"}
-		}
-		token, offset = payload[offset:offset+length], offset+length
-	} else {
-		token, offset = readNullBytes(payload, offset)
-		ok = token != nil
-	}
-	if !ok {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed authentication response"}
-	}
-	database := ""
-	if capabilities&clientConnectWithDB != 0 {
-		if databaseName, next, found := readNullString(payload, offset); found {
-			database = databaseName
-			offset = next
-		}
-	}
-	plugin, _, pluginOK := readNullString(payload, offset)
-	if !pluginOK || plugin != "caching_sha2_password" {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1251, "08004", "client does not support caching_sha2_password"}
-	}
-	if s.config.Username != "" && username != s.config.Username {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
-	}
-	if s.config.PasswordHash != "" && !validPasswordToken(token, nonce, s.config.PasswordHash) {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
-	}
-	if database != "" {
-		if err := s.databaseExists(database); err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
-		}
-	}
-	// Do not downgrade a full caching_sha2_password exchange to an accepted
-	// scramble. A secure channel receives the clear password only inside TLS;
-	// an insecure channel must request and use the server's RSA public key.
-	if err := writePacket(connection, sequence+1, []byte{0x01, 0x04}); err != nil {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
-	}
-	sequence, response, err := readPacket(connection, s.config.MaxAllowedPacket)
-	if err != nil {
-		return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
-	}
-	var password []byte
-	if secure {
-		password = response
-	} else {
-		if len(response) != 1 || response[0] != 0x02 {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "secure authentication exchange required"}
-		}
-		if err := writePacket(connection, sequence+1, publicKeyPacket(s.rsaKey)); err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
-		}
-		sequence, response, err = readPacket(connection, s.config.MaxAllowedPacket)
-		if err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
-		}
-		password, err = decryptPassword(s.rsaKey, response, nonce)
-		if err != nil {
-			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
-		}
-	}
-	password = bytes.TrimSuffix(password, []byte{0})
-	if !validPlainPassword(password, s.config.PasswordHash) {
-		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
-	}
-	return authenticationResult{connection: connection, username: username, database: database, nextSequence: sequence + 1}, nil
+// authenticator owns TLS negotiation and caching_sha2_password exchange. It
+// has no command-dispatch responsibility.
+type authenticator struct {
+	config    Config
+	tlsConfig *tls.Config
+	rsaKey    *rsa.PrivateKey
 }
 
-func (s *Server) databaseExists(name string) error {
+func (a authenticator) databaseExists(name string) error {
 	if strings.EqualFold(identifier(name), informationSchemaName) {
 		return nil
 	}
-	if s.config.Catalog == nil {
+	if a.config.Catalog == nil {
 		return nil
 	}
-	if _, ok := s.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]; !ok {
+	if _, ok := a.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]; !ok {
 		return sqlFailure{code: 1049, state: "42000", message: "unknown database '" + name + "'"}
 	}
 	return nil
@@ -675,7 +546,7 @@ var informationSchemaViews = []informationSchemaView{
 	},
 }
 
-func (s *session) writeQueryResult(connection net.Conn, sequence byte, query string) error {
+func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	result, err := s.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
@@ -683,173 +554,249 @@ func (s *session) writeQueryResult(connection net.Conn, sequence byte, query str
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
-	return writeResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
+	return writeResult(connection, sequence, result, s.statements.server.config.MaxAllowedPacket)
 }
 
-func (s *session) execute(query string) (*queryResult, error) {
+func (s *queryExecutor) execute(query string) (*queryResult, error) {
+	return s.statements.execute(query)
+}
+
+func (s *queryExecutor) useDatabase(name string) { s.statements.useDatabase(name) }
+
+func (s *queryExecutor) databaseExists(name string) error {
+	selector := databaseSelector{s.statements.session}
+	return selector.databaseExists(name)
+}
+
+func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
 	lower := strings.ToLower(query)
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
 	}
-	if lower == "begin" || lower == "start transaction" {
-		if s.server.config.Catalog != nil {
-			s.transactionSnapshot = s.server.config.Catalog.Snapshot()
-			s.transaction = true
+	for _, handler := range s.statementHandlers() {
+		result, handled, err := handler(query, lower)
+		if handled {
+			return result, err
 		}
-		return nil, nil
-	}
-	if lower == "commit" {
-		s.transaction = false
-		s.transactionSnapshot = catalog.Definition{}
-		return nil, nil
-	}
-	if strings.HasPrefix(lower, "savepoint ") {
-		if s.server.config.Catalog == nil {
-			return nil, sqlFailure{1105, "HY000", "database is not initialized"}
-		}
-		name := identifier(strings.TrimSpace(query[len("SAVEPOINT "):]))
-		s.savepoints[strings.ToLower(name)] = s.server.config.Catalog.Snapshot()
-		return nil, nil
-	}
-	if strings.HasPrefix(lower, "rollback to savepoint ") {
-		if s.server.config.Catalog == nil {
-			return nil, sqlFailure{1105, "HY000", "database is not initialized"}
-		}
-		name := identifier(strings.TrimSpace(query[len("ROLLBACK TO SAVEPOINT "):]))
-		snapshot, ok := s.savepoints[strings.ToLower(name)]
-		if !ok {
-			return nil, sqlFailure{1305, "42000", "savepoint does not exist"}
-		}
-		if err := s.server.config.Catalog.Replace(snapshot); err != nil {
-			return nil, sqlFailure{1105, "HY000", err.Error()}
-		}
-		return nil, nil
-	}
-	if strings.HasPrefix(lower, "release savepoint ") {
-		name := identifier(strings.TrimSpace(query[len("RELEASE SAVEPOINT "):]))
-		if _, ok := s.savepoints[strings.ToLower(name)]; !ok {
-			return nil, sqlFailure{1305, "42000", "savepoint does not exist"}
-		}
-		delete(s.savepoints, strings.ToLower(name))
-		return nil, nil
-	}
-	if lower == "rollback" {
-		if s.transaction && s.server.config.Catalog != nil {
-			if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
-				return nil, sqlFailure{1105, "HY000", err.Error()}
-			}
-		}
-		s.transaction = false
-		s.transactionSnapshot = catalog.Definition{}
-		return nil, nil
-	}
-	if strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset ") {
-		return nil, nil
-	}
-	if lower == "select current_date" || lower == "select current_date()" {
-		return &queryResult{columns: []string{"CURRENT_DATE"}, rows: [][]string{{"2026-07-17"}}}, nil
-	}
-	if lower == "select current_time" || lower == "select current_time()" {
-		return &queryResult{columns: []string{"CURRENT_TIME"}, rows: [][]string{{"00:00:00"}}}, nil
-	}
-	if lower == "select version()" || lower == "select @@version" {
-		return &queryResult{columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}}, nil
-	}
-	if lower == "select database()" {
-		return &queryResult{columns: []string{"DATABASE()"}, rows: [][]string{{s.database}}}, nil
-	}
-	if strings.HasPrefix(lower, "select ") && strings.Contains(lower, " from information_schema.") {
-		return s.selectInformationSchema(query)
-	}
-	if lower == "show databases" {
-		rows := make([][]string, 0)
-		if s.server.config.Catalog != nil {
-			namespaces := s.metadataDefinition().Namespaces
-			names := make([]string, 0, len(namespaces))
-			for key, namespace := range namespaces {
-				if strings.EqualFold(key, informationSchemaName) {
-					continue
-				}
-				name := namespace.Name
-				if name == "" {
-					name = key
-				}
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			for _, name := range names {
-				rows = append(rows, []string{name})
-			}
-			rows = append(rows, []string{informationSchemaName})
-		}
-		if s.server.config.Catalog == nil {
-			rows = append(rows, []string{informationSchemaName})
-		}
-		sort.Slice(rows, func(i, j int) bool { return rows[i][0] < rows[j][0] })
-		return &queryResult{columns: []string{"Database"}, rows: rows}, nil
-	}
-	if strings.HasPrefix(lower, "show create database ") || strings.HasPrefix(lower, "show create schema ") {
-		return s.showCreateDatabase(query)
-	}
-	if strings.HasPrefix(lower, "show create table ") {
-		return s.showCreateTable(query)
-	}
-	if lower == "show tables" {
-		if s.database == "" {
-			return nil, sqlFailure{1046, "3D000", "no database selected"}
-		}
-		if strings.EqualFold(s.database, informationSchemaName) {
-			rows := make([][]string, 0, len(informationSchemaViews))
-			for _, view := range informationSchemaViews {
-				rows = append(rows, []string{view.name})
-			}
-			return &queryResult{columns: []string{"Tables_in_" + informationSchemaName}, rows: rows}, nil
-		}
-		definition := s.metadataDefinition()
-		ns, ok := definition.Namespaces[strings.ToLower(s.database)]
-		if !ok {
-			return nil, sqlFailure{1049, "42000", "unknown database"}
-		}
-		rows := make([][]string, 0, len(ns.Tables))
-		names := make([]string, 0, len(ns.Tables))
-		for key, table := range ns.Tables {
-			name := table.Name
-			if name == "" {
-				name = key
-			}
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			rows = append(rows, []string{name})
-		}
-		return &queryResult{columns: []string{"Tables_in_" + s.database}, rows: rows}, nil
-	}
-	if strings.HasPrefix(lower, "use ") {
-		return nil, s.use(strings.TrimSpace(query[4:]))
-	}
-	if strings.HasPrefix(lower, "create database ") || strings.HasPrefix(lower, "create schema ") {
-		return nil, s.createDatabase(query)
-	}
-	if strings.HasPrefix(lower, "create table ") {
-		return nil, createTable(s, query)
-	}
-	if strings.HasPrefix(lower, "insert into ") {
-		return nil, insert(s, query)
-	}
-	if strings.HasPrefix(lower, "select ") {
-		return s.selectQuery(query)
-	}
-	if strings.HasPrefix(lower, "explain ") {
-		return &queryResult{columns: []string{"EXPLAIN"}, rows: [][]string{{`{"schema":"database.explanation/v1","operator":"scan"}`}}}, nil
-	}
-	if strings.HasPrefix(lower, "show processlist") {
-		return &queryResult{columns: []string{"Id"}}, nil
 	}
 	return nil, sqlFailure{1064, "42000", "unsupported query: " + query}
 }
 
-func (s *session) use(name string) error {
+type statementHandler func(query, lower string) (*queryResult, bool, error)
+
+func (s *textStatementExecutor) statementHandlers() []statementHandler {
+	return []statementHandler{
+		s.transactionStatement,
+		s.settingStatement,
+		s.builtinStatement,
+		s.catalogStatement,
+		s.relationStatement,
+		s.operationStatement,
+	}
+}
+
+func (s *textStatementExecutor) settingStatement(_ string, lower string) (*queryResult, bool, error) {
+	return nil, strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset "), nil
+}
+
+func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
+	result, found := map[string]*queryResult{
+		"select current_date":   {columns: []string{"CURRENT_DATE"}, rows: [][]string{{"2026-07-17"}}},
+		"select current_date()": {columns: []string{"CURRENT_DATE"}, rows: [][]string{{"2026-07-17"}}},
+		"select current_time":   {columns: []string{"CURRENT_TIME"}, rows: [][]string{{"00:00:00"}}},
+		"select current_time()": {columns: []string{"CURRENT_TIME"}, rows: [][]string{{"00:00:00"}}},
+		"select version()":      {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
+		"select @@version":      {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
+		"select database()":     {columns: []string{"DATABASE()"}, rows: [][]string{{s.database}}},
+	}[lower]
+	return result, found, nil
+}
+
+func (s *textStatementExecutor) operationStatement(_ string, lower string) (*queryResult, bool, error) {
+	if strings.HasPrefix(lower, "explain ") {
+		return &queryResult{columns: []string{"EXPLAIN"}, rows: [][]string{{`{"schema":"database.explanation/v1","operator":"scan"}`}}}, true, nil
+	}
+	if strings.HasPrefix(lower, "show processlist") {
+		return &queryResult{columns: []string{"Id"}}, true, nil
+	}
+	return nil, false, nil
+}
+
+func (s *textStatementExecutor) transactionStatement(query, lower string) (*queryResult, bool, error) {
+	transactions := transactionExecutor{s.session}
+	switch {
+	case lower == "begin" || lower == "start transaction":
+		return nil, true, transactions.begin()
+	case lower == "commit":
+		return nil, true, transactions.commit()
+	case strings.HasPrefix(lower, "savepoint "):
+		return nil, true, transactions.save(query[len("SAVEPOINT "):])
+	case strings.HasPrefix(lower, "rollback to savepoint "):
+		return nil, true, transactions.rollbackTo(query[len("ROLLBACK TO SAVEPOINT "):])
+	case strings.HasPrefix(lower, "release savepoint "):
+		return nil, true, transactions.release(query[len("RELEASE SAVEPOINT "):])
+	case lower == "rollback":
+		return nil, true, transactions.rollback()
+	default:
+		return nil, false, nil
+	}
+}
+
+func (s *transactionExecutor) begin() error {
+	if s.server.config.Catalog != nil {
+		s.transactionSnapshot = s.server.config.Catalog.Snapshot()
+		s.transaction = true
+	}
+	return nil
+}
+
+func (s *transactionExecutor) commit() error {
+	s.transaction = false
+	s.transactionSnapshot = catalog.Definition{}
+	return nil
+}
+
+func (s *transactionExecutor) save(value string) error {
+	if s.server.config.Catalog == nil {
+		return sqlFailure{1105, "HY000", "database is not initialized"}
+	}
+	name := identifier(strings.TrimSpace(value))
+	s.savepoints[strings.ToLower(name)] = s.server.config.Catalog.Snapshot()
+	return nil
+}
+
+func (s *transactionExecutor) rollbackTo(value string) error {
+	if s.server.config.Catalog == nil {
+		return sqlFailure{1105, "HY000", "database is not initialized"}
+	}
+	name := identifier(strings.TrimSpace(value))
+	snapshot, found := s.savepoints[strings.ToLower(name)]
+	if !found {
+		return sqlFailure{1305, "42000", "savepoint does not exist"}
+	}
+	if err := s.server.config.Catalog.Replace(snapshot); err != nil {
+		return sqlFailure{1105, "HY000", err.Error()}
+	}
+	return nil
+}
+
+func (s *transactionExecutor) release(value string) error {
+	name := identifier(strings.TrimSpace(value))
+	key := strings.ToLower(name)
+	if _, found := s.savepoints[key]; !found {
+		return sqlFailure{1305, "42000", "savepoint does not exist"}
+	}
+	delete(s.savepoints, key)
+	return nil
+}
+
+func (s *transactionExecutor) rollback() error {
+	if s.transaction && s.server.config.Catalog != nil {
+		if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
+			return sqlFailure{1105, "HY000", err.Error()}
+		}
+	}
+	return s.commit()
+}
+
+func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryResult, bool, error) {
+	catalogQueries := catalogExecutor{s.session}
+	if result, handled, err := catalogQueries.show(query, lower); handled {
+		return result, true, err
+	}
+	if strings.HasPrefix(lower, "use ") {
+		selector := databaseSelector{s.session}
+		return nil, true, selector.use(strings.TrimSpace(query[4:]))
+	}
+	if strings.HasPrefix(lower, "create database ") || strings.HasPrefix(lower, "create schema ") {
+		return nil, true, catalogQueries.createDatabase(query)
+	}
+	return nil, false, nil
+}
+
+func (s *catalogExecutor) show(query, lower string) (*queryResult, bool, error) {
+	switch {
+	case lower == "show databases":
+		return s.showDatabases(), true, nil
+	case strings.HasPrefix(lower, "show create database ") || strings.HasPrefix(lower, "show create schema "):
+		result, err := s.showCreateDatabase(query)
+		return result, true, err
+	case strings.HasPrefix(lower, "show create table "):
+		result, err := s.showCreateTable(query)
+		return result, true, err
+	case lower == "show tables":
+		result, err := s.showTables()
+		return result, true, err
+	default:
+		return nil, false, nil
+	}
+}
+
+func (s *catalogExecutor) showDatabases() *queryResult {
+	names := []string{informationSchemaName}
+	for _, namespace := range sortedNamespaces(s.metadataDefinition()) {
+		names = append(names, namespace.Name)
+	}
+	sort.Strings(names)
+	rows := make([][]string, len(names))
+	for index, name := range names {
+		rows[index] = []string{name}
+	}
+	return &queryResult{columns: []string{"Database"}, rows: rows}
+}
+
+func (s *catalogExecutor) showTables() (*queryResult, error) {
+	if s.database == "" {
+		return nil, sqlFailure{1046, "3D000", "no database selected"}
+	}
+	if strings.EqualFold(s.database, informationSchemaName) {
+		return informationSchemaTables(), nil
+	}
+	namespace, found := s.metadataDefinition().Namespaces[strings.ToLower(s.database)]
+	if !found {
+		return nil, sqlFailure{1049, "42000", "unknown database"}
+	}
+	return namespaceTables(s.database, namespace), nil
+}
+
+func informationSchemaTables() *queryResult {
+	rows := make([][]string, len(informationSchemaViews))
+	for index, view := range informationSchemaViews {
+		rows[index] = []string{view.name}
+	}
+	return &queryResult{columns: []string{"Tables_in_" + informationSchemaName}, rows: rows}
+}
+
+func namespaceTables(name string, namespace catalog.Namespace) *queryResult {
+	tables := sortedTables(namespace)
+	rows := make([][]string, len(tables))
+	for index, table := range tables {
+		rows[index] = []string{table.Name}
+	}
+	return &queryResult{columns: []string{"Tables_in_" + name}, rows: rows}
+}
+
+func (s *textStatementExecutor) relationStatement(query, lower string) (*queryResult, bool, error) {
+	relations := relationExecutor{s.session}
+	switch {
+	case strings.HasPrefix(lower, "create table "):
+		return nil, true, relations.createTable(query)
+	case strings.HasPrefix(lower, "insert into "):
+		return nil, true, relations.insert(query)
+	case strings.HasPrefix(lower, "select "):
+		result, err := relations.selectQuery(query)
+		return result, true, err
+	default:
+		return nil, false, nil
+	}
+}
+
+func (s *textStatementExecutor) useDatabase(name string) {
+	selector := databaseSelector{s.session}
+	_ = selector.use(name)
+}
+
+func (s *databaseSelector) use(name string) error {
 	name = identifier(name)
 	if err := s.databaseExists(name); err != nil {
 		return err
@@ -857,10 +804,12 @@ func (s *session) use(name string) error {
 	s.database = name
 	return nil
 }
-func (s *session) useDatabase(name string)          { _ = s.use(name) }
-func (s *session) databaseExists(name string) error { return s.server.databaseExists(identifier(name)) }
 
-func (s *session) metadataDefinition() catalog.Definition {
+func (s *databaseSelector) databaseExists(name string) error {
+	return s.server.auth.databaseExists(identifier(name))
+}
+
+func (s *catalogExecutor) metadataDefinition() catalog.Definition {
 	if s.transaction {
 		return s.transactionSnapshot
 	}
@@ -870,14 +819,14 @@ func (s *session) metadataDefinition() catalog.Definition {
 	return s.server.config.Catalog.Snapshot()
 }
 
-func (s *session) snapshotNamespace(name string) (catalog.Namespace, bool) {
+func (s *relationExecutor) snapshotNamespace(name string) (catalog.Namespace, bool) {
 	if s.server.config.Catalog == nil {
 		return catalog.Namespace{}, false
 	}
 	ns, ok := s.server.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]
 	return ns, ok
 }
-func (s *session) createDatabase(query string) error {
+func (s *catalogExecutor) createDatabase(query string) error {
 	lower := strings.ToLower(query)
 	keyword := "database "
 	if strings.HasPrefix(lower, "create schema ") {
@@ -898,53 +847,86 @@ func (s *session) createDatabase(query string) error {
 	}
 	return nil
 }
-func createTable(s *session, query string) error {
-	open := strings.Index(query, "(")
-	close := strings.LastIndex(query, ")")
-	if open < 0 || close <= open {
-		return sqlFailure{1064, "42000", "malformed CREATE TABLE"}
-	}
-	if strings.TrimSpace(query[close+1:]) != "" {
-		return sqlFailure{1235, "42000", "unsupported table definition"}
-	}
-	head := strings.TrimSpace(query[len("CREATE TABLE "):open])
-	partsForTable, ok := splitQualifiedIdentifier(head)
-	if !ok || len(partsForTable) == 0 || len(partsForTable) > 2 {
-		return sqlFailure{1064, "42000", "invalid table name"}
-	}
-	namespace, name, err := s.tableTarget(partsForTable)
+func (s *relationExecutor) createTable(query string) error {
+	table, err := parseCreateTable(query)
 	if err != nil {
 		return err
 	}
-	parts := splitCSV(query[open+1 : close])
-	columns := make([]string, 0, len(parts))
-	columnTypes := make([]string, 0, len(parts))
-	for _, part := range parts {
-		column, remainder, valid := consumeIdentifier(part)
-		if !valid {
-			return sqlFailure{1064, "42000", "invalid column definition"}
-		}
-		fields := strings.Fields(remainder)
-		if isUnsupportedTableDefinition(column) || hasUnsupportedColumnModifier(fields) {
-			return sqlFailure{1235, "42000", "unsupported table definition"}
-		}
-		columns = append(columns, column)
-		columnType := ""
-		if len(fields) > 0 {
-			columnType = strings.ToUpper(fields[0])
-		}
-		columnTypes = append(columnTypes, columnType)
+	namespace, name, err := s.tableTarget(table.target)
+	if err != nil {
+		return err
 	}
-	if len(columns) == 0 || s.server.config.Catalog == nil {
+	if len(table.columns) == 0 || s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
-	if err := s.server.config.Catalog.CreateTableWithTypes(namespace, name, columns, columnTypes); err != nil {
+	if err := s.server.config.Catalog.CreateTableWithTypes(namespace, name, table.columns, table.types); err != nil {
 		return sqlFailure{1050, "42S01", err.Error()}
 	}
 	return nil
 }
 
-func (s *session) showCreateDatabase(query string) (*queryResult, error) {
+type tableDefinition struct {
+	target  []string
+	columns []string
+	types   []string
+}
+
+func parseCreateTable(query string) (tableDefinition, error) {
+	head, body, err := createTableParts(query)
+	if err != nil {
+		return tableDefinition{}, err
+	}
+	target, ok := splitQualifiedIdentifier(head)
+	if !ok || len(target) == 0 || len(target) > 2 {
+		return tableDefinition{}, sqlFailure{1064, "42000", "invalid table name"}
+	}
+	columns, types, err := parseTableColumns(body)
+	return tableDefinition{target: target, columns: columns, types: types}, err
+}
+
+func createTableParts(query string) (string, string, error) {
+	open := strings.Index(query, "(")
+	close := strings.LastIndex(query, ")")
+	if open < 0 || close <= open {
+		return "", "", sqlFailure{1064, "42000", "malformed CREATE TABLE"}
+	}
+	if strings.TrimSpace(query[close+1:]) != "" {
+		return "", "", sqlFailure{1235, "42000", "unsupported table definition"}
+	}
+	head := strings.TrimSpace(query[len("CREATE TABLE "):open])
+	return head, query[open+1 : close], nil
+}
+
+func parseTableColumns(body string) ([]string, []string, error) {
+	parts := splitCSV(body)
+	columns := make([]string, 0, len(parts))
+	types := make([]string, 0, len(parts))
+	for _, part := range parts {
+		column, typeName, err := parseTableColumn(part)
+		if err != nil {
+			return nil, nil, err
+		}
+		columns, types = append(columns, column), append(types, typeName)
+	}
+	return columns, types, nil
+}
+
+func parseTableColumn(part string) (string, string, error) {
+	column, remainder, valid := consumeIdentifier(part)
+	if !valid {
+		return "", "", sqlFailure{1064, "42000", "invalid column definition"}
+	}
+	fields := strings.Fields(remainder)
+	if isUnsupportedTableDefinition(column) || hasUnsupportedColumnModifier(fields) {
+		return "", "", sqlFailure{1235, "42000", "unsupported table definition"}
+	}
+	if len(fields) == 0 {
+		return column, "", nil
+	}
+	return column, strings.ToUpper(fields[0]), nil
+}
+
+func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error) {
 	name := strings.TrimSpace(query)
 	if strings.HasPrefix(strings.ToLower(name), "show create database ") {
 		name = strings.TrimSpace(name[len("SHOW CREATE DATABASE "):])
@@ -975,24 +957,10 @@ func (s *session) showCreateDatabase(query string) (*queryResult, error) {
 	}, nil
 }
 
-func (s *session) showCreateTable(query string) (*queryResult, error) {
-	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
-	namespaceName, tableName := s.database, target
-	parts, valid := splitQualifiedIdentifier(target)
-	if !valid || len(parts) > 2 {
-		return nil, sqlFailure{1064, "42000", "invalid table name"}
-	}
-	if len(parts) == 2 {
-		namespaceName, tableName = parts[0], parts[1]
-	} else if len(parts) == 1 {
-		tableName = parts[0]
-	}
-	namespaceName = identifier(namespaceName)
-	if namespaceName == "" {
-		return nil, sqlFailure{1046, "3D000", "no database selected"}
-	}
-	if strings.EqualFold(namespaceName, informationSchemaName) {
-		return nil, sqlFailure{1044, "42000", "information_schema definitions are virtual"}
+func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
+	namespaceName, tableName, err := s.showTableTarget(query)
+	if err != nil {
+		return nil, err
 	}
 	namespace, ok := s.metadataDefinition().Namespaces[strings.ToLower(namespaceName)]
 	if !ok {
@@ -1010,6 +978,33 @@ func (s *session) showCreateTable(query string) (*queryResult, error) {
 		return nil, sqlFailure{1105, "HY000", err.Error()}
 	}
 	return &queryResult{columns: []string{"Table", "Create Table"}, rows: [][]string{{table.Name, definition}}}, nil
+}
+
+func (s *catalogExecutor) showTableTarget(query string) (string, string, error) {
+	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
+	parts, valid := splitQualifiedIdentifier(target)
+	if !valid || len(parts) > 2 {
+		return "", "", sqlFailure{1064, "42000", "invalid table name"}
+	}
+	return s.qualifiedShowTableTarget(target, parts)
+}
+
+func (s *catalogExecutor) qualifiedShowTableTarget(target string, parts []string) (string, string, error) {
+	namespaceName, tableName := s.database, target
+	if len(parts) == 2 {
+		namespaceName, tableName = parts[0], parts[1]
+	}
+	if len(parts) == 1 {
+		tableName = parts[0]
+	}
+	namespaceName = identifier(namespaceName)
+	if namespaceName == "" {
+		return "", "", sqlFailure{1046, "3D000", "no database selected"}
+	}
+	if strings.EqualFold(namespaceName, informationSchemaName) {
+		return "", "", sqlFailure{1044, "42000", "information_schema definitions are virtual"}
+	}
+	return namespaceName, tableName, nil
 }
 
 func canonicalCreateTable(table catalog.Table) (string, error) {
@@ -1037,35 +1032,14 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
-func insert(s *session, query string) error {
-	rest := strings.TrimSpace(query[len("INSERT INTO "):])
-	valuesAt := strings.Index(strings.ToLower(rest), "values")
-	if valuesAt < 0 {
-		return sqlFailure{1064, "42000", "malformed INSERT"}
-	}
-	head := strings.TrimSpace(rest[:valuesAt])
-	valueText := strings.TrimSpace(rest[valuesAt+len("values"):])
-	target := strings.TrimSpace(head)
-	if open := strings.IndexByte(target, '('); open >= 0 {
-		target = strings.TrimSpace(target[:open])
-	}
-	parts, valid := splitQualifiedIdentifier(target)
-	if !valid || len(parts) == 0 || len(parts) > 2 {
-		return sqlFailure{1064, "42000", "malformed INSERT"}
-	}
-	namespace, name, err := s.tableTarget(parts)
+func (s *relationExecutor) insert(query string) error {
+	target, row, err := parseInsert(query)
 	if err != nil {
 		return err
 	}
-	open := strings.Index(valueText, "(")
-	close := strings.LastIndex(valueText, ")")
-	if open < 0 || close <= open {
-		return sqlFailure{1064, "42000", "malformed INSERT"}
-	}
-	values := splitCSV(valueText[open+1 : close])
-	row := make([]string, len(values))
-	for i, value := range values {
-		row[i] = scalar(value)
+	namespace, name, err := s.tableTarget(target)
+	if err != nil {
+		return err
 	}
 	if s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
@@ -1075,36 +1049,56 @@ func insert(s *session, query string) error {
 	}
 	return nil
 }
-func (s *session) selectQuery(query string) (*queryResult, error) {
+
+func parseInsert(query string) ([]string, []string, error) {
+	target, values, err := insertParts(query)
+	if err != nil {
+		return nil, nil, err
+	}
+	parts, valid := splitQualifiedIdentifier(target)
+	if !valid || len(parts) == 0 || len(parts) > 2 {
+		return nil, nil, sqlFailure{1064, "42000", "malformed INSERT"}
+	}
+	row, err := insertValues(values)
+	return parts, row, err
+}
+
+func insertParts(query string) (string, string, error) {
+	rest := strings.TrimSpace(query[len("INSERT INTO "):])
+	valuesAt := strings.Index(strings.ToLower(rest), "values")
+	if valuesAt < 0 {
+		return "", "", sqlFailure{1064, "42000", "malformed INSERT"}
+	}
+	target := strings.TrimSpace(rest[:valuesAt])
+	if open := strings.IndexByte(target, '('); open >= 0 {
+		target = strings.TrimSpace(target[:open])
+	}
+	return target, strings.TrimSpace(rest[valuesAt+len("values"):]), nil
+}
+
+func insertValues(valueText string) ([]string, error) {
+	open := strings.Index(valueText, "(")
+	close := strings.LastIndex(valueText, ")")
+	if open < 0 || close <= open {
+		return nil, sqlFailure{1064, "42000", "malformed INSERT"}
+	}
+	values := splitCSV(valueText[open+1 : close])
+	row := make([]string, len(values))
+	for index, value := range values {
+		row[index] = scalar(value)
+	}
+	return row, nil
+}
+func (s *relationExecutor) selectQuery(query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	lower := strings.ToLower(expression)
 	if from := strings.Index(lower, " from "); from >= 0 {
-		projection := strings.TrimSpace(expression[:from])
-		source := strings.TrimSpace(expression[from+6:])
-		if strings.HasPrefix(strings.ToLower(source), informationSchemaName+".") || strings.HasPrefix(strings.ToLower(source), "`information_schema`.") {
-			return s.selectInformationSchema(query)
-		}
-		parts, valid := splitQualifiedIdentifier(strings.Fields(source)[0])
-		if !valid || len(parts) == 0 || len(parts) > 2 {
-			return nil, sqlFailure{1064, "42000", "invalid table name"}
-		}
-		namespace, tableName, err := s.tableTarget(parts)
-		if err != nil {
-			return nil, err
-		}
-		ns, ok := s.snapshotNamespace(namespace)
-		if !ok {
-			return nil, sqlFailure{1049, "42000", "unknown database '" + namespace + "'"}
-		}
-		table, ok := ns.Tables[strings.ToLower(tableName)]
-		if !ok {
-			return nil, sqlFailure{1146, "42S02", "table does not exist"}
-		}
-		if projection != "*" {
-			return nil, sqlFailure{1064, "42000", "only SELECT * is supported for tables"}
-		}
-		return &queryResult{columns: table.Columns, rows: table.Rows}, nil
+		return s.selectFrom(query, expression[:from], expression[from+6:])
 	}
+	return selectLiteral(expression)
+}
+
+func selectLiteral(expression string) (*queryResult, error) {
 	literal := parseLiteralResult(expression)
 	if !literal.supported {
 		return nil, sqlFailure{1064, "42000", "unsupported expression"}
@@ -1112,10 +1106,47 @@ func (s *session) selectQuery(query string) (*queryResult, error) {
 	return &queryResult{columns: []string{expression}, rows: [][]string{{literal.value}}, nulls: [][]bool{{literal.isNull}}, metadata: []columnMetadata{literal.metadata}}, nil
 }
 
+func (s *relationExecutor) selectFrom(query, projectionText, sourceText string) (*queryResult, error) {
+	projection, source := strings.TrimSpace(projectionText), strings.TrimSpace(sourceText)
+	if isInformationSchemaSource(source) {
+		informationSchema := informationSchemaExecutor{s.session}
+		return informationSchema.selectInformationSchema(query)
+	}
+	parts, valid := splitQualifiedIdentifier(strings.Fields(source)[0])
+	if !valid || len(parts) == 0 || len(parts) > 2 {
+		return nil, sqlFailure{1064, "42000", "invalid table name"}
+	}
+	return s.selectTable(projection, parts)
+}
+
+func isInformationSchemaSource(source string) bool {
+	lower := strings.ToLower(source)
+	return strings.HasPrefix(lower, informationSchemaName+".") || strings.HasPrefix(lower, "`information_schema`.")
+}
+
+func (s *relationExecutor) selectTable(projection string, parts []string) (*queryResult, error) {
+	namespace, tableName, err := s.tableTarget(parts)
+	if err != nil {
+		return nil, err
+	}
+	namespaceDefinition, found := s.snapshotNamespace(namespace)
+	if !found {
+		return nil, sqlFailure{1049, "42000", "unknown database '" + namespace + "'"}
+	}
+	table, found := namespaceDefinition.Tables[strings.ToLower(tableName)]
+	if !found {
+		return nil, sqlFailure{1146, "42S02", "table does not exist"}
+	}
+	if projection != "*" {
+		return nil, sqlFailure{1064, "42000", "only SELECT * is supported for tables"}
+	}
+	return &queryResult{columns: table.Columns, rows: table.Rows}, nil
+}
+
 // tableTarget resolves an unqualified table against the current namespace and
 // a qualified table against its named namespace. Keeping this resolution at
 // the protocol seam makes DDL, writes, and reads agree about namespace scope.
-func (s *session) tableTarget(parts []string) (string, string, error) {
+func (s *relationExecutor) tableTarget(parts []string) (string, string, error) {
 	namespace, table := s.database, ""
 	if len(parts) == 2 {
 		namespace, table = parts[0], parts[1]
@@ -1130,7 +1161,7 @@ func (s *session) tableTarget(parts []string) (string, string, error) {
 	}
 	// parts have already been parsed as SQL identifiers. Re-parsing would turn
 	// a literal dot or backtick in a quoted identifier into syntax.
-	if err := s.server.databaseExists(namespace); err != nil {
+	if err := s.server.auth.databaseExists(namespace); err != nil {
 		return "", "", err
 	}
 	return namespace, table, nil
@@ -1205,56 +1236,93 @@ func parseLiteralResult(expression string) literalQueryResult {
 	return literalQueryResult{}
 }
 
-func (s *session) selectInformationSchema(query string) (*queryResult, error) {
-	expression := strings.TrimSpace(query[len("SELECT "):])
-	lower := strings.ToLower(expression)
-	from := strings.Index(lower, " from ")
-	if from < 0 {
-		return nil, sqlFailure{1064, "42000", "information_schema queries require a FROM clause"}
+func (s *informationSchemaExecutor) selectInformationSchema(query string) (*queryResult, error) {
+	view, projection, err := parseInformationSchemaQuery(query)
+	if err != nil {
+		return nil, err
 	}
-	projectionText := strings.TrimSpace(expression[:from])
-	sourceText := strings.TrimSpace(expression[from+6:])
+	catalogQueries := catalogExecutor{s.session}
+	rows := informationSchemaRows(view.name, catalogQueries.metadataDefinition())
+	return projectInformationSchemaRows(view, projection, rows), nil
+}
+
+func parseInformationSchemaQuery(query string) (informationSchemaView, []int, error) {
+	projectionText, sourceText, err := informationSchemaClauses(query)
+	if err != nil {
+		return informationSchemaView{}, nil, err
+	}
+	view, err := informationSchemaViewFor(sourceText)
+	if err != nil {
+		return informationSchemaView{}, nil, err
+	}
+	projection, err := informationSchemaProjection(view, projectionText)
+	return view, projection, err
+}
+
+func informationSchemaClauses(query string) (string, string, error) {
+	expression := strings.TrimSpace(query[len("SELECT "):])
+	from := strings.Index(strings.ToLower(expression), " from ")
+	if from < 0 {
+		return "", "", sqlFailure{1064, "42000", "information_schema queries require a FROM clause"}
+	}
+	return strings.TrimSpace(expression[:from]), strings.TrimSpace(expression[from+6:]), nil
+}
+
+func informationSchemaViewFor(sourceText string) (informationSchemaView, error) {
+	if strings.TrimSpace(sourceText) != sourceText || strings.ContainsAny(sourceText, " \t\r\n") {
+		return informationSchemaView{}, sqlFailure{1105, "HY000", "information_schema aliases and clauses are unsupported"}
+	}
 	parts, ok := splitQualifiedIdentifier(sourceText)
 	if !ok || len(parts) != 2 || !strings.EqualFold(parts[0], informationSchemaName) {
-		return nil, sqlFailure{1105, "HY000", "unsupported information_schema source; supported views are schemata, tables, and columns"}
+		return informationSchemaView{}, sqlFailure{1105, "HY000", "unsupported information_schema source; supported views are schemata, tables, and columns"}
 	}
 	view, ok := findInformationSchemaView(parts[1])
 	if !ok {
-		return nil, sqlFailure{1105, "HY000", "unsupported information_schema view '" + parts[1] + "'"}
+		return informationSchemaView{}, sqlFailure{1105, "HY000", "unsupported information_schema view '" + parts[1] + "'"}
 	}
+	return view, nil
+}
 
-	projection := make([]int, 0, len(view.columns))
+func informationSchemaProjection(view informationSchemaView, projectionText string) ([]int, error) {
 	if projectionText == "*" {
-		for index := range view.columns {
-			projection = append(projection, index)
+		return everyInformationSchemaColumn(view), nil
+	}
+	projection := make([]int, 0, len(view.columns))
+	for _, item := range splitCSV(projectionText) {
+		index, err := informationSchemaColumnIndex(view, item)
+		if err != nil {
+			return nil, err
 		}
-	} else {
-		for _, item := range splitCSV(projectionText) {
-			name, valid := singleIdentifier(item)
-			if !valid {
-				return nil, sqlFailure{1064, "42000", "unsupported information_schema projection"}
-			}
-			index := -1
-			for candidate, column := range view.columns {
-				if strings.EqualFold(column.name, name) {
-					index = candidate
-					break
-				}
-			}
-			if index < 0 {
-				return nil, sqlFailure{1054, "42S22", "unknown information_schema column '" + name + "'"}
-			}
-			projection = append(projection, index)
-		}
+		projection = append(projection, index)
 	}
 	if len(projection) == 0 {
 		return nil, sqlFailure{1064, "42000", "empty information_schema projection"}
 	}
-	if strings.TrimSpace(sourceText) != sourceText || strings.ContainsAny(sourceText, " \t\r\n") {
-		return nil, sqlFailure{1105, "HY000", "information_schema aliases and clauses are unsupported"}
-	}
+	return projection, nil
+}
 
-	rows := informationSchemaRows(view.name, s.metadataDefinition())
+func everyInformationSchemaColumn(view informationSchemaView) []int {
+	projection := make([]int, len(view.columns))
+	for index := range view.columns {
+		projection[index] = index
+	}
+	return projection
+}
+
+func informationSchemaColumnIndex(view informationSchemaView, item string) (int, error) {
+	name, valid := singleIdentifier(item)
+	if !valid {
+		return 0, sqlFailure{1064, "42000", "unsupported information_schema projection"}
+	}
+	for index, column := range view.columns {
+		if strings.EqualFold(column.name, name) {
+			return index, nil
+		}
+	}
+	return 0, sqlFailure{1054, "42S22", "unknown information_schema column '" + name + "'"}
+}
+
+func projectInformationSchemaRows(view informationSchemaView, projection []int, rows [][]metadataValue) *queryResult {
 	columns := make([]string, len(projection))
 	resultRows := make([][]string, len(rows))
 	resultNulls := make([][]bool, len(rows))
@@ -1269,7 +1337,7 @@ func (s *session) selectInformationSchema(query string) (*queryResult, error) {
 			resultNulls[rowIndex][resultIndex] = row[sourceIndex].null
 		}
 	}
-	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls}, nil
+	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls}
 }
 
 type metadataValue struct {
@@ -1287,44 +1355,80 @@ func findInformationSchemaView(name string) (informationSchemaView, bool) {
 }
 
 func informationSchemaRows(viewName string, definition catalog.Definition) [][]metadataValue {
+	builders := map[string]func(catalog.Definition) [][]metadataValue{
+		"schemata": informationSchemaSchemataRows,
+		"tables":   informationSchemaTableRows,
+		"columns":  informationSchemaColumnRows,
+	}
+	return builders[viewName](definition)
+}
+
+func informationSchemaSchemataRows(definition catalog.Definition) [][]metadataValue {
+	rows := [][]metadataValue{{{value: informationSchemaName}}}
+	for _, namespace := range sortedNamespaces(definition) {
+		rows = append(rows, []metadataValue{{value: namespace.Name}})
+	}
+	return rows
+}
+
+func informationSchemaTableRows(definition catalog.Definition) [][]metadataValue {
+	rows := informationSchemaVirtualTableRows()
+	for _, namespace := range sortedNamespaces(definition) {
+		rows = append(rows, informationSchemaNamespaceTableRows(namespace)...)
+	}
+	return rows
+}
+
+func informationSchemaVirtualTableRows() [][]metadataValue {
+	rows := make([][]metadataValue, len(informationSchemaViews))
+	for index, view := range informationSchemaViews {
+		rows[index] = []metadataValue{{value: informationSchemaName}, {value: view.name}, {value: "SYSTEM VIEW"}}
+	}
+	return rows
+}
+
+func informationSchemaNamespaceTableRows(namespace catalog.Namespace) [][]metadataValue {
+	tables := sortedTables(namespace)
+	rows := make([][]metadataValue, len(tables))
+	for index, table := range tables {
+		rows[index] = []metadataValue{{value: namespace.Name}, {value: table.Name}, {value: "BASE TABLE"}}
+	}
+	return rows
+}
+
+func informationSchemaColumnRows(definition catalog.Definition) [][]metadataValue {
+	rows := informationSchemaVirtualColumnRows()
+	for _, namespace := range sortedNamespaces(definition) {
+		rows = append(rows, informationSchemaNamespaceColumnRows(namespace)...)
+	}
+	return rows
+}
+
+func informationSchemaVirtualColumnRows() [][]metadataValue {
 	rows := make([][]metadataValue, 0)
-	switch viewName {
-	case "schemata":
-		rows = append(rows, []metadataValue{{value: informationSchemaName}})
-		for _, namespace := range sortedNamespaces(definition) {
-			rows = append(rows, []metadataValue{{value: namespace.Name}})
-		}
-	case "tables":
-		for _, virtualView := range informationSchemaViews {
-			rows = append(rows, []metadataValue{{value: informationSchemaName}, {value: virtualView.name}, {value: "SYSTEM VIEW"}})
-		}
-		for _, namespace := range sortedNamespaces(definition) {
-			for _, table := range sortedTables(namespace) {
-				rows = append(rows, []metadataValue{{value: namespace.Name}, {value: table.Name}, {value: "BASE TABLE"}})
-			}
-		}
-	case "columns":
-		for _, virtualView := range informationSchemaViews {
-			for index, column := range virtualView.columns {
-				rows = append(rows, []metadataValue{
-					{value: informationSchemaName}, {value: virtualView.name}, {value: column.name},
-					{value: strconv.Itoa(index + 1)}, {value: baseType(column.typeName)}, {value: column.typeName},
-				})
-			}
-		}
-		for _, namespace := range sortedNamespaces(definition) {
-			for _, table := range sortedTables(namespace) {
-				for index, column := range table.Columns {
-					dataType, columnType := informationSchemaType(table, index)
-					rows = append(rows, []metadataValue{
-						{value: namespace.Name}, {value: table.Name}, {value: column}, {value: strconv.Itoa(index + 1)},
-						dataType, columnType,
-					})
-				}
-			}
+	for _, view := range informationSchemaViews {
+		for index, column := range view.columns {
+			rows = append(rows, informationSchemaColumnRow(informationSchemaName, view.name, column.name, index, metadataValue{value: baseType(column.typeName)}, metadataValue{value: column.typeName}))
 		}
 	}
 	return rows
+}
+
+func informationSchemaNamespaceColumnRows(namespace catalog.Namespace) [][]metadataValue {
+	rows := make([][]metadataValue, 0)
+	for _, table := range sortedTables(namespace) {
+		for index, column := range table.Columns {
+			dataType, columnType := informationSchemaType(table, index)
+			rows = append(rows, informationSchemaColumnRow(namespace.Name, table.Name, column, index, dataType, columnType))
+		}
+	}
+	return rows
+}
+
+func informationSchemaColumnRow(namespace, table, column string, index int, dataType, columnType metadataValue) []metadataValue {
+	return []metadataValue{
+		{value: namespace}, {value: table}, {value: column}, {value: strconv.Itoa(index + 1)}, dataType, columnType,
+	}
 }
 
 func informationSchemaType(table catalog.Table, index int) (metadataValue, metadataValue) {
@@ -1372,52 +1476,59 @@ func sortedTables(namespace catalog.Namespace) []catalog.Table {
 	return tables
 }
 
-func (s *session) prepare(connection net.Conn, sequence byte, query string) error {
+func (s *preparedPreparation) prepare(connection net.Conn, sequence byte, query string) error {
+	id, parameters, metadata, err := s.allocate(query)
+	if err != nil {
+		return writePacket(connection, sequence, mysqlError(err))
+	}
+	if err := s.writePreparedMetadata(connection, sequence, id, parameters, metadata); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *preparedPreparation) allocate(query string) (uint32, int, []columnMetadata, error) {
 	parameters, withinLimit := countPreparedParameters(query, maxPreparedParameters)
 	if !withinLimit {
-		return writePacket(connection, sequence, errorPacket(1390, "HY000", "prepared statement contains too many placeholders"))
+		return 0, 0, nil, sqlFailure{1390, "HY000", "prepared statement contains too many placeholders"}
 	}
-	if !s.server.reservePreparedStatement() {
-		return writePacket(connection, sequence, errorPacket(1461, "HY000", "can't create more than max_prepared_stmt_count statements"))
+	if !s.server.connections.reservePreparedStatement() {
+		return 0, 0, nil, sqlFailure{1461, "HY000", "can't create more than max_prepared_stmt_count statements"}
 	}
 	id := s.nextStmtID
 	s.nextStmtID++
-	statement := &preparedStatement{query: query, parameters: parameters, longData: make(map[uint16][]byte)}
-	s.statements[id] = statement
+	s.statements[id] = &preparedStatement{query: query, parameters: parameters, longData: make(map[uint16][]byte)}
 	metadata, err := s.preparedColumns(query)
 	if err != nil {
-		delete(s.statements, id)
-		s.server.releasePreparedStatement()
-		return writePacket(connection, sequence, mysqlError(err))
+		s.release(id)
+		return 0, 0, nil, err
 	}
+	return id, parameters, metadata, nil
+}
+
+func (s *preparedPreparation) release(id uint32) {
+	delete(s.statements, id)
+	s.server.connections.releasePreparedStatement()
+}
+
+func (s *preparedPreparation) writePreparedMetadata(connection net.Conn, sequence byte, id uint32, parameters int, metadata []columnMetadata) error {
 	response := []byte{0x00, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), byte(len(metadata)), 0, byte(parameters), byte(parameters >> 8), 0, 0, 0}
 	maximum := s.server.config.MaxAllowedPacket
-	if int64(len(response)) > maximum {
-		delete(s.statements, id)
-		s.server.releasePreparedStatement()
+	if !preparedMetadataFits(response, parameters, metadata, maximum) {
+		s.release(id)
 		return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
 	}
-	for i := 0; i < parameters; i++ {
-		if int64(len(columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar}))) > maximum {
-			delete(s.statements, id)
-			s.server.releasePreparedStatement()
-			return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
-		}
-	}
-	for _, definition := range metadata {
-		if int64(len(columnDefinition(definition))) > maximum {
-			delete(s.statements, id)
-			s.server.releasePreparedStatement()
-			return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
-		}
-	}
+	return writePreparedMetadataPackets(connection, sequence, response, parameters, metadata, maximum)
+}
+
+func writePreparedMetadataPackets(connection net.Conn, sequence byte, response []byte, parameters int, metadata []columnMetadata, maximum int64) error {
 	if err := writeBoundedPacket(connection, sequence, response, maximum); err != nil {
 		return err
 	}
 	sequence = nextPacketSequence(sequence, response)
 	if parameters > 0 {
 		for i := 0; i < parameters; i++ {
-			payload := columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar})
+			payload := columnDefinition(preparedParameterMetadata(i))
 			if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
 				return err
 			}
@@ -1428,6 +1539,10 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 		}
 		sequence = nextPacketSequence(sequence, eofPacket())
 	}
+	return writePreparedResultMetadata(connection, sequence, metadata, maximum)
+}
+
+func writePreparedResultMetadata(connection net.Conn, sequence byte, metadata []columnMetadata, maximum int64) error {
 	for _, definition := range metadata {
 		payload := columnDefinition(definition)
 		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
@@ -1441,38 +1556,60 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	return nil
 }
 
-func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
+func preparedMetadataFits(response []byte, parameters int, metadata []columnMetadata, maximum int64) bool {
+	if int64(len(response)) > maximum {
+		return false
+	}
+	for index := range parameters {
+		if int64(len(columnDefinition(preparedParameterMetadata(index)))) > maximum {
+			return false
+		}
+	}
+	return everyColumnFits(metadata, maximum)
+}
+
+func everyColumnFits(metadata []columnMetadata, maximum int64) bool {
+	for _, definition := range metadata {
+		if int64(len(columnDefinition(definition))) > maximum {
+			return false
+		}
+	}
+	return true
+}
+
+func preparedParameterMetadata(index int) columnMetadata {
+	return columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", index+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar}
+}
+
+func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
 		return nil, sqlFailure{1064, "42000", "prepared statements support SELECT only"}
 	}
-	expression := strings.TrimSpace(query[len("select "):])
-	parameters := make([]string, parameterCount(query))
-	for index := range parameters {
-		parameters[index] = "NULL"
-	}
+	parameters := nullPreparedParameters(parameterCount(query))
 	validated, err := bindPreparedQuery(query, parameters)
 	if err != nil {
 		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
 	}
 	if len(parameters) > 0 {
-		result, err := s.execute(validated)
-		if err != nil {
-			return nil, err
-		}
-		if result == nil {
-			return nil, nil
-		}
-		metadata := make([]columnMetadata, len(result.columns))
-		for index, name := range result.columns {
-			metadata[index] = columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
-		}
-		return metadata, nil
+		return s.queryColumns(validated, false)
 	}
-	if literal := parseLiteralResult(expression); literal.supported {
+	if literal := parseLiteralResult(strings.TrimSpace(query[len("select "):])); literal.supported {
 		return []columnMetadata{literal.metadata}, nil
 	}
-	result, err := s.execute(validated)
+	return s.queryColumns(validated, true)
+}
+
+func nullPreparedParameters(count int) []string {
+	parameters := make([]string, count)
+	for index := range parameters {
+		parameters[index] = "NULL"
+	}
+	return parameters
+}
+
+func (s *preparedPreparation) queryColumns(query string, preserveMetadata bool) ([]columnMetadata, error) {
+	result, err := newQueryExecutor(s.session).execute(query)
 	if err != nil {
 		return nil, err
 	}
@@ -1482,14 +1619,15 @@ func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
 	metadata := make([]columnMetadata, len(result.columns))
 	for index, name := range result.columns {
 		metadata[index] = columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
-		if index < len(result.metadata) {
+		if preserveMetadata && index < len(result.metadata) {
 			metadata[index] = result.metadata[index]
 		}
 	}
 	return metadata, nil
 }
 
-func (s *session) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
+func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
+	queries := newQueryExecutor(s.session)
 	if len(payload) < 5 {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", "malformed prepared statement"))
 	}
@@ -1506,139 +1644,177 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
-	result, err := s.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := queries.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
-	return writeBinaryResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
+	return writeBinaryResult(connection, sequence, result, s.server.config.MaxAllowedPacket)
 }
 
-func (s *session) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
+func (s *preparedExecution) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
 	count := statement.parameters
-	if len(payload) < 10 {
-		return nil, errors.New("malformed prepared statement")
-	}
-	if payload[5] != 0 || binary.LittleEndian.Uint32(payload[6:10]) != 1 {
-		return nil, errors.New("unsupported prepared statement execute header")
+	if err := validatePreparedExecuteHeader(payload); err != nil {
+		return nil, err
 	}
 	if count == 0 {
-		if len(payload) != 10 {
-			return nil, errors.New("malformed prepared statement trailing data")
-		}
-		return nil, nil
+		return noPreparedValues(payload)
 	}
 	nullBytes := (count + 7) / 8
 	if len(payload) < 10+nullBytes+1 {
 		return nil, errors.New("malformed prepared statement parameters")
 	}
 	offset := 10 + nullBytes
-	newTypes := payload[offset]
-	offset++
-	if newTypes > 1 {
-		return nil, errors.New("malformed prepared statement type flag")
+	types, offset, err := preparedParameterTypes(payload, offset, statement.types, count)
+	if err != nil {
+		return nil, err
 	}
-	types := statement.types
-	if newTypes != 0 {
-		if len(payload[offset:]) < count*2 {
-			return nil, errors.New("malformed prepared statement types")
-		}
-		types = make([]preparedParameterType, count)
-		for i := range types {
-			types[i] = preparedParameterType{typ: payload[offset+i*2], unsigned: payload[offset+i*2+1]&0x80 != 0}
-		}
-		offset += count * 2
-	} else if len(types) != count {
-		return nil, errors.New("prepared statement parameter types are unavailable")
-	}
-	values := make([]string, count)
-	for i := 0; i < count; i++ {
-		if payload[10+i/8]&(1<<uint(i%8)) != 0 {
-			values[i] = "NULL"
-			continue
-		}
-		if long, ok := statement.longData[uint16(i)]; ok {
-			values[i] = quote(string(long))
-			continue
-		}
-		value, next, err := readPreparedValue(payload, offset, types[i])
-		if err != nil {
-			return nil, err
-		}
-		values[i], offset = value, next
+	values, offset, err := preparedParameterValues(payload, offset, types, statement.longData)
+	if err != nil {
+		return nil, err
 	}
 	if offset != len(payload) {
 		return nil, errors.New("malformed prepared statement trailing data")
 	}
 	statement.types = types
-	s.clearLongData(statement)
+	clearPreparedLongData(s.session, statement)
 	return values, nil
 }
 
-func readPreparedValue(payload []byte, offset int, typ preparedParameterType) (string, int, error) {
-	need := func(size int) error {
-		if offset+size > len(payload) {
-			return errors.New("malformed prepared parameter")
-		}
-		return nil
+func validatePreparedExecuteHeader(payload []byte) error {
+	if len(payload) < 10 {
+		return errors.New("malformed prepared statement")
 	}
-	integer := func(size int) (string, int, error) {
-		if err := need(size); err != nil {
-			return "", offset, err
-		}
-		var value uint64
-		for i := 0; i < size; i++ {
-			value |= uint64(payload[offset+i]) << (8 * i)
-		}
-		if typ.unsigned {
-			return strconv.FormatUint(value, 10), offset + size, nil
-		}
-		switch size {
-		case 1:
-			return strconv.FormatInt(int64(int8(value)), 10), offset + size, nil
-		case 2:
-			return strconv.FormatInt(int64(int16(value)), 10), offset + size, nil
-		case 4:
-			return strconv.FormatInt(int64(int32(value)), 10), offset + size, nil
-		default:
-			return strconv.FormatInt(int64(value), 10), offset + size, nil
-		}
+	if payload[5] != 0 || binary.LittleEndian.Uint32(payload[6:10]) != 1 {
+		return errors.New("unsupported prepared statement execute header")
 	}
-	switch typ.typ {
-	case mysqlTypeNull:
-		return "NULL", offset, nil
-	case mysqlTypeTiny:
-		return integer(1)
-	case mysqlTypeShort:
-		return integer(2)
-	case mysqlTypeLong:
-		return integer(4)
-	case mysqlTypeLongLong:
-		return integer(8)
-	case mysqlTypeFloat:
-		if err := need(4); err != nil {
-			return "", offset, err
-		}
-		return strconv.FormatFloat(float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[offset:offset+4]))), 'g', -1, 32), offset + 4, nil
-	case mysqlTypeDouble:
-		if err := need(8); err != nil {
-			return "", offset, err
-		}
-		return strconv.FormatFloat(math.Float64frombits(binary.LittleEndian.Uint64(payload[offset:offset+8])), 'g', -1, 64), offset + 8, nil
-	case mysqlTypeVarchar, mysqlTypeVarString, 0xfe, 0xfc, 0xfb, 0xfa, 0xf9, 0xf5, 0xf6:
-		raw, next, ok := readLengthEncoded(payload, offset)
-		if !ok || raw == nil {
-			return "", offset, errors.New("malformed string prepared parameter")
-		}
-		return quote(string(raw)), next, nil
-	default:
-		return "", offset, errors.New("unsupported prepared parameter type")
-	}
+	return nil
 }
 
-func (s *session) sendLongData(payload []byte) error {
+func noPreparedValues(payload []byte) ([]string, error) {
+	if len(payload) != 10 {
+		return nil, errors.New("malformed prepared statement trailing data")
+	}
+	return nil, nil
+}
+
+func preparedParameterTypes(payload []byte, offset int, prior []preparedParameterType, count int) ([]preparedParameterType, int, error) {
+	if payload[offset] == preparedTypesUnchanged {
+		if len(prior) != count {
+			return nil, offset, errors.New("prepared statement parameter types are unavailable")
+		}
+		return prior, offset + 1, nil
+	}
+	if payload[offset] != preparedTypesSupplied {
+		return nil, offset, errors.New("malformed prepared statement type flag")
+	}
+	offset++
+	if len(payload[offset:]) < count*2 {
+		return nil, offset, errors.New("malformed prepared statement types")
+	}
+	types := make([]preparedParameterType, count)
+	for index := range types {
+		types[index] = preparedParameterType{typ: payload[offset+index*2], unsigned: payload[offset+index*2+1]&0x80 != 0}
+	}
+	return types, offset + count*2, nil
+}
+
+func preparedParameterValues(payload []byte, offset int, types []preparedParameterType, longData map[uint16][]byte) ([]string, int, error) {
+	values := make([]string, len(types))
+	for index := range types {
+		if preparedParameterIsNull(payload, index) {
+			values[index] = "NULL"
+			continue
+		}
+		if long, ok := longData[uint16(index)]; ok {
+			values[index] = quote(string(long))
+			continue
+		}
+		value, next, err := readPreparedValue(payload, offset, types[index])
+		if err != nil {
+			return nil, offset, err
+		}
+		values[index], offset = value, next
+	}
+	return values, offset, nil
+}
+
+func preparedParameterIsNull(payload []byte, index int) bool {
+	return payload[10+index/8]&(1<<uint(index%8)) != 0
+}
+
+func readPreparedValue(payload []byte, offset int, typ preparedParameterType) (string, int, error) {
+	if typ.typ == mysqlTypeNull {
+		return "NULL", offset, nil
+	}
+	reader, ok := preparedValueReaders[typ.typ]
+	if !ok {
+		return "", offset, errors.New("unsupported prepared parameter type")
+	}
+	return reader(payload, offset, typ)
+}
+
+type preparedValueReader func([]byte, int, preparedParameterType) (string, int, error)
+
+var preparedValueReaders = map[byte]preparedValueReader{
+	mysqlTypeTiny: preparedIntegerReader(1), mysqlTypeShort: preparedIntegerReader(2), mysqlTypeLong: preparedIntegerReader(4), mysqlTypeLongLong: preparedIntegerReader(8),
+	mysqlTypeFloat: readPreparedFloat, mysqlTypeDouble: readPreparedDouble,
+	mysqlTypeVarchar: readPreparedString, mysqlTypeVarString: readPreparedString, mysqlTypeString: readPreparedString, mysqlTypeBlob: readPreparedString, mysqlTypeLongBlob: readPreparedString, mysqlTypeMediumBlob: readPreparedString, mysqlTypeTinyBlob: readPreparedString, mysqlTypeJSON: readPreparedString, mysqlTypeNewDecimal: readPreparedString,
+}
+
+func preparedIntegerReader(size int) preparedValueReader {
+	return func(payload []byte, offset int, typ preparedParameterType) (string, int, error) {
+		return readPreparedInteger(payload, offset, typ.unsigned, size)
+	}
+}
+func readPreparedInteger(payload []byte, offset int, unsigned bool, size int) (string, int, error) {
+	if offset+size > len(payload) {
+		return "", offset, errors.New("malformed prepared parameter")
+	}
+	var value uint64
+	for index := range size {
+		value |= uint64(payload[offset+index]) << (8 * index)
+	}
+	if unsigned {
+		return strconv.FormatUint(value, 10), offset + size, nil
+	}
+	return strconv.FormatInt(preparedSignedInteger(value, size), 10), offset + size, nil
+}
+func preparedSignedInteger(value uint64, size int) int64 {
+	switch size {
+	case 1:
+		return int64(int8(value))
+	case 2:
+		return int64(int16(value))
+	case 4:
+		return int64(int32(value))
+	default:
+		return int64(value)
+	}
+}
+func readPreparedFloat(payload []byte, offset int, _ preparedParameterType) (string, int, error) {
+	if offset+4 > len(payload) {
+		return "", offset, errors.New("malformed prepared parameter")
+	}
+	return strconv.FormatFloat(float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[offset:offset+4]))), 'g', -1, 32), offset + 4, nil
+}
+func readPreparedDouble(payload []byte, offset int, _ preparedParameterType) (string, int, error) {
+	if offset+8 > len(payload) {
+		return "", offset, errors.New("malformed prepared parameter")
+	}
+	return strconv.FormatFloat(math.Float64frombits(binary.LittleEndian.Uint64(payload[offset:offset+8])), 'g', -1, 64), offset + 8, nil
+}
+func readPreparedString(payload []byte, offset int, _ preparedParameterType) (string, int, error) {
+	raw, next, ok := readLengthEncoded(payload, offset)
+	if !ok || raw == nil {
+		return "", offset, errors.New("malformed string prepared parameter")
+	}
+	return quote(string(raw)), next, nil
+}
+
+func (s *preparedLifecycle) sendLongData(payload []byte) error {
 	if len(payload) < 7 {
 		return sqlFailure{1210, "HY000", "malformed prepared statement long data"}
 	}
@@ -1659,7 +1835,7 @@ func (s *session) sendLongData(payload []byte) error {
 	return nil
 }
 
-func (s *session) resetPrepared(payload []byte) error {
+func (s *preparedLifecycle) resetPrepared(payload []byte) error {
 	if len(payload) != 5 {
 		return sqlFailure{1210, "HY000", "malformed prepared statement reset"}
 	}
@@ -1667,12 +1843,12 @@ func (s *session) resetPrepared(payload []byte) error {
 	if !ok {
 		return sqlFailure{1243, "HY000", "unknown prepared statement handler"}
 	}
-	s.clearLongData(statement)
+	clearPreparedLongData(s.session, statement)
 	return nil
 }
 
-func (s *session) resetConnection() error {
-	if err := s.rollbackTransaction(); err != nil {
+func (s *preparedLifecycle) resetConnection() error {
+	if err := rollbackTransaction(s.session); err != nil {
 		return err
 	}
 	s.database = s.initialDB
@@ -1682,28 +1858,28 @@ func (s *session) resetConnection() error {
 	return nil
 }
 
-func (s *session) closePrepared(id uint32) {
+func (s *preparedLifecycle) closePrepared(id uint32) {
 	if statement, ok := s.statements[id]; ok {
-		s.clearLongData(statement)
+		clearPreparedLongData(s.session, statement)
 		delete(s.statements, id)
-		s.server.releasePreparedStatement()
+		s.server.connections.releasePreparedStatement()
 	}
 }
 
-func (s *session) closeAllPrepared() {
+func (s *preparedLifecycle) closeAllPrepared() {
 	for id := range s.statements {
 		s.closePrepared(id)
 	}
 }
 
-func (s *session) clearLongData(statement *preparedStatement) {
+func clearPreparedLongData(session *session, statement *preparedStatement) {
 	for _, value := range statement.longData {
-		s.longDataBytes -= len(value)
+		session.longDataBytes -= len(value)
 	}
 	statement.longData = make(map[uint16][]byte)
 }
 
-func (s *session) rollbackTransaction() error {
+func rollbackTransaction(s *session) error {
 	if s.transaction && s.server.config.Catalog != nil {
 		if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
 			return sqlFailure{1105, "HY000", err.Error()}
@@ -1713,45 +1889,6 @@ func (s *session) rollbackTransaction() error {
 	s.transactionSnapshot = catalog.Definition{}
 	s.savepoints = make(map[string]catalog.Definition)
 	return nil
-}
-
-func parameterCount(query string) int { return len(preparedPlaceholders(query)) }
-
-func countPreparedParameters(query string, maximum int) (int, bool) {
-	count := 0
-	quote, escaped := byte(0), false
-	for index := 0; index < len(query); index++ {
-		character := query[index]
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if character == '\\' {
-				escaped = true
-				continue
-			}
-			if character == quote {
-				if quote == '\'' && index+1 < len(query) && query[index+1] == quote {
-					index++
-					continue
-				}
-				quote = 0
-			}
-			continue
-		}
-		if character == '\'' || character == '"' || character == '`' {
-			quote = character
-			continue
-		}
-		if character == '?' {
-			count++
-			if count > maximum {
-				return count, false
-			}
-		}
-	}
-	return count, true
 }
 
 func bindPreparedQuery(query string, values []string) (string, error) {
@@ -1771,147 +1908,6 @@ func bindPreparedQuery(query string, values []string) (string, error) {
 	return result.String(), nil
 }
 
-func preparedPlaceholders(query string) []int {
-	positions := make([]int, 0)
-	quote, escaped := byte(0), false
-	for index := 0; index < len(query); index++ {
-		character := query[index]
-		if quote != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if character == '\\' {
-				escaped = true
-				continue
-			}
-			if character == quote {
-				if quote == '\'' && index+1 < len(query) && query[index+1] == quote {
-					index++
-					continue
-				}
-				quote = 0
-			}
-			continue
-		}
-		if character == '\'' || character == '"' || character == '`' {
-			quote = character
-			continue
-		}
-		if character == '?' {
-			positions = append(positions, index)
-		}
-	}
-	return positions
-}
-
-func identifier(value string) string {
-	name, ok := singleIdentifier(value)
-	if !ok {
-		return ""
-	}
-	return name
-}
-
-func singleIdentifier(value string) (string, bool) {
-	parts, ok := splitQualifiedIdentifier(value)
-	return firstPart(parts, ok)
-}
-
-func firstPart(parts []string, ok bool) (string, bool) {
-	if !ok || len(parts) != 1 || parts[0] == "" {
-		return "", false
-	}
-	return parts[0], true
-}
-
-// splitQualifiedIdentifier parses MySQL-style backtick escaping while
-// keeping dots inside quoted identifiers. It intentionally accepts only a
-// complete identifier list, so trailing SQL cannot be mistaken for a name.
-func splitQualifiedIdentifier(value string) ([]string, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, false
-	}
-	parts := make([]string, 0, 2)
-	for len(value) > 0 {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return nil, false
-		}
-		if value[0] == '`' {
-			var name strings.Builder
-			closed := false
-			for index := 1; index < len(value); index++ {
-				if value[index] != '`' {
-					name.WriteByte(value[index])
-					continue
-				}
-				if index+1 < len(value) && value[index+1] == '`' {
-					name.WriteByte('`')
-					index++
-					continue
-				}
-				value = value[index+1:]
-				closed = true
-				break
-			}
-			if !closed {
-				return nil, false
-			}
-			parts = append(parts, name.String())
-		} else {
-			end := strings.IndexByte(value, '.')
-			if end < 0 {
-				parts = append(parts, strings.TrimSpace(value))
-				return parts, parts[len(parts)-1] != ""
-			}
-			name := strings.TrimSpace(value[:end])
-			if name == "" || strings.ContainsAny(name, " \t\r\n`") {
-				return nil, false
-			}
-			parts = append(parts, name)
-			value = value[end+1:]
-			continue
-		}
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return parts, true
-		}
-		if value[0] != '.' {
-			return nil, false
-		}
-		value = value[1:]
-	}
-	return parts, len(parts) > 0
-}
-
-func consumeIdentifier(value string) (string, string, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", "", false
-	}
-	if value[0] == '`' {
-		for index := 1; index < len(value); index++ {
-			if value[index] != '`' {
-				continue
-			}
-			if index+1 < len(value) && value[index+1] == '`' {
-				index++
-				continue
-			}
-			name, ok := singleIdentifier(value[:index+1])
-			return name, value[index+1:], ok
-		}
-		return "", "", false
-	}
-	end := 0
-	for end < len(value) && value[end] != ' ' && value[end] != '\t' && value[end] != '\r' && value[end] != '\n' {
-		end++
-	}
-	name, ok := singleIdentifier(value[:end])
-	return name, value[end:], ok
-}
 func scalar(value string) string {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
@@ -1947,214 +1943,6 @@ func splitCSV(value string) []string {
 	}
 	result = append(result, strings.TrimSpace(value[start:]))
 	return result
-}
-
-func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool, metadata []columnMetadata, maximum int64) error {
-	count := lengthEncodedInt(len(columns))
-	if err := writeBoundedPacket(connection, sequence, count, maximum); err != nil {
-		return err
-	}
-	sequence = nextPacketSequence(sequence, count)
-	for index, name := range columns {
-		definition := columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
-		if index < len(metadata) {
-			definition = metadata[index]
-		}
-		payload := columnDefinition(definition)
-		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
-			return err
-		}
-		sequence = nextPacketSequence(sequence, payload)
-	}
-	if err := writeBoundedPacket(connection, sequence, eofPacket(), maximum); err != nil {
-		return err
-	}
-	sequence = nextPacketSequence(sequence, eofPacket())
-	for rowIndex, row := range rows {
-		payload := []byte{}
-		for columnIndex, value := range row {
-			if rowIndex < len(nulls) && columnIndex < len(nulls[rowIndex]) && nulls[rowIndex][columnIndex] {
-				payload = append(payload, 0xfb)
-				continue
-			}
-			payload = append(payload, lengthEncodedString(value)...)
-		}
-		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
-			return err
-		}
-		sequence = nextPacketSequence(sequence, payload)
-	}
-	return writeBoundedPacket(connection, sequence, eofPacket(), maximum)
-}
-
-func writeBinaryResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool, metadata []columnMetadata, maximum int64) error {
-	count := lengthEncodedInt(len(columns))
-	if err := writeBoundedPacket(connection, sequence, count, maximum); err != nil {
-		return err
-	}
-	sequence = nextPacketSequence(sequence, count)
-	definitions := make([]columnMetadata, len(columns))
-	for index, name := range columns {
-		definition := columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
-		if index < len(metadata) {
-			definition = metadata[index]
-		}
-		definitions[index] = definition
-		payload := columnDefinition(definition)
-		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
-			return err
-		}
-		sequence = nextPacketSequence(sequence, payload)
-	}
-	if err := writeBoundedPacket(connection, sequence, eofPacket(), maximum); err != nil {
-		return err
-	}
-	sequence = nextPacketSequence(sequence, eofPacket())
-	for rowIndex, row := range rows {
-		payload, err := binaryRow(row, rowIndex, nulls, definitions)
-		if err != nil {
-			return err
-		}
-		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
-			return err
-		}
-		sequence = nextPacketSequence(sequence, payload)
-	}
-	return writeBoundedPacket(connection, sequence, eofPacket(), maximum)
-}
-
-func binaryRow(row []string, rowIndex int, nulls [][]bool, metadata []columnMetadata) ([]byte, error) {
-	payload := make([]byte, 1+(len(metadata)+9)/8)
-	for index, value := range row {
-		if rowIndex < len(nulls) && index < len(nulls[rowIndex]) && nulls[rowIndex][index] {
-			payload[1+(index+2)/8] |= 1 << uint((index+2)%8)
-			continue
-		}
-		definition := columnMetadata{typ: mysqlTypeVarString}
-		if index < len(metadata) {
-			definition = metadata[index]
-		}
-		switch definition.typ {
-		case mysqlTypeLongLong:
-			encoded := make([]byte, 8)
-			if definition.flags&mysqlUnsignedFlag != 0 {
-				value, err := strconv.ParseUint(value, 10, 64)
-				if err != nil {
-					return nil, err
-				}
-				binary.LittleEndian.PutUint64(encoded, value)
-			} else {
-				value, err := strconv.ParseInt(value, 10, 64)
-				if err != nil {
-					return nil, err
-				}
-				binary.LittleEndian.PutUint64(encoded, uint64(value))
-			}
-			payload = append(payload, encoded...)
-		case mysqlTypeLong:
-			value, err := strconv.ParseInt(value, 10, 32)
-			if err != nil {
-				return nil, err
-			}
-			encoded := make([]byte, 4)
-			binary.LittleEndian.PutUint32(encoded, uint32(value))
-			payload = append(payload, encoded...)
-		case mysqlTypeDouble:
-			value, err := strconv.ParseFloat(value, 64)
-			if err != nil {
-				return nil, err
-			}
-			encoded := make([]byte, 8)
-			binary.LittleEndian.PutUint64(encoded, math.Float64bits(value))
-			payload = append(payload, encoded...)
-		default:
-			payload = append(payload, lengthEncodedString(value)...)
-		}
-	}
-	return payload, nil
-}
-
-func columnDefinition(definition columnMetadata) []byte {
-	payload := append(lengthEncodedString(definition.catalog), lengthEncodedString(definition.schema)...)
-	payload = append(payload, lengthEncodedString(definition.table)...)
-	payload = append(payload, lengthEncodedString(definition.originalTable)...)
-	payload = append(payload, lengthEncodedString(definition.name)...)
-	payload = append(payload, lengthEncodedString(definition.originalName)...)
-	payload = append(payload, 0x0c, byte(definition.characterSet), byte(definition.characterSet>>8), byte(definition.length), byte(definition.length>>8), byte(definition.length>>16), byte(definition.length>>24), definition.typ, byte(definition.flags), byte(definition.flags>>8), definition.decimals, 0, 0)
-	return payload
-}
-func eofPacket() []byte { return []byte{0xfe, 0, 0, 2, 0} }
-func lengthEncodedInt(value int) []byte {
-	if value < 251 {
-		return []byte{byte(value)}
-	}
-	if value <= 0xffff {
-		return []byte{0xfc, byte(value), byte(value >> 8)}
-	}
-	if value <= 0xffffff {
-		return []byte{0xfd, byte(value), byte(value >> 8), byte(value >> 16)}
-	}
-	return []byte{0xfe, byte(value), byte(value >> 8), byte(value >> 16), byte(value >> 24), byte(value >> 32), byte(value >> 40), byte(value >> 48), byte(value >> 56)}
-}
-func lengthEncodedString(value string) []byte {
-	return append(lengthEncodedInt(len(value)), []byte(value)...)
-}
-func readLengthEncoded(payload []byte, offset int) ([]byte, int, bool) {
-	if offset >= len(payload) {
-		return nil, offset, false
-	}
-	length := int(payload[offset])
-	offset++
-	if length == 0xfb {
-		return nil, offset, true
-	}
-	if length == 0xfc {
-		if offset+2 > len(payload) {
-			return nil, offset, false
-		}
-		length = int(binary.LittleEndian.Uint16(payload[offset : offset+2]))
-		offset += 2
-	} else if length == 0xfd {
-		if offset+3 > len(payload) {
-			return nil, offset, false
-		}
-		length = int(payload[offset]) | int(payload[offset+1])<<8 | int(payload[offset+2])<<16
-		offset += 3
-	} else if length == 0xfe {
-		if offset+8 > len(payload) {
-			return nil, offset, false
-		}
-		length64 := binary.LittleEndian.Uint64(payload[offset : offset+8])
-		if length64 > uint64(len(payload)-offset-8) {
-			return nil, offset, false
-		}
-		length = int(length64)
-		offset += 8
-	}
-	if offset+length > len(payload) {
-		return nil, offset, false
-	}
-	return payload[offset : offset+length], offset + length, true
-}
-func readNullString(payload []byte, offset int) (string, int, bool) {
-	end := offset
-	for end < len(payload) && payload[end] != 0 {
-		end++
-	}
-	if end >= len(payload) {
-		return "", offset, false
-	}
-	return string(payload[offset:end]), end + 1, true
-}
-func readNullBytes(payload []byte, offset int) ([]byte, int) {
-	end := offset
-	for end < len(payload) && payload[end] != 0 {
-		end++
-	}
-	if end >= len(payload) {
-		return nil, offset
-	}
-	return payload[offset:end], end + 1
 }
 
 const maximumPacketFrame = (1 << 24) - 1

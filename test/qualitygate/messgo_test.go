@@ -40,9 +40,22 @@ func TestMessgoGateIsPinnedAndRunsWithQuality(t *testing.T) {
 	if !strings.Contains(workflow, "run: make mutation") || !strings.Contains(workflow, "GITHUB_BASE_SHA") {
 		t.Error("CI no longer preserves the changed-code mutation gate")
 	}
-	for _, want := range []string{"<rule ref=\"codesize\">", "<rule ref=\"design\">"} {
+	for _, want := range []string{"<rule ref=\"codesize\"", "<rule ref=\"design\""} {
 		if !strings.Contains(ruleset, want) {
 			t.Errorf("messgo ruleset does not include %s", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"<exclude",
+		"<properties>",
+		"<property ",
+		"reportLevel",
+		"minimum=",
+		"maximum=",
+		"maxfields=",
+	} {
+		if strings.Contains(ruleset, forbidden) {
+			t.Errorf("messgo ruleset weakens its default rules with %q", forbidden)
 		}
 	}
 }
