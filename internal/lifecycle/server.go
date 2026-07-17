@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -85,8 +86,8 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 	}
 	cleanStop := false
 	defer func() {
+		_ = release()
 		if cleanStop {
-			_ = release()
 			_ = releaseState(opts.StateFile)
 		}
 	}()
@@ -94,6 +95,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 	var listener net.Listener
 	var mysqlServer *mysql.Server
 	var httpServer *http.Server
+	health := newHealth()
 	var metadata instance.Metadata
 	var store *catalog.Store
 	if opts.DataDirectory != "" {
@@ -111,7 +113,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		if err != nil {
 			return fmt.Errorf("listen for diagnostics: %w", err)
 		}
-		httpServer = &http.Server{Handler: diagnosticsHandler()}
+		httpServer = &http.Server{Handler: diagnosticsHandler(health)}
 		go func() { _ = httpServer.Serve(listener) }()
 	}
 	if opts.MySQLAddress != "" && opts.MySQLEnabled {
@@ -122,6 +124,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		go mysqlServer.Serve()
 	}
 
+	health.set("ready")
 	ready := Event{Schema: "database.lifecycle/v1", State: "ready", Recovered: recovered}
 	if listener != nil {
 		ready.DiagnosticsAddress = listener.Addr().String()
@@ -135,13 +138,21 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 	case <-ctx.Done():
 	case <-signals:
 	}
-	if httpServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = httpServer.Shutdown(shutdownCtx)
-	}
+	health.set("stopping")
+	emit(Event{Schema: "database.lifecycle/v1", State: "stopping"})
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var shutdownErr error
 	if mysqlServer != nil {
-		_ = mysqlServer.Close()
+		shutdownErr = mysqlServer.CloseGracefully(shutdownCtx)
+	}
+	if httpServer != nil {
+		if err := httpServer.Shutdown(shutdownCtx); err != nil && shutdownErr == nil {
+			shutdownErr = err
+		}
+	}
+	if shutdownErr != nil {
+		return fmt.Errorf("graceful shutdown: %w", shutdownErr)
 	}
 	cleanStop = true
 	emit(Event{Schema: "database.lifecycle/v1", State: "stopped"})
@@ -157,15 +168,22 @@ func claimState(path, dataDirectory string) (bool, func() error, error) {
 		return false, release, nil
 	}
 	if lockPath != "" {
-		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE, 0o600)
 		if err != nil {
-			if errors.Is(err, os.ErrExist) {
-				return false, release, errors.New("data directory is already in use")
-			}
 			return false, release, fmt.Errorf("claim data directory: %w", err)
 		}
-		_ = file.Close()
-		release = func() error { return os.Remove(lockPath) }
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			_ = file.Close()
+			return false, release, errors.New("data directory is already in use")
+		}
+		release = func() error {
+			unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+			closeErr := file.Close()
+			if unlockErr != nil {
+				return unlockErr
+			}
+			return closeErr
+		}
 	}
 	if path == "" {
 		return false, release, nil
@@ -206,6 +224,14 @@ func validateInstance(directory string) error {
 	if instanceMetadata.State != "stopped" {
 		return errors.New("data directory has invalid instance metadata")
 	}
+	catalogPath := filepath.Join(directory, "catalog.json")
+	info, err = os.Stat(catalogPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("data directory has missing or invalid catalog")
+	}
+	if _, err := catalog.Open(directory); err != nil {
+		return errors.New("data directory has damaged catalog")
+	}
 	return nil
 }
 
@@ -216,7 +242,26 @@ func releaseState(path string) error {
 	return os.WriteFile(path, []byte("stopped\n"), 0o644)
 }
 
-func diagnosticsHandler() http.Handler {
+type health struct {
+	mu    sync.RWMutex
+	state string
+}
+
+func newHealth() *health { return &health{state: "starting"} }
+
+func (h *health) set(state string) {
+	h.mu.Lock()
+	h.state = state
+	h.mu.Unlock()
+}
+
+func (h *health) current() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.state
+}
+
+func diagnosticsHandler(health *health) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -226,11 +271,19 @@ func diagnosticsHandler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "live"})
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+		if health.current() == "ready" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+			return
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": health.current()})
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = w.Write([]byte("# TYPE database_process_ready gauge\ndatabase_process_ready 1\n"))
+		ready := "0"
+		if health.current() == "ready" {
+			ready = "1"
+		}
+		_, _ = w.Write([]byte("# TYPE database_process_ready gauge\ndatabase_process_ready " + ready + "\n"))
 	})
 	return mux
 }

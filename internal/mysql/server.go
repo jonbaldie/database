@@ -2,6 +2,7 @@
 package mysql
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/jonbaldie/database/internal/catalog"
 )
@@ -41,6 +43,12 @@ type Config struct {
 type Server struct {
 	Listener net.Listener
 	config   Config
+
+	mu          sync.Mutex
+	stopping    bool
+	connections map[net.Conn]struct{}
+	connectionW sync.WaitGroup
+	statementW  sync.WaitGroup
 }
 
 // New retains a small unauthenticated protocol probe seam for callers that do
@@ -69,7 +77,7 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 		}
 		listener = tls.NewListener(listener, &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}})
 	}
-	return &Server{Listener: listener, config: config}, nil
+	return &Server{Listener: listener, config: config, connections: make(map[net.Conn]struct{})}, nil
 }
 
 func (s *Server) Serve() {
@@ -78,11 +86,93 @@ func (s *Server) Serve() {
 		if err != nil {
 			return
 		}
+		if !s.registerConnection(connection) {
+			_ = connection.Close()
+			continue
+		}
 		go s.serveConnection(connection)
 	}
 }
 
+// CloseGracefully prevents new work, allows accepted statements to complete,
+// then closes sessions. Closing a transaction-owning session triggers its
+// rollback before this method returns.
+func (s *Server) CloseGracefully(ctx context.Context) error {
+	s.mu.Lock()
+	if s.stopping {
+		s.mu.Unlock()
+		return nil
+	}
+	s.stopping = true
+	listener := s.Listener
+	s.mu.Unlock()
+
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	if err := waitGroup(ctx, &s.statementW); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	connections := make([]net.Conn, 0, len(s.connections))
+	for connection := range s.connections {
+		connections = append(connections, connection)
+	}
+	s.mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	return waitGroup(ctx, &s.connectionW)
+}
+
+// Close retains the listener-close seam for callers that do not own the
+// lifecycle. Database shutdown uses CloseGracefully.
 func (s *Server) Close() error { return s.Listener.Close() }
+
+func (s *Server) registerConnection(connection net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopping {
+		return false
+	}
+	s.connections[connection] = struct{}{}
+	s.connectionW.Add(1)
+	return true
+}
+
+func (s *Server) unregisterConnection(connection net.Conn) {
+	s.mu.Lock()
+	delete(s.connections, connection)
+	s.mu.Unlock()
+	s.connectionW.Done()
+}
+
+func (s *Server) beginStatement() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopping {
+		return false
+	}
+	s.statementW.Add(1)
+	return true
+}
+
+func (s *Server) endStatement() { s.statementW.Done() }
+
+func waitGroup(ctx context.Context, group *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 type session struct {
 	server              *Server
@@ -99,6 +189,7 @@ type session struct {
 
 func (s *Server) serveConnection(connection net.Conn) {
 	defer connection.Close()
+	defer s.unregisterConnection(connection)
 	var current *session
 	defer func() {
 		if current != nil && current.transaction && s.config.Catalog != nil {
@@ -139,7 +230,12 @@ func (s *Server) serveConnection(connection net.Conn) {
 				return
 			}
 		case 0x03: // COM_QUERY
-			if err := session.writeQueryResult(connection, sequence+1, string(payload[1:])); err != nil {
+			if !s.beginStatement() {
+				return
+			}
+			err := session.writeQueryResult(connection, sequence+1, string(payload[1:]))
+			s.endStatement()
+			if err != nil {
 				return
 			}
 		case 0x0e: // COM_PING
@@ -151,7 +247,12 @@ func (s *Server) serveConnection(connection net.Conn) {
 				return
 			}
 		case 0x17: // COM_STMT_EXECUTE
-			if err := session.executePrepared(connection, sequence+1, payload); err != nil {
+			if !s.beginStatement() {
+				return
+			}
+			err := session.executePrepared(connection, sequence+1, payload)
+			s.endStatement()
+			if err != nil {
 				return
 			}
 		case 0x19: // COM_STMT_CLOSE
