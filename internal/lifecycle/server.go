@@ -145,7 +145,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 	defer cancel()
 	var shutdownErr error
 	if mysqlServer != nil {
-		shutdownErr = mysqlServer.CloseGracefully(shutdownCtx)
+		shutdownErr = mysqlServer.CloseGracefully()
 	}
 	if httpServer != nil {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil && shutdownErr == nil {

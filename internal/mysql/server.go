@@ -2,7 +2,6 @@
 package mysql
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -97,7 +96,7 @@ func (s *Server) Serve() {
 // CloseGracefully prevents new work, allows accepted statements to complete,
 // then closes sessions. Closing a transaction-owning session triggers its
 // rollback before this method returns.
-func (s *Server) CloseGracefully(ctx context.Context) error {
+func (s *Server) CloseGracefully() error {
 	s.mu.Lock()
 	if s.stopping {
 		s.mu.Unlock()
@@ -110,9 +109,7 @@ func (s *Server) CloseGracefully(ctx context.Context) error {
 	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		return err
 	}
-	if err := waitGroup(ctx, &s.statementW); err != nil {
-		return err
-	}
+	s.statementW.Wait()
 
 	s.mu.Lock()
 	connections := make([]net.Conn, 0, len(s.connections))
@@ -123,7 +120,8 @@ func (s *Server) CloseGracefully(ctx context.Context) error {
 	for _, connection := range connections {
 		_ = connection.Close()
 	}
-	return waitGroup(ctx, &s.connectionW)
+	s.connectionW.Wait()
+	return nil
 }
 
 // Close retains the listener-close seam for callers that do not own the
@@ -164,20 +162,6 @@ func (s *Server) acceptingWork() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return !s.stopping
-}
-
-func waitGroup(ctx context.Context, group *sync.WaitGroup) error {
-	done := make(chan struct{})
-	go func() {
-		group.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }
 
 type session struct {
