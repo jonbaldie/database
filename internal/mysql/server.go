@@ -135,13 +135,20 @@ func errorPacket(code uint16, state, message string) []byte {
 
 func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	trimmed := strings.TrimSpace(query)
-	if strings.HasPrefix(strings.ToLower(trimmed), "select ") {
+	lower := strings.ToLower(trimmed)
+	if lower == "begin" || lower == "start transaction" || lower == "commit" || lower == "rollback" {
+		return writePacket(connection, sequence, okPacket())
+	}
+	if strings.HasPrefix(lower, "explain ") {
+		return writeScalarResult(connection, sequence, `{"schema":"database.explanation/v1","operator":"scan"}`)
+	}
+	if strings.HasPrefix(lower, "select ") {
 		value := strings.TrimSpace(trimmed[len("select "):])
 		if number, err := strconv.Atoi(value); err == nil {
 			return writeScalarResult(connection, sequence, strconv.Itoa(number))
 		}
 	}
-	if strings.HasPrefix(strings.ToLower(trimmed), "insert ") || strings.HasPrefix(strings.ToLower(trimmed), "update ") || strings.HasPrefix(strings.ToLower(trimmed), "delete ") || strings.HasPrefix(strings.ToLower(trimmed), "replace ") {
+	if strings.HasPrefix(lower, "insert ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete ") || strings.HasPrefix(lower, "replace ") {
 		return writePacket(connection, sequence, okPacket())
 	}
 	return writePacket(connection, sequence, errorPacket(1064, "42000", fmt.Sprintf("unsupported query %q", trimmed)))
