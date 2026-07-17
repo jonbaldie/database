@@ -22,18 +22,18 @@ type initializationRequest struct {
 func initialize(args []string, stdout, stderr io.Writer) int {
 	request, err := parseInitializationRequest(args)
 	if err != nil {
-		return initFailure(stdout, "invalid_input", 2, err.Error())
+		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, err.Error())
 	}
 	if request.directoryIsOccupied() {
-		return initFailure(stdout, "precondition", 3, "data directory is not empty")
+		return writeOperatorFailure(stdout, "init", newOperationID(), "precondition", 3, "data directory is not empty")
 	}
 	password, err := request.readPassword(os.Stdin)
 	if err != nil {
-		return initFailure(stdout, "invalid_input", 2, "unable to read password")
+		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, "unable to read password")
 	}
 	metadata, err := instance.Initialize(request.directory, "admin", password)
 	if err != nil {
-		return initFailure(stdout, "precondition", 3, err.Error())
+		return writeOperatorFailure(stdout, "init", newOperationID(), "precondition", 3, err.Error())
 	}
 	return writeInitializationSuccess(stdout, request, metadata)
 }
@@ -174,12 +174,4 @@ func initializationResult(directory string, metadata instance.Metadata) map[stri
 		"success": true, "exit_class": "success", "instance_id": metadata.InstanceID,
 		"data_directory": directory, "admin_account": metadata.AdminAccount,
 	}
-}
-
-func initFailure(stdout io.Writer, exitClass string, code int, message string) int {
-	_ = json.NewEncoder(stdout).Encode(map[string]any{
-		"schema": "database.operator.result/v1", "operation": "init", "operation_id": newOperationID(),
-		"success": false, "exit_class": exitClass, "diagnostic": message,
-	})
-	return code
 }
