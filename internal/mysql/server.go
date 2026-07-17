@@ -76,11 +76,12 @@ type Server struct {
 	tlsConfig *tls.Config
 	rsaKey    *rsa.PrivateKey
 
-	mu          sync.Mutex
-	stopping    bool
-	connections map[net.Conn]struct{}
-	connectionW sync.WaitGroup
-	statementW  sync.WaitGroup
+	mu            sync.Mutex
+	stopping      bool
+	connections   map[net.Conn]struct{}
+	connectionW   sync.WaitGroup
+	statementW    sync.WaitGroup
+	preparedCount int
 }
 
 // New retains a small unauthenticated protocol probe seam for callers that do
@@ -210,6 +211,24 @@ func (s *Server) acceptingWork() bool {
 	return !s.stopping
 }
 
+func (s *Server) reservePreparedStatement() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.preparedCount >= s.config.MaxPreparedStmtCount {
+		return false
+	}
+	s.preparedCount++
+	return true
+}
+
+func (s *Server) releasePreparedStatement() {
+	s.mu.Lock()
+	if s.preparedCount > 0 {
+		s.preparedCount--
+	}
+	s.mu.Unlock()
+}
+
 type session struct {
 	server              *Server
 	username            string
@@ -242,6 +261,9 @@ func (s *Server) serveConnection(connection net.Conn) {
 	defer func() {
 		if current != nil && current.transaction && s.config.Catalog != nil {
 			_ = s.config.Catalog.Replace(current.transactionSnapshot)
+		}
+		if current != nil {
+			current.closeAllPrepared()
 		}
 	}()
 	nonce := makeNonce()
@@ -308,10 +330,14 @@ func (s *Server) serveConnection(connection net.Conn) {
 				return
 			}
 		case 0x19: // COM_STMT_CLOSE
-			if len(payload) >= 5 {
-				id := binary.LittleEndian.Uint32(payload[1:5])
-				session.closePrepared(id)
+			if len(payload) != 5 {
+				if writePacket(connection, sequence+1, errorPacket(1210, "HY000", "malformed prepared statement close")) != nil {
+					return
+				}
+				continue
 			}
+			id := binary.LittleEndian.Uint32(payload[1:5])
+			session.closePrepared(id)
 		case 0x18: // COM_STMT_SEND_LONG_DATA
 			if err := session.sendLongData(payload); err != nil {
 				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
@@ -329,6 +355,12 @@ func (s *Server) serveConnection(connection net.Conn) {
 				return
 			}
 		case 0x1f: // COM_RESET_CONNECTION
+			if len(payload) != 1 {
+				if writePacket(connection, sequence+1, errorPacket(1210, "HY000", "malformed connection reset")) != nil {
+					return
+				}
+				continue
+			}
 			if err := session.resetConnection(); err != nil {
 				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
 					return
@@ -1287,7 +1319,7 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	if parameters > maxPreparedParameters {
 		return writePacket(connection, sequence, errorPacket(1390, "HY000", "prepared statement contains too many placeholders"))
 	}
-	if len(s.statements) >= s.server.config.MaxPreparedStmtCount {
+	if !s.server.reservePreparedStatement() {
 		return writePacket(connection, sequence, errorPacket(1461, "HY000", "can't create more than max_prepared_stmt_count statements"))
 	}
 	id := s.nextStmtID
@@ -1299,17 +1331,20 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	maximum := s.server.config.MaxAllowedPacket
 	if int64(len(response)) > maximum {
 		delete(s.statements, id)
+		s.server.releasePreparedStatement()
 		return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
 	}
 	for i := 0; i < parameters; i++ {
 		if int64(len(columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar}))) > maximum {
 			delete(s.statements, id)
+			s.server.releasePreparedStatement()
 			return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
 		}
 	}
 	for _, definition := range metadata {
 		if int64(len(columnDefinition(definition))) > maximum {
 			delete(s.statements, id)
+			s.server.releasePreparedStatement()
 			return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
 		}
 	}
@@ -1524,7 +1559,7 @@ func (s *session) sendLongData(payload []byte) error {
 }
 
 func (s *session) resetPrepared(payload []byte) error {
-	if len(payload) < 5 {
+	if len(payload) != 5 {
 		return sqlFailure{1210, "HY000", "malformed prepared statement reset"}
 	}
 	statement, ok := s.statements[binary.LittleEndian.Uint32(payload[1:5])]
@@ -1541,7 +1576,7 @@ func (s *session) resetConnection() error {
 		return err
 	}
 	s.database = s.initialDB
-	s.statements = make(map[uint32]*preparedStatement)
+	s.closeAllPrepared()
 	s.longDataBytes = 0
 	s.savepoints = make(map[string]catalog.Definition)
 	return nil
@@ -1550,8 +1585,15 @@ func (s *session) resetConnection() error {
 func (s *session) closePrepared(id uint32) {
 	if statement, ok := s.statements[id]; ok {
 		s.clearLongData(statement)
+		delete(s.statements, id)
+		s.server.releasePreparedStatement()
 	}
-	delete(s.statements, id)
+}
+
+func (s *session) closeAllPrepared() {
+	for id := range s.statements {
+		s.closePrepared(id)
+	}
 }
 
 func (s *session) clearLongData(statement *preparedStatement) {
