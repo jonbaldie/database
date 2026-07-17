@@ -437,17 +437,19 @@ func networkAddress(name, value string) (string, error) {
 		return "", invalidConfiguration(name + " has an empty value")
 	}
 	host, port, err := net.SplitHostPort(value)
-	if err != nil || host == "" || net.ParseIP(host) == nil {
+	ip := net.ParseIP(host)
+	if err != nil || host == "" || ip == nil {
 		return "", invalidConfiguration(name + " must be an IPv4 address or bracketed IPv6 address with a port")
 	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return "", invalidConfiguration(name + " port must be between 1 and 65535")
 	}
-	if strings.Contains(host, ":") {
-		return "[" + host + "]:" + strconv.Itoa(portNumber), nil
+	canonicalHost := ip.String()
+	if strings.Contains(canonicalHost, ":") {
+		return "[" + canonicalHost + "]:" + strconv.Itoa(portNumber), nil
 	}
-	return host + ":" + strconv.Itoa(portNumber), nil
+	return canonicalHost + ":" + strconv.Itoa(portNumber), nil
 }
 
 func positiveInteger(name, value string, minimum, maximum int64) (int64, error) {

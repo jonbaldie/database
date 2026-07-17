@@ -144,6 +144,16 @@ func TestResolveConfigurationAcceptsBracketedIPv6(t *testing.T) {
 	}
 }
 
+func TestResolveConfigurationRejectsEquivalentIPv6Listeners(t *testing.T) {
+	if _, err := resolveConfiguration([]string{
+		"--data-directory=/tmp/database-instance",
+		"--mysql-listen-address=[0:0:0:0:0:0:0:1]:3306",
+		"--diagnostics-listen-address=[::1]:3306",
+	}, nil); err == nil {
+		t.Fatal("expected equivalent listener addresses to be rejected")
+	}
+}
+
 func TestResolveConfigurationPreservesMaximumTimeoutsInMilliseconds(t *testing.T) {
 	const maximum = "9223372036854775807"
 	config, err := resolveConfiguration([]string{
