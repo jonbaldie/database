@@ -34,33 +34,38 @@ type configurationValue struct {
 	source string
 }
 
-var configurationDefaults = map[string]string{
-	"data_directory":                          "",
-	"mysql_listen_address":                    "127.0.0.1:3306",
-	"tls_certificate_file":                    "",
-	"tls_private_key_file":                    "",
-	"diagnostics_listen_address":              "",
-	"log_format":                              "json",
-	"statement_timeout_ms":                    "300000",
-	"lock_wait_timeout_ms":                    "5000",
-	"idle_in_transaction_timeout_ms":          "300000",
-	"idle_session_timeout_ms":                 "3600000",
-	"execution_memory_limit_bytes":            "67108864",
-	"aggregate_execution_memory_limit_bytes":  "2147483648",
-	"temporary_storage_limit_bytes":           "17179869184",
-	"aggregate_temporary_storage_limit_bytes": "34359738368",
-	"max_connections":                         "100",
-	"max_allowed_packet":                      "67108864",
-	"max_prepared_stmt_count":                 "4096",
+type configurationSetting struct {
+	defaultValue string
+	flag         string
+	minimum      int64
+	maximum      int64
 }
 
-var configurationNames = func() map[string]bool {
-	result := make(map[string]bool, len(configurationDefaults))
-	for name := range configurationDefaults {
-		result[name] = true
-	}
-	return result
-}()
+var configurationRegistry = map[string]configurationSetting{
+	"data_directory":                          {defaultValue: "", flag: "--data-directory"},
+	"mysql_listen_address":                    {defaultValue: "127.0.0.1:3306", flag: "--mysql-listen-address"},
+	"tls_certificate_file":                    {defaultValue: "", flag: "--tls-certificate-file"},
+	"tls_private_key_file":                    {defaultValue: "", flag: "--tls-private-key-file"},
+	"diagnostics_listen_address":              {defaultValue: "", flag: "--diagnostics-listen-address"},
+	"log_format":                              {defaultValue: "json", flag: "--log-format"},
+	"statement_timeout_ms":                    numericConfigurationSetting("300000", "--statement-timeout-ms", 1, maximumInt64),
+	"lock_wait_timeout_ms":                    numericConfigurationSetting("5000", "--lock-wait-timeout-ms", 1, maximumInt64),
+	"idle_in_transaction_timeout_ms":          numericConfigurationSetting("300000", "--idle-in-transaction-timeout-ms", 1, maximumInt64),
+	"idle_session_timeout_ms":                 numericConfigurationSetting("3600000", "--idle-session-timeout-ms", 1, maximumInt64),
+	"execution_memory_limit_bytes":            numericConfigurationSetting("67108864", "--execution-memory-limit-bytes", 1, maximumInt64),
+	"aggregate_execution_memory_limit_bytes":  numericConfigurationSetting("2147483648", "--aggregate-execution-memory-limit-bytes", 1, maximumInt64),
+	"temporary_storage_limit_bytes":           numericConfigurationSetting("17179869184", "--temporary-storage-limit-bytes", 1, maximumInt64),
+	"aggregate_temporary_storage_limit_bytes": numericConfigurationSetting("34359738368", "--aggregate-temporary-storage-limit-bytes", 1, maximumInt64),
+	"max_connections":                         numericConfigurationSetting("100", "--max-connections", 1, 2147483647),
+	"max_allowed_packet":                      numericConfigurationSetting("67108864", "--max-allowed-packet", 1024, 1073741824),
+	"max_prepared_stmt_count":                 numericConfigurationSetting("4096", "--max-prepared-stmt-count", 1, 2147483647),
+}
+
+const maximumInt64 = int64(1<<63 - 1)
+
+func numericConfigurationSetting(defaultValue, flag string, minimum, maximum int64) configurationSetting {
+	return configurationSetting{defaultValue: defaultValue, flag: flag, minimum: minimum, maximum: maximum}
+}
 
 // parseServeFlags is retained as the compatibility seam used by the serve
 // command and package tests. It now resolves all three public input sources.
@@ -126,9 +131,9 @@ func resolvedConfigurationValues(inputs configurationInputs) (map[string]configu
 }
 
 func defaultConfigurationValues() map[string]configurationValue {
-	values := make(map[string]configurationValue, len(configurationDefaults))
-	for name, value := range configurationDefaults {
-		values[name] = configurationValue{value: value, source: "default"}
+	values := make(map[string]configurationValue, len(configurationRegistry))
+	for name, setting := range configurationRegistry {
+		values[name] = configurationValue{value: setting.defaultValue, source: "default"}
 	}
 	return values
 }
@@ -223,18 +228,16 @@ func flagSetting(name, value string) (string, string, bool) {
 	return canonical, value, true
 }
 
-var configurationFlagNames = map[string]string{
-	"--data-directory":             "data_directory",
-	"--mysql-listen-address":       "mysql_listen_address",
-	"--tls-certificate-file":       "tls_certificate_file",
-	"--tls-private-key-file":       "tls_private_key_file",
-	"--diagnostics-listen-address": "diagnostics_listen_address",
-	"--log-format":                 "log_format",
-	"--statement-timeout-ms":       "statement_timeout_ms", "--lock-wait-timeout-ms": "lock_wait_timeout_ms",
-	"--idle-in-transaction-timeout-ms": "idle_in_transaction_timeout_ms", "--idle-session-timeout-ms": "idle_session_timeout_ms",
-	"--execution-memory-limit-bytes": "execution_memory_limit_bytes", "--aggregate-execution-memory-limit-bytes": "aggregate_execution_memory_limit_bytes",
-	"--temporary-storage-limit-bytes": "temporary_storage_limit_bytes", "--aggregate-temporary-storage-limit-bytes": "aggregate_temporary_storage_limit_bytes",
-	"--max-connections": "max_connections", "--max-allowed-packet": "max_allowed_packet", "--max-prepared-stmt-count": "max_prepared_stmt_count",
+var configurationFlagNames = configurationFlags()
+
+func configurationFlags() map[string]string {
+	flags := make(map[string]string, len(configurationRegistry))
+	for name, setting := range configurationRegistry {
+		if setting.flag != "" {
+			flags[setting.flag] = name
+		}
+	}
+	return flags
 }
 
 func parseConfigurationEnvironment(environment []string) (map[string]string, string, error) {
@@ -301,7 +304,7 @@ func canonicalEnvironmentName(name string) (string, error) {
 		return "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
 	}
 	canonical := strings.ToLower(suffix)
-	if !configurationNames[canonical] {
+	if !isConfigurationSetting(canonical) {
 		return "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
 	}
 	return canonical, nil
@@ -358,7 +361,7 @@ func parseConfigurationFileLine(line string, lineNumber int) (string, string, er
 		return "", "", invalidConfiguration(fmt.Sprintf("config line %d: expected one key=value pair", lineNumber))
 	}
 	key = strings.TrimSpace(key)
-	if !configurationNames[key] {
+	if !isConfigurationSetting(key) {
 		return "", "", invalidConfiguration(fmt.Sprintf("config line %d: unknown setting %q", lineNumber, key))
 	}
 	value, err := tomlValue(strings.TrimSpace(raw))
@@ -369,6 +372,11 @@ func parseConfigurationFileLine(line string, lineNumber int) (string, string, er
 		return "", "", invalidConfiguration("config setting " + key + " has an empty value")
 	}
 	return key, value, nil
+}
+
+func isConfigurationSetting(name string) bool {
+	_, exists := configurationRegistry[name]
+	return exists
 }
 
 func stripTOMLComment(line string) string {
@@ -462,7 +470,7 @@ func configurationValueLookup(values map[string]configurationValue) func(string)
 
 type configurationParts struct {
 	dataDirectory, mysqlAddress, diagnosticsAddress, certificate, key, format string
-	numbers                                                                   map[string]int64
+	limits                                                                    configurationLimits
 }
 
 func buildConfigurationParts(get func(string) string) (configurationParts, error) {
@@ -481,11 +489,11 @@ func buildConfigurationParts(get func(string) string) (configurationParts, error
 	if err != nil {
 		return configurationParts{}, err
 	}
-	numbers, err := configurationNumbers(get)
+	limits, err := configurationNumbers(get)
 	if err != nil {
 		return configurationParts{}, err
 	}
-	parts := configurationParts{dataDirectory: paths.dataDirectory, certificate: paths.certificate, key: paths.key, mysqlAddress: addresses.mysql, diagnosticsAddress: addresses.diagnostics, format: format, numbers: numbers}
+	parts := configurationParts{dataDirectory: paths.dataDirectory, certificate: paths.certificate, key: paths.key, mysqlAddress: addresses.mysql, diagnosticsAddress: addresses.diagnostics, format: format, limits: limits}
 	return parts, validateConfigurationParts(parts)
 }
 
@@ -539,10 +547,10 @@ func configurationFormat(format string) (string, error) {
 }
 
 func validateConfigurationParts(parts configurationParts) error {
-	if parts.numbers["execution_memory_limit_bytes"] > parts.numbers["aggregate_execution_memory_limit_bytes"] {
+	if parts.limits.executionMemory > parts.limits.aggregateMemory {
 		return invalidConfiguration("execution_memory_limit_bytes cannot exceed aggregate_execution_memory_limit_bytes")
 	}
-	if parts.numbers["temporary_storage_limit_bytes"] > parts.numbers["aggregate_temporary_storage_limit_bytes"] {
+	if parts.limits.temporaryStorage > parts.limits.aggregateTemporaryStorage {
 		return invalidConfiguration("temporary_storage_limit_bytes cannot exceed aggregate_temporary_storage_limit_bytes")
 	}
 	if parts.diagnosticsAddress != "" && parts.diagnosticsAddress == parts.mysqlAddress {
@@ -552,31 +560,32 @@ func validateConfigurationParts(parts configurationParts) error {
 }
 
 func (parts configurationParts) options() lifecycle.Options {
-	numbers := parts.numbers
 	format := parts.format
 	if format == "text" {
 		format = "human"
 	}
-	return lifecycle.Options{DataDirectory: parts.dataDirectory, MySQLAddress: parts.mysqlAddress, TLSCertFile: parts.certificate, TLSKeyFile: parts.key, DiagnosticsAddress: parts.diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: numbers["statement_timeout_ms"], LockWaitTimeoutMilliseconds: numbers["lock_wait_timeout_ms"], IdleInTransactionTimeoutMilliseconds: numbers["idle_in_transaction_timeout_ms"], IdleSessionTimeoutMilliseconds: numbers["idle_session_timeout_ms"], ExecutionMemoryLimitBytes: numbers["execution_memory_limit_bytes"], AggregateMemoryLimitBytes: numbers["aggregate_execution_memory_limit_bytes"], TemporaryStorageLimitBytes: numbers["temporary_storage_limit_bytes"], AggregateTemporaryLimitBytes: numbers["aggregate_temporary_storage_limit_bytes"], MaxConnections: int(numbers["max_connections"]), MaxAllowedPacket: numbers["max_allowed_packet"], MaxPreparedStmtCount: int(numbers["max_prepared_stmt_count"]), MySQLEnabled: true}
+	return lifecycle.Options{DataDirectory: parts.dataDirectory, MySQLAddress: parts.mysqlAddress, TLSCertFile: parts.certificate, TLSKeyFile: parts.key, DiagnosticsAddress: parts.diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: parts.limits.statementTimeout, LockWaitTimeoutMilliseconds: parts.limits.lockWaitTimeout, IdleInTransactionTimeoutMilliseconds: parts.limits.idleTransactionTimeout, IdleSessionTimeoutMilliseconds: parts.limits.idleSessionTimeout, ExecutionMemoryLimitBytes: parts.limits.executionMemory, AggregateMemoryLimitBytes: parts.limits.aggregateMemory, TemporaryStorageLimitBytes: parts.limits.temporaryStorage, AggregateTemporaryLimitBytes: parts.limits.aggregateTemporaryStorage, MaxConnections: int(parts.limits.maxConnections), MaxAllowedPacket: parts.limits.maxAllowedPacket, MaxPreparedStmtCount: int(parts.limits.maxPreparedStatements), MySQLEnabled: true}
 }
 
-type integerSetting struct {
-	name             string
-	minimum, maximum int64
+type configurationLimits struct {
+	statementTimeout, lockWaitTimeout, idleTransactionTimeout, idleSessionTimeout int64
+	executionMemory, aggregateMemory, temporaryStorage, aggregateTemporaryStorage int64
+	maxConnections, maxAllowedPacket, maxPreparedStatements                       int64
 }
 
-func configurationNumbers(get func(string) string) (map[string]int64, error) {
-	maximum := int64(^uint64(0) >> 1)
-	settings := []integerSetting{{"statement_timeout_ms", 1, maximum}, {"lock_wait_timeout_ms", 1, maximum}, {"idle_in_transaction_timeout_ms", 1, maximum}, {"idle_session_timeout_ms", 1, maximum}, {"execution_memory_limit_bytes", 1, maximum}, {"aggregate_execution_memory_limit_bytes", 1, maximum}, {"temporary_storage_limit_bytes", 1, maximum}, {"aggregate_temporary_storage_limit_bytes", 1, maximum}, {"max_connections", 1, 2147483647}, {"max_allowed_packet", 1024, 1073741824}, {"max_prepared_stmt_count", 1, 2147483647}}
-	result := make(map[string]int64, len(settings))
-	for _, setting := range settings {
-		value, err := positiveInteger(setting.name, get(setting.name), setting.minimum, setting.maximum)
-		if err != nil {
-			return nil, err
+func configurationNumbers(get func(string) string) (configurationLimits, error) {
+	values := make(map[string]int64, len(configurationRegistry))
+	for name, setting := range configurationRegistry {
+		if setting.minimum == 0 {
+			continue
 		}
-		result[setting.name] = value
+		value, err := positiveInteger(name, get(name), setting.minimum, setting.maximum)
+		if err != nil {
+			return configurationLimits{}, err
+		}
+		values[name] = value
 	}
-	return result, nil
+	return configurationLimits{statementTimeout: values["statement_timeout_ms"], lockWaitTimeout: values["lock_wait_timeout_ms"], idleTransactionTimeout: values["idle_in_transaction_timeout_ms"], idleSessionTimeout: values["idle_session_timeout_ms"], executionMemory: values["execution_memory_limit_bytes"], aggregateMemory: values["aggregate_execution_memory_limit_bytes"], temporaryStorage: values["temporary_storage_limit_bytes"], aggregateTemporaryStorage: values["aggregate_temporary_storage_limit_bytes"], maxConnections: values["max_connections"], maxAllowedPacket: values["max_allowed_packet"], maxPreparedStatements: values["max_prepared_stmt_count"]}, nil
 }
 
 func absolutePath(name, value string, optional bool) (string, error) {
