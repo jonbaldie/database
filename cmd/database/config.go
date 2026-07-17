@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/jonbaldie/database/internal/lifecycle"
 )
@@ -378,23 +377,23 @@ func makeConfiguration(values map[string]configurationValue, explicitMySQL bool)
 	if format != "json" && format != "text" {
 		return configuration{}, invalidConfiguration("log_format must be json or text")
 	}
-	statement, err := durationMilliseconds("statement_timeout_ms", get("statement_timeout_ms"))
-	if err != nil {
-		return configuration{}, err
-	}
-	lockWait, err := durationMilliseconds("lock_wait_timeout_ms", get("lock_wait_timeout_ms"))
-	if err != nil {
-		return configuration{}, err
-	}
-	idleTransaction, err := durationMilliseconds("idle_in_transaction_timeout_ms", get("idle_in_transaction_timeout_ms"))
-	if err != nil {
-		return configuration{}, err
-	}
-	idleSession, err := durationMilliseconds("idle_session_timeout_ms", get("idle_session_timeout_ms"))
-	if err != nil {
-		return configuration{}, err
-	}
 	positive := func(name string) (int64, error) { return positiveInteger(name, get(name), 1, int64(^uint64(0)>>1)) }
+	statement, err := positive("statement_timeout_ms")
+	if err != nil {
+		return configuration{}, err
+	}
+	lockWait, err := positive("lock_wait_timeout_ms")
+	if err != nil {
+		return configuration{}, err
+	}
+	idleTransaction, err := positive("idle_in_transaction_timeout_ms")
+	if err != nil {
+		return configuration{}, err
+	}
+	idleSession, err := positive("idle_session_timeout_ms")
+	if err != nil {
+		return configuration{}, err
+	}
 	memory, err := positive("execution_memory_limit_bytes")
 	if err != nil {
 		return configuration{}, err
@@ -437,9 +436,9 @@ func makeConfiguration(values map[string]configurationValue, explicitMySQL bool)
 	}
 	options := lifecycle.Options{
 		DataDirectory: dataDirectory, MySQLAddress: mysqlAddress, TLSCertFile: cert, TLSKeyFile: key,
-		DiagnosticsAddress: diagnosticsAddress, Format: format, StatementTimeout: statement,
-		LockWaitTimeout: lockWait, IdleInTransactionTimeout: idleTransaction,
-		IdleSessionTimeout: idleSession, ExecutionMemoryLimitBytes: memory,
+		DiagnosticsAddress: diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: statement,
+		LockWaitTimeoutMilliseconds: lockWait, IdleInTransactionTimeoutMilliseconds: idleTransaction,
+		IdleSessionTimeoutMilliseconds: idleSession, ExecutionMemoryLimitBytes: memory,
 		AggregateMemoryLimitBytes: aggregateMemory, TemporaryStorageLimitBytes: temporary,
 		AggregateTemporaryLimitBytes: aggregateTemporary, MaxConnections: int(connections), MaxAllowedPacket: packet,
 		MaxPreparedStmtCount: int(prepared), MySQLEnabled: dataDirectory != "" || explicitMySQL,
@@ -448,18 +447,6 @@ func makeConfiguration(values map[string]configurationValue, explicitMySQL bool)
 		options.Format = "human"
 	}
 	return configuration{options: options, values: values}, nil
-}
-
-// durationMilliseconds rejects values that cannot become a time.Duration.
-// Accepting them would wrap during conversion and silently weaken a public
-// resource safeguard instead of failing invalid startup configuration.
-func durationMilliseconds(name, value string) (time.Duration, error) {
-	const maximum = int64(1<<63-1) / int64(time.Millisecond)
-	milliseconds, err := positiveInteger(name, value, 1, maximum)
-	if err != nil {
-		return 0, err
-	}
-	return time.Duration(milliseconds) * time.Millisecond, nil
 }
 
 func absolutePath(name, value string, optional bool) (string, error) {

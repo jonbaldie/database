@@ -47,10 +47,6 @@ func TestResolveConfigurationRejectsInvalidSources(t *testing.T) {
 		{name: "empty environment", env: []string{"DATABASE_SERVER_MAX_CONNECTIONS="}},
 		{name: "duplicate toml", args: []string{"--config", file}},
 		{name: "malformed integer", args: []string{"--max-connections=zero"}},
-		{name: "statement timeout exceeds duration representation", args: []string{"--statement-timeout-ms=9223372036855"}},
-		{name: "lock wait timeout exceeds duration representation", args: []string{"--lock-wait-timeout-ms=9223372036855"}},
-		{name: "idle transaction timeout exceeds duration representation", args: []string{"--idle-in-transaction-timeout-ms=9223372036855"}},
-		{name: "idle session timeout exceeds duration representation", args: []string{"--idle-session-timeout-ms=9223372036855"}},
 		{name: "contradictory budgets", args: []string{"--execution-memory-limit-bytes=2", "--aggregate-execution-memory-limit-bytes=1"}},
 		{name: "one TLS path", args: []string{"--tls-certificate-file=" + filepath.Join(temporary, "cert.pem")}},
 	}
@@ -70,5 +66,24 @@ func TestResolveConfigurationAcceptsBracketedIPv6(t *testing.T) {
 	}
 	if config.options.MySQLAddress != "[::1]:3306" {
 		t.Fatalf("address = %q", config.options.MySQLAddress)
+	}
+}
+
+func TestResolveConfigurationPreservesMaximumTimeoutsInMilliseconds(t *testing.T) {
+	const maximum = "9223372036854775807"
+	config, err := resolveConfiguration([]string{
+		"--statement-timeout-ms=" + maximum,
+		"--lock-wait-timeout-ms=" + maximum,
+		"--idle-in-transaction-timeout-ms=" + maximum,
+		"--idle-session-timeout-ms=" + maximum,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.options.StatementTimeoutMilliseconds != 9223372036854775807 ||
+		config.options.LockWaitTimeoutMilliseconds != 9223372036854775807 ||
+		config.options.IdleInTransactionTimeoutMilliseconds != 9223372036854775807 ||
+		config.options.IdleSessionTimeoutMilliseconds != 9223372036854775807 {
+		t.Fatalf("timeout options = %#v", config.options)
 	}
 }

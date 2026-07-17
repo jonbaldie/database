@@ -24,24 +24,24 @@ import (
 // disables the diagnostics listener, which keeps the default command useful
 // for smoke tests and local process supervision.
 type Options struct {
-	DataDirectory                string
-	MySQLAddress                 string
-	TLSCertFile                  string
-	TLSKeyFile                   string
-	DiagnosticsAddress           string
-	StateFile                    string
-	Format                       string
-	StatementTimeout             time.Duration
-	LockWaitTimeout              time.Duration
-	IdleInTransactionTimeout     time.Duration
-	IdleSessionTimeout           time.Duration
-	ExecutionMemoryLimitBytes    int64
-	AggregateMemoryLimitBytes    int64
-	TemporaryStorageLimitBytes   int64
-	AggregateTemporaryLimitBytes int64
-	MaxConnections               int
-	MaxAllowedPacket             int64
-	MaxPreparedStmtCount         int
+	DataDirectory                        string
+	MySQLAddress                         string
+	TLSCertFile                          string
+	TLSKeyFile                           string
+	DiagnosticsAddress                   string
+	StateFile                            string
+	Format                               string
+	StatementTimeoutMilliseconds         int64
+	LockWaitTimeoutMilliseconds          int64
+	IdleInTransactionTimeoutMilliseconds int64
+	IdleSessionTimeoutMilliseconds       int64
+	ExecutionMemoryLimitBytes            int64
+	AggregateMemoryLimitBytes            int64
+	TemporaryStorageLimitBytes           int64
+	AggregateTemporaryLimitBytes         int64
+	MaxConnections                       int
+	MaxAllowedPacket                     int64
+	MaxPreparedStmtCount                 int
 	// MySQLEnabled distinguishes the compatibility diagnostics-only invocation
 	// (serve with no instance and no explicit MySQL address) from the normal
 	// configured server path.
