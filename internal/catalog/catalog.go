@@ -15,11 +15,14 @@ type Definition struct {
 	Namespaces map[string]Namespace `json:"namespaces"`
 }
 type Namespace struct {
+	Name   string           `json:"name,omitempty"`
 	Tables map[string]Table `json:"tables"`
 }
 type Table struct {
-	Columns []string   `json:"columns"`
-	Rows    [][]string `json:"rows,omitempty"`
+	Name        string     `json:"name,omitempty"`
+	Columns     []string   `json:"columns"`
+	ColumnTypes []string   `json:"column_types,omitempty"`
+	Rows        [][]string `json:"rows,omitempty"`
 }
 type Store struct {
 	mu         sync.Mutex
@@ -51,11 +54,18 @@ func (s *Store) CreateNamespace(name string) error {
 		if _, ok := s.definition.Namespaces[key]; ok {
 			return errors.New("namespace already exists")
 		}
-		s.definition.Namespaces[key] = Namespace{Tables: map[string]Table{}}
+		s.definition.Namespaces[key] = Namespace{Name: name, Tables: map[string]Table{}}
 		return nil
 	})
 }
 func (s *Store) CreateTable(namespace, name string, columns []string) error {
+	return s.CreateTableWithTypes(namespace, name, columns, nil)
+}
+
+// CreateTableWithTypes records the logical column types needed to reproduce a
+// public schema definition. A nil type list preserves compatibility with the
+// original catalog format, whose columns were names only.
+func (s *Store) CreateTableWithTypes(namespace, name string, columns, columnTypes []string) error {
 	return s.mutate(func() error {
 		key := strings.ToLower(namespace)
 		ns, ok := s.definition.Namespaces[key]
@@ -66,7 +76,14 @@ func (s *Store) CreateTable(namespace, name string, columns []string) error {
 		if _, ok := ns.Tables[table]; ok {
 			return errors.New("table already exists")
 		}
-		ns.Tables[table] = Table{Columns: append([]string(nil), columns...)}
+		definition := Table{Name: name, Columns: append([]string(nil), columns...)}
+		if len(columnTypes) > 0 {
+			if len(columnTypes) != len(columns) {
+				return errors.New("column type count does not match column count")
+			}
+			definition.ColumnTypes = append([]string(nil), columnTypes...)
+		}
+		ns.Tables[table] = definition
 		s.definition.Namespaces[key] = ns
 		return nil
 	})
@@ -110,11 +127,13 @@ func (s *Store) Replace(definition Definition) error {
 func cloneDefinition(source Definition) Definition {
 	copy := Definition{Namespaces: make(map[string]Namespace, len(source.Namespaces))}
 	for namespace, value := range source.Namespaces {
-		cloned := Namespace{Tables: make(map[string]Table, len(value.Tables))}
+		cloned := Namespace{Name: value.Name, Tables: make(map[string]Table, len(value.Tables))}
 		for table, definition := range value.Tables {
 			cloned.Tables[table] = Table{
-				Columns: append([]string(nil), definition.Columns...),
-				Rows:    cloneRows(definition.Rows),
+				Name:        definition.Name,
+				Columns:     append([]string(nil), definition.Columns...),
+				ColumnTypes: append([]string(nil), definition.ColumnTypes...),
+				Rows:        cloneRows(definition.Rows),
 			}
 		}
 		copy.Namespaces[namespace] = cloned

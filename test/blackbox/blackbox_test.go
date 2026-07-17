@@ -347,6 +347,80 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	}
 }
 
+func TestMySQLCatalogReturnsCanonicalCreateDefinitions(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("catalog-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, mysqlAddress := startMySQLServer(t, runner, directory)
+	defer func() {
+		_ = process.Stop()
+		_ = process.Wait()
+	}()
+
+	client := newWireClient(t, mysqlAddress, "admin", "catalog-secret")
+	defer client.close()
+	for _, query := range []string{
+		"CREATE DATABASE zeta",
+		"CREATE DATABASE alpha",
+		"USE zeta",
+		"CREATE TABLE zebra (name VARCHAR(32), id INT)",
+		"CREATE TABLE apple (value DECIMAL(10,2))",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+
+	databases := client.query("SHOW DATABASES")
+	if databases.err != "" || strings.Join(databases.columns, ",") != "Database" || len(databases.rows) != 2 || databases.rows[0][0] != "alpha" || databases.rows[1][0] != "zeta" {
+		t.Fatalf("sorted databases: %#v", databases)
+	}
+	tables := client.query("SHOW TABLES")
+	if tables.err != "" || strings.Join(tables.columns, ",") != "Tables_in_zeta" || len(tables.rows) != 2 || tables.rows[0][0] != "apple" || tables.rows[1][0] != "zebra" {
+		t.Fatalf("sorted tables: %#v", tables)
+	}
+
+	databaseDefinition := client.query("SHOW CREATE DATABASE zeta")
+	if databaseDefinition.err != "" || strings.Join(databaseDefinition.columns, ",") != "Database,Create Database" || len(databaseDefinition.rows) != 1 || strings.Join(databaseDefinition.rows[0], "\n") != "zeta\nCREATE DATABASE `zeta`" {
+		t.Fatalf("canonical database definition: %#v", databaseDefinition)
+	}
+	tableDefinition := client.query("SHOW CREATE TABLE zeta.zebra")
+	expectedTable := "zebra\nCREATE TABLE `zebra` (\n  `name` VARCHAR(32),\n  `id` INT\n)"
+	if tableDefinition.err != "" || strings.Join(tableDefinition.columns, ",") != "Table,Create Table" || len(tableDefinition.rows) != 1 || strings.Join(tableDefinition.rows[0], "\n") != expectedTable {
+		t.Fatalf("canonical table definition: %#v", tableDefinition)
+	}
+	decimalDefinition := client.query("SHOW CREATE TABLE apple")
+	if decimalDefinition.err != "" || len(decimalDefinition.rows) != 1 || decimalDefinition.rows[0][1] != "CREATE TABLE `apple` (\n  `value` DECIMAL(10,2)\n)" {
+		t.Fatalf("parenthesized type definition: %#v", decimalDefinition)
+	}
+}
+
+func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string) (*blackbox.Process, string) {
+	t.Helper()
+	diagnostics := freeAddress(t)
+	mysqlAddress := freeAddress(t)
+	state := filepath.Join(t.TempDir(), "server.state")
+	process, err := runner.Start(context.Background(), "serve", "--data-dir", directory, "--mysql-address", mysqlAddress, "--diagnostics-address", diagnostics, "--format=json", "--state-file", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var event map[string]any
+	if err := process.NextJSONEvent(ctx, &event); err != nil || event["state"] != "ready" {
+		process.Crash()
+		result := process.Wait()
+		t.Fatalf("wait for ready event: %v; result=%#v", err, result)
+	}
+	return process, mysqlAddress
+}
+
 type wireResult struct {
 	columns []string
 	rows    [][]string

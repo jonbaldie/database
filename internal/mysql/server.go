@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -387,11 +388,27 @@ func (s *session) execute(query string) (*queryResult, error) {
 	if lower == "show databases" {
 		rows := make([][]string, 0)
 		if s.server.config.Catalog != nil {
-			for name := range s.server.config.Catalog.Snapshot().Namespaces {
+			namespaces := s.server.config.Catalog.Snapshot().Namespaces
+			names := make([]string, 0, len(namespaces))
+			for key, namespace := range namespaces {
+				name := namespace.Name
+				if name == "" {
+					name = key
+				}
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
 				rows = append(rows, []string{name})
 			}
 		}
 		return &queryResult{[]string{"Database"}, rows}, nil
+	}
+	if strings.HasPrefix(lower, "show create database ") || strings.HasPrefix(lower, "show create schema ") {
+		return s.showCreateDatabase(query)
+	}
+	if strings.HasPrefix(lower, "show create table ") {
+		return s.showCreateTable(query)
 	}
 	if lower == "show tables" {
 		if s.database == "" {
@@ -402,7 +419,16 @@ func (s *session) execute(query string) (*queryResult, error) {
 			return nil, sqlFailure{1049, "42000", "unknown database"}
 		}
 		rows := make([][]string, 0, len(ns.Tables))
-		for name := range ns.Tables {
+		names := make([]string, 0, len(ns.Tables))
+		for key, table := range ns.Tables {
+			name := table.Name
+			if name == "" {
+				name = key
+			}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
 			rows = append(rows, []string{name})
 		}
 		return &queryResult{[]string{"Tables_in_" + s.database}, rows}, nil
@@ -478,6 +504,7 @@ func (s *session) createTable(query string) error {
 	name := identifier(strings.Fields(head)[0])
 	parts := splitCSV(query[open+1 : close])
 	columns := make([]string, 0, len(parts))
+	columnTypes := make([]string, 0, len(parts))
 	for _, part := range parts {
 		fields := strings.Fields(strings.TrimSpace(part))
 		if len(fields) == 0 {
@@ -487,14 +514,95 @@ func (s *session) createTable(query string) error {
 			continue
 		}
 		columns = append(columns, identifier(fields[0]))
+		columnType := "TEXT"
+		if len(fields) > 1 {
+			columnType = strings.ToUpper(fields[1])
+		}
+		columnTypes = append(columnTypes, columnType)
 	}
 	if len(columns) == 0 || s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
-	if err := s.server.config.Catalog.CreateTable(s.database, name, columns); err != nil {
+	if err := s.server.config.Catalog.CreateTableWithTypes(s.database, name, columns, columnTypes); err != nil {
 		return sqlFailure{1050, "42S01", err.Error()}
 	}
 	return nil
+}
+
+func (s *session) showCreateDatabase(query string) (*queryResult, error) {
+	name := strings.TrimSpace(query)
+	if strings.HasPrefix(strings.ToLower(name), "show create database ") {
+		name = strings.TrimSpace(name[len("SHOW CREATE DATABASE "):])
+	} else {
+		name = strings.TrimSpace(name[len("SHOW CREATE SCHEMA "):])
+	}
+	name = identifier(name)
+	if name == "" || s.server.config.Catalog == nil {
+		return nil, sqlFailure{1049, "42000", "unknown database"}
+	}
+	key := strings.ToLower(name)
+	namespace, ok := s.server.config.Catalog.Snapshot().Namespaces[key]
+	if !ok {
+		return nil, sqlFailure{1049, "42000", "unknown database '" + name + "'"}
+	}
+	if namespace.Name == "" {
+		namespace.Name = key
+	}
+	return &queryResult{
+		columns: []string{"Database", "Create Database"},
+		rows:    [][]string{{namespace.Name, "CREATE DATABASE " + quoteIdentifier(namespace.Name)}},
+	}, nil
+}
+
+func (s *session) showCreateTable(query string) (*queryResult, error) {
+	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
+	namespaceName, tableName := s.database, target
+	if dot := strings.LastIndex(target, "."); dot >= 0 {
+		namespaceName, tableName = target[:dot], target[dot+1:]
+	}
+	namespaceName, tableName = identifier(namespaceName), identifier(tableName)
+	if namespaceName == "" {
+		return nil, sqlFailure{1046, "3D000", "no database selected"}
+	}
+	namespace, ok := s.snapshotNamespace(namespaceName)
+	if !ok {
+		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
+	}
+	table, ok := namespace.Tables[strings.ToLower(tableName)]
+	if !ok {
+		return nil, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
+	}
+	if table.Name == "" {
+		table.Name = strings.ToLower(tableName)
+	}
+	definition := canonicalCreateTable(table)
+	return &queryResult{columns: []string{"Table", "Create Table"}, rows: [][]string{{table.Name, definition}}}, nil
+}
+
+func canonicalCreateTable(table catalog.Table) string {
+	var definition strings.Builder
+	definition.WriteString("CREATE TABLE ")
+	definition.WriteString(quoteIdentifier(table.Name))
+	definition.WriteString(" (\n")
+	for index, column := range table.Columns {
+		if index > 0 {
+			definition.WriteString(",\n")
+		}
+		definition.WriteString("  ")
+		definition.WriteString(quoteIdentifier(column))
+		definition.WriteString(" ")
+		columnType := "TEXT"
+		if index < len(table.ColumnTypes) && table.ColumnTypes[index] != "" {
+			columnType = table.ColumnTypes[index]
+		}
+		definition.WriteString(columnType)
+	}
+	definition.WriteString("\n)")
+	return definition.String()
+}
+
+func quoteIdentifier(value string) string {
+	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
 func (s *session) insert(query string) error {
 	if s.database == "" {
@@ -652,15 +760,27 @@ func scalar(value string) string {
 func quote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 func splitCSV(value string) []string {
 	var result []string
-	start := 0
+	start, depth := 0, 0
 	quoted := false
 	for i, character := range value {
 		if character == '\'' {
 			quoted = !quoted
 		}
-		if character == ',' && !quoted {
-			result = append(result, strings.TrimSpace(value[start:i]))
-			start = i + 1
+		if quoted {
+			continue
+		}
+		switch character {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				result = append(result, strings.TrimSpace(value[start:i]))
+				start = i + 1
+			}
 		}
 	}
 	result = append(result, strings.TrimSpace(value[start:]))
