@@ -154,6 +154,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if strings.Contains(lower, " join ") || strings.Contains(lower, " order by ") || strings.Contains(lower, " distinct ") {
 		return writeScalarResult(connection, sequence, "joined")
 	}
+	if strings.Contains(lower, " union ") || strings.HasPrefix(lower, "with ") || strings.Contains(lower, "(select ") {
+		return writeScalarResult(connection, sequence, "composed")
+	}
 	if strings.HasPrefix(lower, "select ") {
 		value := strings.TrimSpace(trimmed[len("select "):])
 		if number, err := strconv.Atoi(value); err == nil {
