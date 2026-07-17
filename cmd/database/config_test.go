@@ -39,6 +39,8 @@ func TestConfigurationOnlyAcceptsCanonicalRegistryForms(t *testing.T) {
 	}{
 		{name: "legacy data directory flag", args: []string{"--data-dir=" + directory}},
 		{name: "legacy mysql address flag", args: []string{"--data-directory=" + directory, "--mysql-address=127.0.0.1:3306"}},
+		{name: "output format is not a registry form", args: []string{"--data-directory=" + directory, "--format=json"}},
+		{name: "human log format", args: []string{"--data-directory=" + directory, "--log-format=human"}},
 		{name: "lowercase environment suffix", args: []string{"--data-directory=" + directory}, env: []string{"DATABASE_SERVER_max_connections=10"}},
 	}
 	for _, test := range tests {

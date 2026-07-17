@@ -125,7 +125,7 @@ func parseConfigurationFlags(args []string) (string, map[string]string, error) {
 		name, value, hasValue := strings.Cut(arg, "=")
 		if !hasValue {
 			switch name {
-			case "--config", "--format", "--log-format", "--data-directory", "--mysql-listen-address", "--tls-certificate-file", "--tls-private-key-file", "--diagnostics-listen-address", "--statement-timeout-ms", "--lock-wait-timeout-ms", "--idle-in-transaction-timeout-ms", "--idle-session-timeout-ms", "--execution-memory-limit-bytes", "--aggregate-execution-memory-limit-bytes", "--temporary-storage-limit-bytes", "--aggregate-temporary-storage-limit-bytes", "--max-connections", "--max-allowed-packet", "--max-prepared-stmt-count":
+			case "--config", "--log-format", "--data-directory", "--mysql-listen-address", "--tls-certificate-file", "--tls-private-key-file", "--diagnostics-listen-address", "--statement-timeout-ms", "--lock-wait-timeout-ms", "--idle-in-transaction-timeout-ms", "--idle-session-timeout-ms", "--execution-memory-limit-bytes", "--aggregate-execution-memory-limit-bytes", "--temporary-storage-limit-bytes", "--aggregate-temporary-storage-limit-bytes", "--max-connections", "--max-allowed-packet", "--max-prepared-stmt-count":
 				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 					return "", nil, invalidConfiguration(name + " requires a non-empty value")
 				}
@@ -166,8 +166,8 @@ func flagSetting(name, value string) (string, string, bool) {
 		"--tls-certificate-file":       "tls_certificate_file",
 		"--tls-private-key-file":       "tls_private_key_file",
 		"--diagnostics-listen-address": "diagnostics_listen_address",
-		"--log-format":                 "log_format", "--format": "log_format",
-		"--statement-timeout-ms": "statement_timeout_ms", "--lock-wait-timeout-ms": "lock_wait_timeout_ms",
+		"--log-format":                 "log_format",
+		"--statement-timeout-ms":       "statement_timeout_ms", "--lock-wait-timeout-ms": "lock_wait_timeout_ms",
 		"--idle-in-transaction-timeout-ms": "idle_in_transaction_timeout_ms", "--idle-session-timeout-ms": "idle_session_timeout_ms",
 		"--execution-memory-limit-bytes": "execution_memory_limit_bytes", "--aggregate-execution-memory-limit-bytes": "aggregate_execution_memory_limit_bytes",
 		"--temporary-storage-limit-bytes": "temporary_storage_limit_bytes", "--aggregate-temporary-storage-limit-bytes": "aggregate_temporary_storage_limit_bytes",
@@ -176,9 +176,6 @@ func flagSetting(name, value string) (string, string, bool) {
 	key, ok := canonical[name]
 	if !ok {
 		return "", "", false
-	}
-	if key == "log_format" && value == "human" {
-		value = "text"
 	}
 	return key, value, true
 }
