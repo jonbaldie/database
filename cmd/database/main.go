@@ -11,9 +11,9 @@ import (
 	"github.com/jonbaldie/database/internal/buildinfo"
 )
 
-func main() { terminate(os.Exit, run(os.Args[1:], os.Stdout, os.Stderr)) }
+var exitProcess = os.Exit
 
-func terminate(exit func(int), code int) { exit(code) }
+func main() { exitProcess(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {

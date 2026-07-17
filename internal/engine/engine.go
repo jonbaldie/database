@@ -524,21 +524,22 @@ func offset(value, base int) int {
 	}
 	return value + base
 }
-func splitTopLevel(s string, separator rune) []string {
+func splitTopLevel(s string, separator byte) []string {
 	result := []string{}
 	start, depth := 0, 0
-	quote := rune(0)
-	for i, r := range s {
+	quote := byte(0)
+	for i, length := 0, len(s); i < length; i++ {
+		character := s[i]
 		if quote != 0 {
-			quote = closingQuote(quote, r)
+			quote = closingQuote(quote, character)
 			continue
 		}
-		if quoteDelimiter(r) {
-			quote = r
+		if quoteDelimiter(character) {
+			quote = character
 			continue
 		}
-		depth = parenthesisDepth(depth, r)
-		if r == separator && depth == 0 {
+		depth = parenthesisDepth(depth, character)
+		if character == separator && depth == 0 {
 			result = append(result, strings.TrimSpace(s[start:i]))
 			start = i + 1
 		}
@@ -546,26 +547,6 @@ func splitTopLevel(s string, separator rune) []string {
 	result = append(result, strings.TrimSpace(s[start:]))
 	return result
 }
-
-func closingQuote(quote, character rune) rune {
-	if character == quote {
-		return 0
-	}
-	return quote
-}
-
-func quoteDelimiter(character rune) bool { return character == '\'' || character == '"' }
-
-func parenthesisDepth(depth int, character rune) int {
-	if character == '(' {
-		return depth + 1
-	}
-	if character == ')' {
-		return depth - 1
-	}
-	return depth
-}
-
 func parseValueGroups(s string) [][]string {
 	groups := [][]string{}
 	for i, length := 0, len(s); i < length; {
@@ -589,14 +570,14 @@ func closingParenthesis(text string, open, length int) int {
 	for index := open; index < length; index++ {
 		character := text[index]
 		if quote != 0 {
-			quote = closingByteQuote(quote, character)
+			quote = closingQuote(quote, character)
 			continue
 		}
-		if byteQuoteDelimiter(character) {
+		if quoteDelimiter(character) {
 			quote = character
 			continue
 		}
-		depth = byteParenthesisDepth(depth, character)
+		depth = parenthesisDepth(depth, character)
 		if depth == 0 {
 			return index
 		}
@@ -604,16 +585,16 @@ func closingParenthesis(text string, open, length int) int {
 	return -1
 }
 
-func closingByteQuote(quote, character byte) byte {
+func closingQuote(quote, character byte) byte {
 	if character == quote {
 		return 0
 	}
 	return quote
 }
 
-func byteQuoteDelimiter(character byte) bool { return character == '\'' || character == '"' }
+func quoteDelimiter(character byte) bool { return character == '\'' || character == '"' }
 
-func byteParenthesisDepth(depth int, character byte) int {
+func parenthesisDepth(depth int, character byte) int {
 	if character == '(' {
 		return depth + 1
 	}
