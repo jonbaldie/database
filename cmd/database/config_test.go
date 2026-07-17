@@ -30,6 +30,81 @@ func TestResolveConfigurationPrecedence(t *testing.T) {
 	}
 }
 
+func TestConfigurationOnlyAcceptsCanonicalRegistryForms(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	tests := []struct {
+		name string
+		args []string
+		env  []string
+	}{
+		{name: "legacy data directory flag", args: []string{"--data-dir=" + directory}},
+		{name: "legacy mysql address flag", args: []string{"--data-directory=" + directory, "--mysql-address=127.0.0.1:3306"}},
+		{name: "output format is not a registry form", args: []string{"--data-directory=" + directory, "--format=json"}},
+		{name: "human log format", args: []string{"--data-directory=" + directory, "--log-format=human"}},
+		{name: "lowercase environment suffix", args: []string{"--data-directory=" + directory}, env: []string{"DATABASE_SERVER_max_connections=10"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := resolveConfiguration(test.args, test.env); err == nil {
+				t.Fatal("expected non-canonical configuration form to be rejected")
+			}
+		})
+	}
+}
+
+func TestConfigurationRequiresDataDirectoryAndUsesRegistryBounds(t *testing.T) {
+	for _, args := range [][]string{
+		nil,
+		{"--data-directory=/tmp/database", "--max-connections=2147483648"},
+		{"--data-directory=/tmp/database", "--max-prepared-stmt-count=2147483648"},
+	} {
+		if _, err := resolveConfiguration(args, nil); err == nil {
+			t.Fatalf("expected configuration %q to be rejected", args)
+		}
+	}
+}
+
+func TestConfigurationFileAcceptsTOMLStringsContainingEquals(t *testing.T) {
+	temporary := t.TempDir()
+	file := filepath.Join(temporary, "server.toml")
+	if err := os.WriteFile(file, []byte("data_directory = \""+filepath.Join(temporary, "data=directory")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := resolveConfiguration([]string{"--config=" + file}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.options.DataDirectory != filepath.Join(temporary, "data=directory") {
+		t.Fatalf("data directory = %q", config.options.DataDirectory)
+	}
+}
+
+func TestConfigurationFileSelectorMayBeRelative(t *testing.T) {
+	temporary := t.TempDir()
+	t.Chdir(temporary)
+	if err := os.WriteFile("server.toml", []byte("data_directory = \""+filepath.Join(temporary, "instance")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := resolveConfiguration([]string{"--config=server.toml"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.options.DataDirectory != filepath.Join(temporary, "instance") {
+		t.Fatalf("data directory = %q", config.options.DataDirectory)
+	}
+}
+
+func TestConfigurationFileRejectsNonTOMLStrings(t *testing.T) {
+	temporary := t.TempDir()
+	file := filepath.Join(temporary, "server.toml")
+	if err := os.WriteFile(file, []byte("data_directory = "+filepath.Join(temporary, "instance")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveConfiguration([]string{"--config=" + file}, nil); err == nil {
+		t.Fatal("expected invalid TOML bare string to be rejected")
+	}
+}
+
 func TestResolveConfigurationRejectsInvalidSources(t *testing.T) {
 	temporary := t.TempDir()
 	file := filepath.Join(temporary, "duplicate.toml")
@@ -60,7 +135,7 @@ func TestResolveConfigurationRejectsInvalidSources(t *testing.T) {
 }
 
 func TestResolveConfigurationAcceptsBracketedIPv6(t *testing.T) {
-	config, err := resolveConfiguration([]string{"--data-dir", "/tmp/database-instance", "--mysql-listen-address", "[::1]:3306"}, nil)
+	config, err := resolveConfiguration([]string{"--data-directory", "/tmp/database-instance", "--mysql-listen-address", "[::1]:3306"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,9 +144,20 @@ func TestResolveConfigurationAcceptsBracketedIPv6(t *testing.T) {
 	}
 }
 
+func TestResolveConfigurationRejectsEquivalentIPv6Listeners(t *testing.T) {
+	if _, err := resolveConfiguration([]string{
+		"--data-directory=/tmp/database-instance",
+		"--mysql-listen-address=[0:0:0:0:0:0:0:1]:3306",
+		"--diagnostics-listen-address=[::1]:3306",
+	}, nil); err == nil {
+		t.Fatal("expected equivalent listener addresses to be rejected")
+	}
+}
+
 func TestResolveConfigurationPreservesMaximumTimeoutsInMilliseconds(t *testing.T) {
 	const maximum = "9223372036854775807"
 	config, err := resolveConfiguration([]string{
+		"--data-directory=/tmp/database-instance",
 		"--statement-timeout-ms=" + maximum,
 		"--lock-wait-timeout-ms=" + maximum,
 		"--idle-in-transaction-timeout-ms=" + maximum,
@@ -85,5 +171,31 @@ func TestResolveConfigurationPreservesMaximumTimeoutsInMilliseconds(t *testing.T
 		config.options.IdleInTransactionTimeoutMilliseconds != 9223372036854775807 ||
 		config.options.IdleSessionTimeoutMilliseconds != 9223372036854775807 {
 		t.Fatalf("timeout options = %#v", config.options)
+	}
+}
+
+func TestResolveConfigurationCarriesEveryResourceLimitToServerBoundary(t *testing.T) {
+	config, err := resolveConfiguration([]string{
+		"--data-directory=/tmp/database-instance",
+		"--statement-timeout-ms=11",
+		"--lock-wait-timeout-ms=12",
+		"--idle-in-transaction-timeout-ms=13",
+		"--idle-session-timeout-ms=14",
+		"--execution-memory-limit-bytes=15",
+		"--aggregate-execution-memory-limit-bytes=16",
+		"--temporary-storage-limit-bytes=17",
+		"--aggregate-temporary-storage-limit-bytes=18",
+		"--max-connections=19",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := config.options
+	if options.StatementTimeoutMilliseconds != 11 || options.LockWaitTimeoutMilliseconds != 12 ||
+		options.IdleInTransactionTimeoutMilliseconds != 13 || options.IdleSessionTimeoutMilliseconds != 14 ||
+		options.ExecutionMemoryLimitBytes != 15 || options.AggregateMemoryLimitBytes != 16 ||
+		options.TemporaryStorageLimitBytes != 17 || options.AggregateTemporaryLimitBytes != 18 ||
+		options.MaxConnections != 19 {
+		t.Fatalf("resource limits were not preserved: %#v", options)
 	}
 }

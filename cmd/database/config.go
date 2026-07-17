@@ -105,23 +105,12 @@ func resolveConfiguration(args, environment []string) (configuration, error) {
 		values[name] = configurationValue{value: value, source: "flag"}
 	}
 
-	mysqlExplicit := values["mysql_listen_address"].source != "default"
-	config, err := makeConfiguration(values, mysqlExplicit)
+	config, err := makeConfiguration(values)
 	if err != nil {
 		return configuration{}, err
 	}
-	// The original diagnostics-only smoke path did not initialize an instance
-	// or open the default MySQL port. Keep that invocation usable while the
-	// documented server path remains explicit about its data directory.
-	config.options.MySQLEnabled = config.options.DataDirectory != "" || mysqlExplicit
-	if stateFile, ok := flags["state_file"]; ok {
-		config.options.StateFile = stateFile
-	}
-	if config.options.MySQLEnabled && config.options.DataDirectory == "" {
-		return configuration{}, invalidConfiguration("data_directory is required when the MySQL listener is enabled")
-	}
-	if config.options.DataDirectory == "" && (flags["data_directory"] != "" || envValues["data_directory"] != "" || configPath != "") {
-		return configuration{}, invalidConfiguration("data_directory must be a non-empty absolute path")
+	if config.options.DataDirectory == "" {
+		return configuration{}, invalidConfiguration("data_directory is required")
 	}
 	return config, nil
 }
@@ -133,18 +122,10 @@ func parseConfigurationFlags(args []string) (string, map[string]string, error) {
 	configSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "--json" {
-			if seen["log_format"] {
-				return "", nil, invalidConfiguration("repeated setting log_format")
-			}
-			seen["log_format"] = true
-			values["log_format"] = "json"
-			continue
-		}
 		name, value, hasValue := strings.Cut(arg, "=")
 		if !hasValue {
 			switch name {
-			case "--config", "--format", "--log-format", "--data-dir", "--data-directory", "--mysql-address", "--mysql-listen-address", "--tls-cert", "--tls-certificate-file", "--tls-key", "--tls-private-key-file", "--diagnostics-address", "--diagnostics-listen-address", "--state-file", "--statement-timeout-ms", "--lock-wait-timeout-ms", "--idle-in-transaction-timeout-ms", "--idle-session-timeout-ms", "--execution-memory-limit-bytes", "--aggregate-execution-memory-limit-bytes", "--temporary-storage-limit-bytes", "--aggregate-temporary-storage-limit-bytes", "--max-connections", "--max-allowed-packet", "--max-prepared-stmt-count":
+			case "--config", "--log-format", "--data-directory", "--mysql-listen-address", "--tls-certificate-file", "--tls-private-key-file", "--diagnostics-listen-address", "--statement-timeout-ms", "--lock-wait-timeout-ms", "--idle-in-transaction-timeout-ms", "--idle-session-timeout-ms", "--execution-memory-limit-bytes", "--aggregate-execution-memory-limit-bytes", "--temporary-storage-limit-bytes", "--aggregate-temporary-storage-limit-bytes", "--max-connections", "--max-allowed-packet", "--max-prepared-stmt-count":
 				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 					return "", nil, invalidConfiguration(name + " requires a non-empty value")
 				}
@@ -165,14 +146,6 @@ func parseConfigurationFlags(args []string) (string, map[string]string, error) {
 			configPath = value
 			continue
 		}
-		if name == "--state-file" {
-			if seen["state_file"] {
-				return "", nil, invalidConfiguration("repeated setting state_file")
-			}
-			seen["state_file"] = true
-			values["state_file"] = value
-			continue
-		}
 		canonical, normalized, ok := flagSetting(name, value)
 		if !ok {
 			return "", nil, invalidConfiguration(fmt.Sprintf("unknown flag %q", name))
@@ -188,13 +161,13 @@ func parseConfigurationFlags(args []string) (string, map[string]string, error) {
 
 func flagSetting(name, value string) (string, string, bool) {
 	canonical := map[string]string{
-		"--data-dir": "data_directory", "--data-directory": "data_directory",
-		"--mysql-address": "mysql_listen_address", "--mysql-listen-address": "mysql_listen_address",
-		"--tls-cert": "tls_certificate_file", "--tls-certificate-file": "tls_certificate_file",
-		"--tls-key": "tls_private_key_file", "--tls-private-key-file": "tls_private_key_file",
-		"--diagnostics-address": "diagnostics_listen_address", "--diagnostics-listen-address": "diagnostics_listen_address",
-		"--log-format": "log_format", "--format": "log_format",
-		"--statement-timeout-ms": "statement_timeout_ms", "--lock-wait-timeout-ms": "lock_wait_timeout_ms",
+		"--data-directory":             "data_directory",
+		"--mysql-listen-address":       "mysql_listen_address",
+		"--tls-certificate-file":       "tls_certificate_file",
+		"--tls-private-key-file":       "tls_private_key_file",
+		"--diagnostics-listen-address": "diagnostics_listen_address",
+		"--log-format":                 "log_format",
+		"--statement-timeout-ms":       "statement_timeout_ms", "--lock-wait-timeout-ms": "lock_wait_timeout_ms",
 		"--idle-in-transaction-timeout-ms": "idle_in_transaction_timeout_ms", "--idle-session-timeout-ms": "idle_session_timeout_ms",
 		"--execution-memory-limit-bytes": "execution_memory_limit_bytes", "--aggregate-execution-memory-limit-bytes": "aggregate_execution_memory_limit_bytes",
 		"--temporary-storage-limit-bytes": "temporary_storage_limit_bytes", "--aggregate-temporary-storage-limit-bytes": "aggregate_temporary_storage_limit_bytes",
@@ -203,9 +176,6 @@ func flagSetting(name, value string) (string, string, bool) {
 	key, ok := canonical[name]
 	if !ok {
 		return "", "", false
-	}
-	if key == "log_format" && value == "human" {
-		value = "text"
 	}
 	return key, value, true
 }
@@ -230,7 +200,11 @@ func parseConfigurationEnvironment(environment []string) (map[string]string, str
 			configPath = value
 			continue
 		}
-		canonical := strings.ToLower(strings.TrimPrefix(name, "DATABASE_SERVER_"))
+		canonical := strings.TrimPrefix(name, "DATABASE_SERVER_")
+		if canonical != strings.ToUpper(canonical) {
+			return nil, "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
+		}
+		canonical = strings.ToLower(canonical)
 		if !configurationNames[canonical] {
 			return nil, "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
 		}
@@ -247,9 +221,6 @@ func parseConfigurationEnvironment(environment []string) (map[string]string, str
 }
 
 func readConfigurationFile(path string) (map[string]string, error) {
-	if !filepath.IsAbs(path) {
-		return nil, invalidConfiguration("config path must be an absolute path")
-	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, &configurationError{class: "precondition", message: fmt.Sprintf("read config file: %v", err)}
@@ -269,7 +240,7 @@ func readConfigurationFile(path string) (map[string]string, error) {
 			return nil, invalidConfiguration(fmt.Sprintf("config line %d: tables are not supported", lineNumber))
 		}
 		key, raw, ok := strings.Cut(line, "=")
-		if !ok || strings.Contains(raw, "=") {
+		if !ok {
 			return nil, invalidConfiguration(fmt.Sprintf("config line %d: expected one key=value pair", lineNumber))
 		}
 		key = strings.TrimSpace(key)
@@ -334,13 +305,13 @@ func tomlValue(raw string) (string, error) {
 		}
 		return value, nil
 	}
-	if strings.ContainsAny(raw, "[]{}") || strings.ContainsAny(raw, " \t") {
+	if raw == "" || strings.Trim(raw, "0123456789") != "" {
 		return "", errors.New("invalid TOML value")
 	}
 	return raw, nil
 }
 
-func makeConfiguration(values map[string]configurationValue, explicitMySQL bool) (configuration, error) {
+func makeConfiguration(values map[string]configurationValue) (configuration, error) {
 	get := func(name string) string { return values[name].value }
 	dataDirectory, err := absolutePath("data_directory", get("data_directory"), false)
 	if err != nil {
@@ -410,7 +381,7 @@ func makeConfiguration(values map[string]configurationValue, explicitMySQL bool)
 	if err != nil {
 		return configuration{}, err
 	}
-	connections, err := positiveInteger("max_connections", get("max_connections"), 1, int64(^uint(0)>>1))
+	connections, err := positiveInteger("max_connections", get("max_connections"), 1, 2147483647)
 	if err != nil {
 		return configuration{}, err
 	}
@@ -418,7 +389,7 @@ func makeConfiguration(values map[string]configurationValue, explicitMySQL bool)
 	if err != nil {
 		return configuration{}, err
 	}
-	prepared, err := positiveInteger("max_prepared_stmt_count", get("max_prepared_stmt_count"), 1, int64(^uint(0)>>1))
+	prepared, err := positiveInteger("max_prepared_stmt_count", get("max_prepared_stmt_count"), 1, 2147483647)
 	if err != nil {
 		return configuration{}, err
 	}
@@ -431,9 +402,8 @@ func makeConfiguration(values map[string]configurationValue, explicitMySQL bool)
 	if diagnosticsAddress != "" && diagnosticsAddress == mysqlAddress {
 		return configuration{}, invalidConfiguration("MySQL and diagnostics listeners must use different addresses")
 	}
-	if explicitMySQL && dataDirectory == "" {
-		return configuration{}, invalidConfiguration("data_directory is required when the MySQL listener is enabled")
-	}
+	// Options is the configuration boundary between this closed-registry
+	// resolver and the server subsystems that apply the individual limits.
 	options := lifecycle.Options{
 		DataDirectory: dataDirectory, MySQLAddress: mysqlAddress, TLSCertFile: cert, TLSKeyFile: key,
 		DiagnosticsAddress: diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: statement,
@@ -441,7 +411,7 @@ func makeConfiguration(values map[string]configurationValue, explicitMySQL bool)
 		IdleSessionTimeoutMilliseconds: idleSession, ExecutionMemoryLimitBytes: memory,
 		AggregateMemoryLimitBytes: aggregateMemory, TemporaryStorageLimitBytes: temporary,
 		AggregateTemporaryLimitBytes: aggregateTemporary, MaxConnections: int(connections), MaxAllowedPacket: packet,
-		MaxPreparedStmtCount: int(prepared), MySQLEnabled: dataDirectory != "" || explicitMySQL,
+		MaxPreparedStmtCount: int(prepared), MySQLEnabled: true,
 	}
 	if format == "text" {
 		options.Format = "human"
@@ -467,17 +437,19 @@ func networkAddress(name, value string) (string, error) {
 		return "", invalidConfiguration(name + " has an empty value")
 	}
 	host, port, err := net.SplitHostPort(value)
-	if err != nil || host == "" || net.ParseIP(host) == nil {
+	ip := net.ParseIP(host)
+	if err != nil || host == "" || ip == nil {
 		return "", invalidConfiguration(name + " must be an IPv4 address or bracketed IPv6 address with a port")
 	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return "", invalidConfiguration(name + " port must be between 1 and 65535")
 	}
-	if strings.Contains(host, ":") {
-		return "[" + host + "]:" + strconv.Itoa(portNumber), nil
+	canonicalHost := ip.String()
+	if strings.Contains(canonicalHost, ":") {
+		return "[" + canonicalHost + "]:" + strconv.Itoa(portNumber), nil
 	}
-	return host + ":" + strconv.Itoa(portNumber), nil
+	return canonicalHost + ":" + strconv.Itoa(portNumber), nil
 }
 
 func positiveInteger(name, value string, minimum, maximum int64) (int64, error) {

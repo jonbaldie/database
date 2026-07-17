@@ -468,11 +468,15 @@ func version(args []string, stdout, stderr io.Writer) int {
 
 func serve(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: database serve [--config PATH] [--data-directory PATH] [--mysql-listen-address HOST:PORT] [--tls-certificate-file PATH --tls-private-key-file PATH] [--diagnostics-listen-address HOST:PORT] [--log-format=json|text]")
-		fmt.Fprintln(stdout, "Compatibility aliases: --data-dir, --mysql-address, --tls-cert, --tls-key, --diagnostics-address, --format, --state-file")
+		fmt.Fprintln(stdout, "Usage: database serve [--format=human|json] [--config PATH] [--data-directory PATH] [--mysql-listen-address HOST:PORT] [--tls-certificate-file PATH --tls-private-key-file PATH] [--diagnostics-listen-address HOST:PORT] [--log-format=json|text]")
 		return 0
 	}
-	opts, err := parseServeFlags(args)
+	outputFormat, configurationArgs, err := configOutputFormat(args)
+	if err != nil {
+		fmt.Fprintf(stderr, "database serve: invalid_input: %v\n", err)
+		return 2
+	}
+	opts, err := parseServeFlags(configurationArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "database serve: %s: %v\n", configurationClass(err), err)
 		return 2
@@ -482,7 +486,7 @@ func serve(args []string, stdout, stderr io.Writer) int {
 	operationID := newOperationID()
 	emit := func(event lifecycle.Event) {
 		event.OperationID = operationID
-		if opts.Format == "json" {
+		if outputFormat == "json" {
 			_ = json.NewEncoder(stdout).Encode(event)
 			return
 		}
@@ -497,13 +501,13 @@ func serve(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if err := lifecycle.Serve(ctx, opts, emit); err != nil {
-		if opts.Format == "json" {
+		if outputFormat == "json" {
 			return writeOperatorFailure(stdout, "serve", operationID, "operation_failed", 1, err.Error())
 		}
 		fmt.Fprintf(stderr, "database serve: %v\n", err)
 		return 1
 	}
-	if opts.Format == "json" {
+	if outputFormat == "json" {
 		return writeOperatorResult(stdout, "serve", operationID, true, "success", "")
 	}
 	fmt.Fprintf(stdout, "database serve: success (operation_id=%s)\n", operationID)
@@ -550,7 +554,7 @@ func configOutputFormat(args []string) (string, []string, error) {
 	filtered := make([]string, 0, len(args))
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
-		if arg != "--json" && arg != "--format" && !strings.HasPrefix(arg, "--format=") {
+		if arg != "--format" && !strings.HasPrefix(arg, "--format=") {
 			filtered = append(filtered, arg)
 			continue
 		}
