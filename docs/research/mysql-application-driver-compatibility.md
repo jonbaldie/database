@@ -1,6 +1,6 @@
 # MySQL compatibility surface used by application drivers
 
-Research date: 2026-07-15
+Research date: 2026-07-17
 
 ## Decision summary
 
@@ -15,6 +15,36 @@ The sensible compatibility target is therefore:
 This boundary is consistent across the requested first-party clients. Connector/J documents server-side prepared statements and configurable result/type conversion; Connector/Python exposes a prepared cursor plus explicit transaction/session APIs; Go and mysql2 expose the same text-query versus prepared-query split.[Connector/J prepared statements](https://dev.mysql.com/doc/connector-j/en/connector-j-connp-props-prepared-statements.html) [Connector/J type conversions](https://dev.mysql.com/doc/connector-j/en/connector-j-reference-type-conversions.html) [Connector/Python prepared cursor](https://dev.mysql.com/doc/connector-python/en/connector-python-api-mysqlcursorprepared.html) [Connector/Python transactions](https://dev.mysql.com/doc/connector-python/en/connector-python-api-mysqlconnection-start-transaction.html) [Go statement source](https://github.com/go-sql-driver/mysql/blob/b96d41506ad9d74622faf53364cb92ba9aea2e6c/statement.go) [mysql2 prepare/execute source](https://github.com/sidorares/node-mysql2/tree/f86cfb18bb507cbe7cefb29cee849604318d5171/lib/commands)
 
 Do not advertise a capability until its complete state machine is implemented. MySQL defines negotiation as the intersection of server and client capability flags; flags alter packet layouts and semantics, including TLS, authentication, result terminators, session tracking, and multiple results.[Connection phase](https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase.html) [Capability flags](https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html)
+
+## Scope and implementation checkpoint
+
+The matrix is a **target compatibility contract**, not evidence that the
+current server already supports an unmodified driver. A supported driver
+profile must name the driver version, connection options, authentication mode,
+and tested journey. For example, a text-only `COM_QUERY` smoke test does not
+establish `database/sql` compatibility when callers pass parameters: its
+normal server-prepared path has a distinct command and result encoding.
+
+The following review of `internal/mysql/server.go` at
+`acea7ff778b63280e938221c79597b4f7015317d` is the handoff from this research
+to implementation work. It deliberately records observable gaps rather than
+making a broad compatibility claim from the presence of a handshake or a
+successful probe.
+
+| Surface | Current evidence | Contract gap before it can be advertised |
+|---|---|---|
+| Packet framing and negotiation | The server reads and writes one physical packet and parses only enough of `HandshakeResponse41` to authenticate/select a database. | Reassemble and split multi-packet payloads, reset/validate sequence IDs at command boundaries, and compute/store the negotiated capability intersection. |
+| TLS and authentication | The handshake names `caching_sha2_password`, while TLS wraps the listener before the classic handshake and authentication completes immediately after one response. | Implement the post-handshake `SSLRequest` upgrade and the complete selected-authentication exchange (including its success/failure branches); otherwise omit the related capability/profile. |
+| Result terminators and metadata | Text rows are emitted with EOF terminators. Each column definition uses empty schema/table/original-name fields and a generic string type. | Select EOF or OK terminators from negotiated capabilities and populate catalog/schema/table/name, charset, type, flags, length, and decimals from the actual expression or stored column. |
+| Prepared statements | Prepare/execute/close exist, but execution ultimately writes a text result set and accepts only a small parameter-type subset. | Add parameter and column metadata, NULL/unsigned/type reuse rules, binary rows, long data, statement reset, and lifecycle/error tests before calling server-prepared statements supported. |
+| Session and transaction state | The session records a selected database and a basic transaction snapshot; `SET`/`RESET` statements are accepted as no-ops. | Model the advertised session settings and their effects (autocommit, isolation/read-only mode, SQL mode, time zone, charset/collation and transaction transitions), then make connection reset restore that model. |
+| Multi-results and tooling SQL | One query produces one result sequence; the metadata implementation is intentionally a small `INFORMATION_SCHEMA` subset. | Negotiate and test multi-results/draining, and promote only captured SQL from a named tool journey into its tooling profile. |
+
+This checkpoint also sets a delivery rule: a future change may narrow the
+advertised capabilities or reject a feature with a protocol-correct error, but
+it must not leave a capability enabled merely because one happy-path exchange
+works. The black-box acceptance suite below is the evidence required to move a
+row from this table into a supported profile.
 
 ## Compatibility matrix
 
