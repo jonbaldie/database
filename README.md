@@ -1,6 +1,7 @@
 # database
 
-This repository is building a transparent, MySQL-compatible relational database server in Go.
+This repository is building a transparent relational database server in Go with
+a documented finite [MySQL protocol and SQL surface](docs/mysql-sql-behaviour.md).
 
 ## Project policy
 
