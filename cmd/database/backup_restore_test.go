@@ -56,6 +56,21 @@ func TestBackupCreateRejectsMissingSource(t *testing.T) {
 	}
 }
 
+func TestBackupCreateRejectsInvalidOutput(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	output := t.TempDir()
+
+	assertOperatorFailure(t, []string{"backup", "create", "--data-dir", source, "--output", output}, "backup create", "operation_failed", 1)
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatalf("read invalid output directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed backup wrote output entries: %#v", entries)
+	}
+}
+
 func TestRestoreRejectsUnsafeArtifact(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "unsafe.tar")
 	writeUnsafeArchive(t, archive)
