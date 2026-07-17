@@ -23,3 +23,9 @@ measurement and repetition rules, clean-start gate, and published release
 evidence. `scripts/performance.sh` is the current repeatable verification
 entry point; running it does not by itself establish the release acceptance
 judgment or turn performance into a CI gate.
+
+The normative [catalog metadata contract](catalog-metadata.md) defines the
+closed visibility boundary, supported `SHOW` statements,
+`information_schema` views, MySQL-shaped metadata, canonical definitions,
+snapshot consistency, and explicit-failure behavior. Implementations and
+conformance evidence must preserve that contract as catalog coverage expands.

@@ -16,6 +16,56 @@ _Avoid_: Black-box performance
 A stable, machine-readable and human-readable account of how the database planned and executed a query, including both its choices and observed operator-level behaviour.
 _Avoid_: Query log, debug text
 
+**SQL identifier**:
+A name declared or referenced through SQL, compared on every supported
+platform using Unicode 17.0 canonical caseless matching while preserving its
+declared spelling. Canonically equivalent and full case-fold-equivalent names
+collide within their ordinary scope, compatibility variants remain distinct,
+and the 64-character limit counts Unicode scalar values in the declared
+spelling; database account names remain separately case-sensitive.
+_Avoid_: Platform-dependent identifier, bytewise identifier, database account name
+
+**Database namespace**:
+A persistent named container of relational objects. MySQL SQL treats `DATABASE`
+and `SCHEMA` as synonyms; a session selects one current database namespace and
+may qualify objects in another.
+_Avoid_: Catalog, schema (outside SQL syntax)
+
+**Catalog visibility**:
+The rule determining which database namespaces and relational definitions an
+account may discover through catalog surfaces. `information_schema` is always
+visible; any namespace grant reveals that namespace and its complete relational
+definition, while `NAMESPACE_MANAGER` reveals every namespace name but not their
+contents and unrelated server-wide grants do not widen visibility.
+_Avoid_: Universal schema discovery, metadata as data-access bypass
+
+**Catalog metadata surface**:
+The closed MySQL-shaped v0.1 contract of supported `SHOW` statements and
+read-only `information_schema` views. It exposes one consistent committed
+snapshot per statement, uses the MySQL 8.4.11 shape for supported concepts, and
+reports unsupported physical facts as absent or `NULL` rather than inventing
+them.
+_Avoid_: Open-ended system catalog, internal metadata API, fabricated compatibility metadata
+
+**Catalog metadata contract**:
+The normative, implementation-ready visibility, naming, shape, consistency,
+and failure rules for the v0.1 catalog metadata surface. Its detail is in
+[docs/catalog-metadata.md](docs/catalog-metadata.md).
+_Avoid_: Driver-specific metadata promise, metadata as a data-access bypass
+
+**Catalog namespace**:
+The always-visible, read-only virtual `information_schema` namespace
+containing the supported catalog metadata views. It is distinct from persistent
+database namespaces and cannot be created, dropped, or mutated by an account.
+_Avoid_: User database, `mysql` system database, persistent namespace
+
+**Canonical schema definition**:
+The stable, replayable SQL returned by `SHOW CREATE DATABASE` or `SHOW CREATE
+TABLE` for the current public schema. It preserves all supported logical
+meaning without preserving the submitted text or exposing unsupported physical
+details.
+_Avoid_: Original DDL text, storage layout dump, internal schema serialization
+
 **Database account**:
 An authenticated identity used by an application or operator to establish
 sessions and exercise permissions. It is distinct from a session, which is one
