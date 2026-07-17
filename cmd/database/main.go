@@ -30,8 +30,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return version(args[1:], stdout, stderr)
 	case "init":
 		return initialize(args[1:], stdout, stderr)
-	case "backup", "restore", "config", "upgrade", "data":
+	case "backup", "restore", "upgrade", "data":
 		return operatorCommand(args, stdout)
+	case "config":
+		return configCommand(args[1:], stdout, stderr)
 	case "serve":
 		return serve(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
@@ -307,12 +309,13 @@ func version(args []string, stdout, stderr io.Writer) int {
 
 func serve(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: database serve [--data-dir PATH] [--mysql-address HOST:PORT] [--tls-cert PATH --tls-key PATH] [--format=human|json] [--diagnostics-address HOST:PORT] [--state-file PATH]")
+		fmt.Fprintln(stdout, "Usage: database serve [--config PATH] [--data-directory PATH] [--mysql-listen-address HOST:PORT] [--tls-certificate-file PATH --tls-private-key-file PATH] [--diagnostics-listen-address HOST:PORT] [--log-format=json|text]")
+		fmt.Fprintln(stdout, "Compatibility aliases: --data-dir, --mysql-address, --tls-cert, --tls-key, --diagnostics-address, --format, --state-file")
 		return 0
 	}
 	opts, err := parseServeFlags(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "database serve: %v\n", err)
+		fmt.Fprintf(stderr, "database serve: %s: %v\n", configurationClass(err), err)
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -339,6 +342,40 @@ func serve(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func configCommand(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprintln(stdout, "Usage: database config validate [--config PATH] [configuration flags]")
+		return 0
+	}
+	if len(args) == 0 || args[0] != "validate" {
+		return writeConfigFailure(stdout, "invalid_input", "config requires the validate operation")
+	}
+	config, err := resolveConfiguration(args[1:], os.Environ())
+	if err != nil {
+		return writeConfigFailure(stdout, configurationClass(err), err.Error())
+	}
+	result := configurationResult(config)
+	result["operation"] = "config validate"
+	result["success"] = true
+	result["exit_class"] = "success"
+	_ = json.NewEncoder(stdout).Encode(result)
+	return 0
+}
+
+func writeConfigFailure(stdout io.Writer, class, message string) int {
+	code := 1
+	if class == "invalid_input" {
+		code = 2
+	} else if class == "precondition" {
+		code = 3
+	}
+	_ = json.NewEncoder(stdout).Encode(map[string]any{
+		"schema": "database.operator.result/v1", "operation": "config validate",
+		"success": false, "exit_class": class, "diagnostic": message,
+	})
+	return code
+}
+
 func formatFlag(args []string) (string, bool) {
 	format := "human"
 	for i := 0; i < len(args); i++ {
@@ -360,66 +397,12 @@ func formatFlag(args []string) (string, bool) {
 	return format, format == "human" || format == "json"
 }
 
-func parseServeFlags(args []string) (lifecycle.Options, error) {
-	opts := lifecycle.Options{Format: "human"}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--json" {
-			opts.Format = "json"
-			continue
-		}
-		name, value, hasValue := strings.Cut(arg, "=")
-		if !hasValue {
-			switch name {
-			case "--format", "--diagnostics-address", "--state-file", "--mysql-address", "--tls-cert", "--tls-key":
-				if i+1 >= len(args) {
-					return opts, fmt.Errorf("%s requires a value", name)
-				}
-				i++
-				value = args[i]
-			case "--data-dir":
-				if i+1 >= len(args) {
-					return opts, fmt.Errorf("%s requires a value", name)
-				}
-				i++
-				value = args[i]
-			default:
-				return opts, fmt.Errorf("unknown flag %q", arg)
-			}
-		}
-		switch name {
-		case "--format":
-			opts.Format = value
-		case "--diagnostics-address":
-			opts.DiagnosticsAddress = value
-		case "--state-file":
-			opts.StateFile = value
-		case "--data-dir":
-			opts.DataDirectory = value
-		case "--mysql-address":
-			opts.MySQLAddress = value
-		case "--tls-cert":
-			opts.TLSCertFile = value
-		case "--tls-key":
-			opts.TLSKeyFile = value
-		default:
-			return opts, fmt.Errorf("unknown flag %q", name)
-		}
-	}
-	if opts.Format != "human" && opts.Format != "json" {
-		return opts, errors.New("format must be human or json")
-	}
-	if (opts.TLSCertFile == "") != (opts.TLSKeyFile == "") {
-		return opts, errors.New("--tls-cert and --tls-key must be provided together")
-	}
-	return opts, nil
-}
-
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: database <command> [options]")
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init      create a stopped database server instance")
 	fmt.Fprintln(w, "  version   report the executable and compatibility identity")
 	fmt.Fprintln(w, "  serve     run the process and optional diagnostics listener")
+	fmt.Fprintln(w, "  config    validate the closed server configuration")
 	fmt.Fprintln(w, "Use 'database <command> --help' for command-specific options.")
 }

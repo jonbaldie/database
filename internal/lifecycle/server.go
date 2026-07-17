@@ -24,13 +24,28 @@ import (
 // disables the diagnostics listener, which keeps the default command useful
 // for smoke tests and local process supervision.
 type Options struct {
-	DataDirectory      string
-	MySQLAddress       string
-	TLSCertFile        string
-	TLSKeyFile         string
-	DiagnosticsAddress string
-	StateFile          string
-	Format             string
+	DataDirectory                string
+	MySQLAddress                 string
+	TLSCertFile                  string
+	TLSKeyFile                   string
+	DiagnosticsAddress           string
+	StateFile                    string
+	Format                       string
+	StatementTimeout             time.Duration
+	LockWaitTimeout              time.Duration
+	IdleInTransactionTimeout     time.Duration
+	IdleSessionTimeout           time.Duration
+	ExecutionMemoryLimitBytes    int64
+	AggregateMemoryLimitBytes    int64
+	TemporaryStorageLimitBytes   int64
+	AggregateTemporaryLimitBytes int64
+	MaxConnections               int
+	MaxAllowedPacket             int64
+	MaxPreparedStmtCount         int
+	// MySQLEnabled distinguishes the compatibility diagnostics-only invocation
+	// (serve with no instance and no explicit MySQL address) from the normal
+	// configured server path.
+	MySQLEnabled bool
 }
 
 // Event is emitted once the process has reached a lifecycle state. It is
@@ -51,6 +66,12 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 	}
 	if opts.Format != "human" && opts.Format != "json" {
 		return fmt.Errorf("unsupported format %q", opts.Format)
+	}
+	if (opts.TLSCertFile == "") != (opts.TLSKeyFile == "") {
+		return errors.New("TLS certificate and private key must be provided together")
+	}
+	if opts.DiagnosticsAddress != "" && opts.DiagnosticsAddress == opts.MySQLAddress {
+		return errors.New("MySQL and diagnostics listeners must use different addresses")
 	}
 
 	if opts.DataDirectory != "" {
@@ -93,7 +114,7 @@ func Serve(ctx context.Context, opts Options, emit func(Event)) error {
 		httpServer = &http.Server{Handler: diagnosticsHandler()}
 		go func() { _ = httpServer.Serve(listener) }()
 	}
-	if opts.MySQLAddress != "" {
+	if opts.MySQLAddress != "" && opts.MySQLEnabled {
 		mysqlServer, err = mysql.NewWithConfig(opts.MySQLAddress, mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile})
 		if err != nil {
 			return fmt.Errorf("listen for mysql: %w", err)
