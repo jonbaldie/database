@@ -1394,13 +1394,32 @@ func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
 		return nil, nil
 	}
 	expression := strings.TrimSpace(query[len("select "):])
-	if strings.Contains(expression, "?") {
-		return []columnMetadata{{catalog: "def", name: expression, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}}, nil
+	parameters := make([]string, parameterCount(query))
+	for index := range parameters {
+		parameters[index] = "NULL"
+	}
+	validated, err := bindPreparedQuery(query, parameters)
+	if err != nil {
+		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
+	}
+	if len(parameters) > 0 {
+		result, err := s.execute(validated)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil {
+			return nil, nil
+		}
+		metadata := make([]columnMetadata, len(result.columns))
+		for index, name := range result.columns {
+			metadata[index] = columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
+		}
+		return metadata, nil
 	}
 	if literal := parseLiteralResult(expression); literal.supported {
 		return []columnMetadata{literal.metadata}, nil
 	}
-	result, err := s.execute(query)
+	result, err := s.execute(validated)
 	if err != nil {
 		return nil, err
 	}
