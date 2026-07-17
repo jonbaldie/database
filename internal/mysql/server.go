@@ -67,6 +67,7 @@ type Config struct {
 	TLSCertFile          string
 	TLSKeyFile           string
 	MaxPreparedStmtCount int
+	MaxAllowedPacket     int64
 }
 
 type Server struct {
@@ -98,6 +99,9 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 	}
 	if config.MaxPreparedStmtCount == 0 {
 		config.MaxPreparedStmtCount = 4096
+	}
+	if config.MaxAllowedPacket == 0 {
+		config.MaxAllowedPacket = 64 * 1024 * 1024
 	}
 	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
 		_ = listener.Close()
@@ -255,7 +259,7 @@ func (s *Server) serveConnection(connection net.Conn) {
 	session := &session{server: s, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]*preparedStatement{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
 	current = session
 	for {
-		sequence, payload, err := readPacket(connection)
+		sequence, payload, err := readPacket(connection, s.config.MaxAllowedPacket)
 		if err != nil || len(payload) == 0 {
 			return
 		}
@@ -349,7 +353,7 @@ type authenticationResult struct {
 }
 
 func (s *Server) authenticate(connection net.Conn, nonce []byte) (authenticationResult, error) {
-	sequence, payload, err := readPacket(connection)
+	sequence, payload, err := readPacket(connection, s.config.MaxAllowedPacket)
 	if err != nil {
 		return authenticationResult{connection: connection, nextSequence: 2}, err
 	}
@@ -363,7 +367,7 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (authentication
 			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
 		}
 		connection = tlsConnection
-		sequence, payload, err = readPacket(connection)
+		sequence, payload, err = readPacket(connection, s.config.MaxAllowedPacket)
 		if err != nil {
 			return authenticationResult{connection: connection, nextSequence: 3}, err
 		}
@@ -432,7 +436,7 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (authentication
 	if err := writePacket(connection, sequence+1, []byte{0x01, 0x04}); err != nil {
 		return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
 	}
-	sequence, response, err := readPacket(connection)
+	sequence, response, err := readPacket(connection, s.config.MaxAllowedPacket)
 	if err != nil {
 		return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
 	}
@@ -446,7 +450,7 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (authentication
 		if err := writePacket(connection, sequence+1, publicKeyPacket(s.rsaKey)); err != nil {
 			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
 		}
-		sequence, response, err = readPacket(connection)
+		sequence, response, err = readPacket(connection, s.config.MaxAllowedPacket)
 		if err != nil {
 			return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
 		}
@@ -646,7 +650,7 @@ func (s *session) writeQueryResult(connection net.Conn, sequence byte, query str
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
-	return writeResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata)
+	return writeResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
 }
 
 func (s *session) execute(query string) (*queryResult, error) {
@@ -1341,7 +1345,7 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
 	}
-	return writeBinaryResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata)
+	return writeBinaryResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
 }
 
 func preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
@@ -1350,6 +1354,9 @@ func preparedValues(payload []byte, statement *preparedStatement) ([]string, err
 		return nil, errors.New("malformed prepared statement")
 	}
 	if count == 0 {
+		if len(payload) != 10 {
+			return nil, errors.New("malformed prepared statement trailing data")
+		}
 		return nil, nil
 	}
 	nullBytes := (count + 7) / 8
@@ -1386,6 +1393,9 @@ func preparedValues(payload []byte, statement *preparedStatement) ([]string, err
 			return nil, err
 		}
 		values[i], offset = value, next
+	}
+	if offset != len(payload) {
+		return nil, errors.New("malformed prepared statement trailing data")
 	}
 	statement.longData = make(map[uint16][]byte)
 	return values, nil
@@ -1703,24 +1713,27 @@ func splitCSV(value string) []string {
 	return result
 }
 
-func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool, metadata []columnMetadata) error {
-	if err := writePacket(connection, sequence, lengthEncodedInt(len(columns))); err != nil {
+func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool, metadata []columnMetadata, maximum int64) error {
+	count := lengthEncodedInt(len(columns))
+	if err := writeBoundedPacket(connection, sequence, count, maximum); err != nil {
 		return err
 	}
+	sequence = nextPacketSequence(sequence, count)
 	for index, name := range columns {
 		definition := columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
 		if index < len(metadata) {
 			definition = metadata[index]
 		}
-		if err := writePacket(connection, sequence+byte(index)+1, columnDefinition(definition)); err != nil {
+		payload := columnDefinition(definition)
+		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
 			return err
 		}
+		sequence = nextPacketSequence(sequence, payload)
 	}
-	sequence += byte(len(columns)) + 1
-	if err := writePacket(connection, sequence, eofPacket()); err != nil {
+	if err := writeBoundedPacket(connection, sequence, eofPacket(), maximum); err != nil {
 		return err
 	}
-	sequence++
+	sequence = nextPacketSequence(sequence, eofPacket())
 	for rowIndex, row := range rows {
 		payload := []byte{}
 		for columnIndex, value := range row {
@@ -1730,18 +1743,20 @@ func writeResult(connection net.Conn, sequence byte, columns []string, rows [][]
 			}
 			payload = append(payload, lengthEncodedString(value)...)
 		}
-		if err := writePacket(connection, sequence, payload); err != nil {
+		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
 			return err
 		}
-		sequence++
+		sequence = nextPacketSequence(sequence, payload)
 	}
-	return writePacket(connection, sequence, eofPacket())
+	return writeBoundedPacket(connection, sequence, eofPacket(), maximum)
 }
 
-func writeBinaryResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool, metadata []columnMetadata) error {
-	if err := writePacket(connection, sequence, lengthEncodedInt(len(columns))); err != nil {
+func writeBinaryResult(connection net.Conn, sequence byte, columns []string, rows [][]string, nulls [][]bool, metadata []columnMetadata, maximum int64) error {
+	count := lengthEncodedInt(len(columns))
+	if err := writeBoundedPacket(connection, sequence, count, maximum); err != nil {
 		return err
 	}
+	sequence = nextPacketSequence(sequence, count)
 	definitions := make([]columnMetadata, len(columns))
 	for index, name := range columns {
 		definition := columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
@@ -1749,26 +1764,27 @@ func writeBinaryResult(connection net.Conn, sequence byte, columns []string, row
 			definition = metadata[index]
 		}
 		definitions[index] = definition
-		if err := writePacket(connection, sequence+byte(index)+1, columnDefinition(definition)); err != nil {
+		payload := columnDefinition(definition)
+		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
 			return err
 		}
+		sequence = nextPacketSequence(sequence, payload)
 	}
-	sequence += byte(len(columns)) + 1
-	if err := writePacket(connection, sequence, eofPacket()); err != nil {
+	if err := writeBoundedPacket(connection, sequence, eofPacket(), maximum); err != nil {
 		return err
 	}
-	sequence++
+	sequence = nextPacketSequence(sequence, eofPacket())
 	for rowIndex, row := range rows {
 		payload, err := binaryRow(row, rowIndex, nulls, definitions)
 		if err != nil {
 			return err
 		}
-		if err := writePacket(connection, sequence, payload); err != nil {
+		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
 			return err
 		}
-		sequence++
+		sequence = nextPacketSequence(sequence, payload)
 	}
-	return writePacket(connection, sequence, eofPacket())
+	return writeBoundedPacket(connection, sequence, eofPacket(), maximum)
 }
 
 func binaryRow(row []string, rowIndex int, nulls [][]bool, metadata []columnMetadata) ([]byte, error) {
@@ -1896,28 +1912,71 @@ func readNullBytes(payload []byte, offset int) ([]byte, int) {
 	}
 	return payload[offset:end], end + 1
 }
-func readPacket(r io.Reader) (byte, []byte, error) {
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(r, header); err != nil {
-		return 0, nil, err
+
+const maximumPacketFrame = (1 << 24) - 1
+
+func readPacket(r io.Reader, maximum int64) (byte, []byte, error) {
+	if maximum <= 0 {
+		return 0, nil, errors.New("packet maximum must be positive")
 	}
-	length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
-	if length > 16*1024*1024 {
-		return 0, nil, errors.New("packet exceeds maximum size")
+	var payload []byte
+	var sequence, expected byte
+	for frame := 0; ; frame++ {
+		header := make([]byte, 4)
+		if _, err := io.ReadFull(r, header); err != nil {
+			return 0, nil, err
+		}
+		if frame == 0 {
+			sequence, expected = header[3], header[3]
+		} else if header[3] != expected {
+			return 0, nil, errors.New("packet continuation sequence mismatch")
+		}
+		expected++
+		length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
+		if int64(len(payload))+int64(length) > maximum {
+			return 0, nil, errors.New("packet exceeds configured maximum size")
+		}
+		start := len(payload)
+		payload = append(payload, make([]byte, length)...)
+		if _, err := io.ReadFull(r, payload[start:]); err != nil {
+			return 0, nil, err
+		}
+		if length < maximumPacketFrame {
+			return sequence, payload, nil
+		}
 	}
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return 0, nil, err
-	}
-	return header[3], payload, nil
 }
-func writePacket(w io.Writer, sequence byte, payload []byte) error {
-	header := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), sequence}
-	if _, err := w.Write(header); err != nil {
-		return err
+
+func writeBoundedPacket(w io.Writer, sequence byte, payload []byte, maximum int64) error {
+	if int64(len(payload)) > maximum {
+		return errors.New("packet exceeds configured maximum size")
 	}
-	_, err := w.Write(payload)
-	return err
+	return writePacket(w, sequence, payload)
+}
+
+func nextPacketSequence(sequence byte, payload []byte) byte {
+	return sequence + byte(len(payload)/maximumPacketFrame+1)
+}
+
+func writePacket(w io.Writer, sequence byte, payload []byte) error {
+	for {
+		length := len(payload)
+		if length > maximumPacketFrame {
+			length = maximumPacketFrame
+		}
+		header := []byte{byte(length), byte(length >> 8), byte(length >> 16), sequence}
+		if _, err := w.Write(header); err != nil {
+			return err
+		}
+		if _, err := w.Write(payload[:length]); err != nil {
+			return err
+		}
+		payload = payload[length:]
+		if length < maximumPacketFrame {
+			return nil
+		}
+		sequence++
+	}
 }
 
 func okPacket() []byte { return []byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00} }

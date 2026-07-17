@@ -144,7 +144,7 @@ func parseConfigurationFlags(args []string) (string, map[string]string, error) {
 		name, value, hasValue := strings.Cut(arg, "=")
 		if !hasValue {
 			switch name {
-			case "--config", "--format", "--log-format", "--data-dir", "--data-directory", "--mysql-address", "--mysql-listen-address", "--tls-cert", "--tls-certificate-file", "--tls-key", "--tls-private-key-file", "--diagnostics-address", "--diagnostics-listen-address", "--state-file", "--max-prepared-stmt-count":
+			case "--config", "--format", "--log-format", "--data-dir", "--data-directory", "--mysql-address", "--mysql-listen-address", "--tls-cert", "--tls-certificate-file", "--tls-key", "--tls-private-key-file", "--diagnostics-address", "--diagnostics-listen-address", "--state-file", "--statement-timeout-ms", "--lock-wait-timeout-ms", "--idle-in-transaction-timeout-ms", "--idle-session-timeout-ms", "--execution-memory-limit-bytes", "--aggregate-execution-memory-limit-bytes", "--temporary-storage-limit-bytes", "--aggregate-temporary-storage-limit-bytes", "--max-connections", "--max-allowed-packet", "--max-prepared-stmt-count":
 				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 					return "", nil, invalidConfiguration(name + " requires a non-empty value")
 				}

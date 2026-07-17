@@ -404,6 +404,9 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	if text.err != "" || statement.err != "" {
 		t.Fatalf("text=%#v prepare=%#v", text, statement)
 	}
+	malformed := []byte{0x17, byte(statement.id), byte(statement.id >> 8), byte(statement.id >> 16), byte(statement.id >> 24), 0, 0, 0, 0, 0, 0}
+	writeWirePacket(t, client.conn, 0, malformed)
+	assertWireError(t, readWirePacket(t, client.conn), 1210, "HY000")
 	binaryResult := client.executePrepared(statement.id)
 	if binaryResult.err != "" || len(binaryResult.rows) != 1 || len(binaryResult.rows[0]) != 1 || binaryResult.rows[0][0] != "7" || len(binaryResult.metadata) != 1 || len(text.metadata) != 1 || binaryResult.metadata[0] != text.metadata[0] {
 		t.Fatalf("prepared binary result differs from text: text=%#v binary=%#v", text, binaryResult)
@@ -416,8 +419,9 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, value: []byte("Ada")}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "Ada" {
 		t.Fatalf("bound result: %#v", result)
 	}
-	longValue := strings.Repeat("long value ", 7000)
-	client.sendLongData(bound.id, 0, []byte(longValue))
+	longValue := strings.Repeat("x", 16*1024*1024)
+	client.sendLongData(bound.id, 0, []byte(longValue[:8*1024*1024]))
+	client.sendLongData(bound.id, 0, []byte(longValue[8*1024*1024:]))
 	if result := client.executePreparedValues(bound.id, []preparedParameter{{typ: 0xfd, long: true}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != longValue {
 		t.Fatalf("long-data result: err=%q rows=%d", result.err, len(result.rows))
 	}
@@ -1319,22 +1323,40 @@ func freeAddress(t *testing.T) string {
 
 func readWirePacket(t *testing.T, conn net.Conn) []byte {
 	t.Helper()
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		t.Fatal(err)
+	payload := []byte{}
+	for {
+		header := make([]byte, 4)
+		if _, err := io.ReadFull(conn, header); err != nil {
+			t.Fatal(err)
+		}
+		length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
+		start := len(payload)
+		payload = append(payload, make([]byte, length)...)
+		if _, err := io.ReadFull(conn, payload[start:]); err != nil {
+			t.Fatal(err)
+		}
+		if length < (1<<24)-1 {
+			return payload
+		}
 	}
-	payload := make([]byte, int(header[0])|int(header[1])<<8|int(header[2])<<16)
-	if _, err := io.ReadFull(conn, payload); err != nil {
-		t.Fatal(err)
-	}
-	return payload
 }
 
 func writeWirePacket(t *testing.T, conn net.Conn, sequence byte, payload []byte) {
 	t.Helper()
-	header := []byte{byte(len(payload)), byte(len(payload) >> 8), byte(len(payload) >> 16), sequence}
-	if _, err := conn.Write(append(header, payload...)); err != nil {
-		t.Fatal(err)
+	for {
+		length := len(payload)
+		if length > (1<<24)-1 {
+			length = (1 << 24) - 1
+		}
+		header := []byte{byte(length), byte(length >> 8), byte(length >> 16), sequence}
+		if _, err := conn.Write(append(header, payload[:length]...)); err != nil {
+			t.Fatal(err)
+		}
+		payload = payload[length:]
+		if length < (1<<24)-1 {
+			return
+		}
+		sequence++
 	}
 }
 
