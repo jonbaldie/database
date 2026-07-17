@@ -2,6 +2,14 @@
 
 This repository is building a transparent, MySQL-compatible relational database server in Go.
 
+## Project policy
+
+database is licensed under the [Apache License 2.0](LICENSE), including its
+patent grant. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms,
+[GOVERNANCE.md](GOVERNANCE.md) for project decision-making, and
+[COMPATIBILITY.md](COMPATIBILITY.md) for release and public compatibility
+commitments.
+
 The executable delivery spine currently provides the public process seams used by black-box verification:
 
 ```sh
