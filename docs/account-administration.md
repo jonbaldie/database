@@ -2,7 +2,7 @@
 
 This document is the normative v0.1 contract for database accounts and grants.
 It is deliberately a finite MySQL-shaped surface, not a general MySQL account
-administration feature. The [MySQL SQL behaviour baseline](https://github.com/jonbaldie/database/issues/25)
+administration feature. The [MySQL SQL behaviour contract](mysql-sql-behaviour.md)
 governs MySQL 8.4.11 outcomes not explicitly changed here.
 
 ## Accounts and credentials

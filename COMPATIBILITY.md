@@ -13,9 +13,9 @@ prominent changelog entry and migration notes; it does not require a prior
 deprecation release.
 
 Compatibility commitments cover documented public behaviour and formats,
-including the published MySQL application compatibility profile and versioned
-query-explanation contract. The downstream operational contract defines
-supported upgrade behaviour.
+including the [MySQL SQL behaviour contract](docs/mysql-sql-behaviour.md) and
+versioned query-explanation contract. The downstream operational contract
+defines supported upgrade behaviour.
 
 Internal Go packages, component interfaces, and physical storage formats are
 not public compatibility surfaces.
