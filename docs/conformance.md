@@ -11,3 +11,8 @@ initialization, lifecycle and diagnostics, MySQL handshake and text/prepared
 query commands, transaction controls, scalar expressions, DDL/mutation command
 outcomes, catalog probes, operator result records, and release build entry
 points. Unsupported behavior returns explicit protocol or operator errors.
+
+The normative [operator automation contract](operator-automation.md) defines
+the complete command, stream, progress, result, diagnostic, and exit-class
+surface. Implementations must preserve that contract even while individual
+workflow coverage is delivered by separate tickets.

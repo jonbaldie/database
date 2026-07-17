@@ -19,7 +19,15 @@ The closed [server configuration registry](docs/server-configuration.md)
 defines every startup setting, exact input form, precedence rule, default, and
 validation boundary.
 
-The executable delivery spine currently provides the public process seams used by black-box verification:
+The [operator automation contract](docs/operator-automation.md) defines the
+exact command inputs, secret boundary, progress records, terminal results,
+diagnostics, exit classes, and compatibility rules for automating every
+supported operator workflow.
+
+The executable delivery spine currently provides the public process seams used
+by black-box verification. These examples show the current partial delivery
+syntax; the complete, normative automation syntax is in the
+[operator automation contract](docs/operator-automation.md):
 
 ```sh
 make build
