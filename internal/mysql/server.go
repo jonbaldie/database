@@ -139,6 +139,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if lower == "begin" || lower == "start transaction" || lower == "commit" || lower == "rollback" {
 		return writePacket(connection, sequence, okPacket())
 	}
+	if strings.HasPrefix(lower, "savepoint ") || strings.HasPrefix(lower, "release savepoint ") || strings.HasPrefix(lower, "rollback to savepoint ") {
+		return writePacket(connection, sequence, okPacket())
+	}
 	if lower == "select current_date" || lower == "select current_date()" {
 		return writeScalarResult(connection, sequence, "2026-07-17")
 	}
