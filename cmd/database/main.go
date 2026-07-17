@@ -26,25 +26,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return 2
 	}
-	switch args[0] {
-	case "version":
-		return version(args[1:], stdout, stderr)
-	case "init":
-		return initialize(args[1:], stdout, stderr)
-	case "backup", "restore", "upgrade", "data", "shutdown":
-		return operatorCommand(args, stdout)
-	case "config":
-		return configCommand(args[1:], stdout, stderr)
-	case "serve":
-		return serve(args[1:], stdout, stderr)
-	case "help", "--help", "-h":
-		usage(stdout)
-		return 0
-	default:
+	handler, ok := commandHandlerFor(args[0])
+	if !ok {
 		fmt.Fprintf(stderr, "database: unknown command %q\n", args[0])
 		usage(stderr)
 		return 2
 	}
+	return handler(commandInvocation{args: args, stdout: stdout, stderr: stderr})
 }
 
 func operatorCommand(args []string, stdout io.Writer) int {

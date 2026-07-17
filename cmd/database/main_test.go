@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,6 +56,43 @@ func TestOperatorRejectsUnknownFlags(t *testing.T) {
 	}
 	if result["exit_class"] != "invalid_input" || !strings.Contains(result["diagnostic"].(string), "unknown flag") {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestCommandHandlersRouteEverySupportedWorkflow(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		handler commandHandler
+	}{
+		{name: "version", args: []string{"version"}, handler: versionCommand},
+		{name: "initialization", args: []string{"init"}, handler: initializeCommand},
+		{name: "backup", args: []string{"backup", "inspect"}, handler: operatorCommandHandler},
+		{name: "restore", args: []string{"restore"}, handler: operatorCommandHandler},
+		{name: "upgrade", args: []string{"upgrade"}, handler: operatorCommandHandler},
+		{name: "data", args: []string{"data", "validate"}, handler: operatorCommandHandler},
+		{name: "shutdown", args: []string{"shutdown"}, handler: operatorCommandHandler},
+		{name: "configuration", args: []string{"config", "validate"}, handler: configCommandHandler},
+		{name: "serve", args: []string{"serve"}, handler: serveCommand},
+		{name: "help", args: []string{"help"}, handler: helpCommand},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler, ok := commandHandlerFor(test.args[0])
+			if !ok {
+				t.Fatalf("handler missing for %q", test.args[0])
+			}
+			if fmt.Sprintf("%p", handler) != fmt.Sprintf("%p", test.handler) {
+				t.Fatalf("handler for %q changed workflow ownership", test.args[0])
+			}
+		})
+	}
+}
+
+func TestCommandHandlersRejectUnknownCommand(t *testing.T) {
+	if _, ok := commandHandlerFor("unknown"); ok {
+		t.Fatal("unknown command received a handler")
 	}
 }
 
