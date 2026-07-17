@@ -35,33 +35,37 @@ type configurationValue struct {
 	source string
 }
 
-var configurationDefaults = map[string]string{
-	"data_directory":                          "",
-	"mysql_listen_address":                    "127.0.0.1:3306",
-	"tls_certificate_file":                    "",
-	"tls_private_key_file":                    "",
-	"diagnostics_listen_address":              "",
-	"log_format":                              "json",
-	"statement_timeout_ms":                    "300000",
-	"lock_wait_timeout_ms":                    "5000",
-	"idle_in_transaction_timeout_ms":          "300000",
-	"idle_session_timeout_ms":                 "3600000",
-	"execution_memory_limit_bytes":            "67108864",
-	"aggregate_execution_memory_limit_bytes":  "2147483648",
-	"temporary_storage_limit_bytes":           "17179869184",
-	"aggregate_temporary_storage_limit_bytes": "34359738368",
-	"max_connections":                         "100",
-	"max_allowed_packet":                      "67108864",
-	"max_prepared_stmt_count":                 "4096",
+type configurationValueKind uint8
+
+const (
+	configurationString configurationValueKind = iota
+	configurationPositiveDecimal
+)
+
+type configurationSetting struct {
+	defaultValue string
+	valueKind    configurationValueKind
 }
 
-var configurationNames = func() map[string]bool {
-	result := make(map[string]bool, len(configurationDefaults))
-	for name := range configurationDefaults {
-		result[name] = true
-	}
-	return result
-}()
+var configurationRegistry = map[string]configurationSetting{
+	"data_directory":                          {defaultValue: "", valueKind: configurationString},
+	"mysql_listen_address":                    {defaultValue: "127.0.0.1:3306", valueKind: configurationString},
+	"tls_certificate_file":                    {defaultValue: "", valueKind: configurationString},
+	"tls_private_key_file":                    {defaultValue: "", valueKind: configurationString},
+	"diagnostics_listen_address":              {defaultValue: "", valueKind: configurationString},
+	"log_format":                              {defaultValue: "json", valueKind: configurationString},
+	"statement_timeout_ms":                    {defaultValue: "300000", valueKind: configurationPositiveDecimal},
+	"lock_wait_timeout_ms":                    {defaultValue: "5000", valueKind: configurationPositiveDecimal},
+	"idle_in_transaction_timeout_ms":          {defaultValue: "300000", valueKind: configurationPositiveDecimal},
+	"idle_session_timeout_ms":                 {defaultValue: "3600000", valueKind: configurationPositiveDecimal},
+	"execution_memory_limit_bytes":            {defaultValue: "67108864", valueKind: configurationPositiveDecimal},
+	"aggregate_execution_memory_limit_bytes":  {defaultValue: "2147483648", valueKind: configurationPositiveDecimal},
+	"temporary_storage_limit_bytes":           {defaultValue: "17179869184", valueKind: configurationPositiveDecimal},
+	"aggregate_temporary_storage_limit_bytes": {defaultValue: "34359738368", valueKind: configurationPositiveDecimal},
+	"max_connections":                         {defaultValue: "100", valueKind: configurationPositiveDecimal},
+	"max_allowed_packet":                      {defaultValue: "67108864", valueKind: configurationPositiveDecimal},
+	"max_prepared_stmt_count":                 {defaultValue: "4096", valueKind: configurationPositiveDecimal},
+}
 
 // parseServeFlags is retained as the compatibility seam used by the serve
 // command and package tests. It now resolves all three public input sources.
@@ -74,9 +78,9 @@ func parseServeFlags(args []string) (lifecycle.Options, error) {
 }
 
 func resolveConfiguration(args, environment []string) (configuration, error) {
-	values := make(map[string]configurationValue, len(configurationDefaults))
-	for name, value := range configurationDefaults {
-		values[name] = configurationValue{value: value, source: "default"}
+	values := make(map[string]configurationValue, len(configurationRegistry))
+	for name, setting := range configurationRegistry {
+		values[name] = configurationValue{value: setting.defaultValue, source: "default"}
 	}
 
 	configPath, flags, err := parseConfigurationFlags(args)
@@ -125,16 +129,16 @@ func parseConfigurationFlags(args []string) (string, map[string]string, error) {
 		arg := args[i]
 		name, value, hasValue := strings.Cut(arg, "=")
 		if !hasValue {
-			switch name {
-			case "--config", "--log-format", "--data-directory", "--mysql-listen-address", "--tls-certificate-file", "--tls-private-key-file", "--diagnostics-listen-address", "--statement-timeout-ms", "--lock-wait-timeout-ms", "--idle-in-transaction-timeout-ms", "--idle-session-timeout-ms", "--execution-memory-limit-bytes", "--aggregate-execution-memory-limit-bytes", "--temporary-storage-limit-bytes", "--aggregate-temporary-storage-limit-bytes", "--max-connections", "--max-allowed-packet", "--max-prepared-stmt-count":
-				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
-					return "", nil, invalidConfiguration(name + " requires a non-empty value")
+			if name != "--config" {
+				if _, ok := flagSetting(name); !ok {
+					return "", nil, invalidConfiguration(fmt.Sprintf("unknown flag %q", arg))
 				}
-				i++
-				value = args[i]
-			default:
-				return "", nil, invalidConfiguration(fmt.Sprintf("unknown flag %q", arg))
 			}
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
+				return "", nil, invalidConfiguration(name + " requires a non-empty value")
+			}
+			i++
+			value = args[i]
 		}
 		if value == "" {
 			return "", nil, invalidConfiguration(fmt.Sprintf("%s has an empty value", name))
@@ -147,7 +151,7 @@ func parseConfigurationFlags(args []string) (string, map[string]string, error) {
 			configPath = value
 			continue
 		}
-		canonical, normalized, ok := flagSetting(name, value)
+		canonical, ok := flagSetting(name)
 		if !ok {
 			return "", nil, invalidConfiguration(fmt.Sprintf("unknown flag %q", name))
 		}
@@ -155,30 +159,20 @@ func parseConfigurationFlags(args []string) (string, map[string]string, error) {
 			return "", nil, invalidConfiguration("repeated setting " + canonical)
 		}
 		seen[canonical] = true
-		values[canonical] = normalized
+		values[canonical] = value
 	}
 	return configPath, values, nil
 }
 
-func flagSetting(name, value string) (string, string, bool) {
-	canonical := map[string]string{
-		"--data-directory":             "data_directory",
-		"--mysql-listen-address":       "mysql_listen_address",
-		"--tls-certificate-file":       "tls_certificate_file",
-		"--tls-private-key-file":       "tls_private_key_file",
-		"--diagnostics-listen-address": "diagnostics_listen_address",
-		"--log-format":                 "log_format",
-		"--statement-timeout-ms":       "statement_timeout_ms", "--lock-wait-timeout-ms": "lock_wait_timeout_ms",
-		"--idle-in-transaction-timeout-ms": "idle_in_transaction_timeout_ms", "--idle-session-timeout-ms": "idle_session_timeout_ms",
-		"--execution-memory-limit-bytes": "execution_memory_limit_bytes", "--aggregate-execution-memory-limit-bytes": "aggregate_execution_memory_limit_bytes",
-		"--temporary-storage-limit-bytes": "temporary_storage_limit_bytes", "--aggregate-temporary-storage-limit-bytes": "aggregate_temporary_storage_limit_bytes",
-		"--max-connections": "max_connections", "--max-allowed-packet": "max_allowed_packet", "--max-prepared-stmt-count": "max_prepared_stmt_count",
+func flagSetting(name string) (string, bool) {
+	canonical := strings.ReplaceAll(strings.TrimPrefix(name, "--"), "-", "_")
+	if name != "--"+strings.ReplaceAll(canonical, "_", "-") {
+		return "", false
 	}
-	key, ok := canonical[name]
-	if !ok {
-		return "", "", false
+	if _, ok := configurationRegistry[canonical]; !ok {
+		return "", false
 	}
-	return key, value, true
+	return canonical, true
 }
 
 func parseConfigurationEnvironment(environment []string) (map[string]string, string, error) {
@@ -206,7 +200,7 @@ func parseConfigurationEnvironment(environment []string) (map[string]string, str
 			return nil, "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
 		}
 		canonical = strings.ToLower(canonical)
-		if !configurationNames[canonical] {
+		if _, ok := configurationRegistry[canonical]; !ok {
 			return nil, "", invalidConfiguration(fmt.Sprintf("unknown environment setting %q", name))
 		}
 		if seen[name] {
@@ -245,19 +239,23 @@ func readConfigurationFile(path string) (map[string]string, error) {
 			return nil, invalidConfiguration(fmt.Sprintf("config line %d: expected one key=value pair", lineNumber))
 		}
 		key = strings.TrimSpace(key)
-		if !configurationNames[key] {
+		setting, ok := configurationRegistry[key]
+		if !ok {
 			return nil, invalidConfiguration(fmt.Sprintf("config line %d: unknown setting %q", lineNumber, key))
 		}
 		if seen[key] {
 			return nil, invalidConfiguration("duplicate config setting " + key)
 		}
 		seen[key] = true
-		value, stringValue, err := tomlValue(strings.TrimSpace(raw))
+		value, isString, err := tomlValue(strings.TrimSpace(raw))
 		if err != nil {
 			return nil, invalidConfiguration(fmt.Sprintf("config line %d: %s", lineNumber, err))
 		}
-		if numericConfigurationSetting(key) && stringValue {
-			return nil, invalidConfiguration(fmt.Sprintf("config line %d: %s must be a bare decimal integer", lineNumber, key))
+		if setting.valueKind == configurationPositiveDecimal && isString {
+			return nil, invalidConfiguration(fmt.Sprintf("config line %d: %s has the wrong TOML value form", lineNumber, key))
+		}
+		if setting.valueKind == configurationString && !isString {
+			return nil, invalidConfiguration(fmt.Sprintf("config line %d: %s has the wrong TOML value form", lineNumber, key))
 		}
 		if value == "" {
 			return nil, invalidConfiguration("config setting " + key + " has an empty value")
@@ -334,17 +332,6 @@ func validateTOMLStringCharacters(raw string) error {
 		}
 	}
 	return nil
-}
-
-func numericConfigurationSetting(name string) bool {
-	switch name {
-	case "statement_timeout_ms", "lock_wait_timeout_ms", "idle_in_transaction_timeout_ms", "idle_session_timeout_ms",
-		"execution_memory_limit_bytes", "aggregate_execution_memory_limit_bytes", "temporary_storage_limit_bytes",
-		"aggregate_temporary_storage_limit_bytes", "max_connections", "max_allowed_packet", "max_prepared_stmt_count":
-		return true
-	default:
-		return false
-	}
 }
 
 func validateTOMLBasicString(raw string) error {
