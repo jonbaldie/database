@@ -274,19 +274,16 @@ type connectionWorker struct{ server *Server }
 
 type queryExecutor struct{ *session }
 
-type preparedExecutor struct {
-	*session
-	queries *queryExecutor
-}
+type preparedExecutor struct{ *session }
 
 func (w connectionWorker) serve(connection net.Conn) {
 	defer connection.Close()
 	defer w.server.connections.unregister(connection)
-	var current *session
+	var transactionSession *session
 	var prepared *preparedExecutor
 	defer func() {
-		if current != nil && current.transaction && w.server.config.Catalog != nil {
-			_ = w.server.config.Catalog.Replace(current.transactionSnapshot)
+		if transactionSession != nil && transactionSession.transaction && w.server.config.Catalog != nil {
+			_ = w.server.config.Catalog.Replace(transactionSession.transactionSnapshot)
 		}
 		if prepared != nil {
 			prepared.closeAllPrepared()
@@ -306,9 +303,9 @@ func (w connectionWorker) serve(connection net.Conn) {
 		return
 	}
 	session := &session{server: w.server, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]*preparedStatement{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
-	current = session
+	transactionSession = session
 	queries := &queryExecutor{session}
-	prepared = &preparedExecutor{session: session, queries: queries}
+	prepared = &preparedExecutor{session}
 	for {
 		sequence, payload, err := readPacket(connection, w.server.config.MaxAllowedPacket)
 		if err != nil || len(payload) == 0 {
@@ -1481,6 +1478,7 @@ func (s *preparedExecutor) prepare(connection net.Conn, sequence byte, query str
 
 func (s *preparedExecutor) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	queries := &queryExecutor{s.session}
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
 		return nil, sqlFailure{1064, "42000", "prepared statements support SELECT only"}
 	}
@@ -1494,7 +1492,7 @@ func (s *preparedExecutor) preparedColumns(query string) ([]columnMetadata, erro
 		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
 	}
 	if len(parameters) > 0 {
-		result, err := s.queries.execute(validated)
+		result, err := queries.execute(validated)
 		if err != nil {
 			return nil, err
 		}
@@ -1510,7 +1508,7 @@ func (s *preparedExecutor) preparedColumns(query string) ([]columnMetadata, erro
 	if literal := parseLiteralResult(expression); literal.supported {
 		return []columnMetadata{literal.metadata}, nil
 	}
-	result, err := s.queries.execute(validated)
+	result, err := queries.execute(validated)
 	if err != nil {
 		return nil, err
 	}
@@ -1528,6 +1526,7 @@ func (s *preparedExecutor) preparedColumns(query string) ([]columnMetadata, erro
 }
 
 func (s *preparedExecutor) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
+	queries := &queryExecutor{s.session}
 	if len(payload) < 5 {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", "malformed prepared statement"))
 	}
@@ -1544,7 +1543,7 @@ func (s *preparedExecutor) executePrepared(connection net.Conn, sequence byte, p
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
-	result, err := s.queries.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := queries.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
