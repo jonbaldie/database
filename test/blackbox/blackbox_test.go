@@ -2,12 +2,23 @@ package blackbox_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/jonbaldie/database/test/blackbox"
 )
 
@@ -371,6 +383,102 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	}
 }
 
+func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("secure-password\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	certificate, key := testTLSCertificate(t)
+	address := freeAddress(t)
+	process, err := runner.Start(context.Background(), "serve", "--data-dir", directory, "--mysql-address", address, "--tls-cert", certificate, "--tls-key", key, "--format=json", "--state-file", filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	var ready map[string]any
+	if err := process.NextJSONEvent(context.Background(), &ready); err != nil || ready["state"] != "ready" {
+		t.Fatalf("ready: %#v %v", ready, err)
+	}
+
+	client := newTLSWireClient(t, address, "admin", "secure-password")
+	defer client.close()
+	writeWirePacket(t, client.conn, 0, append([]byte{0x03}, "SELECT 'Ada'"...))
+	if count := readWirePacket(t, client.conn); len(count) != 1 || count[0] != 1 {
+		t.Fatalf("column count: %x", count)
+	}
+	definition := readWirePacket(t, client.conn)
+	column, ok := parseColumnDefinition(definition)
+	if !ok || column.catalog != "def" || column.schema != "" || column.table != "" || column.originalTable != "" || column.name != "'Ada'" || column.originalName != "" || column.characterSet != 45 || column.length != 12 || column.typ != 0xfd || column.flags != 1 || column.decimals != 0 {
+		t.Fatalf("literal ColumnDefinition41 = %#v (raw %x)", column, definition)
+	}
+	_ = readWirePacket(t, client.conn) // column terminator
+	if row := readWirePacket(t, client.conn); string(row) != "\x03Ada" {
+		t.Fatalf("literal row = %x", row)
+	}
+	_ = readWirePacket(t, client.conn) // row terminator
+
+	writeWirePacket(t, client.conn, 0, append([]byte{0x03}, "SELECT 1"...))
+	if count := readWirePacket(t, client.conn); len(count) != 1 || count[0] != 1 {
+		t.Fatalf("integer column count: %x", count)
+	}
+	integerDefinition := readWirePacket(t, client.conn)
+	integerColumn, ok := parseColumnDefinition(integerDefinition)
+	if !ok || integerColumn.characterSet != 63 || integerColumn.length != 1 || integerColumn.typ != 0x08 || integerColumn.flags != 0x81 || integerColumn.decimals != 0 {
+		t.Fatalf("integer literal ColumnDefinition41 = %#v (raw %x)", integerColumn, integerDefinition)
+	}
+	_ = readWirePacket(t, client.conn)
+	if row := readWirePacket(t, client.conn); string(row) != "\x011" {
+		t.Fatalf("integer literal row = %x", row)
+	}
+	_ = readWirePacket(t, client.conn)
+
+	writeWirePacket(t, client.conn, 0, append([]byte{0x03}, "SELECT NULL"...))
+	if count := readWirePacket(t, client.conn); len(count) != 1 || count[0] != 1 {
+		t.Fatalf("NULL column count: %x", count)
+	}
+	nullDefinition := readWirePacket(t, client.conn)
+	nullColumn, ok := parseColumnDefinition(nullDefinition)
+	if !ok || nullColumn.characterSet != 63 || nullColumn.length != 0 || nullColumn.typ != 0x06 || nullColumn.flags != 0x80 || nullColumn.decimals != 0 {
+		t.Fatalf("NULL literal ColumnDefinition41 = %#v (raw %x)", nullColumn, nullDefinition)
+	}
+	_ = readWirePacket(t, client.conn)
+	if row := readWirePacket(t, client.conn); len(row) != 1 || row[0] != 0xfb {
+		t.Fatalf("NULL literal row = %x", row)
+	}
+	_ = readWirePacket(t, client.conn)
+
+	writeWirePacket(t, client.conn, 0, []byte{0x7f})
+	assertWireError(t, readWirePacket(t, client.conn), 1047, "08S01")
+
+	plain, err := net.DialTimeout("tcp", address, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	greeting := readWirePacket(t, plain)
+	_, capabilities := greetingNonceAndCapabilities(t, greeting)
+	unsupported := capabilities | (1 << 5) // CLIENT_COMPRESS was not negotiated.
+	response := handshakeResponse(unsupported, "admin", nil)
+	writeWirePacket(t, plain, 1, response)
+	assertWireError(t, readWirePacket(t, plain), 1043, "08S01")
+
+	client.close()
+	driver, err := sql.Open("mysql", "admin:secure-password@tcp("+address+")/?tls=skip-verify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer driver.Close()
+	var value string
+	if err := driver.QueryRowContext(context.Background(), "SELECT 'Ada'").Scan(&value); err != nil || value != "Ada" {
+		t.Fatalf("go-sql-driver text query: value=%q err=%v", value, err)
+	}
+}
+
 func TestMySQLCatalogReturnsCanonicalCreateDefinitions(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
@@ -652,57 +760,202 @@ type wireClient struct {
 	seq  byte
 }
 
+type wireColumn struct {
+	catalog, schema, table, originalTable, name, originalName string
+	characterSet                                              uint16
+	length                                                    uint32
+	typ                                                       byte
+	flags                                                     uint16
+	decimals                                                  byte
+}
+
+func newTLSWireClient(t *testing.T, address, username, password string) *wireClient {
+	t.Helper()
+	connection, err := net.DialTimeout("tcp", address, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	greeting := readWirePacket(t, connection)
+	nonce, capabilities := greetingNonceAndCapabilities(t, greeting)
+	if capabilities&(1<<11) == 0 {
+		connection.Close()
+		t.Fatal("server did not advertise CLIENT_SSL")
+	}
+	sslRequest := make([]byte, 32)
+	binary.LittleEndian.PutUint32(sslRequest[:4], capabilities)
+	sslRequest[8] = 45
+	writeWirePacket(t, connection, 1, sslRequest)
+	tlsConnection := tls.Client(connection, &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}) // #nosec G402 -- ephemeral black-box certificate
+	if err := tlsConnection.Handshake(); err != nil {
+		connection.Close()
+		t.Fatal(err)
+	}
+	writeWirePacket(t, tlsConnection, 2, handshakeResponse(capabilities, username, cachingSHA2Token(password, nonce)))
+	if auth := readWirePacket(t, tlsConnection); len(auth) != 2 || auth[0] != 0x01 || auth[1] != 0x04 {
+		tlsConnection.Close()
+		t.Fatalf("authentication did not require TLS full exchange: %x", auth)
+	}
+	writeWirePacket(t, tlsConnection, 4, append([]byte(password), 0))
+	if auth := readWirePacket(t, tlsConnection); len(auth) == 0 || auth[0] != 0x00 {
+		tlsConnection.Close()
+		t.Fatalf("TLS authentication failed: %x", auth)
+	}
+	return &wireClient{t: t, conn: tlsConnection}
+}
+
+func greetingNonceAndCapabilities(t *testing.T, payload []byte) ([]byte, uint32) {
+	t.Helper()
+	if len(payload) == 0 || payload[0] != 0x0a {
+		t.Fatalf("invalid greeting: %x", payload)
+	}
+	versionEnd := bytesIndex(payload[1:], 0) + 1
+	position := versionEnd + 1 + 4
+	if position+8 >= len(payload) {
+		t.Fatalf("truncated greeting: %x", payload)
+	}
+	nonce := append([]byte(nil), payload[position:position+8]...)
+	position += 9
+	lower := binary.LittleEndian.Uint16(payload[position : position+2])
+	position += 2 + 1 + 2
+	upper := binary.LittleEndian.Uint16(payload[position : position+2])
+	position += 2
+	authLength := int(payload[position])
+	position += 1 + 10
+	remaining := authLength - 1 - 8
+	if remaining < 0 || position+remaining > len(payload) {
+		t.Fatalf("malformed greeting nonce: %x", payload)
+	}
+	nonce = append(nonce, payload[position:position+remaining]...)
+	return nonce, uint32(lower) | uint32(upper)<<16
+}
+
+func handshakeResponse(capabilities uint32, username string, token []byte) []byte {
+	response := make([]byte, 0, 64+len(username)+len(token))
+	response = append(response, byte(capabilities), byte(capabilities>>8), byte(capabilities>>16), byte(capabilities>>24))
+	response = append(response, 0, 0, 0, 0, 45)
+	response = append(response, make([]byte, 23)...)
+	response = append(response, username...)
+	response = append(response, 0, byte(len(token)))
+	response = append(response, token...)
+	response = append(response, []byte("caching_sha2_password")...)
+	return append(response, 0)
+}
+
+func cachingSHA2Token(password string, nonce []byte) []byte {
+	stage1 := sha256.Sum256([]byte(password))
+	stage2 := sha256.Sum256(stage1[:])
+	scramble := sha256.Sum256(append(append([]byte{}, stage2[:]...), nonce...))
+	token := make([]byte, len(stage1))
+	for index := range token {
+		token[index] = stage1[index] ^ scramble[index]
+	}
+	return token
+}
+
+func parseColumnDefinition(payload []byte) (wireColumn, bool) {
+	values := [6]string{}
+	offset := 0
+	for index := range values {
+		value, next, ok := readLengthString(payload, offset)
+		if !ok {
+			return wireColumn{}, false
+		}
+		values[index], offset = value, next
+	}
+	if offset+13 != len(payload) || payload[offset] != 0x0c {
+		return wireColumn{}, false
+	}
+	return wireColumn{catalog: values[0], schema: values[1], table: values[2], originalTable: values[3], name: values[4], originalName: values[5], characterSet: binary.LittleEndian.Uint16(payload[offset+1 : offset+3]), length: binary.LittleEndian.Uint32(payload[offset+3 : offset+7]), typ: payload[offset+7], flags: binary.LittleEndian.Uint16(payload[offset+8 : offset+10]), decimals: payload[offset+10]}, true
+}
+
+func assertWireError(t *testing.T, payload []byte, code uint16, state string) {
+	t.Helper()
+	if len(payload) < 9 || payload[0] != 0xff || binary.LittleEndian.Uint16(payload[1:3]) != code || payload[3] != '#' || string(payload[4:9]) != state {
+		t.Fatalf("error packet = %x, want code %d state %s", payload, code, state)
+	}
+}
+
+func testTLSCertificate(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "database test"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), DNSNames: []string{"localhost"}, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	certificate, privateKey := filepath.Join(directory, "certificate.pem"), filepath.Join(directory, "key.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	encodedKey, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privateKey, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certificate, privateKey
+}
+
 func newWireClient(t *testing.T, address, username, password string) *wireClient {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := readWirePacket(t, conn)
-	versionEnd := bytesIndex(payload[1:], 0) + 1
-	position := versionEnd + 1
-	position += 4
-	nonce := append([]byte(nil), payload[position:position+8]...)
-	position += 8 + 1
-	lower := binary.LittleEndian.Uint16(payload[position : position+2])
-	position += 2 + 1 + 2
-	upper := binary.LittleEndian.Uint16(payload[position : position+2])
-	position += 2
-	authLength := int(payload[position])
-	position++
-	position += 10
-	remainingNonce := authLength - 1 - 8
-	if remainingNonce < 0 || position+remainingNonce > len(payload) {
-		t.Fatalf("malformed authentication salt")
+	nonce, capabilities := greetingNonceAndCapabilities(t, readWirePacket(t, conn))
+	writeWirePacket(t, conn, 1, handshakeResponse(capabilities, username, cachingSHA2Token(password, nonce)))
+	if auth := readWirePacket(t, conn); len(auth) != 2 || auth[0] != 0x01 || auth[1] != 0x04 {
+		conn.Close()
+		t.Fatalf("authentication did not require secure exchange: %x", auth)
 	}
-	nonce = append(nonce, payload[position:position+remainingNonce]...)
-	for len(nonce) > 0 && nonce[len(nonce)-1] == 0 {
-		nonce = nonce[:len(nonce)-1]
+	writeWirePacket(t, conn, 3, []byte{0x02})
+	publicKeyPacket := readWirePacket(t, conn)
+	if len(publicKeyPacket) < 2 || publicKeyPacket[0] != 0x01 {
+		conn.Close()
+		t.Fatalf("authentication public key: %x", publicKeyPacket)
 	}
-	capabilities := uint32(lower) | uint32(upper)<<16
-	stage1 := sha256.Sum256([]byte(password))
-	stage2 := sha256.Sum256(stage1[:])
-	scrambleInput := append(append([]byte{}, stage2[:]...), nonce...)
-	scramble := sha256.Sum256(scrambleInput)
-	token := make([]byte, len(stage1))
-	for i := range token {
-		token[i] = stage1[i] ^ scramble[i]
+	block, _ := pem.Decode(publicKeyPacket[1:])
+	if block == nil {
+		conn.Close()
+		t.Fatalf("invalid authentication public key: %q", publicKeyPacket[1:])
 	}
-	response := make([]byte, 0, 64)
-	response = append(response, byte(capabilities), byte(capabilities>>8), byte(capabilities>>16), byte(capabilities>>24))
-	response = append(response, 0, 0, 0, 0, 33)
-	response = append(response, make([]byte, 23)...)
-	response = append(response, username...)
-	response = append(response, 0, byte(len(token)))
-	response = append(response, token...)
-	response = append(response, []byte("caching_sha2_password")...)
-	response = append(response, 0)
-	writeWirePacket(t, conn, 1, response)
+	publicKey, err := parseRSAPublicKey(block.Bytes)
+	if err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	plain := append([]byte(password), 0)
+	for index := range plain {
+		plain[index] ^= nonce[index%len(nonce)]
+	}
+	encrypted, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, publicKey, plain, nil)
+	if err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	writeWirePacket(t, conn, 5, encrypted)
 	if auth := readWirePacket(t, conn); len(auth) == 0 || auth[0] != 0x00 {
 		conn.Close()
 		t.Fatalf("authentication failed: %x", auth)
 	}
 	return &wireClient{t: t, conn: conn}
+}
+
+func parseRSAPublicKey(der []byte) (*rsa.PublicKey, error) {
+	key, err := x509.ParsePKIXPublicKey(der)
+	if err != nil {
+		return nil, err
+	}
+	rsaKey, ok := key.(*rsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("authentication key is %T, not RSA", key)
+	}
+	return rsaKey, nil
 }
 
 func (c *wireClient) query(query string) wireResult {
