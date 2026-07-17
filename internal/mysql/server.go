@@ -1315,8 +1315,8 @@ func sortedTables(namespace catalog.Namespace) []catalog.Table {
 }
 
 func (s *session) prepare(connection net.Conn, sequence byte, query string) error {
-	parameters := parameterCount(query)
-	if parameters > maxPreparedParameters {
+	parameters, withinLimit := countPreparedParameters(query, maxPreparedParameters)
+	if !withinLimit {
 		return writePacket(connection, sequence, errorPacket(1390, "HY000", "prepared statement contains too many placeholders"))
 	}
 	if !s.server.reservePreparedStatement() {
@@ -1671,6 +1671,43 @@ func (s *session) rollbackTransaction() error {
 }
 
 func parameterCount(query string) int { return len(preparedPlaceholders(query)) }
+
+func countPreparedParameters(query string, maximum int) (int, bool) {
+	count := 0
+	quote, escaped := byte(0), false
+	for index := 0; index < len(query); index++ {
+		character := query[index]
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if character == '\\' {
+				escaped = true
+				continue
+			}
+			if character == quote {
+				if quote == '\'' && index+1 < len(query) && query[index+1] == quote {
+					index++
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		if character == '\'' || character == '"' || character == '`' {
+			quote = character
+			continue
+		}
+		if character == '?' {
+			count++
+			if count > maximum {
+				return count, false
+			}
+		}
+	}
+	return count, true
+}
 
 func bindPreparedQuery(query string, values []string) (string, error) {
 	positions := preparedPlaceholders(query)
