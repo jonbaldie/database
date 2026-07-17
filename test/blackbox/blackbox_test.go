@@ -385,6 +385,75 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	}
 }
 
+func TestMySQLNamespacesAndBasicTablesSurviveRestartAndSupportQualifiedAccess(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("namespace-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, address := startMySQLServer(t, runner, directory)
+	client := newWireClient(t, address, "admin", "namespace-secret")
+	for _, query := range []string{
+		"CREATE DATABASE alpha",
+		"CREATE DATABASE beta",
+		"USE alpha",
+		"CREATE TABLE local_rows (id INT, name VARCHAR(32))",
+		"INSERT INTO local_rows VALUES (1, 'Ada')",
+		"CREATE TABLE beta.cross_rows (id INT, name VARCHAR(32))",
+		"INSERT INTO beta.cross_rows VALUES (2, 'Grace')",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+	if result := client.query("SELECT * FROM local_rows"); result.err != "" || len(result.rows) != 1 || strings.Join(result.rows[0], ",") != "1,Ada" {
+		t.Fatalf("current namespace read: %#v", result)
+	}
+	if result := client.query("SELECT * FROM beta.cross_rows"); result.err != "" || len(result.rows) != 1 || strings.Join(result.rows[0], ",") != "2,Grace" {
+		t.Fatalf("qualified cross-namespace read: %#v", result)
+	}
+	for _, query := range []string{
+		"CREATE TABLE rejected_constraint (id INT, PRIMARY KEY (id))",
+		"CREATE TABLE rejected_option (id INT) ENGINE=InnoDB",
+	} {
+		if result := client.query(query); result.err == "" {
+			t.Fatalf("recognized unsupported table definition succeeded: query=%q result=%#v", query, result)
+		}
+	}
+	for _, table := range []string{"rejected_constraint", "rejected_option"} {
+		if result := client.query("SELECT * FROM " + table); result.err == "" {
+			t.Fatalf("unsupported definition left a durable table: table=%q result=%#v", table, result)
+		}
+	}
+	if err := client.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.ExitCode != 0 {
+		t.Fatalf("stop: %#v", result)
+	}
+
+	process, address = startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	reopened := newWireClient(t, address, "admin", "namespace-secret")
+	defer reopened.close()
+	if result := reopened.query("USE alpha"); result.err != "" {
+		t.Fatalf("use alpha after restart: %#v", result)
+	}
+	if result := reopened.query("SELECT * FROM local_rows"); result.err != "" || len(result.rows) != 1 || strings.Join(result.rows[0], ",") != "1,Ada" {
+		t.Fatalf("current namespace durable row: %#v", result)
+	}
+	if result := reopened.query("SELECT * FROM beta.cross_rows"); result.err != "" || len(result.rows) != 1 || strings.Join(result.rows[0], ",") != "2,Grace" {
+		t.Fatalf("qualified durable row: %#v", result)
+	}
+}
+
 func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")

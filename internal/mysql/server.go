@@ -832,10 +832,10 @@ func (s *session) execute(query string) (*queryResult, error) {
 		return nil, s.createDatabase(query)
 	}
 	if strings.HasPrefix(lower, "create table ") {
-		return nil, s.createTable(query)
+		return nil, createTable(s, query)
 	}
 	if strings.HasPrefix(lower, "insert into ") {
-		return nil, s.insert(query)
+		return nil, insert(s, query)
 	}
 	if strings.HasPrefix(lower, "select ") {
 		return s.selectQuery(query)
@@ -898,24 +898,24 @@ func (s *session) createDatabase(query string) error {
 	}
 	return nil
 }
-func (s *session) createTable(query string) error {
-	if s.database == "" {
-		return sqlFailure{1046, "3D000", "no database selected"}
-	}
-	if strings.EqualFold(s.database, informationSchemaName) {
-		return sqlFailure{1044, "42000", "information_schema is read-only"}
-	}
+func createTable(s *session, query string) error {
 	open := strings.Index(query, "(")
 	close := strings.LastIndex(query, ")")
 	if open < 0 || close <= open {
 		return sqlFailure{1064, "42000", "malformed CREATE TABLE"}
 	}
+	if strings.TrimSpace(query[close+1:]) != "" {
+		return sqlFailure{1235, "42000", "unsupported table definition"}
+	}
 	head := strings.TrimSpace(query[len("CREATE TABLE "):open])
 	partsForTable, ok := splitQualifiedIdentifier(head)
-	if !ok || len(partsForTable) != 1 {
+	if !ok || len(partsForTable) == 0 || len(partsForTable) > 2 {
 		return sqlFailure{1064, "42000", "invalid table name"}
 	}
-	name := partsForTable[0]
+	namespace, name, err := s.tableTarget(partsForTable)
+	if err != nil {
+		return err
+	}
 	parts := splitCSV(query[open+1 : close])
 	columns := make([]string, 0, len(parts))
 	columnTypes := make([]string, 0, len(parts))
@@ -925,8 +925,8 @@ func (s *session) createTable(query string) error {
 			return sqlFailure{1064, "42000", "invalid column definition"}
 		}
 		fields := strings.Fields(remainder)
-		if strings.EqualFold(column, "primary") || strings.EqualFold(column, "constraint") {
-			continue
+		if isUnsupportedTableDefinition(column) || hasUnsupportedColumnModifier(fields) {
+			return sqlFailure{1235, "42000", "unsupported table definition"}
 		}
 		columns = append(columns, column)
 		columnType := ""
@@ -938,7 +938,7 @@ func (s *session) createTable(query string) error {
 	if len(columns) == 0 || s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
-	if err := s.server.config.Catalog.CreateTableWithTypes(s.database, name, columns, columnTypes); err != nil {
+	if err := s.server.config.Catalog.CreateTableWithTypes(namespace, name, columns, columnTypes); err != nil {
 		return sqlFailure{1050, "42S01", err.Error()}
 	}
 	return nil
@@ -1037,13 +1037,7 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
-func (s *session) insert(query string) error {
-	if s.database == "" {
-		return sqlFailure{1046, "3D000", "no database selected"}
-	}
-	if strings.EqualFold(s.database, informationSchemaName) {
-		return sqlFailure{1044, "42000", "information_schema is read-only"}
-	}
+func insert(s *session, query string) error {
 	rest := strings.TrimSpace(query[len("INSERT INTO "):])
 	valuesAt := strings.Index(strings.ToLower(rest), "values")
 	if valuesAt < 0 {
@@ -1051,7 +1045,18 @@ func (s *session) insert(query string) error {
 	}
 	head := strings.TrimSpace(rest[:valuesAt])
 	valueText := strings.TrimSpace(rest[valuesAt+len("values"):])
-	name := identifier(strings.Fields(strings.Trim(head, "() "))[0])
+	target := strings.TrimSpace(head)
+	if open := strings.IndexByte(target, '('); open >= 0 {
+		target = strings.TrimSpace(target[:open])
+	}
+	parts, valid := splitQualifiedIdentifier(target)
+	if !valid || len(parts) == 0 || len(parts) > 2 {
+		return sqlFailure{1064, "42000", "malformed INSERT"}
+	}
+	namespace, name, err := s.tableTarget(parts)
+	if err != nil {
+		return err
+	}
 	open := strings.Index(valueText, "(")
 	close := strings.LastIndex(valueText, ")")
 	if open < 0 || close <= open {
@@ -1065,7 +1070,7 @@ func (s *session) insert(query string) error {
 	if s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
-	if err := s.server.config.Catalog.Insert(s.database, name, row); err != nil {
+	if err := s.server.config.Catalog.Insert(namespace, name, row); err != nil {
 		return sqlFailure{1136, "21S01", err.Error()}
 	}
 	return nil
@@ -1079,10 +1084,17 @@ func (s *session) selectQuery(query string) (*queryResult, error) {
 		if strings.HasPrefix(strings.ToLower(source), informationSchemaName+".") || strings.HasPrefix(strings.ToLower(source), "`information_schema`.") {
 			return s.selectInformationSchema(query)
 		}
-		tableName := identifier(strings.Fields(source)[0])
-		ns, ok := s.snapshotNamespace(s.database)
+		parts, valid := splitQualifiedIdentifier(strings.Fields(source)[0])
+		if !valid || len(parts) == 0 || len(parts) > 2 {
+			return nil, sqlFailure{1064, "42000", "invalid table name"}
+		}
+		namespace, tableName, err := s.tableTarget(parts)
+		if err != nil {
+			return nil, err
+		}
+		ns, ok := s.snapshotNamespace(namespace)
 		if !ok {
-			return nil, sqlFailure{1049, "42000", "unknown database"}
+			return nil, sqlFailure{1049, "42000", "unknown database '" + namespace + "'"}
 		}
 		table, ok := ns.Tables[strings.ToLower(tableName)]
 		if !ok {
@@ -1098,6 +1110,52 @@ func (s *session) selectQuery(query string) (*queryResult, error) {
 		return nil, sqlFailure{1064, "42000", "unsupported expression"}
 	}
 	return &queryResult{columns: []string{expression}, rows: [][]string{{literal.value}}, nulls: [][]bool{{literal.isNull}}, metadata: []columnMetadata{literal.metadata}}, nil
+}
+
+// tableTarget resolves an unqualified table against the current namespace and
+// a qualified table against its named namespace. Keeping this resolution at
+// the protocol seam makes DDL, writes, and reads agree about namespace scope.
+func (s *session) tableTarget(parts []string) (string, string, error) {
+	namespace, table := s.database, ""
+	if len(parts) == 2 {
+		namespace, table = parts[0], parts[1]
+	} else if len(parts) == 1 {
+		table = parts[0]
+	}
+	if namespace == "" || table == "" {
+		return "", "", sqlFailure{1046, "3D000", "no database selected"}
+	}
+	if strings.EqualFold(namespace, informationSchemaName) {
+		return "", "", sqlFailure{1044, "42000", "information_schema is read-only"}
+	}
+	// parts have already been parsed as SQL identifiers. Re-parsing would turn
+	// a literal dot or backtick in a quoted identifier into syntax.
+	if err := s.server.databaseExists(namespace); err != nil {
+		return "", "", err
+	}
+	return namespace, table, nil
+}
+
+func isUnsupportedTableDefinition(value string) bool {
+	switch strings.ToLower(value) {
+	case "primary", "unique", "foreign", "check", "constraint", "key", "index", "fulltext", "spatial":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasUnsupportedColumnModifier(fields []string) bool {
+	if len(fields) < 2 {
+		return false
+	}
+	for _, field := range fields[1:] {
+		switch strings.ToLower(strings.Trim(field, "(),")) {
+		case "not", "null", "default", "primary", "unique", "references", "check", "constraint", "auto_increment", "generated", "comment", "collate", "character":
+			return true
+		}
+	}
+	return false
 }
 
 type literalQueryResult struct {
