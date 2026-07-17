@@ -95,12 +95,52 @@ compatibility rules for automating the operator command family. Its detail is
 in [docs/operator-automation.md](docs/operator-automation.md).
 _Avoid_: CLI help text as API, progress as completion, implicit credential input
 
+**v0.1 performance acceptance target**:
+A measurable threshold assessed through five independent valid runs on a
+published reference environment before v0.1 is released. Four runs must pass;
+one miss is published but does not block release, while two misses do. It is a
+release-quality gate, not an automated CI test, service-level agreement, or
+guarantee that every deployment will achieve the same result.
+_Avoid_: Flaky one-run test gate, informational benchmark, universal performance guarantee
+
+**v0.1 capacity envelope**:
+The small-application scale at which v0.1 must remain comfortable on one
+ordinary machine: approximately 10 GB of stored application data and 50
+simultaneous sessions. It is an acceptance boundary for the experimental
+release, not a production-scale claim.
+_Avoid_: Toy-only database, production-scale capacity guarantee
+
+**v0.1 performance reference environment**:
+The specific machine on which v0.1 performance acceptance targets are judged:
+an Apple iMac `Mac15,5` with an eight-core M3 chip, 16 GB of memory, and its
+internal 512 GB Apple SSD. Each result identifies the operating-system version
+and relevant test conditions used for that run.
+_Avoid_: Abstract minimum hardware, whichever machine is available
+
+**v0.1 performance acceptance corpus**:
+The fixed, versioned, deliberately non-domain relational data used to judge
+v0.1 performance targets. It combines narrow keyed records, larger related
+records, primary, unique, and secondary access paths, controlled key
+distributions, and a 10 GB scale without claiming to represent a particular
+application.
+_Avoid_: Representative application workload, e-commerce benchmark, implementation test fixture
+
+**v0.1 performance acceptance scenario**:
+The versioned release-evidence contract that applies the performance acceptance
+corpus to the separate lookup, durable-write, and clean-start gates under fixed
+application-visible concurrency, warm-up, measurement, repetition, and
+reporting rules. Its normative detail is in
+[docs/performance-acceptance.md](docs/performance-acceptance.md).
+_Avoid_: Benchmark harness, mixed representative workload, implementation performance test
+
 ## Scope boundary
 
 v0.1 does not define a representative application workload. In particular, the
 product contract does not invent application fixtures, schemas, row counts,
 arbitrary representative queries, or transaction mixes. Its specified
-performance-acceptance operations remain required; their exact corpus and
-harness mechanics are implementation work. Later design decisions must be
-grounded in the documented external database contract rather than an arbitrary
-surrogate application.
+performance-acceptance operations use the fixed, deliberately non-domain
+scenario in [docs/performance-acceptance.md](docs/performance-acceptance.md).
+The scenario fixes observable corpus, workload, and evidence rules while
+leaving harness architecture and internal mechanics as implementation choices.
+Later design decisions must be grounded in the documented external database
+contract rather than an arbitrary surrogate application.
