@@ -2,8 +2,12 @@ VERSION ?= 0.1.0
 BUILD_IDENTITY ?= local
 GO ?= go
 LDFLAGS = -s -w -X github.com/jonbaldie/database/internal/buildinfo.ProductVersion=$(VERSION) -X github.com/jonbaldie/database/internal/buildinfo.BuildIdentity=$(BUILD_IDENTITY)
+MESSGO_VERSION := v0.2.0
+MESSGO_MODULE := github.com/quality-gates/messgo/cmd/messgo
+MESSGO_RULESET := config/messgo.xml
+MESSGO_PATHS := $(shell $(GO) list -f '{{.Dir}}' ./... | tr '\n' ',' | sed 's/,$$//')
 
-.PHONY: build test vet fmt-check validate-query-explanation quality mutation
+.PHONY: build test vet fmt-check validate-query-explanation quality messgo mutation
 
 build:
 	mkdir -p bin
@@ -21,7 +25,10 @@ fmt-check:
 validate-query-explanation:
 	./scripts/validate-query-explanation-schema.sh
 
-quality: fmt-check vet test build
+quality: fmt-check vet test build messgo
+
+messgo:
+	$(GO) run $(MESSGO_MODULE)@$(MESSGO_VERSION) $(MESSGO_PATHS) text $(MESSGO_RULESET) --ignore-tests
 
 mutation:
 	./scripts/mutation-threshold.sh

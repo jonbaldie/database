@@ -27,4 +27,8 @@ bin/database serve --data-dir /absolute/path/to/data --mysql-address=127.0.0.1:3
 
 `database version --format=json` emits the versioned `database.version/v1` identity. The `serve` command is the process seam: it exclusively owns one initialized data directory, reports `database.lifecycle/v1` readiness, exposes `/live`, `/ready`, and `/metrics`, and handles `SIGINT` or `SIGTERM` by refusing new work, finishing current statements, and rolling back open transactions. SQL, storage, authentication, and complete operator workflows are implemented by their respective tickets.
 
-Run the repository verification with `make quality`. Pull requests also enforce mutation testing on changed production Go functions with an 80% minimum score.
+Run the repository verification with `make quality`. It includes a pinned
+`messgo` full-production analysis; its checked-in design and code-size adoption
+baseline is applied to every non-test Go source file, not just changed files.
+Pull requests also enforce mutation testing on changed production Go functions
+with an 80% minimum score.
