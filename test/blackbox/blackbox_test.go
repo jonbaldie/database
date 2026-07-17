@@ -537,6 +537,104 @@ func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string) (*
 	return process, mysqlAddress
 }
 
+func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("shutdown-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+
+	process, address := startMySQLServer(t, runner, directory)
+	second := runner.Run(context.Background(), "serve", "--data-dir", directory, "--mysql-address", freeAddress(t), "--format=json")
+	if second.ExitCode != 1 || !strings.Contains(second.Stdout, "already in use") {
+		t.Fatalf("second owner: %#v", second)
+	}
+
+	client := newWireClient(t, address, "admin", "shutdown-secret")
+	if result := client.query("BEGIN"); result.err != "" {
+		t.Fatalf("begin: %#v", result)
+	}
+	if result := client.query("CREATE DATABASE interrupted"); result.err != "" {
+		t.Fatalf("create uncommitted database: %#v", result)
+	}
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.ExitCode != 0 {
+		t.Fatalf("graceful shutdown: %#v", result)
+	}
+	_ = client.conn.Close()
+
+	process, address = startMySQLServer(t, runner, directory)
+	client = newWireClient(t, address, "admin", "shutdown-secret")
+	if result := client.query("USE interrupted"); result.err == "" {
+		t.Fatalf("uncommitted database survived shutdown: %#v", result)
+	}
+	if err := client.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.ExitCode != 0 {
+		t.Fatalf("restart shutdown: %#v", result)
+	}
+
+	damaged := filepath.Join(t.TempDir(), "damaged-instance")
+	if result := runner.Run(context.Background(), "init", damaged, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize damaged fixture: %#v", result)
+	}
+	if err := os.Remove(filepath.Join(damaged, "catalog.json")); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "serve", "--data-dir", damaged, "--mysql-address", freeAddress(t), "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stdout, "catalog") {
+		t.Fatalf("damaged directory: %#v", result)
+	}
+}
+
+func TestServeEmitsTerminalOperatorResult(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("result-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, _ := startMySQLServer(t, runner, directory)
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	result := process.Wait()
+	if result.ExitCode != 0 {
+		t.Fatalf("graceful shutdown: %#v", result)
+	}
+	var readyOperationID, resultOperationID string
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("invalid serve output line %q: %v", line, err)
+		}
+		if event["schema"] == "database.lifecycle/v1" && event["state"] == "ready" {
+			readyOperationID, _ = event["operation_id"].(string)
+		}
+		if event["schema"] == "database.operator.result/v1" && event["operation"] == "serve" {
+			if event["success"] != true || event["exit_class"] != "success" {
+				t.Fatalf("terminal serve result = %#v", event)
+			}
+			resultOperationID, _ = event["operation_id"].(string)
+		}
+	}
+	if readyOperationID == "" || resultOperationID == "" || readyOperationID != resultOperationID {
+		t.Fatalf("serve result did not correlate lifecycle progress: ready=%q result=%q output=%q", readyOperationID, resultOperationID, result.Stdout)
+	}
+}
+
 type wireResult struct {
 	columns []string
 	rows    [][]string

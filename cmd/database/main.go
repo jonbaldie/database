@@ -479,7 +479,9 @@ func serve(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	operationID := newOperationID()
 	emit := func(event lifecycle.Event) {
+		event.OperationID = operationID
 		if opts.Format == "json" {
 			_ = json.NewEncoder(stdout).Encode(event)
 			return
@@ -495,9 +497,16 @@ func serve(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if err := lifecycle.Serve(ctx, opts, emit); err != nil {
+		if opts.Format == "json" {
+			return writeOperatorFailure(stdout, "serve", operationID, "operation_failed", 1, err.Error())
+		}
 		fmt.Fprintf(stderr, "database serve: %v\n", err)
 		return 1
 	}
+	if opts.Format == "json" {
+		return writeOperatorResult(stdout, "serve", operationID, true, "success", "")
+	}
+	fmt.Fprintf(stdout, "database serve: success (operation_id=%s)\n", operationID)
 	return 0
 }
 
