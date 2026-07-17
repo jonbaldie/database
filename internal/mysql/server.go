@@ -71,17 +71,23 @@ type Config struct {
 }
 
 type Server struct {
-	Listener  net.Listener
-	config    Config
-	tlsConfig *tls.Config
-	rsaKey    *rsa.PrivateKey
+	Listener    net.Listener
+	config      Config
+	connections *connectionRegistry
+	auth        authenticator
+}
 
+// connectionRegistry owns admission and graceful-drain accounting. It is kept
+// separate from wire handling so transport lifecycle can evolve independently
+// of command and SQL compatibility work.
+type connectionRegistry struct {
 	mu            sync.Mutex
 	stopping      bool
 	connections   map[net.Conn]struct{}
 	connectionW   sync.WaitGroup
 	statementW    sync.WaitGroup
 	preparedCount int
+	preparedLimit int
 }
 
 // New retains a small unauthenticated protocol probe seam for callers that do
@@ -108,21 +114,27 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 		_ = listener.Close()
 		return nil, errors.New("TLS certificate and key must be provided together")
 	}
-	server := &Server{Listener: listener, config: config, connections: make(map[net.Conn]struct{})}
+	registry := &connectionRegistry{
+		connections:   make(map[net.Conn]struct{}),
+		preparedLimit: config.MaxPreparedStmtCount,
+	}
+	server := &Server{Listener: listener, config: config, connections: registry}
+	auth := authenticator{config: config}
 	if config.TLSCertFile != "" {
 		certificate, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
 		if err != nil {
 			_ = listener.Close()
 			return nil, fmt.Errorf("load TLS certificate: %w", err)
 		}
-		server.tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
+		auth.tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}}
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		_ = listener.Close()
 		return nil, fmt.Errorf("generate authentication key: %w", err)
 	}
-	server.rsaKey = key
+	auth.rsaKey = key
+	server.auth = auth
 	return server, nil
 }
 
@@ -132,11 +144,11 @@ func (s *Server) Serve() {
 		if err != nil {
 			return
 		}
-		if !s.registerConnection(connection) {
+		if !s.connections.register(connection) {
 			_ = connection.Close()
 			continue
 		}
-		go s.serveConnection(connection)
+		go connectionWorker{server: s}.serve(connection)
 	}
 }
 
@@ -144,89 +156,90 @@ func (s *Server) Serve() {
 // then closes sessions. Closing a transaction-owning session triggers its
 // rollback before this method returns.
 func (s *Server) CloseGracefully() error {
-	s.mu.Lock()
-	if s.stopping {
-		s.mu.Unlock()
-		return nil
-	}
-	s.stopping = true
-	listener := s.Listener
-	s.mu.Unlock()
-
-	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		return err
-	}
-	s.statementW.Wait()
-
-	s.mu.Lock()
-	connections := make([]net.Conn, 0, len(s.connections))
-	for connection := range s.connections {
-		connections = append(connections, connection)
-	}
-	s.mu.Unlock()
-	for _, connection := range connections {
-		_ = connection.Close()
-	}
-	s.connectionW.Wait()
-	return nil
+	return s.connections.closeGracefully(s.Listener)
 }
 
 // Close retains the listener-close seam for callers that do not own the
 // lifecycle. Database shutdown uses CloseGracefully.
 func (s *Server) Close() error { return s.Listener.Close() }
 
-func (s *Server) registerConnection(connection net.Conn) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopping {
+func (r *connectionRegistry) register(connection net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopping {
 		return false
 	}
-	s.connections[connection] = struct{}{}
-	s.connectionW.Add(1)
+	r.connections[connection] = struct{}{}
+	r.connectionW.Add(1)
 	return true
 }
 
-func (s *Server) unregisterConnection(connection net.Conn) {
-	s.mu.Lock()
-	delete(s.connections, connection)
-	s.mu.Unlock()
-	s.connectionW.Done()
+func (r *connectionRegistry) unregister(connection net.Conn) {
+	r.mu.Lock()
+	delete(r.connections, connection)
+	r.mu.Unlock()
+	r.connectionW.Done()
 }
 
-func (s *Server) beginStatement() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopping {
+func (r *connectionRegistry) beginStatement() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopping {
 		return false
 	}
-	s.statementW.Add(1)
+	r.statementW.Add(1)
 	return true
 }
 
-func (s *Server) endStatement() { s.statementW.Done() }
+func (r *connectionRegistry) endStatement() { r.statementW.Done() }
 
-func (s *Server) acceptingWork() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return !s.stopping
+func (r *connectionRegistry) acceptingWork() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.stopping
 }
 
-func (s *Server) reservePreparedStatement() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.preparedCount >= s.config.MaxPreparedStmtCount {
+func (r *connectionRegistry) reservePreparedStatement() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.preparedCount >= r.preparedLimit {
 		return false
 	}
-	s.preparedCount++
+	r.preparedCount++
 	return true
 }
 
-func (s *Server) releasePreparedStatement() {
-	s.mu.Lock()
-	if s.preparedCount > 0 {
-		s.preparedCount--
+func (r *connectionRegistry) releasePreparedStatement() {
+	r.mu.Lock()
+	if r.preparedCount > 0 {
+		r.preparedCount--
 	}
-	s.mu.Unlock()
+	r.mu.Unlock()
+}
+
+func (r *connectionRegistry) closeGracefully(listener net.Listener) error {
+	r.mu.Lock()
+	if r.stopping {
+		r.mu.Unlock()
+		return nil
+	}
+	r.stopping = true
+	r.mu.Unlock()
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	r.statementW.Wait()
+	r.mu.Lock()
+	connections := make([]net.Conn, 0, len(r.connections))
+	for connection := range r.connections {
+		connections = append(connections, connection)
+	}
+	r.mu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	r.connectionW.Wait()
+	return nil
 }
 
 type session struct {
@@ -254,23 +267,36 @@ type preparedParameterType struct {
 	unsigned bool
 }
 
-func (s *Server) serveConnection(connection net.Conn) {
+// connectionWorker owns one authenticated classic-protocol conversation. Its
+// collaborators deliberately separate wire dispatch, SQL/catalog behaviour,
+// and prepared-statement behaviour for the follow-on strict-gate slices.
+type connectionWorker struct{ server *Server }
+
+type queryExecutor struct{ *session }
+
+type preparedExecutor struct {
+	*session
+	queries *queryExecutor
+}
+
+func (w connectionWorker) serve(connection net.Conn) {
 	defer connection.Close()
-	defer s.unregisterConnection(connection)
+	defer w.server.connections.unregister(connection)
 	var current *session
+	var prepared *preparedExecutor
 	defer func() {
-		if current != nil && current.transaction && s.config.Catalog != nil {
-			_ = s.config.Catalog.Replace(current.transactionSnapshot)
+		if current != nil && current.transaction && w.server.config.Catalog != nil {
+			_ = w.server.config.Catalog.Replace(current.transactionSnapshot)
 		}
-		if current != nil {
-			current.closeAllPrepared()
+		if prepared != nil {
+			prepared.closeAllPrepared()
 		}
 	}()
 	nonce := makeNonce()
-	if err := writePacket(connection, 0, handshake(s.config.Version, nonce, s.tlsConfig != nil)); err != nil {
+	if err := writePacket(connection, 0, handshake(w.server.config.Version, nonce, w.server.auth.tlsConfig != nil)); err != nil {
 		return
 	}
-	authentication, err := s.authenticate(connection, nonce)
+	authentication, err := w.server.auth.authenticate(connection, nonce)
 	if err != nil {
 		_ = writePacket(authentication.connection, authentication.nextSequence, mysqlError(err))
 		return
@@ -279,22 +305,24 @@ func (s *Server) serveConnection(connection net.Conn) {
 	if err := writePacket(connection, authentication.nextSequence, okPacket()); err != nil {
 		return
 	}
-	session := &session{server: s, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]*preparedStatement{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
+	session := &session{server: w.server, username: authentication.username, database: authentication.database, initialDB: authentication.database, statements: map[uint32]*preparedStatement{}, nextStmtID: 1, savepoints: map[string]catalog.Definition{}}
 	current = session
+	queries := &queryExecutor{session}
+	prepared = &preparedExecutor{session: session, queries: queries}
 	for {
-		sequence, payload, err := readPacket(connection, s.config.MaxAllowedPacket)
+		sequence, payload, err := readPacket(connection, w.server.config.MaxAllowedPacket)
 		if err != nil || len(payload) == 0 {
 			return
 		}
-		if !s.acceptingWork() {
+		if !w.server.connections.acceptingWork() {
 			return
 		}
 		switch payload[0] {
 		case 0x01: // COM_QUIT
 			return
 		case 0x02: // COM_INIT_DB
-			session.useDatabase(string(payload[1:]))
-			if err := session.databaseExists(session.database); err != nil {
+			queries.useDatabase(string(payload[1:]))
+			if err := queries.databaseExists(session.database); err != nil {
 				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
 					return
 				}
@@ -304,11 +332,11 @@ func (s *Server) serveConnection(connection net.Conn) {
 				return
 			}
 		case 0x03: // COM_QUERY
-			if !s.beginStatement() {
+			if !w.server.connections.beginStatement() {
 				return
 			}
-			err := session.writeQueryResult(connection, sequence+1, string(payload[1:]))
-			s.endStatement()
+			err := queries.writeQueryResult(connection, sequence+1, string(payload[1:]))
+			w.server.connections.endStatement()
 			if err != nil {
 				return
 			}
@@ -317,15 +345,15 @@ func (s *Server) serveConnection(connection net.Conn) {
 				return
 			}
 		case 0x16: // COM_STMT_PREPARE
-			if err := session.prepare(connection, sequence+1, string(payload[1:])); err != nil {
+			if err := prepared.prepare(connection, sequence+1, string(payload[1:])); err != nil {
 				return
 			}
 		case 0x17: // COM_STMT_EXECUTE
-			if !s.beginStatement() {
+			if !w.server.connections.beginStatement() {
 				return
 			}
-			err := session.executePrepared(connection, sequence+1, payload)
-			s.endStatement()
+			err := prepared.executePrepared(connection, sequence+1, payload)
+			w.server.connections.endStatement()
 			if err != nil {
 				return
 			}
@@ -337,15 +365,15 @@ func (s *Server) serveConnection(connection net.Conn) {
 				continue
 			}
 			id := binary.LittleEndian.Uint32(payload[1:5])
-			session.closePrepared(id)
+			prepared.closePrepared(id)
 		case 0x18: // COM_STMT_SEND_LONG_DATA
-			if err := session.sendLongData(payload); err != nil {
+			if err := prepared.sendLongData(payload); err != nil {
 				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
 					return
 				}
 			}
 		case 0x1a: // COM_STMT_RESET
-			if err := session.resetPrepared(payload); err != nil {
+			if err := prepared.resetPrepared(payload); err != nil {
 				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
 					return
 				}
@@ -361,7 +389,7 @@ func (s *Server) serveConnection(connection net.Conn) {
 				}
 				continue
 			}
-			if err := session.resetConnection(); err != nil {
+			if err := prepared.resetConnection(); err != nil {
 				if writePacket(connection, sequence+1, mysqlError(err)) != nil {
 					return
 				}
@@ -385,22 +413,30 @@ type authenticationResult struct {
 	nextSequence byte
 }
 
-func (s *Server) authenticate(connection net.Conn, nonce []byte) (authenticationResult, error) {
-	sequence, payload, err := readPacket(connection, s.config.MaxAllowedPacket)
+// authenticator owns TLS negotiation and caching_sha2_password exchange. It
+// has no command-dispatch responsibility.
+type authenticator struct {
+	config    Config
+	tlsConfig *tls.Config
+	rsaKey    *rsa.PrivateKey
+}
+
+func (a authenticator) authenticate(connection net.Conn, nonce []byte) (authenticationResult, error) {
+	sequence, payload, err := readPacket(connection, a.config.MaxAllowedPacket)
 	if err != nil {
 		return authenticationResult{connection: connection, nextSequence: 2}, err
 	}
 	secure := false
 	if len(payload) == 32 && binary.LittleEndian.Uint32(payload[:4])&clientSSL != 0 {
-		if s.tlsConfig == nil {
+		if a.tlsConfig == nil {
 			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "TLS capability is not supported"}
 		}
-		tlsConnection := tls.Server(connection, s.tlsConfig)
+		tlsConnection := tls.Server(connection, a.tlsConfig)
 		if err := tlsConnection.Handshake(); err != nil {
 			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
 		}
 		connection = tlsConnection
-		sequence, payload, err = readPacket(connection, s.config.MaxAllowedPacket)
+		sequence, payload, err = readPacket(connection, a.config.MaxAllowedPacket)
 		if err != nil {
 			return authenticationResult{connection: connection, nextSequence: 3}, err
 		}
@@ -410,7 +446,7 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (authentication
 		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "malformed handshake response"}
 	}
 	capabilities := binary.LittleEndian.Uint32(payload[:4])
-	if capabilities&^acceptedClientCapabilities(s.tlsConfig != nil) != 0 {
+	if capabilities&^acceptedClientCapabilities(a.tlsConfig != nil) != 0 {
 		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1043, "08S01", "unsupported client capabilities"}
 	}
 	if capabilities&clientProtocol41 == 0 || capabilities&clientSecureConnection == 0 || capabilities&clientPluginAuth == 0 {
@@ -452,14 +488,14 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (authentication
 	if !pluginOK || plugin != "caching_sha2_password" {
 		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1251, "08004", "client does not support caching_sha2_password"}
 	}
-	if s.config.Username != "" && username != s.config.Username {
+	if a.config.Username != "" && username != a.config.Username {
 		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
 	}
-	if s.config.PasswordHash != "" && !validPasswordToken(token, nonce, s.config.PasswordHash) {
+	if a.config.PasswordHash != "" && !validPasswordToken(token, nonce, a.config.PasswordHash) {
 		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
 	}
 	if database != "" {
-		if err := s.databaseExists(database); err != nil {
+		if err := a.databaseExists(database); err != nil {
 			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
 		}
 	}
@@ -469,7 +505,7 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (authentication
 	if err := writePacket(connection, sequence+1, []byte{0x01, 0x04}); err != nil {
 		return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
 	}
-	sequence, response, err := readPacket(connection, s.config.MaxAllowedPacket)
+	sequence, response, err := readPacket(connection, a.config.MaxAllowedPacket)
 	if err != nil {
 		return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
 	}
@@ -480,33 +516,33 @@ func (s *Server) authenticate(connection net.Conn, nonce []byte) (authentication
 		if len(response) != 1 || response[0] != 0x02 {
 			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "secure authentication exchange required"}
 		}
-		if err := writePacket(connection, sequence+1, publicKeyPacket(s.rsaKey)); err != nil {
+		if err := writePacket(connection, sequence+1, publicKeyPacket(a.rsaKey)); err != nil {
 			return authenticationResult{connection: connection, nextSequence: sequence + 1}, err
 		}
-		sequence, response, err = readPacket(connection, s.config.MaxAllowedPacket)
+		sequence, response, err = readPacket(connection, a.config.MaxAllowedPacket)
 		if err != nil {
 			return authenticationResult{connection: connection, nextSequence: sequence + 2}, err
 		}
-		password, err = decryptPassword(s.rsaKey, response, nonce)
+		password, err = decryptPassword(a.rsaKey, response, nonce)
 		if err != nil {
 			return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
 		}
 	}
 	password = bytes.TrimSuffix(password, []byte{0})
-	if !validPlainPassword(password, s.config.PasswordHash) {
+	if !validPlainPassword(password, a.config.PasswordHash) {
 		return authenticationResult{connection: connection, nextSequence: sequence + 1}, sqlFailure{1045, "28000", "access denied"}
 	}
 	return authenticationResult{connection: connection, username: username, database: database, nextSequence: sequence + 1}, nil
 }
 
-func (s *Server) databaseExists(name string) error {
+func (a authenticator) databaseExists(name string) error {
 	if strings.EqualFold(identifier(name), informationSchemaName) {
 		return nil
 	}
-	if s.config.Catalog == nil {
+	if a.config.Catalog == nil {
 		return nil
 	}
-	if _, ok := s.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]; !ok {
+	if _, ok := a.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]; !ok {
 		return sqlFailure{code: 1049, state: "42000", message: "unknown database '" + name + "'"}
 	}
 	return nil
@@ -675,7 +711,7 @@ var informationSchemaViews = []informationSchemaView{
 	},
 }
 
-func (s *session) writeQueryResult(connection net.Conn, sequence byte, query string) error {
+func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	result, err := s.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
@@ -686,7 +722,7 @@ func (s *session) writeQueryResult(connection net.Conn, sequence byte, query str
 	return writeResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
 }
 
-func (s *session) execute(query string) (*queryResult, error) {
+func (s *queryExecutor) execute(query string) (*queryResult, error) {
 	lower := strings.ToLower(query)
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
@@ -849,7 +885,7 @@ func (s *session) execute(query string) (*queryResult, error) {
 	return nil, sqlFailure{1064, "42000", "unsupported query: " + query}
 }
 
-func (s *session) use(name string) error {
+func (s *queryExecutor) use(name string) error {
 	name = identifier(name)
 	if err := s.databaseExists(name); err != nil {
 		return err
@@ -857,10 +893,12 @@ func (s *session) use(name string) error {
 	s.database = name
 	return nil
 }
-func (s *session) useDatabase(name string)          { _ = s.use(name) }
-func (s *session) databaseExists(name string) error { return s.server.databaseExists(identifier(name)) }
+func (s *queryExecutor) useDatabase(name string) { _ = s.use(name) }
+func (s *queryExecutor) databaseExists(name string) error {
+	return s.server.auth.databaseExists(identifier(name))
+}
 
-func (s *session) metadataDefinition() catalog.Definition {
+func (s *queryExecutor) metadataDefinition() catalog.Definition {
 	if s.transaction {
 		return s.transactionSnapshot
 	}
@@ -870,14 +908,14 @@ func (s *session) metadataDefinition() catalog.Definition {
 	return s.server.config.Catalog.Snapshot()
 }
 
-func (s *session) snapshotNamespace(name string) (catalog.Namespace, bool) {
+func (s *queryExecutor) snapshotNamespace(name string) (catalog.Namespace, bool) {
 	if s.server.config.Catalog == nil {
 		return catalog.Namespace{}, false
 	}
 	ns, ok := s.server.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]
 	return ns, ok
 }
-func (s *session) createDatabase(query string) error {
+func (s *queryExecutor) createDatabase(query string) error {
 	lower := strings.ToLower(query)
 	keyword := "database "
 	if strings.HasPrefix(lower, "create schema ") {
@@ -898,7 +936,7 @@ func (s *session) createDatabase(query string) error {
 	}
 	return nil
 }
-func createTable(s *session, query string) error {
+func createTable(s *queryExecutor, query string) error {
 	open := strings.Index(query, "(")
 	close := strings.LastIndex(query, ")")
 	if open < 0 || close <= open {
@@ -944,7 +982,7 @@ func createTable(s *session, query string) error {
 	return nil
 }
 
-func (s *session) showCreateDatabase(query string) (*queryResult, error) {
+func (s *queryExecutor) showCreateDatabase(query string) (*queryResult, error) {
 	name := strings.TrimSpace(query)
 	if strings.HasPrefix(strings.ToLower(name), "show create database ") {
 		name = strings.TrimSpace(name[len("SHOW CREATE DATABASE "):])
@@ -975,7 +1013,7 @@ func (s *session) showCreateDatabase(query string) (*queryResult, error) {
 	}, nil
 }
 
-func (s *session) showCreateTable(query string) (*queryResult, error) {
+func (s *queryExecutor) showCreateTable(query string) (*queryResult, error) {
 	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
 	namespaceName, tableName := s.database, target
 	parts, valid := splitQualifiedIdentifier(target)
@@ -1037,7 +1075,7 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
-func insert(s *session, query string) error {
+func insert(s *queryExecutor, query string) error {
 	rest := strings.TrimSpace(query[len("INSERT INTO "):])
 	valuesAt := strings.Index(strings.ToLower(rest), "values")
 	if valuesAt < 0 {
@@ -1075,7 +1113,7 @@ func insert(s *session, query string) error {
 	}
 	return nil
 }
-func (s *session) selectQuery(query string) (*queryResult, error) {
+func (s *queryExecutor) selectQuery(query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	lower := strings.ToLower(expression)
 	if from := strings.Index(lower, " from "); from >= 0 {
@@ -1115,7 +1153,7 @@ func (s *session) selectQuery(query string) (*queryResult, error) {
 // tableTarget resolves an unqualified table against the current namespace and
 // a qualified table against its named namespace. Keeping this resolution at
 // the protocol seam makes DDL, writes, and reads agree about namespace scope.
-func (s *session) tableTarget(parts []string) (string, string, error) {
+func (s *queryExecutor) tableTarget(parts []string) (string, string, error) {
 	namespace, table := s.database, ""
 	if len(parts) == 2 {
 		namespace, table = parts[0], parts[1]
@@ -1130,7 +1168,7 @@ func (s *session) tableTarget(parts []string) (string, string, error) {
 	}
 	// parts have already been parsed as SQL identifiers. Re-parsing would turn
 	// a literal dot or backtick in a quoted identifier into syntax.
-	if err := s.server.databaseExists(namespace); err != nil {
+	if err := s.server.auth.databaseExists(namespace); err != nil {
 		return "", "", err
 	}
 	return namespace, table, nil
@@ -1205,7 +1243,7 @@ func parseLiteralResult(expression string) literalQueryResult {
 	return literalQueryResult{}
 }
 
-func (s *session) selectInformationSchema(query string) (*queryResult, error) {
+func (s *queryExecutor) selectInformationSchema(query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	lower := strings.ToLower(expression)
 	from := strings.Index(lower, " from ")
@@ -1372,12 +1410,12 @@ func sortedTables(namespace catalog.Namespace) []catalog.Table {
 	return tables
 }
 
-func (s *session) prepare(connection net.Conn, sequence byte, query string) error {
+func (s *preparedExecutor) prepare(connection net.Conn, sequence byte, query string) error {
 	parameters, withinLimit := countPreparedParameters(query, maxPreparedParameters)
 	if !withinLimit {
 		return writePacket(connection, sequence, errorPacket(1390, "HY000", "prepared statement contains too many placeholders"))
 	}
-	if !s.server.reservePreparedStatement() {
+	if !s.server.connections.reservePreparedStatement() {
 		return writePacket(connection, sequence, errorPacket(1461, "HY000", "can't create more than max_prepared_stmt_count statements"))
 	}
 	id := s.nextStmtID
@@ -1387,27 +1425,27 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	metadata, err := s.preparedColumns(query)
 	if err != nil {
 		delete(s.statements, id)
-		s.server.releasePreparedStatement()
+		s.server.connections.releasePreparedStatement()
 		return writePacket(connection, sequence, mysqlError(err))
 	}
 	response := []byte{0x00, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), byte(len(metadata)), 0, byte(parameters), byte(parameters >> 8), 0, 0, 0}
 	maximum := s.server.config.MaxAllowedPacket
 	if int64(len(response)) > maximum {
 		delete(s.statements, id)
-		s.server.releasePreparedStatement()
+		s.server.connections.releasePreparedStatement()
 		return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
 	}
 	for i := 0; i < parameters; i++ {
 		if int64(len(columnDefinition(columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", i+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar}))) > maximum {
 			delete(s.statements, id)
-			s.server.releasePreparedStatement()
+			s.server.connections.releasePreparedStatement()
 			return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
 		}
 	}
 	for _, definition := range metadata {
 		if int64(len(columnDefinition(definition))) > maximum {
 			delete(s.statements, id)
-			s.server.releasePreparedStatement()
+			s.server.connections.releasePreparedStatement()
 			return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
 		}
 	}
@@ -1441,7 +1479,7 @@ func (s *session) prepare(connection net.Conn, sequence byte, query string) erro
 	return nil
 }
 
-func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
+func (s *preparedExecutor) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
 		return nil, sqlFailure{1064, "42000", "prepared statements support SELECT only"}
@@ -1456,7 +1494,7 @@ func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
 		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
 	}
 	if len(parameters) > 0 {
-		result, err := s.execute(validated)
+		result, err := s.queries.execute(validated)
 		if err != nil {
 			return nil, err
 		}
@@ -1472,7 +1510,7 @@ func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
 	if literal := parseLiteralResult(expression); literal.supported {
 		return []columnMetadata{literal.metadata}, nil
 	}
-	result, err := s.execute(validated)
+	result, err := s.queries.execute(validated)
 	if err != nil {
 		return nil, err
 	}
@@ -1489,7 +1527,7 @@ func (s *session) preparedColumns(query string) ([]columnMetadata, error) {
 	return metadata, nil
 }
 
-func (s *session) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
+func (s *preparedExecutor) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
 	if len(payload) < 5 {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", "malformed prepared statement"))
 	}
@@ -1506,7 +1544,7 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
-	result, err := s.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := s.queries.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
@@ -1516,7 +1554,7 @@ func (s *session) executePrepared(connection net.Conn, sequence byte, payload []
 	return writeBinaryResult(connection, sequence, result.columns, result.rows, result.nulls, result.metadata, s.server.config.MaxAllowedPacket)
 }
 
-func (s *session) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
+func (s *preparedExecutor) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
 	count := statement.parameters
 	if len(payload) < 10 {
 		return nil, errors.New("malformed prepared statement")
@@ -1638,7 +1676,7 @@ func readPreparedValue(payload []byte, offset int, typ preparedParameterType) (s
 	}
 }
 
-func (s *session) sendLongData(payload []byte) error {
+func (s *preparedExecutor) sendLongData(payload []byte) error {
 	if len(payload) < 7 {
 		return sqlFailure{1210, "HY000", "malformed prepared statement long data"}
 	}
@@ -1659,7 +1697,7 @@ func (s *session) sendLongData(payload []byte) error {
 	return nil
 }
 
-func (s *session) resetPrepared(payload []byte) error {
+func (s *preparedExecutor) resetPrepared(payload []byte) error {
 	if len(payload) != 5 {
 		return sqlFailure{1210, "HY000", "malformed prepared statement reset"}
 	}
@@ -1671,8 +1709,8 @@ func (s *session) resetPrepared(payload []byte) error {
 	return nil
 }
 
-func (s *session) resetConnection() error {
-	if err := s.rollbackTransaction(); err != nil {
+func (s *preparedExecutor) resetConnection() error {
+	if err := rollbackTransaction(s.session); err != nil {
 		return err
 	}
 	s.database = s.initialDB
@@ -1682,28 +1720,28 @@ func (s *session) resetConnection() error {
 	return nil
 }
 
-func (s *session) closePrepared(id uint32) {
+func (s *preparedExecutor) closePrepared(id uint32) {
 	if statement, ok := s.statements[id]; ok {
 		s.clearLongData(statement)
 		delete(s.statements, id)
-		s.server.releasePreparedStatement()
+		s.server.connections.releasePreparedStatement()
 	}
 }
 
-func (s *session) closeAllPrepared() {
+func (s *preparedExecutor) closeAllPrepared() {
 	for id := range s.statements {
 		s.closePrepared(id)
 	}
 }
 
-func (s *session) clearLongData(statement *preparedStatement) {
+func (s *preparedExecutor) clearLongData(statement *preparedStatement) {
 	for _, value := range statement.longData {
 		s.longDataBytes -= len(value)
 	}
 	statement.longData = make(map[uint16][]byte)
 }
 
-func (s *session) rollbackTransaction() error {
+func rollbackTransaction(s *session) error {
 	if s.transaction && s.server.config.Catalog != nil {
 		if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
 			return sqlFailure{1105, "HY000", err.Error()}
