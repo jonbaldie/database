@@ -99,6 +99,14 @@ func (s *Store) Snapshot() Definition {
 	return cloneDefinition(s.definition)
 }
 
+// Replace atomically restores a previously captured catalog snapshot.
+func (s *Store) Replace(definition Definition) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.definition = cloneDefinition(definition)
+	return s.persistLocked()
+}
+
 func cloneDefinition(source Definition) Definition {
 	copy := Definition{Namespaces: make(map[string]Namespace, len(source.Namespaces))}
 	for namespace, value := range source.Namespaces {
@@ -128,6 +136,10 @@ func (s *Store) mutate(action func() error) error {
 	if err := action(); err != nil {
 		return err
 	}
+	return s.persistLocked()
+}
+
+func (s *Store) persistLocked() error {
 	b, err := json.MarshalIndent(s.definition, "", "  ")
 	if err != nil {
 		return err

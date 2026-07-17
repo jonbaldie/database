@@ -84,17 +84,25 @@ func (s *Server) Serve() {
 func (s *Server) Close() error { return s.Listener.Close() }
 
 type session struct {
-	server     *Server
-	username   string
-	database   string
-	initialDB  string
-	statements map[uint32]string
-	parameters map[uint32]int
-	nextStmtID uint32
+	server              *Server
+	username            string
+	database            string
+	initialDB           string
+	statements          map[uint32]string
+	parameters          map[uint32]int
+	nextStmtID          uint32
+	transaction         bool
+	transactionSnapshot catalog.Definition
 }
 
 func (s *Server) serveConnection(connection net.Conn) {
 	defer connection.Close()
+	var current *session
+	defer func() {
+		if current != nil && current.transaction && s.config.Catalog != nil {
+			_ = s.config.Catalog.Replace(current.transactionSnapshot)
+		}
+	}()
 	nonce := makeNonce()
 	if err := writePacket(connection, 0, handshake(s.config.Version, nonce)); err != nil {
 		return
@@ -108,6 +116,7 @@ func (s *Server) serveConnection(connection net.Conn) {
 		return
 	}
 	session := &session{server: s, username: username, database: database, initialDB: database, statements: map[uint32]string{}, parameters: map[uint32]int{}, nextStmtID: 1}
+	current = session
 	for {
 		sequence, payload, err := readPacket(connection)
 		if err != nil || len(payload) == 0 {
@@ -307,7 +316,29 @@ func (s *session) execute(query string) (*queryResult, error) {
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
 	}
-	if lower == "begin" || lower == "start transaction" || lower == "commit" || lower == "rollback" || strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset ") {
+	if lower == "begin" || lower == "start transaction" {
+		if s.server.config.Catalog != nil {
+			s.transactionSnapshot = s.server.config.Catalog.Snapshot()
+			s.transaction = true
+		}
+		return nil, nil
+	}
+	if lower == "commit" {
+		s.transaction = false
+		s.transactionSnapshot = catalog.Definition{}
+		return nil, nil
+	}
+	if lower == "rollback" {
+		if s.transaction && s.server.config.Catalog != nil {
+			if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
+				return nil, sqlFailure{1105, "HY000", err.Error()}
+			}
+		}
+		s.transaction = false
+		s.transactionSnapshot = catalog.Definition{}
+		return nil, nil
+	}
+	if strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset ") {
 		return nil, nil
 	}
 	if lower == "select current_date" || lower == "select current_date()" {
