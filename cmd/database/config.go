@@ -251,9 +251,12 @@ func readConfigurationFile(path string) (map[string]string, error) {
 			return nil, invalidConfiguration("duplicate config setting " + key)
 		}
 		seen[key] = true
-		value, err := tomlValue(strings.TrimSpace(raw))
+		value, stringValue, err := tomlValue(strings.TrimSpace(raw))
 		if err != nil {
 			return nil, invalidConfiguration(fmt.Sprintf("config line %d: %s", lineNumber, err))
+		}
+		if numericConfigurationSetting(key) && stringValue {
+			return nil, invalidConfiguration(fmt.Sprintf("config line %d: %s must be a bare decimal integer", lineNumber, key))
 		}
 		if value == "" {
 			return nil, invalidConfiguration("config setting " + key + " has an empty value")
@@ -294,21 +297,78 @@ func stripTOMLComment(line string) string {
 	return line
 }
 
-func tomlValue(raw string) (string, error) {
+func tomlValue(raw string) (string, bool, error) {
 	if len(raw) >= 2 && ((raw[0] == '"' && raw[len(raw)-1] == '"') || (raw[0] == '\'' && raw[len(raw)-1] == '\'')) {
 		if raw[0] == '\'' {
-			return raw[1 : len(raw)-1], nil
+			if strings.Contains(raw[1:len(raw)-1], "'") {
+				return "", false, errors.New("invalid TOML literal string")
+			}
+			return raw[1 : len(raw)-1], true, nil
+		}
+		if err := validateTOMLBasicString(raw); err != nil {
+			return "", false, err
 		}
 		value, err := strconv.Unquote(raw)
 		if err != nil {
-			return "", errors.New("invalid quoted value")
+			return "", false, errors.New("invalid quoted value")
 		}
-		return value, nil
+		return value, true, nil
 	}
-	if raw == "" || strings.Trim(raw, "0123456789") != "" {
-		return "", errors.New("invalid TOML value")
+	if raw == "" || strings.Trim(raw, "0123456789") != "" || (len(raw) > 1 && raw[0] == '0') {
+		return "", false, errors.New("invalid TOML value")
 	}
-	return raw, nil
+	return raw, false, nil
+}
+
+func numericConfigurationSetting(name string) bool {
+	switch name {
+	case "statement_timeout_ms", "lock_wait_timeout_ms", "idle_in_transaction_timeout_ms", "idle_session_timeout_ms",
+		"execution_memory_limit_bytes", "aggregate_execution_memory_limit_bytes", "temporary_storage_limit_bytes",
+		"aggregate_temporary_storage_limit_bytes", "max_connections", "max_allowed_packet", "max_prepared_stmt_count":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateTOMLBasicString(raw string) error {
+	for index := 1; index < len(raw)-1; index++ {
+		if raw[index] != '\\' {
+			continue
+		}
+		index++
+		if index >= len(raw)-1 {
+			return errors.New("invalid TOML basic string escape")
+		}
+		switch raw[index] {
+		case '"', '\\', 'b', 't', 'n', 'f', 'r':
+		case 'u':
+			if !tomlHexEscape(raw, index+1, 4) {
+				return errors.New("invalid TOML basic string escape")
+			}
+			index += 4
+		case 'U':
+			if !tomlHexEscape(raw, index+1, 8) {
+				return errors.New("invalid TOML basic string escape")
+			}
+			index += 8
+		default:
+			return errors.New("invalid TOML basic string escape")
+		}
+	}
+	return nil
+}
+
+func tomlHexEscape(raw string, start, length int) bool {
+	if start+length > len(raw)-1 {
+		return false
+	}
+	for _, character := range raw[start : start+length] {
+		if !('0' <= character && character <= '9') && !('a' <= character && character <= 'f') && !('A' <= character && character <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func makeConfiguration(values map[string]configurationValue) (configuration, error) {
