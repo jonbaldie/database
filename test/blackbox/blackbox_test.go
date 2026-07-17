@@ -445,6 +445,115 @@ func TestMySQLNamespacesAndBasicTablesSurviveRestartAndSupportQualifiedAccess(t 
 	}
 }
 
+func TestMySQLCRUDStatementsAreAtomicAndPreparedExecutionMatchesText(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("crud-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, address, "admin", "crud-secret")
+	defer client.close()
+
+	for _, query := range []string{
+		"CREATE DATABASE app",
+		"USE app",
+		"CREATE TABLE users (id INT, name VARCHAR(32))",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+	inserted := client.query("INSERT INTO users (id, name) VALUES (1, 'Ada'), (2, 'Grace')")
+	if inserted.err != "" || inserted.affected != 2 {
+		t.Fatalf("multi-row insert: %#v", inserted)
+	}
+	selected := client.query("SELECT id, name FROM users WHERE id = 2")
+	if selected.err != "" || strings.Join(selected.columns, ",") != "id,name" || len(selected.metadata) != 2 || selected.metadata[0].typ != 0x03 || selected.metadata[1].typ != 0xfd || selected.metadata[0].schema != "app" || selected.metadata[0].table != "users" || len(selected.rows) != 1 || strings.Join(selected.rows[0], ",") != "2,Grace" {
+		t.Fatalf("projected lookup metadata and row: %#v", selected)
+	}
+	preparedLookup := client.prepare("SELECT id FROM users WHERE id = ?")
+	if preparedLookup.err != "" || len(preparedLookup.metadata) != 1 || preparedLookup.metadata[0].typ != 0x03 || preparedLookup.metadata[0].schema != "app" || preparedLookup.metadata[0].table != "users" {
+		t.Fatalf("prepared lookup metadata: %#v", preparedLookup)
+	}
+	if result := client.executePreparedValues(preparedLookup.id, []preparedParameter{{typ: 0x08, value: []byte{2, 0, 0, 0, 0, 0, 0, 0}}}); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "2" {
+		t.Fatalf("prepared lookup: %#v", result)
+	}
+	client.closePrepared(preparedLookup.id)
+	updated := client.query("UPDATE users SET name = 'Grace Hopper' WHERE id = 2")
+	if updated.err != "" || updated.affected != 1 {
+		t.Fatalf("text update: %#v", updated)
+	}
+	if unchanged := client.query("UPDATE users SET name = 'Grace Hopper' WHERE id = 2"); unchanged.err != "" || unchanged.affected != 0 {
+		t.Fatalf("unchanged update affected rows: %#v", unchanged)
+	}
+	if failed := client.query("UPDATE users SET name = 'Broken', missing = 'value' WHERE id = 1"); failed.err == "" {
+		t.Fatalf("invalid update succeeded: %#v", failed)
+	}
+	if rows := client.query("SELECT * FROM users WHERE id = 1"); rows.err != "" || len(rows.rows) != 1 || strings.Join(rows.rows[0], ",") != "1,Ada" {
+		t.Fatalf("failed update leaked a partial row change: %#v", rows)
+	}
+	if failed := client.query("INSERT INTO users VALUES (3, 'Linus'), (4)"); failed.err == "" {
+		t.Fatalf("invalid multi-row insert succeeded: %#v", failed)
+	}
+	if failed := client.query("INSERT INTO users VALUES (3, 'Linus'),"); failed.err == "" {
+		t.Fatalf("trailing-comma insert succeeded: %#v", failed)
+	}
+	if rows := client.query("SELECT * FROM users"); rows.err != "" || len(rows.rows) != 2 {
+		t.Fatalf("failed insert leaked rows: %#v", rows)
+	}
+
+	statement := client.prepare("INSERT INTO users (id, name) VALUES (?, ?)")
+	if statement.err != "" {
+		t.Fatalf("prepare DML: %#v", statement)
+	}
+	preparedInsert := client.executePreparedValues(statement.id, []preparedParameter{
+		{typ: 0x08, value: []byte{3, 0, 0, 0, 0, 0, 0, 0}},
+		{typ: 0xfd, value: []byte("Linus")},
+	})
+	if preparedInsert.err != "" || preparedInsert.affected != 1 {
+		t.Fatalf("prepared insert: %#v", preparedInsert)
+	}
+	client.closePrepared(statement.id)
+
+	statement = client.prepare("UPDATE users SET name = ? WHERE id = ?")
+	if statement.err != "" {
+		t.Fatalf("prepare update: %#v", statement)
+	}
+	preparedUpdate := client.executePreparedValues(statement.id, []preparedParameter{
+		{typ: 0xfd, value: []byte("Ada Lovelace")},
+		{typ: 0x08, value: []byte{1, 0, 0, 0, 0, 0, 0, 0}},
+	})
+	if preparedUpdate.err != "" || preparedUpdate.affected != 1 {
+		t.Fatalf("prepared update: %#v", preparedUpdate)
+	}
+	client.closePrepared(statement.id)
+
+	deleted := client.query("DELETE FROM users WHERE id = 2")
+	if deleted.err != "" || deleted.affected != 1 {
+		t.Fatalf("delete: %#v", deleted)
+	}
+	statement = client.prepare("DELETE FROM users WHERE id = ?")
+	if statement.err != "" {
+		t.Fatalf("prepare delete: %#v", statement)
+	}
+	preparedDelete := client.executePreparedValues(statement.id, []preparedParameter{
+		{typ: 0x08, value: []byte{3, 0, 0, 0, 0, 0, 0, 0}},
+	})
+	if preparedDelete.err != "" || preparedDelete.affected != 1 {
+		t.Fatalf("prepared delete: %#v", preparedDelete)
+	}
+	client.closePrepared(statement.id)
+	if rows := client.query("SELECT * FROM users"); rows.err != "" || len(rows.rows) != 1 || strings.Join(rows.rows[0], ",") != "1,Ada Lovelace" {
+		t.Fatalf("CRUD final rows: %#v", rows)
+	}
+}
+
 func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
@@ -952,12 +1061,14 @@ type wireResult struct {
 	columns  []string
 	rows     [][]string
 	metadata []wireColumn
+	affected uint64
 	err      string
 }
 
 type preparedStatement struct {
-	id  uint32
-	err string
+	id       uint32
+	metadata []wireColumn
+	err      string
 }
 
 type preparedParameter struct {
@@ -1185,10 +1296,15 @@ func (c *wireClient) prepare(query string) preparedStatement {
 	}
 	parameters := int(binary.LittleEndian.Uint16(payload[7:9]))
 	columns := int(binary.LittleEndian.Uint16(payload[5:7]))
-	for _, count := range []int{parameters, columns} {
+	metadata := make([]wireColumn, 0, columns)
+	for index, count := range []int{parameters, columns} {
 		for range count {
-			if _, ok := parseColumnDefinition(readWirePacket(c.t, c.conn)); !ok {
+			column, ok := parseColumnDefinition(readWirePacket(c.t, c.conn))
+			if !ok {
 				return preparedStatement{err: "malformed prepared metadata"}
+			}
+			if index == 1 {
+				metadata = append(metadata, column)
 			}
 		}
 		if count > 0 {
@@ -1197,7 +1313,7 @@ func (c *wireClient) prepare(query string) preparedStatement {
 			}
 		}
 	}
-	return preparedStatement{id: binary.LittleEndian.Uint32(payload[1:5])}
+	return preparedStatement{id: binary.LittleEndian.Uint32(payload[1:5]), metadata: metadata}
 }
 
 func (c *wireClient) executePrepared(id uint32) wireResult {
@@ -1341,6 +1457,12 @@ func (c *wireClient) readPreparedResult() wireResult {
 				continue
 			}
 			switch column.typ {
+			case 0x03:
+				if offset+4 > len(row) {
+					return wireResult{err: "truncated integer binary row"}
+				}
+				values[index] = strconv.FormatInt(int64(int32(binary.LittleEndian.Uint32(row[offset:offset+4]))), 10)
+				offset += 4
 			case 0x08:
 				if offset+8 > len(row) {
 					return wireResult{err: "truncated integer binary row"}
@@ -1378,7 +1500,11 @@ func (c *wireClient) readResultHeader() (wireResult, bool) {
 		return wireResult{err: string(payload[4:])}, true
 	}
 	if payload[0] == 0x00 {
-		return wireResult{}, true
+		affected, _, ok := readLengthInt(payload, 1)
+		if !ok {
+			return wireResult{err: fmt.Sprintf("malformed OK packet %x", payload)}, true
+		}
+		return wireResult{affected: uint64(affected)}, true
 	}
 	columnCount, _, ok := readLengthInt(payload, 0)
 	if !ok {
