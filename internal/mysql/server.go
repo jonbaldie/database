@@ -151,6 +151,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if lower == "select current_time" || lower == "select current_time()" {
 		return writeScalarResult(connection, sequence, "00:00:00")
 	}
+	if lower == "select version()" || lower == "select @@version" {
+		return writeScalarResult(connection, sequence, "0.1.0-dev")
+	}
 	if strings.HasPrefix(lower, "explain ") {
 		if strings.HasPrefix(lower, "explain analyze ") {
 			return writeScalarResult(connection, sequence, `{"schema":"database.explanation/v1","operator":"scan","runtime":{"rows":1,"time_ms":0}}`)

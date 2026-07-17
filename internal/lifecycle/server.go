@@ -185,7 +185,11 @@ func releaseState(path string) error {
 
 func diagnosticsHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/live", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "live"})
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
