@@ -10,13 +10,15 @@ import (
 // conversation owns one accepted connection from greeting through cleanup.
 // Command behaviour remains in the established query and prepared collaborators.
 type conversation struct {
-	server     *Server
-	accepted   net.Conn
-	connection net.Conn
-	session    *session
-	queries    *queryExecutor
-	prepared   *preparedExecutor
-	admitted   bool
+	server            *Server
+	accepted          net.Conn
+	connection        net.Conn
+	session           *session
+	queries           *queryExecutor
+	preparation       *preparedPreparation
+	execution         *preparedExecution
+	preparedLifecycle *preparedLifecycle
+	admitted          bool
 }
 
 const (
@@ -49,8 +51,8 @@ func (c *conversation) close() {
 	if c.session != nil && c.session.transaction && c.server.config.Catalog != nil {
 		_ = c.server.config.Catalog.Replace(c.session.transactionSnapshot)
 	}
-	if c.prepared != nil {
-		c.prepared.closeAllPrepared()
+	if c.preparedLifecycle != nil {
+		c.preparedLifecycle.closeAllPrepared()
 	}
 	_ = c.accepted.Close()
 	c.server.connections.unregister(c.accepted, c.admitted)
@@ -77,7 +79,9 @@ func (c *conversation) authenticate() bool {
 	}
 	c.session = newSession(c.server, authentication)
 	c.queries = newQueryExecutor(c.session)
-	c.prepared = &preparedExecutor{c.session}
+	c.preparation = &preparedPreparation{c.session}
+	c.execution = &preparedExecution{c.session}
+	c.preparedLifecycle = &preparedLifecycle{c.session}
 	return true
 }
 
@@ -134,12 +138,12 @@ func (c *conversation) query(sequence byte, payload []byte) bool {
 func (c *conversation) ping(sequence byte, _ []byte) bool { return c.write(sequence, okPacket()) }
 
 func (c *conversation) prepare(sequence byte, payload []byte) bool {
-	return c.prepared.prepare(c.connection, sequence, string(payload[1:])) == nil
+	return c.preparation.prepare(c.connection, sequence, string(payload[1:])) == nil
 }
 
 func (c *conversation) executePrepared(sequence byte, payload []byte) bool {
 	return c.runStatement(func() error {
-		return c.prepared.executePrepared(c.connection, sequence, payload)
+		return c.execution.executePrepared(c.connection, sequence, payload)
 	})
 }
 
@@ -156,19 +160,19 @@ func (c *conversation) closePrepared(sequence byte, payload []byte) bool {
 	if len(payload) != 5 {
 		return c.write(sequence, errorPacket(1210, "HY000", "malformed prepared statement close"))
 	}
-	c.prepared.closePrepared(binary.LittleEndian.Uint32(payload[1:5]))
+	c.preparedLifecycle.closePrepared(binary.LittleEndian.Uint32(payload[1:5]))
 	return true
 }
 
 func (c *conversation) sendLongData(sequence byte, payload []byte) bool {
-	if err := c.prepared.sendLongData(payload); err != nil {
+	if err := c.preparedLifecycle.sendLongData(payload); err != nil {
 		return c.write(sequence, mysqlError(err))
 	}
 	return true
 }
 
 func (c *conversation) resetPrepared(sequence byte, payload []byte) bool {
-	if err := c.prepared.resetPrepared(payload); err != nil {
+	if err := c.preparedLifecycle.resetPrepared(payload); err != nil {
 		return c.write(sequence, mysqlError(err))
 	}
 	return c.write(sequence, okPacket())
@@ -178,7 +182,7 @@ func (c *conversation) resetConnection(sequence byte, payload []byte) bool {
 	if len(payload) != 1 {
 		return c.write(sequence, errorPacket(1210, "HY000", "malformed connection reset"))
 	}
-	if err := c.prepared.resetConnection(); err != nil {
+	if err := c.preparedLifecycle.resetConnection(); err != nil {
 		return c.write(sequence, mysqlError(err))
 	}
 	return c.write(sequence, okPacket())
