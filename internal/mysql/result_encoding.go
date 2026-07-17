@@ -200,6 +200,19 @@ func lengthEncodedInt(value int) []byte {
 	return []byte{0xfe, byte(value), byte(value >> 8), byte(value >> 16), byte(value >> 24), byte(value >> 32), byte(value >> 40), byte(value >> 48), byte(value >> 56)}
 }
 
+func lengthEncodedUint(value uint64) []byte {
+	if value < 251 {
+		return []byte{byte(value)}
+	}
+	if value <= 0xffff {
+		return []byte{0xfc, byte(value), byte(value >> 8)}
+	}
+	if value <= 0xffffff {
+		return []byte{0xfd, byte(value), byte(value >> 8), byte(value >> 16)}
+	}
+	return []byte{0xfe, byte(value), byte(value >> 8), byte(value >> 16), byte(value >> 24), byte(value >> 32), byte(value >> 40), byte(value >> 48), byte(value >> 56)}
+}
+
 func lengthEncodedString(value string) []byte {
 	return append(lengthEncodedInt(len(value)), []byte(value)...)
 }

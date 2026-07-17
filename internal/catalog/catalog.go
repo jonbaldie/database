@@ -84,12 +84,12 @@ func validateDefinition(definition Definition) error {
 }
 
 func (s *Store) CreateNamespace(name string) error {
-	return s.mutate(func() error {
+	return s.mutate(func(definition *Definition) error {
 		key := strings.ToLower(name)
-		if _, ok := s.definition.Namespaces[key]; ok {
+		if _, ok := definition.Namespaces[key]; ok {
 			return errors.New("namespace already exists")
 		}
-		s.definition.Namespaces[key] = Namespace{Name: name, Tables: map[string]Table{}}
+		definition.Namespaces[key] = Namespace{Name: name, Tables: map[string]Table{}}
 		return nil
 	})
 }
@@ -101,9 +101,9 @@ func (s *Store) CreateTable(namespace, name string, columns []string) error {
 // public schema definition. A nil type list preserves compatibility with the
 // original catalog format, whose columns were names only.
 func (s *Store) CreateTableWithTypes(namespace, name string, columns, columnTypes []string) error {
-	return s.mutate(func() error {
+	return s.mutate(func(definition *Definition) error {
 		key := strings.ToLower(namespace)
-		ns, ok := s.definition.Namespaces[key]
+		ns, ok := definition.Namespaces[key]
 		if !ok {
 			return errors.New("namespace does not exist")
 		}
@@ -111,36 +111,63 @@ func (s *Store) CreateTableWithTypes(namespace, name string, columns, columnType
 		if _, ok := ns.Tables[table]; ok {
 			return errors.New("table already exists")
 		}
-		definition := Table{Name: name, Columns: append([]string(nil), columns...)}
+		tableDefinition := Table{Name: name, Columns: append([]string(nil), columns...)}
 		if len(columnTypes) > 0 {
 			if len(columnTypes) != len(columns) {
 				return errors.New("column type count does not match column count")
 			}
-			definition.ColumnTypes = append([]string(nil), columnTypes...)
+			tableDefinition.ColumnTypes = append([]string(nil), columnTypes...)
 		}
-		ns.Tables[table] = definition
-		s.definition.Namespaces[key] = ns
+		ns.Tables[table] = tableDefinition
+		definition.Namespaces[key] = ns
 		return nil
 	})
 }
 
 func (s *Store) Insert(namespace, table string, row []string) error {
-	return s.mutate(func() error {
-		ns, ok := s.definition.Namespaces[strings.ToLower(namespace)]
+	return s.mutate(func(definition *Definition) error {
+		ns, ok := definition.Namespaces[strings.ToLower(namespace)]
 		if !ok {
 			return errors.New("namespace does not exist")
 		}
 		key := strings.ToLower(table)
-		definition, ok := ns.Tables[key]
+		tableDefinition, ok := ns.Tables[key]
 		if !ok {
 			return errors.New("table does not exist")
 		}
-		if len(row) != len(definition.Columns) {
+		if len(row) != len(tableDefinition.Columns) {
 			return errors.New("column count does not match value count")
 		}
-		definition.Rows = append(definition.Rows, append([]string(nil), row...))
-		ns.Tables[key] = definition
-		s.definition.Namespaces[strings.ToLower(namespace)] = ns
+		tableDefinition.Rows = append(tableDefinition.Rows, append([]string(nil), row...))
+		ns.Tables[key] = tableDefinition
+		definition.Namespaces[strings.ToLower(namespace)] = ns
+		return nil
+	})
+}
+
+// ReplaceRows commits a complete, validated table-row image as one durable
+// catalog mutation. Callers construct that image before this operation, so a
+// malformed statement never exposes a partially changed table.
+func (s *Store) ReplaceRows(namespace, table string, rows [][]string) error {
+	return s.mutate(func(definition *Definition) error {
+		key := strings.ToLower(namespace)
+		ns, ok := definition.Namespaces[key]
+		if !ok {
+			return errors.New("namespace does not exist")
+		}
+		tableKey := strings.ToLower(table)
+		current, ok := ns.Tables[tableKey]
+		if !ok {
+			return errors.New("table does not exist")
+		}
+		for index, row := range rows {
+			if len(row) != len(current.Columns) {
+				return fmt.Errorf("row %d column count does not match table", index)
+			}
+		}
+		current.Rows = cloneRows(rows)
+		ns.Tables[tableKey] = current
+		definition.Namespaces[key] = ns
 		return nil
 	})
 }
@@ -155,8 +182,15 @@ func (s *Store) Snapshot() Definition {
 func (s *Store) Replace(definition Definition) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.definition = cloneDefinition(definition)
-	return s.persistLocked()
+	staged := cloneDefinition(definition)
+	if err := validateDefinition(staged); err != nil {
+		return fmt.Errorf("invalid catalog: %w", err)
+	}
+	if err := s.persistLocked(staged); err != nil {
+		return err
+	}
+	s.definition = staged
+	return nil
 }
 
 func cloneDefinition(source Definition) Definition {
@@ -184,30 +218,81 @@ func cloneRows(rows [][]string) [][]string {
 	return copy
 }
 
-func (s *Store) mutate(action func() error) error {
+func (s *Store) mutate(action func(*Definition) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := action(); err != nil {
+	staged := cloneDefinition(s.definition)
+	if err := action(&staged); err != nil {
 		return err
 	}
-	return s.persistLocked()
+	if err := validateDefinition(staged); err != nil {
+		return fmt.Errorf("invalid catalog: %w", err)
+	}
+	if err := s.persistLocked(staged); err != nil {
+		return err
+	}
+	s.definition = staged
+	return nil
 }
 
-func (s *Store) persistLocked() error {
-	b, err := json.MarshalIndent(s.definition, "", "  ")
+func (s *Store) persistLocked(definition Definition) error {
+	b, err := catalogJSON(definition)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	file, err := os.OpenFile(s.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	temporary, err := writeCatalogTemp(filepath.Dir(s.path), b)
 	if err != nil {
 		return err
 	}
-	if _, err = file.Write(b); err == nil {
-		err = file.Sync()
+	defer os.Remove(temporary)
+	if err := os.Rename(temporary, s.path); err != nil {
+		return err
 	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
+	return syncCatalogDirectory(s.path)
+}
+
+func catalogJSON(definition Definition) ([]byte, error) {
+	b, err := json.MarshalIndent(definition, "", "  ")
+	if err != nil {
+		return nil, err
 	}
-	return err
+	return append(b, '\n'), nil
+}
+
+func writeCatalogTemp(directory string, content []byte) (string, error) {
+	file, err := os.CreateTemp(directory, ".catalog-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	temporary := file.Name()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	if err := writeCatalogFile(file, content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(temporary)
+		return "", err
+	}
+	return temporary, nil
+}
+
+func writeCatalogFile(file *os.File, content []byte) error {
+	if _, err := file.Write(content); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	return file.Close()
+}
+
+func syncCatalogDirectory(path string) error {
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }

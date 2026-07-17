@@ -488,6 +488,7 @@ type queryResult struct {
 	columns  []string
 	rows     [][]string
 	metadata []columnMetadata
+	affected uint64
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
@@ -553,6 +554,9 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 	}
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
+	}
+	if len(result.columns) == 0 {
+		return writePacket(connection, sequence, okPacket(result.affected))
 	}
 	return writeResult(connection, sequence, result, s.statements.server.config.MaxAllowedPacket)
 }
@@ -780,11 +784,18 @@ func (s *textStatementExecutor) relationStatement(query, lower string) (*queryRe
 	relations := relationExecutor{s.session}
 	switch {
 	case strings.HasPrefix(lower, "create table "):
-		return nil, true, relations.createTable(query)
+		return nil, true, createTable(&relations, query)
 	case strings.HasPrefix(lower, "insert into "):
-		return nil, true, relations.insert(query)
+		affected, err := insertRows(&relations, query)
+		return &queryResult{affected: affected}, true, err
+	case strings.HasPrefix(lower, "update "):
+		affected, err := updateRows(&relations, query)
+		return &queryResult{affected: affected}, true, err
+	case strings.HasPrefix(lower, "delete from "):
+		affected, err := deleteRows(&relations, query)
+		return &queryResult{affected: affected}, true, err
 	case strings.HasPrefix(lower, "select "):
-		result, err := relations.selectQuery(query)
+		result, err := selectQuery(&relations, query)
 		return result, true, err
 	default:
 		return nil, false, nil
@@ -819,7 +830,7 @@ func (s *catalogExecutor) metadataDefinition() catalog.Definition {
 	return s.server.config.Catalog.Snapshot()
 }
 
-func (s *relationExecutor) snapshotNamespace(name string) (catalog.Namespace, bool) {
+func snapshotNamespace(s *relationExecutor, name string) (catalog.Namespace, bool) {
 	if s.server.config.Catalog == nil {
 		return catalog.Namespace{}, false
 	}
@@ -847,12 +858,12 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	}
 	return nil
 }
-func (s *relationExecutor) createTable(query string) error {
+func createTable(s *relationExecutor, query string) error {
 	table, err := parseCreateTable(query)
 	if err != nil {
 		return err
 	}
-	namespace, name, err := s.tableTarget(table.target)
+	namespace, name, err := tableTarget(s, table.target)
 	if err != nil {
 		return err
 	}
@@ -1032,68 +1043,478 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
-func (s *relationExecutor) insert(query string) error {
-	target, row, err := parseInsert(query)
+func insertRows(s *relationExecutor, query string) (uint64, error) {
+	plan, err := makeInsertPlan(s, query)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	namespace, name, err := s.tableTarget(target)
+	rows, affected, err := applyInsertPlan(plan)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if s.server.config.Catalog == nil {
-		return sqlFailure{1105, "HY000", "database is not initialized"}
+		return 0, sqlFailure{1105, "HY000", "database is not initialized"}
 	}
-	if err := s.server.config.Catalog.Insert(namespace, name, row); err != nil {
-		return sqlFailure{1136, "21S01", err.Error()}
+	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
+		return 0, sqlFailure{1105, "HY000", err.Error()}
 	}
-	return nil
+	return affected, nil
 }
 
-func parseInsert(query string) ([]string, []string, error) {
-	target, values, err := insertParts(query)
+type insertPlan struct {
+	namespace, name string
+	table           catalog.Table
+	columns         []int
+	groups          [][]string
+}
+
+func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
+	parts, columns, groups, err := parseInsertInput(query)
 	if err != nil {
-		return nil, nil, err
+		return insertPlan{}, err
 	}
+	namespace, name, err := tableTarget(s, parts)
+	if err != nil {
+		return insertPlan{}, err
+	}
+	table, err := relationTable(s, namespace, name)
+	if err != nil {
+		return insertPlan{}, err
+	}
+	indexes, err := insertColumnIndexes(table, columns)
+	if err != nil {
+		return insertPlan{}, err
+	}
+	return insertPlan{namespace: namespace, name: name, table: table, columns: indexes, groups: groups}, nil
+}
+
+func parseInsertInput(query string) ([]string, []string, [][]string, error) {
+	head, valueText, ok := splitInsert(query)
+	if !ok {
+		return nil, nil, nil, sqlFailure{1064, "42000", "malformed INSERT"}
+	}
+	parts, columns, ok := insertTarget(head)
+	if !ok || len(parts) == 0 || len(parts) > 2 {
+		return nil, nil, nil, sqlFailure{1064, "42000", "malformed INSERT"}
+	}
+	groups, ok := valueGroups(valueText)
+	if !ok || len(groups) == 0 {
+		return nil, nil, nil, sqlFailure{1064, "42000", "malformed INSERT"}
+	}
+	return parts, columns, groups, nil
+}
+
+func insertColumnIndexes(table catalog.Table, columns []string) ([]int, error) {
+	if len(columns) == 0 {
+		columns = table.Columns
+	}
+	indexes, err := tableColumnIndexes(table)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]int, len(columns))
+	seen := make(map[int]bool, len(columns))
+	for index, column := range columns {
+		columnIndex, found := indexes[strings.ToLower(column)]
+		if !found || seen[columnIndex] {
+			return nil, sqlFailure{1054, "42S22", "unknown or duplicate column '" + column + "'"}
+		}
+		seen[columnIndex], result[index] = true, columnIndex
+	}
+	return result, nil
+}
+
+func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
+	rows := cloneRows(plan.table.Rows)
+	for _, group := range plan.groups {
+		if len(group) != len(plan.columns) {
+			return nil, 0, sqlFailure{1136, "21S01", "column count does not match value count"}
+		}
+		row := make([]string, len(plan.table.Columns))
+		for valueIndex, value := range group {
+			row[plan.columns[valueIndex]] = scalar(value)
+		}
+		rows = append(rows, row)
+	}
+	return rows, uint64(len(plan.groups)), nil
+}
+
+func updateRows(s *relationExecutor, query string) (uint64, error) {
+	plan, err := makeUpdatePlan(s, query)
+	if err != nil {
+		return 0, err
+	}
+	rows, affected := applyUpdatePlan(plan)
+	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
+		return 0, sqlFailure{1105, "HY000", err.Error()}
+	}
+	return affected, nil
+}
+
+type updatePlan struct {
+	namespace, name string
+	table           catalog.Table
+	updates         map[int]string
+	matcher         func([]string) bool
+}
+
+func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
+	target, assignments, where, err := parseUpdateInput(query)
+	if err != nil {
+		return updatePlan{}, err
+	}
+	namespace, name, table, err := planTable(s, target)
+	if err != nil {
+		return updatePlan{}, err
+	}
+	indexes, err := tableColumnIndexes(table)
+	if err != nil {
+		return updatePlan{}, err
+	}
+	updates, err := assignmentValues(assignments, indexes)
+	if err != nil {
+		return updatePlan{}, err
+	}
+	matcher, err := rowMatcher(where, indexes)
+	if err != nil {
+		return updatePlan{}, err
+	}
+	return updatePlan{namespace: namespace, name: name, table: table, updates: updates, matcher: matcher}, nil
+}
+
+func parseUpdateInput(query string) (string, string, string, error) {
+	rest := strings.TrimSpace(query[len("UPDATE "):])
+	setAt := keywordAt(rest, "set")
+	if setAt < 0 {
+		return "", "", "", sqlFailure{1064, "42000", "malformed UPDATE"}
+	}
+	assignments, where, ok := splitWhere(strings.TrimSpace(rest[setAt+len("set"):]))
+	if !ok || assignments == "" {
+		return "", "", "", sqlFailure{1064, "42000", "malformed UPDATE"}
+	}
+	return strings.TrimSpace(rest[:setAt]), assignments, where, nil
+}
+
+func planTable(s *relationExecutor, target string) (string, string, catalog.Table, error) {
 	parts, valid := splitQualifiedIdentifier(target)
 	if !valid || len(parts) == 0 || len(parts) > 2 {
-		return nil, nil, sqlFailure{1064, "42000", "malformed INSERT"}
+		return "", "", catalog.Table{}, sqlFailure{1064, "42000", "invalid table name"}
 	}
-	row, err := insertValues(values)
-	return parts, row, err
+	namespace, name, err := tableTarget(s, parts)
+	if err != nil {
+		return "", "", catalog.Table{}, err
+	}
+	table, err := relationTable(s, namespace, name)
+	return namespace, name, table, err
 }
 
-func insertParts(query string) (string, string, error) {
+func assignmentValues(value string, indexes map[string]int) (map[int]string, error) {
+	updates := make(map[int]string)
+	seen := make(map[int]bool)
+	for _, assignment := range splitCSV(value) {
+		column, rawValue, ok := splitEquals(assignment)
+		if !ok {
+			return nil, sqlFailure{1064, "42000", "malformed UPDATE assignment"}
+		}
+		column, ok = singleIdentifier(column)
+		if !ok {
+			return nil, sqlFailure{1064, "42000", "invalid UPDATE column"}
+		}
+		index, found := indexes[strings.ToLower(column)]
+		if !found || seen[index] {
+			return nil, sqlFailure{1054, "42S22", "unknown or duplicate column '" + column + "'"}
+		}
+		seen[index], updates[index] = true, scalar(rawValue)
+	}
+	return updates, nil
+}
+
+func applyUpdatePlan(plan updatePlan) ([][]string, uint64) {
+	rows, affected := cloneRows(plan.table.Rows), uint64(0)
+	for rowIndex, row := range rows {
+		if !plan.matcher(row) {
+			continue
+		}
+		changed := false
+		for column, value := range plan.updates {
+			if rows[rowIndex][column] != value {
+				changed = true
+			}
+			rows[rowIndex][column] = value
+		}
+		if changed {
+			affected++
+		}
+	}
+	return rows, affected
+}
+
+func deleteRows(s *relationExecutor, query string) (uint64, error) {
+	plan, err := makeDeletePlan(s, query)
+	if err != nil {
+		return 0, err
+	}
+	rows, affected := applyDeletePlan(plan)
+	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
+		return 0, sqlFailure{1105, "HY000", err.Error()}
+	}
+	return affected, nil
+}
+
+type deletePlan struct {
+	namespace, name string
+	table           catalog.Table
+	matcher         func([]string) bool
+}
+
+func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
+	target, where, err := parseDeleteInput(query)
+	if err != nil {
+		return deletePlan{}, err
+	}
+	namespace, name, table, err := planTable(s, target)
+	if err != nil {
+		return deletePlan{}, err
+	}
+	indexes, err := tableColumnIndexes(table)
+	if err != nil {
+		return deletePlan{}, err
+	}
+	matcher, err := rowMatcher(where, indexes)
+	if err != nil {
+		return deletePlan{}, err
+	}
+	return deletePlan{namespace: namespace, name: name, table: table, matcher: matcher}, nil
+}
+
+func parseDeleteInput(query string) (string, string, error) {
+	rest := strings.TrimSpace(query[len("DELETE FROM "):])
+	target, where, ok := splitWhere(rest)
+	if !ok || target == "" {
+		return "", "", sqlFailure{1064, "42000", "malformed DELETE"}
+	}
+	return target, where, nil
+}
+
+func applyDeletePlan(plan deletePlan) ([][]string, uint64) {
+	rows, affected := make([][]string, 0, len(plan.table.Rows)), uint64(0)
+	for _, row := range plan.table.Rows {
+		if plan.matcher(row) {
+			affected++
+			continue
+		}
+		rows = append(rows, append([]string(nil), row...))
+	}
+	return rows, affected
+}
+
+func relationTable(s *relationExecutor, namespace, name string) (catalog.Table, error) {
+	ns, found := snapshotNamespace(s, namespace)
+	if !found {
+		return catalog.Table{}, sqlFailure{1049, "42000", "unknown database '" + namespace + "'"}
+	}
+	table, found := ns.Tables[strings.ToLower(name)]
+	if !found {
+		return catalog.Table{}, sqlFailure{1146, "42S02", "table does not exist"}
+	}
+	return table, nil
+}
+
+func tableColumnIndexes(table catalog.Table) (map[string]int, error) {
+	indexes := make(map[string]int, len(table.Columns))
+	for index, column := range table.Columns {
+		key := strings.ToLower(column)
+		if _, duplicate := indexes[key]; duplicate {
+			return nil, sqlFailure{1105, "HY000", "catalog contains duplicate column '" + column + "'"}
+		}
+		indexes[key] = index
+	}
+	return indexes, nil
+}
+
+func cloneRows(rows [][]string) [][]string {
+	copy := make([][]string, len(rows))
+	for index, row := range rows {
+		copy[index] = append([]string(nil), row...)
+	}
+	return copy
+}
+
+func splitInsert(query string) (string, string, bool) {
 	rest := strings.TrimSpace(query[len("INSERT INTO "):])
-	valuesAt := strings.Index(strings.ToLower(rest), "values")
-	if valuesAt < 0 {
-		return "", "", sqlFailure{1064, "42000", "malformed INSERT"}
+	position := keywordAt(rest, "values")
+	if position < 0 {
+		return "", "", false
 	}
-	target := strings.TrimSpace(rest[:valuesAt])
-	if open := strings.IndexByte(target, '('); open >= 0 {
-		target = strings.TrimSpace(target[:open])
-	}
-	return target, strings.TrimSpace(rest[valuesAt+len("values"):]), nil
+	return strings.TrimSpace(rest[:position]), strings.TrimSpace(rest[position+len("values"):]), true
 }
 
-func insertValues(valueText string) ([]string, error) {
-	open := strings.Index(valueText, "(")
-	close := strings.LastIndex(valueText, ")")
-	if open < 0 || close <= open {
-		return nil, sqlFailure{1064, "42000", "malformed INSERT"}
+func insertTarget(value string) ([]string, []string, bool) {
+	value = strings.TrimSpace(value)
+	open := strings.IndexByte(value, '(')
+	if open < 0 {
+		parts, ok := splitQualifiedIdentifier(value)
+		return parts, nil, ok
 	}
-	values := splitCSV(valueText[open+1 : close])
-	row := make([]string, len(values))
-	for index, value := range values {
-		row[index] = scalar(value)
+	close, ok := matchingParenthesis(value, open)
+	if !ok || strings.TrimSpace(value[close+1:]) != "" {
+		return nil, nil, false
 	}
-	return row, nil
+	parts, ok := splitQualifiedIdentifier(strings.TrimSpace(value[:open]))
+	if !ok {
+		return nil, nil, false
+	}
+	columns := splitCSV(value[open+1 : close])
+	if len(columns) == 0 || columns[0] == "" {
+		return nil, nil, false
+	}
+	for index, column := range columns {
+		name, valid := singleIdentifier(column)
+		if !valid {
+			return nil, nil, false
+		}
+		columns[index] = name
+	}
+	return parts, columns, true
 }
-func (s *relationExecutor) selectQuery(query string) (*queryResult, error) {
+
+func valueGroups(value string) ([][]string, bool) {
+	groups := make([][]string, 0)
+	for value = strings.TrimSpace(value); value != ""; value = strings.TrimSpace(value) {
+		if value[0] != '(' {
+			return nil, false
+		}
+		close, ok := matchingParenthesis(value, 0)
+		if !ok {
+			return nil, false
+		}
+		groups = append(groups, splitCSV(value[1:close]))
+		value = strings.TrimSpace(value[close+1:])
+		if value == "" {
+			break
+		}
+		if value[0] != ',' {
+			return nil, false
+		}
+		value = strings.TrimSpace(value[1:])
+		if value == "" {
+			return nil, false
+		}
+	}
+	return groups, true
+}
+
+func matchingParenthesis(value string, open int) (int, bool) {
+	depth := 0
+	limit := len(value)
+	for index := open; index < limit; index++ {
+		if value[index] == '\'' {
+			index = skipQuoted(value, index)
+			continue
+		}
+		switch value[index] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return index, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func keywordAt(value, keyword string) int {
+	lower := strings.ToLower(value)
+	limit := len(lower) - len(keyword)
+	for index := 0; index <= limit; index++ {
+		if lower[index] == '\'' {
+			index = skipQuoted(lower, index)
+			continue
+		}
+		if lower[index:index+len(keyword)] != keyword || !keywordBoundary(lower, index, len(keyword)) {
+			continue
+		}
+		return index
+	}
+	return -1
+}
+
+func skipQuoted(value string, start int) int {
+	limit := len(value)
+	for index := start + 1; index < limit; index++ {
+		if value[index] != '\'' {
+			continue
+		}
+		if index+1 < len(value) && value[index+1] == '\'' {
+			index++
+			continue
+		}
+		return index
+	}
+	return len(value) - 1
+}
+
+func keywordBoundary(value string, index, length int) bool {
+	before := index == 0 || strings.ContainsRune(" \t\n", rune(value[index-1]))
+	after := index+length == len(value) || strings.ContainsRune(" \t\n", rune(value[index+length]))
+	return before && after
+}
+
+func splitWhere(value string) (string, string, bool) {
+	position := keywordAt(value, "where")
+	if position < 0 {
+		return strings.TrimSpace(value), "", true
+	}
+	before, after := strings.TrimSpace(value[:position]), strings.TrimSpace(value[position+len("where"):])
+	return before, after, before != "" && after != ""
+}
+
+func splitEquals(value string) (string, string, bool) {
+	quoted := false
+	limit := len(value)
+	for index := 0; index < limit; index++ {
+		if value[index] == '\'' {
+			if quoted && index+1 < len(value) && value[index+1] == '\'' {
+				index++
+				continue
+			}
+			quoted = !quoted
+			continue
+		}
+		if !quoted && value[index] == '=' {
+			left, right := strings.TrimSpace(value[:index]), strings.TrimSpace(value[index+1:])
+			return left, right, left != "" && right != ""
+		}
+	}
+	return "", "", false
+}
+
+func rowMatcher(where string, indexes map[string]int) (func([]string) bool, error) {
+	if where == "" {
+		return func([]string) bool { return true }, nil
+	}
+	column, value, ok := splitEquals(where)
+	if !ok {
+		return nil, sqlFailure{1064, "42000", "unsupported WHERE clause"}
+	}
+	column, ok = singleIdentifier(column)
+	if !ok {
+		return nil, sqlFailure{1064, "42000", "invalid WHERE column"}
+	}
+	index, found := indexes[strings.ToLower(column)]
+	if !found {
+		return nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
+	}
+	want := scalar(value)
+	return func(row []string) bool { return index < len(row) && row[index] == want }, nil
+}
+func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	lower := strings.ToLower(expression)
 	if from := strings.Index(lower, " from "); from >= 0 {
-		return s.selectFrom(query, expression[:from], expression[from+6:])
+		return selectFrom(s, query, expression[:from], expression[from+6:])
 	}
 	return selectLiteral(expression)
 }
@@ -1106,17 +1527,21 @@ func selectLiteral(expression string) (*queryResult, error) {
 	return &queryResult{columns: []string{expression}, rows: [][]string{{literal.value}}, nulls: [][]bool{{literal.isNull}}, metadata: []columnMetadata{literal.metadata}}, nil
 }
 
-func (s *relationExecutor) selectFrom(query, projectionText, sourceText string) (*queryResult, error) {
+func selectFrom(s *relationExecutor, query, projectionText, sourceText string) (*queryResult, error) {
 	projection, source := strings.TrimSpace(projectionText), strings.TrimSpace(sourceText)
 	if isInformationSchemaSource(source) {
 		informationSchema := informationSchemaExecutor{s.session}
 		return informationSchema.selectInformationSchema(query)
 	}
-	parts, valid := splitQualifiedIdentifier(strings.Fields(source)[0])
+	target, where, valid := splitWhere(source)
+	if !valid {
+		return nil, sqlFailure{1064, "42000", "malformed SELECT"}
+	}
+	parts, valid := splitQualifiedIdentifier(target)
 	if !valid || len(parts) == 0 || len(parts) > 2 {
 		return nil, sqlFailure{1064, "42000", "invalid table name"}
 	}
-	return s.selectTable(projection, parts)
+	return selectRows(s, projection, parts, where)
 }
 
 func isInformationSchemaSource(source string) bool {
@@ -1124,29 +1549,131 @@ func isInformationSchemaSource(source string) bool {
 	return strings.HasPrefix(lower, informationSchemaName+".") || strings.HasPrefix(lower, "`information_schema`.")
 }
 
-func (s *relationExecutor) selectTable(projection string, parts []string) (*queryResult, error) {
-	namespace, tableName, err := s.tableTarget(parts)
+func selectRows(s *relationExecutor, projection string, parts []string, where string) (*queryResult, error) {
+	namespace, tableName, err := tableTarget(s, parts)
 	if err != nil {
 		return nil, err
 	}
-	namespaceDefinition, found := s.snapshotNamespace(namespace)
-	if !found {
-		return nil, sqlFailure{1049, "42000", "unknown database '" + namespace + "'"}
+	table, err := relationTable(s, namespace, tableName)
+	if err != nil {
+		return nil, err
 	}
-	table, found := namespaceDefinition.Tables[strings.ToLower(tableName)]
-	if !found {
-		return nil, sqlFailure{1146, "42S02", "table does not exist"}
+	indexes, err := tableColumnIndexes(table)
+	if err != nil {
+		return nil, err
 	}
-	if projection != "*" {
-		return nil, sqlFailure{1064, "42000", "only SELECT * is supported for tables"}
+	selected, columns, err := selectedColumns(table, projection, indexes)
+	if err != nil {
+		return nil, err
 	}
-	return &queryResult{columns: table.Columns, rows: table.Rows}, nil
+	matches, err := rowMatcher(where, indexes)
+	if err != nil {
+		return nil, err
+	}
+	rows := projectRows(table.Rows, selected, matches)
+	return &queryResult{columns: columns, rows: rows, metadata: tableMetadata(namespace, tableName, table, selected)}, nil
+}
+
+func selectedColumns(table catalog.Table, projection string, indexes map[string]int) ([]int, []string, error) {
+	if projection == "*" {
+		return allColumns(table), append([]string(nil), table.Columns...), nil
+	}
+	return projectedColumns(table, projection, indexes)
+}
+
+func allColumns(table catalog.Table) []int {
+	selected := make([]int, len(table.Columns))
+	for index := range selected {
+		selected[index] = index
+	}
+	return selected
+}
+
+func projectedColumns(table catalog.Table, projection string, indexes map[string]int) ([]int, []string, error) {
+	expressions := splitCSV(projection)
+	selected := make([]int, 0, len(expressions))
+	columns := make([]string, 0, len(expressions))
+	for _, expression := range expressions {
+		column, valid := singleIdentifier(expression)
+		if !valid {
+			return nil, nil, sqlFailure{1064, "42000", "unsupported SELECT projection"}
+		}
+		index, found := indexes[strings.ToLower(column)]
+		if !found {
+			return nil, nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
+		}
+		selected = append(selected, index)
+		columns = append(columns, table.Columns[index])
+	}
+	return selected, columns, nil
+}
+
+func projectRows(source [][]string, selected []int, matches func([]string) bool) [][]string {
+	rows := make([][]string, 0, len(source))
+	for _, row := range source {
+		if !matches(row) {
+			continue
+		}
+		projected := make([]string, len(selected))
+		for resultIndex, sourceIndex := range selected {
+			projected[resultIndex] = row[sourceIndex]
+		}
+		rows = append(rows, projected)
+	}
+	return rows
+}
+
+func tableMetadata(namespace, tableName string, table catalog.Table, selected []int) []columnMetadata {
+	metadata := make([]columnMetadata, len(selected))
+	for resultIndex, columnIndex := range selected {
+		name := table.Columns[columnIndex]
+		definition := columnMetadata{catalog: "def", schema: namespace, table: tableName, originalTable: tableName, name: name, originalName: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
+		if typeName, known := table.ColumnType(columnIndex); known {
+			definition.typ, definition.length, definition.characterSet = catalogColumnWireType(typeName)
+		}
+		metadata[resultIndex] = definition
+	}
+	return metadata
+}
+
+func catalogColumnWireType(typeName string) (byte, uint32, uint16) {
+	normalized := strings.ToUpper(strings.TrimSpace(typeName))
+	switch {
+	case strings.HasPrefix(normalized, "TINYINT"):
+		return mysqlTypeTiny, 4, mysqlCharsetBinary
+	case strings.HasPrefix(normalized, "SMALLINT"):
+		return mysqlTypeShort, 6, mysqlCharsetBinary
+	case strings.HasPrefix(normalized, "MEDIUMINT"), strings.HasPrefix(normalized, "INT"), strings.HasPrefix(normalized, "INTEGER"):
+		return mysqlTypeLong, 11, mysqlCharsetBinary
+	case strings.HasPrefix(normalized, "BIGINT"):
+		return mysqlTypeLongLong, 20, mysqlCharsetBinary
+	case strings.HasPrefix(normalized, "FLOAT"):
+		return mysqlTypeFloat, 12, mysqlCharsetBinary
+	case strings.HasPrefix(normalized, "DOUBLE"):
+		return mysqlTypeDouble, 22, mysqlCharsetBinary
+	case strings.HasPrefix(normalized, "CHAR"), strings.HasPrefix(normalized, "VARCHAR"):
+		return mysqlTypeVarString, characterTypeLength(normalized) * 4, mysqlCharsetUTF8MB4GeneralCI
+	default:
+		return mysqlTypeVarString, 0, mysqlCharsetUTF8MB4GeneralCI
+	}
+}
+
+func characterTypeLength(typeName string) uint32 {
+	open, close := strings.IndexByte(typeName, '('), strings.IndexByte(typeName, ')')
+	if open < 0 || close <= open+1 {
+		return 0
+	}
+	length, err := strconv.ParseUint(strings.TrimSpace(typeName[open+1:close]), 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(length)
 }
 
 // tableTarget resolves an unqualified table against the current namespace and
 // a qualified table against its named namespace. Keeping this resolution at
 // the protocol seam makes DDL, writes, and reads agree about namespace scope.
-func (s *relationExecutor) tableTarget(parts []string) (string, string, error) {
+func tableTarget(s *relationExecutor, parts []string) (string, string, error) {
 	namespace, table := s.database, ""
 	if len(parts) == 2 {
 		namespace, table = parts[0], parts[1]
@@ -1583,8 +2110,12 @@ func preparedParameterMetadata(index int) columnMetadata {
 
 func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
-	if !strings.HasPrefix(strings.ToLower(query), "select ") {
-		return nil, sqlFailure{1064, "42000", "prepared statements support SELECT only"}
+	lower := strings.ToLower(query)
+	if !strings.HasPrefix(lower, "select ") && !strings.HasPrefix(lower, "insert into ") && !strings.HasPrefix(lower, "update ") && !strings.HasPrefix(lower, "delete from ") {
+		return nil, sqlFailure{1064, "42000", "unsupported prepared statement"}
+	}
+	if !strings.HasPrefix(lower, "select ") {
+		return nil, nil
 	}
 	parameters := nullPreparedParameters(parameterCount(query))
 	validated, err := bindPreparedQuery(query, parameters)
@@ -1592,7 +2123,7 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
 	}
 	if len(parameters) > 0 {
-		return s.queryColumns(validated, false)
+		return s.queryColumns(validated, true)
 	}
 	if literal := parseLiteralResult(strings.TrimSpace(query[len("select "):])); literal.supported {
 		return []columnMetadata{literal.metadata}, nil
@@ -1650,6 +2181,9 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	}
 	if result == nil {
 		return writePacket(connection, sequence, okPacket())
+	}
+	if len(result.columns) == 0 {
+		return writePacket(connection, sequence, okPacket(result.affected))
 	}
 	return writeBinaryResult(connection, sequence, result, s.server.config.MaxAllowedPacket)
 }
@@ -2012,7 +2546,16 @@ func writePacket(w io.Writer, sequence byte, payload []byte) error {
 	}
 }
 
-func okPacket() []byte { return []byte{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00} }
+func okPacket(affected ...uint64) []byte {
+	count := uint64(0)
+	if len(affected) > 0 {
+		count = affected[0]
+	}
+	payload := []byte{0x00}
+	payload = append(payload, lengthEncodedUint(count)...)
+	payload = append(payload, 0x00, 0x02, 0x00, 0x00, 0x00)
+	return payload
+}
 
 func errorPacket(code uint16, state, message string) []byte {
 	if len(message) > 255 {
