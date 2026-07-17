@@ -152,7 +152,13 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 		return writeScalarResult(connection, sequence, "00:00:00")
 	}
 	if strings.HasPrefix(lower, "explain ") {
+		if strings.HasPrefix(lower, "explain analyze ") {
+			return writeScalarResult(connection, sequence, `{"schema":"database.explanation/v1","operator":"scan","runtime":{"rows":1,"time_ms":0}}`)
+		}
 		return writeScalarResult(connection, sequence, `{"schema":"database.explanation/v1","operator":"scan"}`)
+	}
+	if lower == "show processlist" || strings.HasPrefix(lower, "kill ") {
+		return writePacket(connection, sequence, okPacket())
 	}
 	if strings.HasPrefix(lower, "create ") || strings.HasPrefix(lower, "alter ") || strings.HasPrefix(lower, "drop ") || strings.HasPrefix(lower, "truncate ") {
 		return writePacket(connection, sequence, okPacket())
