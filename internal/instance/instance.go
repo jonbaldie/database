@@ -42,14 +42,20 @@ func Initialize(directory, account, password string) (Metadata, error) {
 	if err := validateInitializationInput(directory, account, password); err != nil {
 		return Metadata{}, err
 	}
-	if err := prepareDirectory(directory); err != nil {
+	claim, err := claimInitialization(directory)
+	if err != nil {
 		return Metadata{}, err
 	}
 	metadata, err := newMetadata(account, password)
 	if err != nil {
+		_ = claim.discard()
 		return Metadata{}, err
 	}
-	if err := persistInitializedInstance(directory, metadata); err != nil {
+	if err := persistInitializedInstance(claim, metadata); err != nil {
+		_ = claim.discard()
+		return Metadata{}, err
+	}
+	if err := claim.release(); err != nil {
 		return Metadata{}, err
 	}
 	return metadata, nil
@@ -60,6 +66,27 @@ func validateInitializationInput(directory, account, password string) error {
 		return errors.New("data directory, account, and password are required")
 	}
 	return nil
+}
+
+const initializationLockName = ".database-initializing"
+
+type initializationClaim struct {
+	directory string
+	staging   string
+}
+
+func claimInitialization(directory string) (initializationClaim, error) {
+	if err := prepareDirectory(directory); err != nil {
+		return initializationClaim{}, err
+	}
+	staging := filepath.Join(directory, initializationLockName)
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return initializationClaim{}, errors.New("data directory initialization is already in progress")
+		}
+		return initializationClaim{}, fmt.Errorf("claim data directory initialization: %w", err)
+	}
+	return initializationClaim{directory: directory, staging: staging}, nil
 }
 
 func prepareDirectory(directory string) error {
@@ -80,8 +107,31 @@ func prepareDirectory(directory string) error {
 	if err != nil {
 		return fmt.Errorf("inspect data directory: %w", err)
 	}
+	if hasOnlyInitializationLock(entries) {
+		return errors.New("data directory initialization is already in progress")
+	}
 	if len(entries) != 0 {
 		return errors.New("data directory is not empty")
+	}
+	return nil
+}
+
+func hasOnlyInitializationLock(entries []os.DirEntry) bool {
+	return len(entries) == 1 && entries[0].Name() == initializationLockName && entries[0].IsDir()
+}
+
+func (claim initializationClaim) release() error {
+	if err := os.Remove(claim.staging); err != nil {
+		return fmt.Errorf("finish data directory initialization: %w", err)
+	}
+	return nil
+}
+
+func (claim initializationClaim) discard() error {
+	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
+	paths.removeTemporary()
+	if err := os.Remove(claim.staging); err != nil {
+		return fmt.Errorf("discard data directory initialization: %w", err)
 	}
 	return nil
 }
@@ -101,13 +151,13 @@ func newMetadata(account, password string) (Metadata, error) {
 	}, nil
 }
 
-func persistInitializedInstance(directory string, metadata Metadata) error {
+func persistInitializedInstance(claim initializationClaim, metadata Metadata) error {
 	metadataContents, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode instance metadata: %w", err)
 	}
 	metadataContents = append(metadataContents, '\n')
-	paths := initializationPaths{directory: directory}
+	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
 	if err := paths.writeStaged(metadataContents); err != nil {
 		return err
 	}
@@ -116,6 +166,7 @@ func persistInitializedInstance(directory string, metadata Metadata) error {
 
 type initializationPaths struct {
 	directory string
+	staging   string
 }
 
 func (paths initializationPaths) writeStaged(metadata []byte) error {
@@ -135,7 +186,9 @@ func (paths initializationPaths) commit() error {
 		return fmt.Errorf("install catalog: %w", err)
 	}
 	if err := os.Rename(paths.metadataTemporary(), paths.metadata()); err != nil {
-		_ = os.Remove(paths.catalog())
+		if removeErr := os.Remove(paths.catalog()); removeErr != nil {
+			return fmt.Errorf("install instance metadata: %w; remove partial catalog: %v", err, removeErr)
+		}
 		return fmt.Errorf("install instance metadata: %w", err)
 	}
 	return nil
@@ -154,10 +207,12 @@ func (paths initializationPaths) metadata() string {
 	return filepath.Join(paths.directory, "instance.json")
 }
 
-func (paths initializationPaths) catalogTemporary() string { return paths.catalog() + ".initializing" }
+func (paths initializationPaths) catalogTemporary() string {
+	return filepath.Join(paths.staging, "catalog.json")
+}
 
 func (paths initializationPaths) metadataTemporary() string {
-	return paths.metadata() + ".initializing"
+	return filepath.Join(paths.staging, "instance.json")
 }
 
 func writeDurable(path string, contents []byte) error {
