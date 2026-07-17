@@ -142,6 +142,9 @@ func writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	if strings.HasPrefix(lower, "savepoint ") || strings.HasPrefix(lower, "release savepoint ") || strings.HasPrefix(lower, "rollback to savepoint ") {
 		return writePacket(connection, sequence, okPacket())
 	}
+	if strings.Contains(lower, " for update") || strings.Contains(lower, " nowait") || strings.Contains(lower, " skip locked") {
+		return writeScalarResult(connection, sequence, "locked")
+	}
 	if lower == "select current_date" || lower == "select current_date()" {
 		return writeScalarResult(connection, sequence, "2026-07-17")
 	}
