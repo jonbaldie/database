@@ -79,6 +79,21 @@ func TestConfigurationFileAcceptsTOMLStringsContainingEquals(t *testing.T) {
 	}
 }
 
+func TestConfigurationFileSelectorMayBeRelative(t *testing.T) {
+	temporary := t.TempDir()
+	t.Chdir(temporary)
+	if err := os.WriteFile("server.toml", []byte("data_directory = \""+filepath.Join(temporary, "instance")+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := resolveConfiguration([]string{"--config=server.toml"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.options.DataDirectory != filepath.Join(temporary, "instance") {
+		t.Fatalf("data directory = %q", config.options.DataDirectory)
+	}
+}
+
 func TestConfigurationFileRejectsNonTOMLStrings(t *testing.T) {
 	temporary := t.TempDir()
 	file := filepath.Join(temporary, "server.toml")
@@ -146,5 +161,31 @@ func TestResolveConfigurationPreservesMaximumTimeoutsInMilliseconds(t *testing.T
 		config.options.IdleInTransactionTimeoutMilliseconds != 9223372036854775807 ||
 		config.options.IdleSessionTimeoutMilliseconds != 9223372036854775807 {
 		t.Fatalf("timeout options = %#v", config.options)
+	}
+}
+
+func TestResolveConfigurationCarriesEveryResourceLimitToServerBoundary(t *testing.T) {
+	config, err := resolveConfiguration([]string{
+		"--data-directory=/tmp/database-instance",
+		"--statement-timeout-ms=11",
+		"--lock-wait-timeout-ms=12",
+		"--idle-in-transaction-timeout-ms=13",
+		"--idle-session-timeout-ms=14",
+		"--execution-memory-limit-bytes=15",
+		"--aggregate-execution-memory-limit-bytes=16",
+		"--temporary-storage-limit-bytes=17",
+		"--aggregate-temporary-storage-limit-bytes=18",
+		"--max-connections=19",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := config.options
+	if options.StatementTimeoutMilliseconds != 11 || options.LockWaitTimeoutMilliseconds != 12 ||
+		options.IdleInTransactionTimeoutMilliseconds != 13 || options.IdleSessionTimeoutMilliseconds != 14 ||
+		options.ExecutionMemoryLimitBytes != 15 || options.AggregateMemoryLimitBytes != 16 ||
+		options.TemporaryStorageLimitBytes != 17 || options.AggregateTemporaryLimitBytes != 18 ||
+		options.MaxConnections != 19 {
+		t.Fatalf("resource limits were not preserved: %#v", options)
 	}
 }

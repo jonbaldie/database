@@ -221,9 +221,6 @@ func parseConfigurationEnvironment(environment []string) (map[string]string, str
 }
 
 func readConfigurationFile(path string) (map[string]string, error) {
-	if !filepath.IsAbs(path) {
-		return nil, invalidConfiguration("config path must be an absolute path")
-	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, &configurationError{class: "precondition", message: fmt.Sprintf("read config file: %v", err)}
@@ -405,6 +402,8 @@ func makeConfiguration(values map[string]configurationValue) (configuration, err
 	if diagnosticsAddress != "" && diagnosticsAddress == mysqlAddress {
 		return configuration{}, invalidConfiguration("MySQL and diagnostics listeners must use different addresses")
 	}
+	// Options is the configuration boundary between this closed-registry
+	// resolver and the server subsystems that apply the individual limits.
 	options := lifecycle.Options{
 		DataDirectory: dataDirectory, MySQLAddress: mysqlAddress, TLSCertFile: cert, TLSKeyFile: key,
 		DiagnosticsAddress: diagnosticsAddress, Format: format, StatementTimeoutMilliseconds: statement,
