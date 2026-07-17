@@ -73,13 +73,20 @@ func exitCode(command *exec.Cmd, err error) int {
 
 // Process is a running executable with line-oriented stdout observation.
 type Process struct {
-	command *exec.Cmd
-	lines   <-chan string
+	control processControl
+	output  processOutput
+}
 
+type processControl struct {
+	command *exec.Cmd
+	read    *sync.WaitGroup
+}
+
+type processOutput struct {
+	events <-chan string
 	mu     sync.Mutex
 	stdout bytes.Buffer
 	stderr bytes.Buffer
-	read   *sync.WaitGroup
 }
 
 // Start launches an executable without waiting for it to exit.
@@ -101,16 +108,13 @@ func (r Runner) Start(ctx context.Context, args ...string) (*Process, error) {
 	lines := make(chan string, 16)
 	read := new(sync.WaitGroup)
 	read.Add(2)
-	process := &Process{command: command, lines: lines, read: read}
+	process := &Process{control: processControl{command: command, read: read}, output: processOutput{events: lines}}
 	go func() {
 		defer read.Done()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			process.mu.Lock()
-			process.stdout.WriteString(line)
-			process.stdout.WriteByte('\n')
-			process.mu.Unlock()
+			process.output.appendStdout(line)
 			lines <- line
 		}
 		close(lines)
@@ -119,22 +123,17 @@ func (r Runner) Start(ctx context.Context, args ...string) (*Process, error) {
 		defer read.Done()
 		var captured bytes.Buffer
 		_, _ = io.Copy(&captured, stderr)
-		process.mu.Lock()
-		process.stderr.Write(captured.Bytes())
-		process.mu.Unlock()
+		process.output.appendStderr(captured.Bytes())
 	}()
 	return process, nil
 }
 
 // NextJSONEvent waits for and decodes the next JSON line from stdout.
 func (p *Process) NextJSONEvent(ctx context.Context, target any) error {
-	p.mu.Lock()
-	lines := p.lines
-	p.mu.Unlock()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case line, ok := <-lines:
+	case line, ok := <-p.output.events:
 		if !ok {
 			return io.EOF
 		}
@@ -147,25 +146,44 @@ func (p *Process) NextJSONEvent(ctx context.Context, target any) error {
 
 // Wait waits for process exit and returns its observed result.
 func (p *Process) Wait() Result {
-	err := p.command.Wait()
-	p.read.Wait()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return Result{Stdout: p.stdout.String(), Stderr: p.stderr.String(), ExitCode: exitCode(p.command, err), Err: err}
+	err := p.control.wait()
+	p.control.read.Wait()
+	return p.output.result(p.control.command, err)
+}
+
+func (control *processControl) wait() error { return control.command.Wait() }
+
+func (output *processOutput) result(command *exec.Cmd, err error) Result {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return Result{Stdout: output.stdout.String(), Stderr: output.stderr.String(), ExitCode: exitCode(command, err), Err: err}
 }
 
 // Stop requests the same graceful signal used by an operator stop command.
 func (p *Process) Stop() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.command.Process.Signal(syscall.SIGTERM)
+	return p.control.stop()
 }
+
+func (control *processControl) stop() error { return control.command.Process.Signal(syscall.SIGTERM) }
 
 // Crash terminates the process without giving it a graceful shutdown path.
 func (p *Process) Crash() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.command.Process.Kill()
+	return p.control.crash()
+}
+
+func (control *processControl) crash() error { return control.command.Process.Kill() }
+
+func (output *processOutput) appendStdout(line string) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	output.stdout.WriteString(line)
+	output.stdout.WriteByte('\n')
+}
+
+func (output *processOutput) appendStderr(data []byte) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	output.stderr.Write(data)
 }
 
 // HTTPJSON performs one diagnostics request and decodes its JSON response.

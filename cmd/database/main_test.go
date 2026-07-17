@@ -4,10 +4,28 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestMainExitsWithTheCommandResult(t *testing.T) {
+	previousArgs, previousExit := os.Args, exitProcess
+	t.Cleanup(func() {
+		os.Args = previousArgs
+		exitProcess = previousExit
+	})
+	os.Args = []string{"database", "unknown"}
+	exitCode := -1
+	exitProcess = func(code int) { exitCode = code }
+
+	main()
+
+	if exitCode != 2 {
+		t.Fatalf("process exit code = %d, want 2", exitCode)
+	}
+}
 
 func TestUnsupportedOperatorOperationsFailExplicitly(t *testing.T) {
 	tests := []struct {
