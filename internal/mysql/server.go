@@ -616,9 +616,10 @@ func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*query
 	return result, found, nil
 }
 
-func (s *textStatementExecutor) operationStatement(_ string, lower string) (*queryResult, bool, error) {
+func (s *textStatementExecutor) operationStatement(query, lower string) (*queryResult, bool, error) {
 	if strings.HasPrefix(lower, "explain ") {
-		return &queryResult{columns: []string{"EXPLAIN"}, rows: [][]string{{`{"schema":"database.explanation/v1","operator":"scan"}`}}}, true, nil
+		result, err := s.explainStatement(query)
+		return result, true, err
 	}
 	if strings.HasPrefix(lower, "show processlist") {
 		return &queryResult{columns: []string{"Id"}}, true, nil
