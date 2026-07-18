@@ -32,8 +32,8 @@ func TestCatalogColumnWireType(t *testing.T) {
 		{"DECIMAL(10,2)", mysqlTypeNewDecimal, mysqlCharsetBinary},
 		{"BIT(8)", mysqlTypeBit, mysqlCharsetBinary},
 		{"BOOLEAN", mysqlTypeTiny, mysqlCharsetBinary},
-		{"VARCHAR(32)", mysqlTypeVarString, mysqlCharsetUTF8MB4GeneralCI},
-		{"DATE", mysqlTypeVarString, mysqlCharsetUTF8MB4GeneralCI},
+		{"VARCHAR(32)", mysqlTypeVarString, mysqlCharsetUTF8MB40900AICI},
+		{"DATE", mysqlTypeVarString, mysqlCharsetUTF8MB40900AICI},
 	}
 	for _, c := range cases {
 		wire, _, charset := catalogColumnWireType(c.typeName)

@@ -85,7 +85,7 @@ func validateDefinition(definition Definition) error {
 
 func (s *Store) CreateNamespace(name string) error {
 	return s.mutate(func(definition *Definition) error {
-		key := strings.ToLower(name)
+		key := Key(name)
 		if _, ok := definition.Namespaces[key]; ok {
 			return errors.New("namespace already exists")
 		}
@@ -102,12 +102,12 @@ func (s *Store) CreateTable(namespace, name string, columns []string) error {
 // original catalog format, whose columns were names only.
 func (s *Store) CreateTableWithTypes(namespace, name string, columns, columnTypes []string) error {
 	return s.mutate(func(definition *Definition) error {
-		key := strings.ToLower(namespace)
+		key := Key(namespace)
 		ns, ok := definition.Namespaces[key]
 		if !ok {
 			return errors.New("namespace does not exist")
 		}
-		table := strings.ToLower(name)
+		table := Key(name)
 		if _, ok := ns.Tables[table]; ok {
 			return errors.New("table already exists")
 		}
@@ -126,11 +126,11 @@ func (s *Store) CreateTableWithTypes(namespace, name string, columns, columnType
 
 func (s *Store) Insert(namespace, table string, row []string) error {
 	return s.mutate(func(definition *Definition) error {
-		ns, ok := definition.Namespaces[strings.ToLower(namespace)]
+		ns, ok := definition.Namespaces[Key(namespace)]
 		if !ok {
 			return errors.New("namespace does not exist")
 		}
-		key := strings.ToLower(table)
+		key := Key(table)
 		tableDefinition, ok := ns.Tables[key]
 		if !ok {
 			return errors.New("table does not exist")
@@ -140,7 +140,7 @@ func (s *Store) Insert(namespace, table string, row []string) error {
 		}
 		tableDefinition.Rows = append(tableDefinition.Rows, append([]string(nil), row...))
 		ns.Tables[key] = tableDefinition
-		definition.Namespaces[strings.ToLower(namespace)] = ns
+		definition.Namespaces[Key(namespace)] = ns
 		return nil
 	})
 }
@@ -150,12 +150,12 @@ func (s *Store) Insert(namespace, table string, row []string) error {
 // malformed statement never exposes a partially changed table.
 func (s *Store) ReplaceRows(namespace, table string, rows [][]string) error {
 	return s.mutate(func(definition *Definition) error {
-		key := strings.ToLower(namespace)
+		key := Key(namespace)
 		ns, ok := definition.Namespaces[key]
 		if !ok {
 			return errors.New("namespace does not exist")
 		}
-		tableKey := strings.ToLower(table)
+		tableKey := Key(table)
 		current, ok := ns.Tables[tableKey]
 		if !ok {
 			return errors.New("table does not exist")

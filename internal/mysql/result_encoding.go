@@ -97,7 +97,7 @@ func resultColumnDefinition(name string, index int, metadata []columnMetadata) c
 	if index < len(metadata) {
 		return metadata[index]
 	}
-	return columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
+	return columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString}
 }
 
 func textRow(row []string, rowIndex int, nulls [][]bool) []byte {
