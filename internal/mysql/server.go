@@ -51,6 +51,8 @@ const (
 	mysqlTypeTiny                byte   = 0x01
 	mysqlTypeShort               byte   = 0x02
 	mysqlTypeLong                byte   = 0x03
+	mysqlTypeInt24               byte   = 0x09
+	mysqlTypeBit                 byte   = 0x10
 	mysqlTypeFloat               byte   = 0x04
 	mysqlTypeDouble              byte   = 0x05
 	mysqlTypeVarchar             byte   = 0x0f
@@ -935,7 +937,24 @@ func parseTableColumn(part string) (string, string, error) {
 	if len(fields) == 0 {
 		return column, "", nil
 	}
-	return column, strings.ToUpper(fields[0]), nil
+	typeName, err := columnTypeName(fields)
+	if err != nil {
+		return "", "", err
+	}
+	return column, typeName, nil
+}
+
+// columnTypeName folds a trailing UNSIGNED modifier into the declared type and
+// rejects any numeric or bit declaration that violates a public ceiling.
+func columnTypeName(fields []string) (string, error) {
+	typeName := strings.ToUpper(fields[0])
+	if len(fields) >= 2 && strings.EqualFold(fields[1], "unsigned") {
+		typeName += " UNSIGNED"
+	}
+	if _, err := parseNumericType(typeName); err != nil {
+		return "", err
+	}
+	return typeName, nil
 }
 
 func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error) {
@@ -1127,17 +1146,40 @@ func insertColumnIndexes(table catalog.Table, columns []string) ([]int, error) {
 
 func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 	rows := cloneRows(plan.table.Rows)
+	rowNumber := 1
 	for _, group := range plan.groups {
 		if len(group) != len(plan.columns) {
 			return nil, 0, sqlFailure{1136, "21S01", "column count does not match value count"}
 		}
 		row := make([]string, len(plan.table.Columns))
 		for valueIndex, value := range group {
-			row[plan.columns[valueIndex]] = scalar(value)
+			columnIndex := plan.columns[valueIndex]
+			canonical, err := canonicalColumnValue(plan.table, columnIndex, value, rowNumber)
+			if err != nil {
+				return nil, 0, err
+			}
+			row[columnIndex] = canonical
 		}
 		rows = append(rows, row)
+		rowNumber++
 	}
 	return rows, uint64(len(plan.groups)), nil
+}
+
+// canonicalColumnValue enforces the strict value contract for a written column.
+// A column without a recorded numeric or bit type keeps its literal scalar so
+// character, temporal, and typeless columns are unaffected by this seam.
+func canonicalColumnValue(table catalog.Table, columnIndex int, raw string, row int) (string, error) {
+	value := scalar(raw)
+	typeName, known := table.ColumnType(columnIndex)
+	if !known {
+		return value, nil
+	}
+	typ, err := parseNumericType(typeName)
+	if err != nil || typ.kind == numericNone {
+		return value, nil
+	}
+	return canonicalNumericValue(typ, value, table.Columns[columnIndex], row)
 }
 
 func updateRows(s *relationExecutor, query string) (uint64, error) {
@@ -1145,7 +1187,10 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	rows, affected := applyUpdatePlan(plan)
+	rows, affected, err := applyUpdatePlan(plan)
+	if err != nil {
+		return 0, err
+	}
 	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
 		return 0, sqlFailure{1105, "HY000", err.Error()}
 	}
@@ -1230,14 +1275,18 @@ func assignmentValues(value string, indexes map[string]int) (map[int]string, err
 	return updates, nil
 }
 
-func applyUpdatePlan(plan updatePlan) ([][]string, uint64) {
+func applyUpdatePlan(plan updatePlan) ([][]string, uint64, error) {
+	updates, err := canonicalUpdates(plan)
+	if err != nil {
+		return nil, 0, err
+	}
 	rows, affected := cloneRows(plan.table.Rows), uint64(0)
 	for rowIndex, row := range rows {
 		if !plan.matcher(row) {
 			continue
 		}
 		changed := false
-		for column, value := range plan.updates {
+		for column, value := range updates {
 			if rows[rowIndex][column] != value {
 				changed = true
 			}
@@ -1247,7 +1296,21 @@ func applyUpdatePlan(plan updatePlan) ([][]string, uint64) {
 			affected++
 		}
 	}
-	return rows, affected
+	return rows, affected, nil
+}
+
+// canonicalUpdates validates every assignment constant against its column type
+// before any row changes, so a rejected UPDATE leaves the table untouched.
+func canonicalUpdates(plan updatePlan) (map[int]string, error) {
+	updates := make(map[int]string, len(plan.updates))
+	for column, value := range plan.updates {
+		canonical, err := canonicalColumnValue(plan.table, column, value, 1)
+		if err != nil {
+			return nil, err
+		}
+		updates[column] = canonical
+	}
+	return updates, nil
 }
 
 func deleteRows(s *relationExecutor, query string) (uint64, error) {
@@ -1631,6 +1694,9 @@ func tableMetadata(namespace, tableName string, table catalog.Table, selected []
 		definition := columnMetadata{catalog: "def", schema: namespace, table: tableName, originalTable: tableName, name: name, originalName: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
 		if typeName, known := table.ColumnType(columnIndex); known {
 			definition.typ, definition.length, definition.characterSet = catalogColumnWireType(typeName)
+			if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(typeName)), " UNSIGNED") {
+				definition.flags |= mysqlUnsignedFlag
+			}
 		}
 		metadata[resultIndex] = definition
 	}
@@ -1638,20 +1704,11 @@ func tableMetadata(namespace, tableName string, table catalog.Table, selected []
 }
 
 func catalogColumnWireType(typeName string) (byte, uint32, uint16) {
+	if typ, err := parseNumericType(typeName); err == nil && typ.kind != numericNone {
+		return numericWireType(typ)
+	}
 	normalized := strings.ToUpper(strings.TrimSpace(typeName))
 	switch {
-	case strings.HasPrefix(normalized, "TINYINT"):
-		return mysqlTypeTiny, 4, mysqlCharsetBinary
-	case strings.HasPrefix(normalized, "SMALLINT"):
-		return mysqlTypeShort, 6, mysqlCharsetBinary
-	case strings.HasPrefix(normalized, "MEDIUMINT"), strings.HasPrefix(normalized, "INT"), strings.HasPrefix(normalized, "INTEGER"):
-		return mysqlTypeLong, 11, mysqlCharsetBinary
-	case strings.HasPrefix(normalized, "BIGINT"):
-		return mysqlTypeLongLong, 20, mysqlCharsetBinary
-	case strings.HasPrefix(normalized, "FLOAT"):
-		return mysqlTypeFloat, 12, mysqlCharsetBinary
-	case strings.HasPrefix(normalized, "DOUBLE"):
-		return mysqlTypeDouble, 22, mysqlCharsetBinary
 	case strings.HasPrefix(normalized, "CHAR"), strings.HasPrefix(normalized, "VARCHAR"):
 		return mysqlTypeVarString, characterTypeLength(normalized) * 4, mysqlCharsetUTF8MB4GeneralCI
 	default:
