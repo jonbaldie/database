@@ -171,6 +171,93 @@ func TestCanonicalNumericValuePreservesNull(t *testing.T) {
 	}
 }
 
+func TestParseNumericTypeCeilingBoundaries(t *testing.T) {
+	for _, ok := range []string{"DECIMAL(65,30)", "DECIMAL(1,0)", "DECIMAL(65,0)", "BIT(1)", "BIT(64)"} {
+		if _, err := parseNumericType(ok); err != nil {
+			t.Errorf("parseNumericType(%q) rejected an in-ceiling declaration: %v", ok, err)
+		}
+	}
+	if typ, _ := parseNumericType("DECIMAL"); typ.precision != 10 || typ.scale != 0 {
+		t.Errorf("bare DECIMAL default = precision %d scale %d, want 10/0", typ.precision, typ.scale)
+	}
+	if typ, _ := parseNumericType("BIT"); typ.width != 1 {
+		t.Errorf("bare BIT width = %d, want 1", typ.width)
+	}
+}
+
+func TestParseNumericTypeUnsignedBounds(t *testing.T) {
+	signed, _ := parseNumericType("INT")
+	if signed.min != -2147483648 || signed.smax != 2147483647 || signed.unsigned {
+		t.Errorf("INT bounds = %+v", signed)
+	}
+	unsigned, _ := parseNumericType("INT UNSIGNED")
+	if unsigned.min != 0 || unsigned.umax != 4294967295 || !unsigned.unsigned {
+		t.Errorf("INT UNSIGNED bounds = %+v", unsigned)
+	}
+}
+
+func TestNumericWireType(t *testing.T) {
+	cases := []struct {
+		typeName string
+		wire     byte
+		length   uint32
+		charset  uint16
+	}{
+		{"TINYINT", mysqlTypeTiny, 4, mysqlCharsetBinary},
+		{"SMALLINT", mysqlTypeShort, 6, mysqlCharsetBinary},
+		{"MEDIUMINT", mysqlTypeInt24, 9, mysqlCharsetBinary},
+		{"INT", mysqlTypeLong, 11, mysqlCharsetBinary},
+		{"BIGINT", mysqlTypeLongLong, 20, mysqlCharsetBinary},
+		{"DECIMAL(10,2)", mysqlTypeNewDecimal, 12, mysqlCharsetBinary},
+		{"FLOAT", mysqlTypeFloat, 12, mysqlCharsetBinary},
+		{"DOUBLE", mysqlTypeDouble, 22, mysqlCharsetBinary},
+		{"BOOLEAN", mysqlTypeTiny, 1, mysqlCharsetBinary},
+		{"BIT(8)", mysqlTypeBit, 8, mysqlCharsetBinary},
+	}
+	for _, c := range cases {
+		typ, _ := parseNumericType(c.typeName)
+		wire, length, charset := numericWireType(typ)
+		if wire != c.wire || length != c.length || charset != c.charset {
+			t.Errorf("numericWireType(%s) = (%#x,%d,%d), want (%#x,%d,%d)", c.typeName, wire, length, charset, c.wire, c.length, c.charset)
+		}
+	}
+}
+
+func TestCanonicalDecimalScaleZero(t *testing.T) {
+	typ, _ := parseNumericType("NUMERIC(5)")
+	cases := map[string]string{"3": "3", "007": "7", "3.0": "3", "-0": "0"}
+	for in, want := range cases {
+		got, err := canonicalNumericValue(typ, in, "col", 1)
+		if err != nil || got != want {
+			t.Errorf("numeric(5) %q = %q err %v, want %q", in, got, err, want)
+		}
+	}
+	if _, err := canonicalNumericValue(typ, "3.1", "col", 1); err == nil {
+		t.Errorf("numeric(5) accepted lossy fraction 3.1")
+	}
+}
+
+func TestCanonicalFloatWidthOverflow(t *testing.T) {
+	narrow, _ := parseNumericType("FLOAT")
+	if _, err := canonicalNumericValue(narrow, "1e40", "col", 1); err == nil {
+		t.Errorf("FLOAT accepted a value beyond 32-bit range")
+	}
+	wide, _ := parseNumericType("DOUBLE")
+	if got, err := canonicalNumericValue(wide, "1e40", "col", 1); err != nil || got == "" {
+		t.Errorf("DOUBLE rejected an in-range wide value: %q %v", got, err)
+	}
+}
+
+func TestCanonicalDecimalNegativeRetainsSign(t *testing.T) {
+	typ, _ := parseNumericType("DECIMAL(6,2)")
+	if got, _ := canonicalNumericValue(typ, "-12.3", "col", 1); got != "-12.30" {
+		t.Errorf("negative decimal = %q, want -12.30", got)
+	}
+	if got, _ := canonicalNumericValue(typ, "-0.00", "col", 1); got != "0.00" {
+		t.Errorf("negative zero decimal = %q, want 0.00", got)
+	}
+}
+
 func assertSQLCode(t *testing.T, err error, code uint16, context ...any) {
 	t.Helper()
 	if err == nil {

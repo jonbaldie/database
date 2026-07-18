@@ -1695,4 +1695,13 @@ func TestMySQLStrictNumericAndBitSemantics(t *testing.T) {
 	if explained := client.query("EXPLAIN SELECT small, mask FROM t WHERE count = 7"); explained.err != "" || len(explained.rows) == 0 {
 		t.Fatalf("numeric query is not explainable: %#v", explained)
 	}
+
+	// A non-canonical predicate literal must compare against the canonical
+	// stored value: WHERE count = 007 matches the stored 7.
+	if matched := client.query("SELECT small FROM t WHERE count = 007"); matched.err != "" || len(matched.rows) != 1 || matched.rows[0][0] != "-128" {
+		t.Fatalf("non-canonical numeric predicate did not match canonical value: %#v", matched)
+	}
+	if updated := client.query("UPDATE t SET small = 42 WHERE count = 007"); updated.err != "" || updated.affected != 1 {
+		t.Fatalf("non-canonical predicate update: %#v", updated)
+	}
 }

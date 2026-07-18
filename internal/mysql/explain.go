@@ -122,7 +122,7 @@ func (s *textStatementExecutor) explainSelectSource(relations *relationExecutor,
 	}
 	// Validate the predicate exactly as the executor would, so EXPLAIN never
 	// describes a plan for a statement that would fail at run time.
-	if _, err := rowMatcher(strings.TrimSpace(where), indexes); err != nil {
+	if _, err := rowMatcher(strings.TrimSpace(where), table, indexes); err != nil {
 		return queryexplanation.Select{}, err
 	}
 	return queryexplanation.Select{

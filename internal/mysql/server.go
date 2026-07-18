@@ -51,10 +51,10 @@ const (
 	mysqlTypeTiny                byte   = 0x01
 	mysqlTypeShort               byte   = 0x02
 	mysqlTypeLong                byte   = 0x03
-	mysqlTypeInt24               byte   = 0x09
-	mysqlTypeBit                 byte   = 0x10
 	mysqlTypeFloat               byte   = 0x04
 	mysqlTypeDouble              byte   = 0x05
+	mysqlTypeInt24               byte   = 0x09
+	mysqlTypeBit                 byte   = 0x10
 	mysqlTypeVarchar             byte   = 0x0f
 	mysqlTypeVarString           byte   = 0xfd
 	mysqlTypeString              byte   = 0xfe
@@ -1221,7 +1221,7 @@ func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
 	if err != nil {
 		return updatePlan{}, err
 	}
-	matcher, err := rowMatcher(where, indexes)
+	matcher, err := rowMatcher(where, table, indexes)
 	if err != nil {
 		return updatePlan{}, err
 	}
@@ -1344,7 +1344,7 @@ func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
 	if err != nil {
 		return deletePlan{}, err
 	}
-	matcher, err := rowMatcher(where, indexes)
+	matcher, err := rowMatcher(where, table, indexes)
 	if err != nil {
 		return deletePlan{}, err
 	}
@@ -1555,7 +1555,7 @@ func splitEquals(value string) (string, string, bool) {
 	return "", "", false
 }
 
-func rowMatcher(where string, indexes map[string]int) (func([]string) bool, error) {
+func rowMatcher(where string, table catalog.Table, indexes map[string]int) (func([]string) bool, error) {
 	if where == "" {
 		return func([]string) bool { return true }, nil
 	}
@@ -1571,8 +1571,28 @@ func rowMatcher(where string, indexes map[string]int) (func([]string) bool, erro
 	if !found {
 		return nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
 	}
-	want := scalar(value)
+	want := matcherValue(table, index, value)
 	return func(row []string) bool { return index < len(row) && row[index] == want }, nil
+}
+
+// matcherValue canonicalizes an equality literal to the stored representation of
+// its column, so a numeric predicate compares against the same canonical form a
+// write produced (for example WHERE n = 007 matches a stored 7). A literal that
+// is malformed for the column keeps its scalar and simply matches no row.
+func matcherValue(table catalog.Table, index int, value string) string {
+	want := scalar(value)
+	typeName, known := table.ColumnType(index)
+	if !known {
+		return want
+	}
+	typ, err := parseNumericType(typeName)
+	if err != nil || typ.kind == numericNone {
+		return want
+	}
+	if canonical, cerr := canonicalNumericValue(typ, want, table.Columns[index], 1); cerr == nil {
+		return canonical
+	}
+	return want
 }
 func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
@@ -1630,7 +1650,7 @@ func selectRows(s *relationExecutor, projection string, parts []string, where st
 	if err != nil {
 		return nil, err
 	}
-	matches, err := rowMatcher(where, indexes)
+	matches, err := rowMatcher(where, table, indexes)
 	if err != nil {
 		return nil, err
 	}

@@ -93,11 +93,11 @@ func splitNumericType(typeName string) (string, string, bool) {
 	if open < 0 {
 		return normalized, "", unsigned
 	}
-	close := strings.LastIndexByte(normalized, ')')
-	if close <= open {
+	end := strings.LastIndexByte(normalized, ')')
+	if end <= open {
 		return normalized, "", unsigned
 	}
-	return strings.TrimSpace(normalized[:open]), normalized[open+1 : close], unsigned
+	return strings.TrimSpace(normalized[:open]), normalized[open+1 : end], unsigned
 }
 
 func integerNumericType(bounds integerBounds, unsigned bool) numericType {
