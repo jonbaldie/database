@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
 )
@@ -63,6 +64,11 @@ const (
 	mysqlTypeLongBlob        byte   = 0xfb
 	mysqlTypeJSON            byte   = 0xf5
 	mysqlTypeNewDecimal      byte   = 0xf6
+	mysqlTypeTimestamp       byte   = 0x07
+	mysqlTypeDate            byte   = 0x0a
+	mysqlTypeTime            byte   = 0x0b
+	mysqlTypeDatetime        byte   = 0x0c
+	mysqlTypeYear            byte   = 0x0d
 	mysqlNotNullFlag         uint16 = 1
 	mysqlBinaryFlag          uint16 = 1 << 7
 	mysqlUnsignedFlag        uint16 = 1 << 5
@@ -82,6 +88,13 @@ type Config struct {
 	MaxPreparedStmtCount int
 	MaxConnections       int
 	MaxAllowedPacket     int64
+	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
+	// current-time functions render through. It defaults to UTC and accepts UTC
+	// or a ±HH:MM offset within ±14:00.
+	TimeZone string
+	// Clock supplies the current instant for current-time functions. It defaults
+	// to time.Now and is injectable so rendering is reproducible under test.
+	Clock func() time.Time
 }
 
 type Server struct {
@@ -150,6 +163,12 @@ func normalizedConfig(config Config) Config {
 	}
 	if config.MaxAllowedPacket == 0 {
 		config.MaxAllowedPacket = 64 * 1024 * 1024
+	}
+	if config.TimeZone == "" {
+		config.TimeZone = "UTC"
+	}
+	if config.Clock == nil {
+		config.Clock = time.Now
 	}
 	return config
 }
@@ -605,16 +624,52 @@ func (s *textStatementExecutor) settingStatement(_ string, lower string) (*query
 }
 
 func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
+	if column, kind, ok := currentTimeQuery(lower); ok {
+		value, err := s.renderCurrentTime(kind)
+		if err != nil {
+			return nil, true, err
+		}
+		return &queryResult{columns: []string{column}, rows: [][]string{{value}}}, true, nil
+	}
 	result, found := map[string]*queryResult{
-		"select current_date":   {columns: []string{"CURRENT_DATE"}, rows: [][]string{{"2026-07-17"}}},
-		"select current_date()": {columns: []string{"CURRENT_DATE"}, rows: [][]string{{"2026-07-17"}}},
-		"select current_time":   {columns: []string{"CURRENT_TIME"}, rows: [][]string{{"00:00:00"}}},
-		"select current_time()": {columns: []string{"CURRENT_TIME"}, rows: [][]string{{"00:00:00"}}},
-		"select version()":      {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
-		"select @@version":      {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
-		"select database()":     {columns: []string{"DATABASE()"}, rows: [][]string{{s.database}}},
+		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
+		"select @@version":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
+		"select database()": {columns: []string{"DATABASE()"}, rows: [][]string{{s.database}}},
 	}[lower]
 	return result, found, nil
+}
+
+// currentTimeQuery maps a recognized current-time SELECT to its result column
+// label and the temporal kind that shapes its value.
+func currentTimeQuery(lower string) (string, temporalKind, bool) {
+	switch lower {
+	case "select current_date", "select current_date()", "select curdate()":
+		return "CURRENT_DATE", temporalDate, true
+	case "select current_time", "select current_time()", "select curtime()":
+		return "CURRENT_TIME", temporalTime, true
+	case "select current_timestamp", "select current_timestamp()", "select now()":
+		return "CURRENT_TIMESTAMP", temporalTimestamp, true
+	default:
+		return "", temporalNone, false
+	}
+}
+
+// renderCurrentTime evaluates a current-time function against the configured
+// clock, rendered through the fixed-offset session time zone. A TIMESTAMP is the
+// current instant rendered through the offset; a DATE or TIME is the session-
+// local wall clock. Both read one captured instant, so references within a
+// statement observe the same value.
+func (s *textStatementExecutor) renderCurrentTime(kind temporalKind) (string, error) {
+	offset, err := parseFixedOffset(s.server.config.TimeZone)
+	if err != nil {
+		return "", err
+	}
+	instant := s.server.config.Clock().UTC()
+	if kind == temporalTimestamp {
+		return renderTimestampFixedOffset(instant.Format("2006-01-02 15:04:05"), offset, 0)
+	}
+	local := instant.Add(time.Duration(offset) * time.Minute)
+	return currentTemporal(local, kind, 0), nil
 }
 
 func (s *textStatementExecutor) operationStatement(query, lower string) (*queryResult, bool, error) {
@@ -966,6 +1021,9 @@ func columnTypeName(fields []string) (string, error) {
 	if _, err := parseNumericType(typeName); err != nil {
 		return "", err
 	}
+	if _, err := parseTemporalType(typeName); err != nil {
+		return "", err
+	}
 	typeName, err := characterModifierTypeName(typeName, rest)
 	if err != nil {
 		return "", err
@@ -1186,27 +1244,75 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 }
 
 // canonicalColumnValue enforces the strict value contract for a written column.
-// A column without a recorded numeric, bit, or character type keeps its literal
-// scalar so temporal and typeless columns are unaffected by this seam.
+// A column without a recorded numeric, bit, character, or temporal type keeps
+// its literal scalar so a typeless column is unaffected by this seam.
 func canonicalColumnValue(table catalog.Table, columnIndex int, raw string, row int) (string, error) {
 	value := scalar(raw)
 	typeName, known := table.ColumnType(columnIndex)
 	if !known {
 		return value, nil
 	}
-	if typ, err := parseNumericType(typeName); err != nil || typ.kind != numericNone {
-		if err != nil {
-			return value, err
+	return canonicalTypedValue(typeName, value, table.Columns[columnIndex], row)
+}
+
+// scalarCanonicalizer reports whether a declared type belongs to its family and,
+// if so, the canonical value or the rejection error for that family.
+type scalarCanonicalizer func(typeName, value, column string, row int) (bool, string, error)
+
+// scalarCanonicalizers is the ordered set of strict scalar value contracts a
+// written column is routed through: numeric or bit, character or binary, then
+// temporal. The first family that claims the declared type owns the value.
+var scalarCanonicalizers = []scalarCanonicalizer{
+	numericCanonicalizer,
+	characterCanonicalizer,
+	temporalCanonicalizer,
+}
+
+// canonicalTypedValue routes a value to the strict contract of its declared
+// scalar family, returning the value unchanged for a typeless column.
+func canonicalTypedValue(typeName, value, column string, row int) (string, error) {
+	for _, canonicalize := range scalarCanonicalizers {
+		if matched, canonical, err := canonicalize(typeName, value, column, row); matched {
+			return canonical, err
 		}
-		return canonicalNumericValue(typ, value, table.Columns[columnIndex], row)
-	}
-	if typ, err := parseCharacterType(typeName); err != nil || typ.kind != characterNone {
-		if err != nil {
-			return value, err
-		}
-		return canonicalCharacterValue(typ, value, table.Columns[columnIndex], row)
 	}
 	return value, nil
+}
+
+func numericCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+	typ, err := parseNumericType(typeName)
+	if err != nil {
+		return true, value, err
+	}
+	if typ.kind == numericNone {
+		return false, value, nil
+	}
+	canonical, cerr := canonicalNumericValue(typ, value, column, row)
+	return true, canonical, cerr
+}
+
+func characterCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+	typ, err := parseCharacterType(typeName)
+	if err != nil {
+		return true, value, err
+	}
+	if typ.kind == characterNone {
+		return false, value, nil
+	}
+	canonical, cerr := canonicalCharacterValue(typ, value, column, row)
+	return true, canonical, cerr
+}
+
+func temporalCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+	typ, err := parseTemporalType(typeName)
+	if err != nil {
+		return true, value, err
+	}
+	if typ.kind == temporalNone {
+		return false, value, nil
+	}
+	canonical, cerr := canonicalTemporalValue(typ, value, column, row)
+	return true, canonical, cerr
 }
 
 func updateRows(s *relationExecutor, query string) (uint64, error) {
@@ -1630,12 +1736,16 @@ func matcherValue(table catalog.Table, index int, value string) string {
 	if !known {
 		return want
 	}
-	typ, err := parseNumericType(typeName)
-	if err != nil || typ.kind == numericNone {
+	if typ, err := parseNumericType(typeName); err == nil && typ.kind != numericNone {
+		if canonical, cerr := canonicalNumericValue(typ, want, table.Columns[index], 1); cerr == nil {
+			return canonical
+		}
 		return want
 	}
-	if canonical, cerr := canonicalNumericValue(typ, want, table.Columns[index], 1); cerr == nil {
-		return canonical
+	if typ, err := parseTemporalType(typeName); err == nil && typ.kind != temporalNone {
+		if canonical, cerr := canonicalTemporalValue(typ, want, table.Columns[index], 1); cerr == nil {
+			return canonical
+		}
 	}
 	return want
 }
@@ -1774,6 +1884,9 @@ func catalogColumnWireType(typeName string) (byte, uint32, uint16) {
 	}
 	if typ, err := parseCharacterType(typeName); err == nil && typ.kind != characterNone {
 		return typ.wire, characterWireLength(typ), characterWireCharset(typ)
+	}
+	if typ, err := parseTemporalType(typeName); err == nil && typ.kind != temporalNone {
+		return temporalWireType(typ)
 	}
 	return mysqlTypeVarString, 0, mysqlCharsetUTF8MB40900AICI
 }
@@ -2427,6 +2540,8 @@ var preparedValueReaders = map[byte]preparedValueReader{
 	mysqlTypeTiny: preparedIntegerReader(1), mysqlTypeShort: preparedIntegerReader(2), mysqlTypeLong: preparedIntegerReader(4), mysqlTypeLongLong: preparedIntegerReader(8),
 	mysqlTypeFloat: readPreparedFloat, mysqlTypeDouble: readPreparedDouble,
 	mysqlTypeVarchar: readPreparedString, mysqlTypeVarString: readPreparedString, mysqlTypeString: readPreparedString, mysqlTypeBlob: readPreparedString, mysqlTypeLongBlob: readPreparedString, mysqlTypeMediumBlob: readPreparedString, mysqlTypeTinyBlob: readPreparedString, mysqlTypeJSON: readPreparedString, mysqlTypeNewDecimal: readPreparedString,
+	mysqlTypeYear: preparedIntegerReader(2),
+	mysqlTypeDate: readPreparedTemporal, mysqlTypeDatetime: readPreparedTemporal, mysqlTypeTimestamp: readPreparedTemporal, mysqlTypeTime: readPreparedTemporal,
 }
 
 func preparedIntegerReader(size int) preparedValueReader {

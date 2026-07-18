@@ -173,12 +173,8 @@ func characterModifierTypeName(base string, modifiers []string) (string, error) 
 	if charset == "" && collation == "" {
 		return base, nil
 	}
-	family, ok := characterFamilies[strings.ToUpper(splitBaseName(base))]
-	if !ok || family.kind != characterText {
-		return "", sqlFailure{1253, "42000", "character set or collation is not applicable to this type"}
-	}
-	if charset != "" && strings.ToUpper(charset) != "UTF8MB4" {
-		return "", sqlFailure{1115, "42000", fmt.Sprintf("Unknown character set: '%s'", charset)}
+	if err := validateCharacterModifierTarget(base, charset); err != nil {
+		return "", err
 	}
 	if collation == "" {
 		return base, nil
@@ -187,6 +183,20 @@ func characterModifierTypeName(base string, modifiers []string) (string, error) 
 		return "", err
 	}
 	return base + " COLLATE " + strings.ToLower(collation), nil
+}
+
+// validateCharacterModifierTarget rejects a CHARACTER SET or COLLATE clause on a
+// non-character base type and any character set other than the supported
+// utf8mb4.
+func validateCharacterModifierTarget(base, charset string) error {
+	family, ok := characterFamilies[strings.ToUpper(splitBaseName(base))]
+	if !ok || family.kind != characterText {
+		return sqlFailure{1253, "42000", "character set or collation is not applicable to this type"}
+	}
+	if charset != "" && strings.ToUpper(charset) != "UTF8MB4" {
+		return sqlFailure{1115, "42000", fmt.Sprintf("Unknown character set: '%s'", charset)}
+	}
+	return nil
 }
 
 func splitBaseName(base string) string {
@@ -199,7 +209,8 @@ func splitBaseName(base string) string {
 // modifier and fails.
 func scanCharacterModifiers(modifiers []string) (string, string, error) {
 	charset, collation := "", ""
-	for index := 0; index < len(modifiers); index++ {
+	count := len(modifiers)
+	for index := 0; index < count; index++ {
 		token := strings.ToUpper(modifiers[index])
 		switch token {
 		case "CHARACTER":

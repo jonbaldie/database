@@ -1,1 +1,4 @@
 .worktrees/
+
+# Build output
+bin/
