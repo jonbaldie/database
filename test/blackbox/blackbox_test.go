@@ -717,7 +717,7 @@ func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 	}
 	definition := readWirePacket(t, client.conn)
 	column, ok := parseColumnDefinition(definition)
-	if !ok || column.catalog != "def" || column.schema != "" || column.table != "" || column.originalTable != "" || column.name != "'Ada'" || column.originalName != "" || column.characterSet != 45 || column.length != 12 || column.typ != 0xfd || column.flags != 1 || column.decimals != 0 {
+	if !ok || column.catalog != "def" || column.schema != "" || column.table != "" || column.originalTable != "" || column.name != "'Ada'" || column.originalName != "" || column.characterSet != 255 || column.length != 12 || column.typ != 0xfd || column.flags != 1 || column.decimals != 0 {
 		t.Fatalf("literal ColumnDefinition41 = %#v (raw %x)", column, definition)
 	}
 	_ = readWirePacket(t, client.conn) // column terminator
@@ -1703,5 +1703,89 @@ func TestMySQLStrictNumericAndBitSemantics(t *testing.T) {
 	}
 	if updated := client.query("UPDATE t SET small = 42 WHERE count = 007"); updated.err != "" || updated.affected != 1 {
 		t.Fatalf("non-canonical predicate update: %#v", updated)
+	}
+}
+
+func TestMySQLEnforcesCharacterCollationAndIdentifierSemantics(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("charset-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, address, "admin", "charset-secret")
+	defer client.close()
+
+	for _, query := range []string{
+		"CREATE DATABASE app",
+		"USE app",
+		"CREATE TABLE people (tag VARCHAR(4), sensitive VARCHAR(8) COLLATE utf8mb4_bin)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+
+	// utf8mb4 result metadata advertises the two supported collations.
+	described := client.query("SELECT tag, sensitive FROM people")
+	if described.err != "" || len(described.metadata) != 2 || described.metadata[0].characterSet != 255 || described.metadata[1].characterSet != 46 {
+		t.Fatalf("collation metadata: %#v", described)
+	}
+
+	if inserted := client.query("INSERT INTO people (tag, sensitive) VALUES ('Ada', 'Ada')"); inserted.err != "" || inserted.affected != 1 {
+		t.Fatalf("insert: %#v", inserted)
+	}
+
+	// utf8mb4_0900_ai_ci matches case-insensitively; utf8mb4_bin does not.
+	if ci := client.query("SELECT tag FROM people WHERE tag = 'ADA'"); ci.err != "" || len(ci.rows) != 1 || ci.rows[0][0] != "Ada" {
+		t.Fatalf("case-insensitive default collation: %#v", ci)
+	}
+	if bin := client.query("SELECT sensitive FROM people WHERE sensitive = 'ADA'"); bin.err != "" || len(bin.rows) != 0 {
+		t.Fatalf("utf8mb4_bin must be case-sensitive: %#v", bin)
+	}
+	if exact := client.query("SELECT sensitive FROM people WHERE sensitive = 'Ada'"); exact.err != "" || len(exact.rows) != 1 {
+		t.Fatalf("utf8mb4_bin exact match: %#v", exact)
+	}
+
+	// An assignment past the declared length fails and leaves no durable effect.
+	if tooLong := client.query("INSERT INTO people (tag) VALUES ('toolong')"); tooLong.err == "" {
+		t.Fatalf("over-length assignment accepted: %#v", tooLong)
+	}
+	if after := client.query("SELECT tag FROM people"); after.err != "" || len(after.rows) != 1 {
+		t.Fatalf("rejected write changed table: %#v", after)
+	}
+
+	// An unsupported collation fails before any durable table exists.
+	if bad := client.query("CREATE TABLE bad (c VARCHAR(4) COLLATE utf8mb4_general_ci)"); bad.err == "" {
+		t.Fatalf("unsupported collation accepted: %#v", bad)
+	}
+	if reused := client.query("CREATE TABLE bad (c VARCHAR(4))"); reused.err != "" {
+		t.Fatalf("rejected DDL left durable table: %#v", reused)
+	}
+
+	// Identifiers preserve spelling but collide under canonical caseless matching.
+	if create := client.query("CREATE TABLE Ledger (id INT)"); create.err != "" {
+		t.Fatalf("mixed-case table: %#v", create)
+	}
+	if insert := client.query("INSERT INTO ledger (id) VALUES (7)"); insert.err != "" || insert.affected != 1 {
+		t.Fatalf("caseless table reference: %#v", insert)
+	}
+	if selected := client.query("SELECT id FROM LEDGER"); selected.err != "" || len(selected.rows) != 1 || selected.rows[0][0] != "7" {
+		t.Fatalf("caseless table lookup: %#v", selected)
+	}
+	shown := client.query("SHOW CREATE TABLE ledger")
+	if shown.err != "" || len(shown.rows) != 1 || shown.rows[0][0] != "Ledger" {
+		t.Fatalf("declared spelling not preserved: %#v", shown)
+	}
+
+	// An identifier past the fixed 64-scalar ceiling fails explicitly.
+	overLong := strings.Repeat("n", 65)
+	if bad := client.query("CREATE TABLE " + overLong + " (id INT)"); bad.err == "" {
+		t.Fatalf("over-length identifier accepted: %#v", bad)
 	}
 }

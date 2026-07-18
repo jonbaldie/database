@@ -44,33 +44,32 @@ const (
 	clientPluginLenencData    = 1 << 21
 	clientSSL                 = 1 << 11
 
-	mysqlCharsetUTF8MB4GeneralCI uint16 = 45
-	mysqlCharsetBinary           uint16 = 63
-	mysqlTypeLongLong            byte   = 0x08
-	mysqlTypeNull                byte   = 0x06
-	mysqlTypeTiny                byte   = 0x01
-	mysqlTypeShort               byte   = 0x02
-	mysqlTypeLong                byte   = 0x03
-	mysqlTypeFloat               byte   = 0x04
-	mysqlTypeDouble              byte   = 0x05
-	mysqlTypeInt24               byte   = 0x09
-	mysqlTypeBit                 byte   = 0x10
-	mysqlTypeVarchar             byte   = 0x0f
-	mysqlTypeVarString           byte   = 0xfd
-	mysqlTypeString              byte   = 0xfe
-	mysqlTypeBlob                byte   = 0xfc
-	mysqlTypeTinyBlob            byte   = 0xf9
-	mysqlTypeMediumBlob          byte   = 0xfa
-	mysqlTypeLongBlob            byte   = 0xfb
-	mysqlTypeJSON                byte   = 0xf5
-	mysqlTypeNewDecimal          byte   = 0xf6
-	mysqlNotNullFlag             uint16 = 1
-	mysqlBinaryFlag              uint16 = 1 << 7
-	mysqlUnsignedFlag            uint16 = 1 << 5
-	maxPreparedParameters               = 65535
-	maxPreparedLongDataBytes            = 16 * 1024 * 1024
-	preparedTypesUnchanged       byte   = 0
-	preparedTypesSupplied        byte   = 1
+	mysqlCharsetBinary       uint16 = 63
+	mysqlTypeLongLong        byte   = 0x08
+	mysqlTypeNull            byte   = 0x06
+	mysqlTypeTiny            byte   = 0x01
+	mysqlTypeShort           byte   = 0x02
+	mysqlTypeLong            byte   = 0x03
+	mysqlTypeFloat           byte   = 0x04
+	mysqlTypeDouble          byte   = 0x05
+	mysqlTypeInt24           byte   = 0x09
+	mysqlTypeBit             byte   = 0x10
+	mysqlTypeVarchar         byte   = 0x0f
+	mysqlTypeVarString       byte   = 0xfd
+	mysqlTypeString          byte   = 0xfe
+	mysqlTypeBlob            byte   = 0xfc
+	mysqlTypeTinyBlob        byte   = 0xf9
+	mysqlTypeMediumBlob      byte   = 0xfa
+	mysqlTypeLongBlob        byte   = 0xfb
+	mysqlTypeJSON            byte   = 0xf5
+	mysqlTypeNewDecimal      byte   = 0xf6
+	mysqlNotNullFlag         uint16 = 1
+	mysqlBinaryFlag          uint16 = 1 << 7
+	mysqlUnsignedFlag        uint16 = 1 << 5
+	maxPreparedParameters           = 65535
+	maxPreparedLongDataBytes        = 16 * 1024 * 1024
+	preparedTypesUnchanged   byte   = 0
+	preparedTypesSupplied    byte   = 1
 )
 
 type Config struct {
@@ -379,7 +378,7 @@ func (a authenticator) databaseExists(name string) error {
 	if a.config.Catalog == nil {
 		return nil
 	}
-	if _, ok := a.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]; !ok {
+	if _, ok := a.config.Catalog.Snapshot().Namespaces[catalog.Key(name)]; !ok {
 		return sqlFailure{code: 1049, state: "42000", message: "unknown database '" + name + "'"}
 	}
 	return nil
@@ -668,7 +667,7 @@ func (s *transactionExecutor) save(value string) error {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
 	name := identifier(strings.TrimSpace(value))
-	s.savepoints[strings.ToLower(name)] = s.server.config.Catalog.Snapshot()
+	s.savepoints[catalog.Key(name)] = s.server.config.Catalog.Snapshot()
 	return nil
 }
 
@@ -677,7 +676,7 @@ func (s *transactionExecutor) rollbackTo(value string) error {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
 	name := identifier(strings.TrimSpace(value))
-	snapshot, found := s.savepoints[strings.ToLower(name)]
+	snapshot, found := s.savepoints[catalog.Key(name)]
 	if !found {
 		return sqlFailure{1305, "42000", "savepoint does not exist"}
 	}
@@ -689,7 +688,7 @@ func (s *transactionExecutor) rollbackTo(value string) error {
 
 func (s *transactionExecutor) release(value string) error {
 	name := identifier(strings.TrimSpace(value))
-	key := strings.ToLower(name)
+	key := catalog.Key(name)
 	if _, found := s.savepoints[key]; !found {
 		return sqlFailure{1305, "42000", "savepoint does not exist"}
 	}
@@ -759,7 +758,7 @@ func (s *catalogExecutor) showTables() (*queryResult, error) {
 	if strings.EqualFold(s.database, informationSchemaName) {
 		return informationSchemaTables(), nil
 	}
-	namespace, found := s.metadataDefinition().Namespaces[strings.ToLower(s.database)]
+	namespace, found := s.metadataDefinition().Namespaces[catalog.Key(s.database)]
 	if !found {
 		return nil, sqlFailure{1049, "42000", "unknown database"}
 	}
@@ -837,7 +836,7 @@ func snapshotNamespace(s *relationExecutor, name string) (catalog.Namespace, boo
 	if s.server.config.Catalog == nil {
 		return catalog.Namespace{}, false
 	}
-	ns, ok := s.server.config.Catalog.Snapshot().Namespaces[strings.ToLower(name)]
+	ns, ok := s.server.config.Catalog.Snapshot().Namespaces[catalog.Key(name)]
 	return ns, ok
 }
 func (s *catalogExecutor) createDatabase(query string) error {
@@ -849,6 +848,9 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	name, ok := singleIdentifier(strings.TrimSpace(query[len("create ")+len(keyword):]))
 	if !ok {
 		return sqlFailure{1064, "42000", "malformed CREATE DATABASE"}
+	}
+	if err := validateIdentifierLength(name); err != nil {
+		return err
 	}
 	if strings.EqualFold(name, informationSchemaName) {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
@@ -894,6 +896,11 @@ func parseCreateTable(query string) (tableDefinition, error) {
 	if !ok || len(target) == 0 || len(target) > 2 {
 		return tableDefinition{}, sqlFailure{1064, "42000", "invalid table name"}
 	}
+	for _, part := range target {
+		if err := validateIdentifierLength(part); err != nil {
+			return tableDefinition{}, err
+		}
+	}
 	columns, types, err := parseTableColumns(body)
 	return tableDefinition{target: target, columns: columns, types: types}, err
 }
@@ -930,6 +937,9 @@ func parseTableColumn(part string) (string, string, error) {
 	if !valid {
 		return "", "", sqlFailure{1064, "42000", "invalid column definition"}
 	}
+	if err := validateIdentifierLength(column); err != nil {
+		return "", "", err
+	}
 	fields := strings.Fields(remainder)
 	if isUnsupportedTableDefinition(column) || hasUnsupportedColumnModifier(fields) {
 		return "", "", sqlFailure{1235, "42000", "unsupported table definition"}
@@ -948,10 +958,19 @@ func parseTableColumn(part string) (string, string, error) {
 // rejects any numeric or bit declaration that violates a public ceiling.
 func columnTypeName(fields []string) (string, error) {
 	typeName := strings.ToUpper(fields[0])
-	if len(fields) >= 2 && strings.EqualFold(fields[1], "unsigned") {
+	rest := fields[1:]
+	if len(rest) >= 1 && strings.EqualFold(rest[0], "unsigned") {
 		typeName += " UNSIGNED"
+		rest = rest[1:]
 	}
 	if _, err := parseNumericType(typeName); err != nil {
+		return "", err
+	}
+	typeName, err := characterModifierTypeName(typeName, rest)
+	if err != nil {
+		return "", err
+	}
+	if _, err := parseCharacterType(typeName); err != nil {
 		return "", err
 	}
 	return typeName, nil
@@ -974,7 +993,7 @@ func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error)
 	if name == "" || s.server.config.Catalog == nil {
 		return nil, sqlFailure{1049, "42000", "unknown database"}
 	}
-	key := strings.ToLower(name)
+	key := catalog.Key(name)
 	namespace, ok := s.metadataDefinition().Namespaces[key]
 	if !ok {
 		return nil, sqlFailure{1049, "42000", "unknown database '" + name + "'"}
@@ -993,11 +1012,11 @@ func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	namespace, ok := s.metadataDefinition().Namespaces[strings.ToLower(namespaceName)]
+	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
 	if !ok {
 		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
 	}
-	table, ok := namespace.Tables[strings.ToLower(tableName)]
+	table, ok := namespace.Tables[catalog.Key(tableName)]
 	if !ok {
 		return nil, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
 	}
@@ -1135,7 +1154,7 @@ func insertColumnIndexes(table catalog.Table, columns []string) ([]int, error) {
 	result := make([]int, len(columns))
 	seen := make(map[int]bool, len(columns))
 	for index, column := range columns {
-		columnIndex, found := indexes[strings.ToLower(column)]
+		columnIndex, found := indexes[catalog.Key(column)]
 		if !found || seen[columnIndex] {
 			return nil, sqlFailure{1054, "42S22", "unknown or duplicate column '" + column + "'"}
 		}
@@ -1167,19 +1186,27 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 }
 
 // canonicalColumnValue enforces the strict value contract for a written column.
-// A column without a recorded numeric or bit type keeps its literal scalar so
-// character, temporal, and typeless columns are unaffected by this seam.
+// A column without a recorded numeric, bit, or character type keeps its literal
+// scalar so temporal and typeless columns are unaffected by this seam.
 func canonicalColumnValue(table catalog.Table, columnIndex int, raw string, row int) (string, error) {
 	value := scalar(raw)
 	typeName, known := table.ColumnType(columnIndex)
 	if !known {
 		return value, nil
 	}
-	typ, err := parseNumericType(typeName)
-	if err != nil || typ.kind == numericNone {
-		return value, nil
+	if typ, err := parseNumericType(typeName); err != nil || typ.kind != numericNone {
+		if err != nil {
+			return value, err
+		}
+		return canonicalNumericValue(typ, value, table.Columns[columnIndex], row)
 	}
-	return canonicalNumericValue(typ, value, table.Columns[columnIndex], row)
+	if typ, err := parseCharacterType(typeName); err != nil || typ.kind != characterNone {
+		if err != nil {
+			return value, err
+		}
+		return canonicalCharacterValue(typ, value, table.Columns[columnIndex], row)
+	}
+	return value, nil
 }
 
 func updateRows(s *relationExecutor, query string) (uint64, error) {
@@ -1266,7 +1293,7 @@ func assignmentValues(value string, indexes map[string]int) (map[int]string, err
 		if !ok {
 			return nil, sqlFailure{1064, "42000", "invalid UPDATE column"}
 		}
-		index, found := indexes[strings.ToLower(column)]
+		index, found := indexes[catalog.Key(column)]
 		if !found || seen[index] {
 			return nil, sqlFailure{1054, "42S22", "unknown or duplicate column '" + column + "'"}
 		}
@@ -1377,7 +1404,7 @@ func relationTable(s *relationExecutor, namespace, name string) (catalog.Table, 
 	if !found {
 		return catalog.Table{}, sqlFailure{1049, "42000", "unknown database '" + namespace + "'"}
 	}
-	table, found := ns.Tables[strings.ToLower(name)]
+	table, found := ns.Tables[catalog.Key(name)]
 	if !found {
 		return catalog.Table{}, sqlFailure{1146, "42S02", "table does not exist"}
 	}
@@ -1387,7 +1414,7 @@ func relationTable(s *relationExecutor, namespace, name string) (catalog.Table, 
 func tableColumnIndexes(table catalog.Table) (map[string]int, error) {
 	indexes := make(map[string]int, len(table.Columns))
 	for index, column := range table.Columns {
-		key := strings.ToLower(column)
+		key := catalog.Key(column)
 		if _, duplicate := indexes[key]; duplicate {
 			return nil, sqlFailure{1105, "HY000", "catalog contains duplicate column '" + column + "'"}
 		}
@@ -1567,12 +1594,30 @@ func rowMatcher(where string, table catalog.Table, indexes map[string]int) (func
 	if !ok {
 		return nil, sqlFailure{1064, "42000", "invalid WHERE column"}
 	}
-	index, found := indexes[strings.ToLower(column)]
+	index, found := indexes[catalog.Key(column)]
 	if !found {
 		return nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
 	}
 	want := matcherValue(table, index, value)
-	return func(row []string) bool { return index < len(row) && row[index] == want }, nil
+	equalityKey := columnEqualityKey(table, index)
+	wantKey := equalityKey(want)
+	return func(row []string) bool { return index < len(row) && equalityKey(row[index]) == wantKey }, nil
+}
+
+// columnEqualityKey returns the transform that decides equality for a column.
+// A character column compares through its collation key so utf8mb4_0900_ai_ci
+// matches case- and accent-insensitively and utf8mb4_bin matches bytewise;
+// every other column compares its stored representation verbatim.
+func columnEqualityKey(table catalog.Table, index int) func(string) string {
+	typeName, known := table.ColumnType(index)
+	if !known {
+		return func(value string) string { return value }
+	}
+	typ, err := parseCharacterType(typeName)
+	if err != nil || typ.kind == characterNone {
+		return func(value string) string { return value }
+	}
+	return func(value string) string { return characterComparisonKey(typ, value) }
 }
 
 // matcherValue canonicalizes an equality literal to the stored representation of
@@ -1682,7 +1727,7 @@ func projectedColumns(table catalog.Table, projection string, indexes map[string
 		if !valid {
 			return nil, nil, sqlFailure{1064, "42000", "unsupported SELECT projection"}
 		}
-		index, found := indexes[strings.ToLower(column)]
+		index, found := indexes[catalog.Key(column)]
 		if !found {
 			return nil, nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
 		}
@@ -1711,7 +1756,7 @@ func tableMetadata(namespace, tableName string, table catalog.Table, selected []
 	metadata := make([]columnMetadata, len(selected))
 	for resultIndex, columnIndex := range selected {
 		name := table.Columns[columnIndex]
-		definition := columnMetadata{catalog: "def", schema: namespace, table: tableName, originalTable: tableName, name: name, originalName: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
+		definition := columnMetadata{catalog: "def", schema: namespace, table: tableName, originalTable: tableName, name: name, originalName: name, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString}
 		if typeName, known := table.ColumnType(columnIndex); known {
 			definition.typ, definition.length, definition.characterSet = catalogColumnWireType(typeName)
 			if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(typeName)), " UNSIGNED") {
@@ -1727,25 +1772,33 @@ func catalogColumnWireType(typeName string) (byte, uint32, uint16) {
 	if typ, err := parseNumericType(typeName); err == nil && typ.kind != numericNone {
 		return numericWireType(typ)
 	}
-	normalized := strings.ToUpper(strings.TrimSpace(typeName))
-	switch {
-	case strings.HasPrefix(normalized, "CHAR"), strings.HasPrefix(normalized, "VARCHAR"):
-		return mysqlTypeVarString, characterTypeLength(normalized) * 4, mysqlCharsetUTF8MB4GeneralCI
-	default:
-		return mysqlTypeVarString, 0, mysqlCharsetUTF8MB4GeneralCI
+	if typ, err := parseCharacterType(typeName); err == nil && typ.kind != characterNone {
+		return typ.wire, characterWireLength(typ), characterWireCharset(typ)
 	}
+	return mysqlTypeVarString, 0, mysqlCharsetUTF8MB40900AICI
 }
 
-func characterTypeLength(typeName string) uint32 {
-	open, close := strings.IndexByte(typeName, '('), strings.IndexByte(typeName, ')')
-	if open < 0 || close <= open+1 {
+// characterWireLength reports the result-column display length: a bounded text
+// column advertises up to four utf8mb4 bytes per declared character, a bounded
+// binary column advertises its declared byte length, and an unbounded family
+// advertises zero.
+func characterWireLength(typ characterType) uint32 {
+	if !typ.bounded {
 		return 0
 	}
-	length, err := strconv.ParseUint(strings.TrimSpace(typeName[open+1:close]), 10, 32)
-	if err != nil {
-		return 0
+	if typ.kind == characterText {
+		return uint32(typ.length) * 4
 	}
-	return uint32(length)
+	return uint32(typ.length)
+}
+
+// validateIdentifierLength enforces the fixed identifier ceiling, counted in
+// Unicode scalar values of the declared spelling, before any durable effect.
+func validateIdentifierLength(name string) error {
+	if catalog.IdentifierLength(name) > catalog.IdentifierLimit {
+		return sqlFailure{1059, "42000", fmt.Sprintf("Identifier name '%s' is too long", name)}
+	}
+	return nil
 }
 
 // tableTarget resolves an unqualified table against the current namespace and
@@ -1787,7 +1840,7 @@ func hasUnsupportedColumnModifier(fields []string) bool {
 	}
 	for _, field := range fields[1:] {
 		switch strings.ToLower(strings.Trim(field, "(),")) {
-		case "not", "null", "default", "primary", "unique", "references", "check", "constraint", "auto_increment", "generated", "comment", "collate", "character":
+		case "not", "null", "default", "primary", "unique", "references", "check", "constraint", "auto_increment", "generated", "comment":
 			return true
 		}
 	}
@@ -1803,7 +1856,7 @@ type literalQueryResult struct {
 
 func parseLiteralResult(expression string) literalQueryResult {
 	value := strings.TrimSpace(expression)
-	metadata := columnMetadata{catalog: "def", name: value, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString, flags: mysqlNotNullFlag}
+	metadata := columnMetadata{catalog: "def", name: value, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString, flags: mysqlNotNullFlag}
 	if strings.EqualFold(value, "null") {
 		metadata.characterSet = mysqlCharsetBinary
 		metadata.typ = mysqlTypeNull
@@ -2183,7 +2236,7 @@ func everyColumnFits(metadata []columnMetadata, maximum int64) bool {
 }
 
 func preparedParameterMetadata(index int) columnMetadata {
-	return columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", index+1), characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarchar}
+	return columnMetadata{catalog: "def", name: fmt.Sprintf("param%d", index+1), characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarchar}
 }
 
 func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, error) {
@@ -2227,7 +2280,7 @@ func (s *preparedPreparation) queryColumns(query string, preserveMetadata bool) 
 	}
 	metadata := make([]columnMetadata, len(result.columns))
 	for index, name := range result.columns {
-		metadata[index] = columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB4GeneralCI, typ: mysqlTypeVarString}
+		metadata[index] = columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString}
 		if preserveMetadata && index < len(result.metadata) {
 			metadata[index] = result.metadata[index]
 		}
