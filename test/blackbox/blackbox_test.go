@@ -1619,3 +1619,89 @@ func bytesIndex(value []byte, target byte) int {
 	}
 	return -1
 }
+
+func TestMySQLStrictNumericAndBitSemantics(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("numeric-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, address, "admin", "numeric-secret")
+	defer client.close()
+
+	for _, query := range []string{
+		"CREATE DATABASE app",
+		"USE app",
+		"CREATE TABLE t (small TINYINT, count INT UNSIGNED, price DECIMAL(10,2), ratio DOUBLE, active BOOLEAN, mask BIT(8))",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+
+	for _, rejected := range []string{
+		"CREATE TABLE bad_decimal (v DECIMAL(66,2))",
+		"CREATE TABLE bad_bit (v BIT(65))",
+	} {
+		if result := client.query(rejected); result.err == "" {
+			t.Fatalf("out-of-ceiling declaration accepted: %q", rejected)
+		}
+	}
+
+	inserted := client.query("INSERT INTO t VALUES (-128, 007, 1.5, 2.5, TRUE, b'101')")
+	if inserted.err != "" || inserted.affected != 1 {
+		t.Fatalf("valid numeric insert: %#v", inserted)
+	}
+	selected := client.query("SELECT small, count, price, ratio, active, mask FROM t")
+	if selected.err != "" || len(selected.rows) != 1 || strings.Join(selected.rows[0], ",") != "-128,7,1.50,2.5,1,5" {
+		t.Fatalf("canonical numeric values: %#v", selected)
+	}
+	if len(selected.metadata) != 6 || selected.metadata[2].typ != 0xf6 || selected.metadata[4].typ != 0x01 || selected.metadata[5].typ != 0x10 {
+		t.Fatalf("numeric result metadata types: %#v", selected.metadata)
+	}
+	if selected.metadata[1].flags&0x20 == 0 {
+		t.Fatalf("unsigned column missing unsigned flag: %#v", selected.metadata[1])
+	}
+
+	for _, rejected := range []string{
+		"INSERT INTO t (small) VALUES (128)",
+		"INSERT INTO t (count) VALUES (-1)",
+		"INSERT INTO t (price) VALUES (1.234)",
+		"INSERT INTO t (ratio) VALUES ('inf')",
+		"INSERT INTO t (mask) VALUES (256)",
+		"INSERT INTO t (small) VALUES ('abc')",
+	} {
+		if result := client.query(rejected); result.err == "" {
+			t.Fatalf("strict numeric violation accepted: %q", rejected)
+		}
+	}
+	if rows := client.query("SELECT small FROM t"); rows.err != "" || len(rows.rows) != 1 {
+		t.Fatalf("rejected numeric writes leaked rows: %#v", rows)
+	}
+
+	if failed := client.query("UPDATE t SET small = 200 WHERE small = -128"); failed.err == "" {
+		t.Fatalf("out-of-range update accepted: %#v", failed)
+	}
+	if rows := client.query("SELECT small FROM t"); rows.err != "" || len(rows.rows) != 1 || rows.rows[0][0] != "-128" {
+		t.Fatalf("rejected update leaked a partial change: %#v", rows)
+	}
+
+	if explained := client.query("EXPLAIN SELECT small, mask FROM t WHERE count = 7"); explained.err != "" || len(explained.rows) == 0 {
+		t.Fatalf("numeric query is not explainable: %#v", explained)
+	}
+
+	// A non-canonical predicate literal must compare against the canonical
+	// stored value: WHERE count = 007 matches the stored 7.
+	if matched := client.query("SELECT small FROM t WHERE count = 007"); matched.err != "" || len(matched.rows) != 1 || matched.rows[0][0] != "-128" {
+		t.Fatalf("non-canonical numeric predicate did not match canonical value: %#v", matched)
+	}
+	if updated := client.query("UPDATE t SET small = 42 WHERE count = 007"); updated.err != "" || updated.affected != 1 {
+		t.Fatalf("non-canonical predicate update: %#v", updated)
+	}
+}
