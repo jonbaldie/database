@@ -2637,12 +2637,48 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
 	}
 	if len(parameters) > 0 {
+		if expression, ok := preparedScalarExpression(query); ok {
+			if metadata, ok := preparedScalarMetadata(expression, len(parameters)); ok {
+				return metadata, nil
+			}
+		}
 		return s.queryColumns(validated, true)
 	}
 	if literal := parseLiteralResult(strings.TrimSpace(query[len("select "):])); literal.supported {
 		return []columnMetadata{literal.metadata}, nil
 	}
 	return s.queryColumns(validated, true)
+}
+
+func preparedScalarExpression(query string) (string, bool) {
+	expression := strings.TrimSpace(query[len("select "):])
+	return expression, keywordAt(expression, "from") < 0
+}
+
+// preparedScalarMetadata evaluates a FROM-less expression with representative
+// parameter domains. Preparing with NULL makes every NULL-propagating function
+// advertise NULL metadata, even though the bound execution will return its
+// actual result type. String and numeric representatives cover the strict
+// function families without allowing prepare-time metadata to depend on a
+// particular bound value.
+func preparedScalarMetadata(expression string, parameters int) ([]columnMetadata, bool) {
+	for _, replacement := range []string{quote(""), "0", "0.0"} {
+		values := make([]string, parameters)
+		for index := range values {
+			values[index] = replacement
+		}
+		bound, err := bindPreparedQuery(expression, values)
+		if err != nil {
+			continue
+		}
+		_, _, metadata, err := scalarColumn(bound)
+		if err != nil {
+			continue
+		}
+		metadata.name = expression
+		return []columnMetadata{metadata}, true
+	}
+	return nil, false
 }
 
 func nullPreparedParameters(count int) []string {

@@ -157,3 +157,18 @@ func TestParsedLiteralMatchesScalarColumn(t *testing.T) {
 		t.Errorf("parseLiteralResult reported an unsupported expression as supported")
 	}
 }
+
+func TestPreparedScalarMetadataInfersParameterDomain(t *testing.T) {
+	executor := expressionExecutor(t)
+	preparation := &preparedPreparation{executor.session}
+	metadata, err := preparation.preparedColumns("SELECT SUBSTRING(?, 2)")
+	if err != nil || len(metadata) != 1 {
+		t.Fatalf("parameterized SUBSTRING metadata unavailable: err=%v metadata=%#v", err, metadata)
+	}
+	if metadata[0].typ != mysqlTypeVarString || metadata[0].characterSet != mysqlCharsetUTF8MB40900AICI {
+		t.Fatalf("parameterized SUBSTRING metadata = %#v, want utf8mb4 string", metadata[0])
+	}
+	if metadata[0].name != "SUBSTRING(?, 2)" {
+		t.Fatalf("parameterized SUBSTRING metadata name = %q", metadata[0].name)
+	}
+}

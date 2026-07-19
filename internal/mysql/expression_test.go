@@ -1,6 +1,9 @@
 package mysql
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func evalRender(t *testing.T, expression string) string {
 	t.Helper()
@@ -249,5 +252,21 @@ func TestEvaluateExtendedFunctionSemantics(t *testing.T) {
 	}
 	for _, expression := range []string{"POW(2, 3)", "SUBSTR('abc', 1)"} {
 		evalError(t, expression)
+	}
+}
+
+func TestExtendedFunctionsRejectInvalidBoundsAndCeilings(t *testing.T) {
+	for _, expression := range []string{
+		"SUBSTRING('abc', 99, 'x')",
+		"ROUND(1.2, 31)",
+		"ROUND(1.2, -31)",
+	} {
+		evalError(t, expression)
+	}
+
+	input := strings.Repeat("a", characterScalarCeiling/2+1)
+	_, err := replaceValue([]exprValue{stringValue(input), stringValue("a"), stringValue("aa")})
+	if !isFailureCode(err, 1406) {
+		t.Fatalf("REPLACE expanded scalar was not rejected: %v", err)
 	}
 }
