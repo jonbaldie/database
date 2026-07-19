@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"fmt"
 	"math"
 	"strings"
 )
@@ -40,6 +41,9 @@ func roundPosition(arguments []exprValue) (int, error) {
 	}
 	if places > int64(math.MaxInt) || places < int64(math.MinInt) {
 		return 0, outOfRangeValue()
+	}
+	if places > 30 || places < -30 {
+		return 0, sqlFailure{1426, "42000", fmt.Sprintf("Too-big precision %d specified for 'round'. Maximum is 30", places)}
 	}
 	return int(places), nil
 }
@@ -237,12 +241,15 @@ func hasNullArgument(arguments []exprValue) bool {
 
 func substringBounds(length int, position int64, arguments []exprValue) (int, int, error) {
 	start := substringStart(length, position)
-	if start >= length || len(arguments) == 2 {
+	if len(arguments) == 2 {
 		return start, length, nil
 	}
 	partLength, err := expressionInteger(arguments[2])
 	if err != nil {
 		return 0, 0, err
+	}
+	if start >= length {
+		return start, start, nil
 	}
 	if partLength <= 0 {
 		return start, start, nil
@@ -287,9 +294,16 @@ func replaceValue(arguments []exprValue) (exprValue, error) {
 		return exprValue{}, err
 	}
 	if search == "" {
-		return stringValue(text), nil
+		return boundedStringValue(text)
 	}
-	return stringValue(strings.ReplaceAll(text, search, replacement)), nil
+	return boundedStringValue(strings.ReplaceAll(text, search, replacement))
+}
+
+func boundedStringValue(value string) (exprValue, error) {
+	if len(value) > characterScalarCeiling {
+		return exprValue{}, dataTooLong("REPLACE", 1)
+	}
+	return stringValue(value), nil
 }
 
 func locateValue(arguments []exprValue) (exprValue, error) {
