@@ -25,6 +25,10 @@ type Table struct {
 	Rows        [][]string `json:"rows,omitempty"`
 }
 
+// ErrRevisionConflict reports that a concurrent catalog commit superseded the
+// snapshot a caller tried to publish.
+var ErrRevisionConflict = errors.New("catalog changed concurrently")
+
 // ColumnType reports the recorded logical type without inventing a fallback
 // for catalog entries written before column types were persisted.
 func (t Table) ColumnType(index int) (string, bool) {
@@ -38,6 +42,7 @@ type Store struct {
 	mu         sync.Mutex
 	path       string
 	definition Definition
+	revision   uint64
 }
 
 func Open(directory string) (*Store, error) {
@@ -173,24 +178,48 @@ func (s *Store) ReplaceRows(namespace, table string, rows [][]string) error {
 }
 
 func (s *Store) Snapshot() Definition {
+	definition, _ := s.SnapshotWithRevision()
+	return definition
+}
+
+// SnapshotWithRevision returns one immutable view and the revision that owns
+// it. The revision is process-local and lets a transaction reject a stale
+// whole-catalog replacement instead of silently overwriting another commit.
+func (s *Store) SnapshotWithRevision() (Definition, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneDefinition(s.definition)
+	return cloneDefinition(s.definition), s.revision
 }
 
 // Replace atomically restores a previously captured catalog snapshot.
 func (s *Store) Replace(definition Definition) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.replaceLocked(definition)
+}
+
+// ReplaceIfRevision publishes definition only if expected is still current.
+// It is the commit gate for session-local transaction snapshots.
+func (s *Store) ReplaceIfRevision(expected uint64, definition Definition) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.revision != expected {
+		return ErrRevisionConflict
+	}
+	return s.replaceLocked(definition)
+}
+
+// Apply validates an isolated catalog transformation without publishing it.
+// Transaction sessions use this to keep uncommitted work private.
+func Apply(definition Definition, action func(*Definition) error) (Definition, error) {
 	staged := cloneDefinition(definition)
+	if err := action(&staged); err != nil {
+		return Definition{}, err
+	}
 	if err := validateDefinition(staged); err != nil {
-		return fmt.Errorf("invalid catalog: %w", err)
+		return Definition{}, fmt.Errorf("invalid catalog: %w", err)
 	}
-	if err := s.persistLocked(staged); err != nil {
-		return err
-	}
-	s.definition = staged
-	return nil
+	return staged, nil
 }
 
 func cloneDefinition(source Definition) Definition {
@@ -232,6 +261,20 @@ func (s *Store) mutate(action func(*Definition) error) error {
 		return err
 	}
 	s.definition = staged
+	s.revision++
+	return nil
+}
+
+func (s *Store) replaceLocked(definition Definition) error {
+	staged := cloneDefinition(definition)
+	if err := validateDefinition(staged); err != nil {
+		return fmt.Errorf("invalid catalog: %w", err)
+	}
+	if err := s.persistLocked(staged); err != nil {
+		return err
+	}
+	s.definition = staged
+	s.revision++
 	return nil
 }
 

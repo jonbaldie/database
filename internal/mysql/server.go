@@ -322,16 +322,53 @@ func (r *connectionRegistry) closeGracefully(listener net.Listener) error {
 }
 
 type session struct {
-	server              *Server
-	username            string
-	database            string
-	initialDB           string
-	statements          map[uint32]*preparedStatement
-	nextStmtID          uint32
-	longDataBytes       int
-	transaction         bool
-	transactionSnapshot catalog.Definition
-	savepoints          map[string]catalog.Definition
+	server        *Server
+	username      string
+	database      string
+	initialDB     string
+	statements    map[uint32]*preparedStatement
+	nextStmtID    uint32
+	longDataBytes int
+	transactionState
+}
+
+type transactionState struct {
+	transactionSettings
+	transactionWork
+	savepointState
+	statementState
+}
+
+type transactionSettings struct {
+	autocommitOff bool
+	isolation     isolationLevel
+	readOnly      bool
+	nextIsolation isolationLevel
+	nextReadOnly  bool
+}
+
+type transactionWork struct {
+	transaction          bool
+	transactionSnapshot  catalog.Definition
+	transactionRevision  uint64
+	transactionStateSet  bool
+	transactionReadSet   bool
+	transactionDirty     bool
+	transactionIsolation isolationLevel
+	transactionReadOnly  bool
+	transactionMutations []func(*catalog.Definition) error
+}
+
+type savepointState struct {
+	savepoints         map[string]catalog.Definition
+	savepointDirty     map[string]bool
+	savepointMutations map[string]int
+	savepointRead      map[string]bool
+}
+
+type statementState struct {
+	statementDefinition    catalog.Definition
+	statementDefinitionSet bool
 }
 
 type preparedStatement struct {
@@ -593,17 +630,12 @@ func (s *queryExecutor) databaseExists(name string) error {
 }
 
 func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	lower := strings.ToLower(query)
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
 	}
-	for _, handler := range s.statementHandlers() {
-		result, handled, err := handler(query, lower)
-		if handled {
-			return result, err
-		}
-	}
-	return nil, sqlFailure{1064, "42000", "unsupported query: " + query}
+	return s.executeWithTransaction(query, lower)
 }
 
 type statementHandler func(query, lower string) (*queryResult, bool, error)
@@ -617,10 +649,6 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 		s.relationStatement,
 		s.operationStatement,
 	}
-}
-
-func (s *textStatementExecutor) settingStatement(_ string, lower string) (*queryResult, bool, error) {
-	return nil, strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset "), nil
 }
 
 func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
@@ -684,80 +712,11 @@ func (s *textStatementExecutor) operationStatement(query, lower string) (*queryR
 }
 
 func (s *textStatementExecutor) transactionStatement(query, lower string) (*queryResult, bool, error) {
-	transactions := transactionExecutor{s.session}
-	switch {
-	case lower == "begin" || lower == "start transaction":
-		return nil, true, transactions.begin()
-	case lower == "commit":
-		return nil, true, transactions.commit()
-	case strings.HasPrefix(lower, "savepoint "):
-		return nil, true, transactions.save(query[len("SAVEPOINT "):])
-	case strings.HasPrefix(lower, "rollback to savepoint "):
-		return nil, true, transactions.rollbackTo(query[len("ROLLBACK TO SAVEPOINT "):])
-	case strings.HasPrefix(lower, "release savepoint "):
-		return nil, true, transactions.release(query[len("RELEASE SAVEPOINT "):])
-	case lower == "rollback":
-		return nil, true, transactions.rollback()
-	default:
+	handler, handled := findTransactionHandler(lower)
+	if !handled {
 		return nil, false, nil
 	}
-}
-
-func (s *transactionExecutor) begin() error {
-	if s.server.config.Catalog != nil {
-		s.transactionSnapshot = s.server.config.Catalog.Snapshot()
-		s.transaction = true
-	}
-	return nil
-}
-
-func (s *transactionExecutor) commit() error {
-	s.transaction = false
-	s.transactionSnapshot = catalog.Definition{}
-	return nil
-}
-
-func (s *transactionExecutor) save(value string) error {
-	if s.server.config.Catalog == nil {
-		return sqlFailure{1105, "HY000", "database is not initialized"}
-	}
-	name := identifier(strings.TrimSpace(value))
-	s.savepoints[catalog.Key(name)] = s.server.config.Catalog.Snapshot()
-	return nil
-}
-
-func (s *transactionExecutor) rollbackTo(value string) error {
-	if s.server.config.Catalog == nil {
-		return sqlFailure{1105, "HY000", "database is not initialized"}
-	}
-	name := identifier(strings.TrimSpace(value))
-	snapshot, found := s.savepoints[catalog.Key(name)]
-	if !found {
-		return sqlFailure{1305, "42000", "savepoint does not exist"}
-	}
-	if err := s.server.config.Catalog.Replace(snapshot); err != nil {
-		return sqlFailure{1105, "HY000", err.Error()}
-	}
-	return nil
-}
-
-func (s *transactionExecutor) release(value string) error {
-	name := identifier(strings.TrimSpace(value))
-	key := catalog.Key(name)
-	if _, found := s.savepoints[key]; !found {
-		return sqlFailure{1305, "42000", "savepoint does not exist"}
-	}
-	delete(s.savepoints, key)
-	return nil
-}
-
-func (s *transactionExecutor) rollback() error {
-	if s.transaction && s.server.config.Catalog != nil {
-		if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
-			return sqlFailure{1105, "HY000", err.Error()}
-		}
-	}
-	return s.commit()
+	return nil, true, handler(s.session, query)
 }
 
 func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryResult, bool, error) {
@@ -874,24 +833,20 @@ func (s *databaseSelector) use(name string) error {
 }
 
 func (s *databaseSelector) databaseExists(name string) error {
-	return s.server.auth.databaseExists(identifier(name))
+	return s.session.databaseExists(identifier(name))
 }
 
 func (s *catalogExecutor) metadataDefinition() catalog.Definition {
-	if s.transaction {
-		return s.transactionSnapshot
-	}
 	if s.server.config.Catalog == nil {
-		return catalog.Definition{Namespaces: map[string]catalog.Namespace{}}
+		return emptyDefinition()
 	}
+	// Catalog metadata is statement-scoped even when ordinary data reads use
+	// a repeatable-read transaction snapshot.
 	return s.server.config.Catalog.Snapshot()
 }
 
 func snapshotNamespace(s *relationExecutor, name string) (catalog.Namespace, bool) {
-	if s.server.config.Catalog == nil {
-		return catalog.Namespace{}, false
-	}
-	ns, ok := s.server.config.Catalog.Snapshot().Namespaces[catalog.Key(name)]
+	ns, ok := s.session.currentDefinition().Namespaces[catalog.Key(name)]
 	return ns, ok
 }
 func (s *catalogExecutor) createDatabase(query string) error {
@@ -910,11 +865,15 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	if strings.EqualFold(name, informationSchemaName) {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
-	if s.server.config.Catalog == nil {
-		return sqlFailure{1105, "HY000", "database is not initialized"}
-	}
-	if err := s.server.config.Catalog.CreateNamespace(name); err != nil {
-		return sqlFailure{1007, "HY000", err.Error()}
+	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
+		key := catalog.Key(name)
+		if _, exists := definition.Namespaces[key]; exists {
+			return errors.New("namespace already exists")
+		}
+		definition.Namespaces[key] = catalog.Namespace{Name: name, Tables: map[string]catalog.Table{}}
+		return nil
+	}); err != nil {
+		return catalogMutationFailure(err, sqlFailure{1007, "HY000", err.Error()})
 	}
 	return nil
 }
@@ -930,8 +889,24 @@ func createTable(s *relationExecutor, query string) error {
 	if len(table.columns) == 0 || s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
-	if err := s.server.config.Catalog.CreateTableWithTypes(namespace, name, table.columns, table.types); err != nil {
-		return sqlFailure{1050, "42S01", err.Error()}
+	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
+		namespaceDefinition, exists := definition.Namespaces[catalog.Key(namespace)]
+		if !exists {
+			return errors.New("namespace does not exist")
+		}
+		key := catalog.Key(name)
+		if _, exists := namespaceDefinition.Tables[key]; exists {
+			return errors.New("table already exists")
+		}
+		tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...)}
+		if len(table.types) > 0 {
+			tableDefinition.ColumnTypes = append([]string(nil), table.types...)
+		}
+		namespaceDefinition.Tables[key] = tableDefinition
+		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
+		return nil
+	}); err != nil {
+		return catalogMutationFailure(err, sqlFailure{1050, "42S01", err.Error()})
 	}
 	return nil
 }
@@ -1140,20 +1115,45 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
+
+func mutateTableRows(definition *catalog.Definition, namespaceName, tableName string, transform func(catalog.Table) ([][]string, error)) error {
+	namespace, found := definition.Namespaces[catalog.Key(namespaceName)]
+	if !found {
+		return errors.New("namespace does not exist")
+	}
+	table, found := namespace.Tables[catalog.Key(tableName)]
+	if !found {
+		return errors.New("table does not exist")
+	}
+	rows, err := transform(table)
+	if err != nil {
+		return err
+	}
+	table.Rows = cloneRows(rows)
+	namespace.Tables[catalog.Key(tableName)] = table
+	definition.Namespaces[catalog.Key(namespaceName)] = namespace
+	return nil
+}
+
 func insertRows(s *relationExecutor, query string) (uint64, error) {
 	plan, err := makeInsertPlan(s, query)
 	if err != nil {
 		return 0, err
 	}
-	rows, affected, err := applyInsertPlan(plan)
+	_, affected, err := applyInsertPlan(plan)
 	if err != nil {
 		return 0, err
 	}
-	if s.server.config.Catalog == nil {
-		return 0, sqlFailure{1105, "HY000", "database is not initialized"}
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _, err := applyInsertPlan(currentPlan)
+			return rows, err
+		})
 	}
-	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
-		return 0, sqlFailure{1105, "HY000", err.Error()}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
 }
@@ -1320,12 +1320,20 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	rows, affected, err := applyUpdatePlan(plan)
+	_, affected, err := applyUpdatePlan(plan)
 	if err != nil {
 		return 0, err
 	}
-	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
-		return 0, sqlFailure{1105, "HY000", err.Error()}
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _, err := applyUpdatePlan(currentPlan)
+			return rows, err
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
 }
@@ -1451,9 +1459,17 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	rows, affected := applyDeletePlan(plan)
-	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
-		return 0, sqlFailure{1105, "HY000", err.Error()}
+	_, affected := applyDeletePlan(plan)
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _ := applyDeletePlan(currentPlan)
+			return rows, nil
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
 }
@@ -1932,7 +1948,7 @@ func tableTarget(s *relationExecutor, parts []string) (string, string, error) {
 	}
 	// parts have already been parsed as SQL identifiers. Re-parsing would turn
 	// a literal dot or backtick in a quoted identifier into syntax.
-	if err := s.server.auth.databaseExists(namespace); err != nil {
+	if err := (&databaseSelector{s.session}).databaseExists(namespace); err != nil {
 		return "", "", err
 	}
 	return namespace, table, nil
@@ -2604,10 +2620,14 @@ func (s *preparedLifecycle) resetConnection() error {
 	if err := rollbackTransaction(s.session); err != nil {
 		return err
 	}
+	s.autocommitOff = false
+	s.isolation = isolationRepeatableRead
+	s.readOnly = false
+	s.nextIsolation = isolationRepeatableRead
+	s.nextReadOnly = false
 	s.database = s.initialDB
 	s.closeAllPrepared()
 	s.longDataBytes = 0
-	s.savepoints = make(map[string]catalog.Definition)
 	return nil
 }
 
@@ -2630,18 +2650,6 @@ func clearPreparedLongData(session *session, statement *preparedStatement) {
 		session.longDataBytes -= len(value)
 	}
 	statement.longData = make(map[uint16][]byte)
-}
-
-func rollbackTransaction(s *session) error {
-	if s.transaction && s.server.config.Catalog != nil {
-		if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
-			return sqlFailure{1105, "HY000", err.Error()}
-		}
-	}
-	s.transaction = false
-	s.transactionSnapshot = catalog.Definition{}
-	s.savepoints = make(map[string]catalog.Definition)
-	return nil
 }
 
 func bindPreparedQuery(query string, values []string) (string, error) {
