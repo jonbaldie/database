@@ -28,6 +28,23 @@ const (
 	temporalYear
 )
 
+func temporalLabel(kind temporalKind) string {
+	switch kind {
+	case temporalDate:
+		return "DATE"
+	case temporalTime:
+		return "TIME"
+	case temporalDatetime:
+		return "DATETIME"
+	case temporalTimestamp:
+		return "TIMESTAMP"
+	case temporalYear:
+		return "YEAR"
+	default:
+		return "temporal"
+	}
+}
+
 // temporalType is the parsed description of a declared temporal column. A
 // temporalNone kind means the declaration belongs to another contract (numeric,
 // character, or an unknown legacy type).
@@ -556,6 +573,9 @@ func readPreparedTemporal(payload []byte, offset int, typ preparedParameterType)
 	if !validPreparedTemporalBodyLength(typ.typ, len(body)) {
 		return "", offset, errors.New("malformed temporal prepared parameter")
 	}
+	if len(body) == 0 {
+		return "", offset, errors.New("zero temporal prepared parameter")
+	}
 	if typ.typ == mysqlTypeTime {
 		value, err := decodePreparedTime(body)
 		if err != nil {
@@ -598,7 +618,7 @@ func preparedDatetimeParts(body []byte) (int, int, int, int, int, int, int, erro
 	year, month, day := preparedDateParts(body)
 	hour, minute, second := preparedClockParts(body)
 	micros := preparedMicroseconds(body)
-	if !validPreparedDatetimeParts(month, day, hour, minute, second, micros) {
+	if !validPreparedDatetimeParts(year, month, day, hour, minute, second, micros) {
 		return 0, 0, 0, 0, 0, 0, 0, errors.New("malformed temporal prepared parameter")
 	}
 	return year, month, day, hour, minute, second, micros, nil
@@ -625,15 +645,10 @@ func preparedMicroseconds(body []byte) int {
 	return int(binary.LittleEndian.Uint32(body[7:11]))
 }
 
-func validPreparedDatetimeParts(month, day, hour, minute, second, micros int) bool {
-	values := []int{month, day, hour, minute, second, micros}
-	limits := []int{12, 31, 23, 59, 59, 999999}
-	for index, value := range values {
-		if value > limits[index] {
-			return false
-		}
-	}
-	return true
+func validPreparedDatetimeParts(year, month, day, hour, minute, second, micros int) bool {
+	return year >= 1000 && year <= 9999 &&
+		validCalendarDay(year, month, day) &&
+		hour <= 23 && minute <= 59 && second <= 59 && micros <= 999999
 }
 
 func decodePreparedTime(body []byte) (string, error) {

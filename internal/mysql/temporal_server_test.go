@@ -149,6 +149,29 @@ func TestTimestampSessionOffsetAppliesToWritePredicateAndRead(t *testing.T) {
 	if result, err = executor.execute("SELECT at FROM events WHERE at = NULL"); err != nil || len(result.rows) != 0 {
 		t.Fatalf("temporal NULL predicate = %#v err %v", result, err)
 	}
+	if _, err := executor.execute("SELECT at FROM events WHERE at = 'NULL'"); err == nil {
+		t.Fatal("quoted NULL was accepted as a temporal value")
+	}
+}
+
+func TestTableResultsDistinguishNullText(t *testing.T) {
+	executor := currentTimeExecutor(t, "UTC", time.Date(2026, 7, 18, 22, 0, 0, 0, time.UTC))
+	if _, err := executor.execute("CREATE TABLE labels (value VARCHAR(4))"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := executor.execute("INSERT INTO labels VALUES ('NULL'), (NULL)"); err != nil {
+		t.Fatalf("insert values: %v", err)
+	}
+	result, err := executor.execute("SELECT value FROM labels")
+	if err != nil || len(result.rows) != 2 || len(result.nulls) != 2 {
+		t.Fatalf("NULL/text result = %#v err %v", result, err)
+	}
+	if result.rows[0][0] != "NULL" || result.nulls[0][0] {
+		t.Fatalf("quoted NULL was encoded as SQL NULL: %#v", result)
+	}
+	if result.rows[1][0] != "NULL" || !result.nulls[1][0] {
+		t.Fatalf("unquoted NULL was not encoded as SQL NULL: %#v", result)
+	}
 }
 
 func TestTimestampOffsetBelongsToTheSession(t *testing.T) {
@@ -195,7 +218,6 @@ func TestPreparedTemporalMatchesTextInput(t *testing.T) {
 		{mysqlTypeTime, []byte{8, 0, 0, 0, 0, 0, 12, 0, 0}, "12:00:00"},
 		{mysqlTypeTime, []byte{8, 1, 0, 0, 0, 0, 12, 0, 0}, "-12:00:00"},
 		{mysqlTypeTime, []byte{8, 0, 1, 0, 0, 0, 14, 0, 0}, "38:00:00"},
-		{mysqlTypeDate, []byte{0}, "0000-00-00"},
 	}
 	for _, c := range cases {
 		got, next, err := readPreparedTemporal(c.payload, 0, preparedParameterType{typ: c.wire})
@@ -252,6 +274,9 @@ func TestPreparedTemporalRejectsMalformedLength(t *testing.T) {
 		wire    byte
 		payload []byte
 	}{
+		{mysqlTypeDate, []byte{0}},
+		{mysqlTypeDatetime, []byte{7, 0, 0, 2, 30, 0, 0, 0}},
+		{mysqlTypeDatetime, []byte{7, 0xE5, 0x07, 2, 30, 0, 0, 0}},
 		{mysqlTypeDate, []byte{1, 1}},
 		{mysqlTypeDatetime, []byte{5, 0, 0, 1, 1, 1}},
 		{mysqlTypeTime, []byte{9, 0, 0, 0, 0, 0, 1, 2, 3, 4}},

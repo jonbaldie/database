@@ -76,6 +76,7 @@ const (
 	maxPreparedLongDataBytes        = 16 * 1024 * 1024
 	preparedTypesUnchanged   byte   = 0
 	preparedTypesSupplied    byte   = 1
+	storedSQLNullValue              = "\x00database-sql-null"
 )
 
 type Config struct {
@@ -1321,6 +1322,9 @@ func canonicalColumnValue(table catalog.Table, columnIndex int, raw string, row 
 }
 
 func canonicalColumnValueAtOffset(table catalog.Table, columnIndex int, raw string, row, offsetMinutes int) (string, error) {
+	if isSQLNullLiteral(raw) {
+		return storedSQLNullValue, nil
+	}
 	value := scalar(raw)
 	preparedWire, preparedValue, prepared := decodePreparedTemporalLiteral(value)
 	if prepared {
@@ -1330,16 +1334,43 @@ func canonicalColumnValueAtOffset(table catalog.Table, columnIndex int, raw stri
 	if !known {
 		return value, nil
 	}
-	if prepared && preparedWire == mysqlTypeDate {
-		if typ, err := parseTemporalType(typeName); err == nil && typ.kind == temporalDatetime {
-			date, err := canonicalDateValue(value, table.Columns[columnIndex], row)
-			if err != nil {
-				return "", err
-			}
-			value = date + " 00:00:00"
-		}
+	if err := rejectQuotedTemporalNull(typeName, value, table.Columns[columnIndex], row); err != nil {
+		return "", err
+	}
+	value, err := normalizePreparedDate(typeName, value, preparedWire, prepared, table.Columns[columnIndex], row)
+	if err != nil {
+		return "", err
 	}
 	return canonicalTypedValueAtOffset(typeName, value, table.Columns[columnIndex], row, offsetMinutes)
+}
+
+func rejectQuotedTemporalNull(typeName, value, column string, row int) error {
+	if !isSQLNullSpelling(value) {
+		return nil
+	}
+	typ, err := parseTemporalType(typeName)
+	if err != nil {
+		return err
+	}
+	if typ.kind == temporalNone {
+		return nil
+	}
+	return incorrectTemporal(temporalLabel(typ.kind), column, value, row)
+}
+
+func normalizePreparedDate(typeName, value string, wire byte, prepared bool, column string, row int) (string, error) {
+	if !prepared || wire != mysqlTypeDate {
+		return value, nil
+	}
+	typ, err := parseTemporalType(typeName)
+	if err != nil || typ.kind != temporalDatetime {
+		return value, nil
+	}
+	date, err := canonicalDateValue(value, column, row)
+	if err != nil {
+		return "", err
+	}
+	return date + " 00:00:00", nil
 }
 
 // scalarCanonicalizer reports whether a declared type belongs to its family and,
@@ -1825,6 +1856,9 @@ func rowMatcherAtOffset(where string, table catalog.Table, indexes map[string]in
 	if !found {
 		return nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
 	}
+	if isSQLNullLiteral(value) {
+		return func([]string) bool { return false }, nil
+	}
 	want, err := matcherValueAtOffsetChecked(table, index, value, offsetMinutes)
 	if err != nil {
 		return nil, err
@@ -1872,6 +1906,15 @@ func matcherValueAtOffsetChecked(table catalog.Table, index int, value string, o
 	typeName, known := table.ColumnType(index)
 	if !known {
 		return want, nil
+	}
+	if isSQLNullSpelling(want) && !isSQLNullLiteral(value) {
+		typ, err := parseTemporalType(typeName)
+		if err != nil {
+			return want, err
+		}
+		if typ.kind != temporalNone {
+			return want, incorrectTemporal(temporalLabel(typ.kind), table.Columns[index], want, 1)
+		}
 	}
 	if canonical, ok := canonicalMatcherNumeric(typeName, want, table.Columns[index]); ok {
 		return canonical, nil
@@ -1985,8 +2028,10 @@ func selectRows(s *relationExecutor, projection string, parts []string, where st
 	if err != nil {
 		return nil, err
 	}
+	nulls := resultNulls(rows)
+	displayStoredNulls(rows)
 	return &queryResult{
-		columns: columns, rows: rows, nulls: resultNulls(rows),
+		columns: columns, rows: rows, nulls: nulls,
 		metadata: tableMetadata(namespace, tableName, table, selected),
 	}, nil
 }
@@ -2045,10 +2090,28 @@ func resultNulls(rows [][]string) [][]bool {
 	for rowIndex, row := range rows {
 		nulls[rowIndex] = make([]bool, len(row))
 		for columnIndex, value := range row {
-			nulls[rowIndex][columnIndex] = strings.EqualFold(value, "null")
+			nulls[rowIndex][columnIndex] = value == storedSQLNullValue
 		}
 	}
 	return nulls
+}
+
+func isSQLNullLiteral(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "null")
+}
+
+func isSQLNullSpelling(value string) bool {
+	return strings.EqualFold(value, "null")
+}
+
+func displayStoredNulls(rows [][]string) {
+	for _, row := range rows {
+		for columnIndex, value := range row {
+			if value == storedSQLNullValue {
+				row[columnIndex] = "NULL"
+			}
+		}
+	}
 }
 
 func renderSelectedTemporalRows(rows [][]string, selected []int, table catalog.Table, offsetMinutes int) ([][]string, error) {
@@ -2059,7 +2122,7 @@ func renderSelectedTemporalRows(rows [][]string, selected []int, table catalog.T
 				continue
 			}
 			typ, err := parseTemporalType(typeName)
-			if err != nil || typ.kind != temporalTimestamp || strings.EqualFold(row[resultIndex], "null") {
+			if err != nil || typ.kind != temporalTimestamp || row[resultIndex] == storedSQLNullValue {
 				continue
 			}
 			rendered, err := renderTimestampFixedOffset(row[resultIndex], offsetMinutes, typ.precision)
@@ -2074,7 +2137,7 @@ func renderSelectedTemporalRows(rows [][]string, selected []int, table catalog.T
 
 func renderStoredTemporalValue(typeName, value string, offsetMinutes int) (string, error) {
 	typ, err := parseTemporalType(typeName)
-	if err != nil || typ.kind != temporalTimestamp || strings.EqualFold(value, "null") {
+	if err != nil || typ.kind != temporalTimestamp || value == storedSQLNullValue {
 		return value, err
 	}
 	return renderTimestampFixedOffset(value, offsetMinutes, typ.precision)
