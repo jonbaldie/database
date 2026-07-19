@@ -58,10 +58,13 @@ var temporalFamilies = map[string]temporalFamily{
 // names a fractional precision the family does not accept or a precision outside
 // the zero-through-six ceiling.
 func parseTemporalType(typeName string) (temporalType, error) {
-	base, argument := splitTemporalType(typeName)
+	base, argument, parenthesized, valid := splitTemporalType(typeName)
 	family, ok := temporalFamilies[base]
 	if !ok {
 		return temporalType{}, nil
+	}
+	if !valid || (parenthesized && argument == "") {
+		return temporalType{}, sqlFailure{1064, "42000", fmt.Sprintf("invalid %s declaration", base)}
 	}
 	precision, err := temporalPrecision(family, base, argument)
 	if err != nil {
@@ -72,17 +75,18 @@ func parseTemporalType(typeName string) (temporalType, error) {
 
 // splitTemporalType returns the upper-cased base name and the parenthesised
 // precision argument of a declared temporal type.
-func splitTemporalType(typeName string) (string, string) {
+func splitTemporalType(typeName string) (string, string, bool, bool) {
 	normalized := strings.ToUpper(strings.TrimSpace(typeName))
 	open := strings.IndexByte(normalized, '(')
 	if open < 0 {
-		return normalized, ""
+		return normalized, "", false, true
 	}
+	base := strings.TrimSpace(normalized[:open])
 	end := strings.LastIndexByte(normalized, ')')
-	if end <= open {
-		return normalized, ""
+	if end <= open || strings.TrimSpace(normalized[end+1:]) != "" {
+		return base, "", true, false
 	}
-	return strings.TrimSpace(normalized[:open]), strings.TrimSpace(normalized[open+1 : end])
+	return base, strings.TrimSpace(normalized[open+1 : end]), true, true
 }
 
 func temporalPrecision(family temporalFamily, base, argument string) (int, error) {

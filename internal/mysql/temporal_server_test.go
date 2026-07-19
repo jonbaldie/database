@@ -136,6 +136,19 @@ func TestTimestampSessionOffsetAppliesToWritePredicateAndRead(t *testing.T) {
 	if len(result.rows) != 1 || result.rows[0][0] != "2021-01-02 03:04:05" {
 		t.Fatalf("selected TIMESTAMP = %#v, want session-local value", result.rows)
 	}
+	if _, err := executor.execute("SELECT at FROM events WHERE at = 'not-a-timestamp'"); err == nil {
+		t.Fatal("malformed temporal predicate was silently treated as no match")
+	}
+	if _, err := executor.execute("INSERT INTO events VALUES (NULL)"); err != nil {
+		t.Fatalf("insert NULL: %v", err)
+	}
+	result, err = executor.execute("SELECT at FROM events")
+	if err != nil || len(result.rows) != 2 || len(result.nulls) != 2 || !result.nulls[1][0] {
+		t.Fatalf("temporal NULL result = %#v err %v", result, err)
+	}
+	if result, err = executor.execute("SELECT at FROM events WHERE at = NULL"); err != nil || len(result.rows) != 0 {
+		t.Fatalf("temporal NULL predicate = %#v err %v", result, err)
+	}
 }
 
 func TestTimestampOffsetBelongsToTheSession(t *testing.T) {

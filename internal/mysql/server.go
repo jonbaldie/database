@@ -1815,7 +1815,13 @@ func rowMatcherAtOffset(where string, table catalog.Table, indexes map[string]in
 	if !found {
 		return nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
 	}
-	want := matcherValueAtOffset(table, index, value, offsetMinutes)
+	want, err := matcherValueAtOffsetChecked(table, index, value, offsetMinutes)
+	if err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(want, "null") {
+		return func([]string) bool { return false }, nil
+	}
 	equalityKey := columnEqualityKey(table, index)
 	wantKey := equalityKey(want)
 	return func(row []string) bool { return index < len(row) && equalityKey(row[index]) == wantKey }, nil
@@ -1839,21 +1845,26 @@ func columnEqualityKey(table catalog.Table, index int) func(string) string {
 
 // matcherValue canonicalizes an equality literal to the stored representation of
 // its column, so a numeric predicate compares against the same canonical form a
-// write produced (for example WHERE n = 007 matches a stored 7). A literal that
-// is malformed for the column keeps its scalar and simply matches no row.
+// write produced (for example WHERE n = 007 matches a stored 7). The execution
+// path uses the checked form so malformed temporal predicates fail explicitly.
 func matcherValue(table catalog.Table, index int, value string) string {
 	return matcherValueAtOffset(table, index, value, 0)
 }
 
 func matcherValueAtOffset(table catalog.Table, index int, value string, offsetMinutes int) string {
+	canonical, _ := matcherValueAtOffsetChecked(table, index, value, offsetMinutes)
+	return canonical
+}
+
+func matcherValueAtOffsetChecked(table catalog.Table, index int, value string, offsetMinutes int) (string, error) {
 	raw := scalar(value)
 	_, want, _ := decodePreparedTemporalLiteral(raw)
 	typeName, known := table.ColumnType(index)
 	if !known {
-		return want
+		return want, nil
 	}
 	if canonical, ok := canonicalMatcherNumeric(typeName, want, table.Columns[index]); ok {
-		return canonical
+		return canonical, nil
 	}
 	return canonicalMatcherTemporal(typeName, want, raw, table.Columns[index], offsetMinutes)
 }
@@ -1870,22 +1881,26 @@ func canonicalMatcherNumeric(typeName, value, column string) (string, bool) {
 	return canonical, true
 }
 
-func canonicalMatcherTemporal(typeName, value, raw, column string, offsetMinutes int) string {
+func canonicalMatcherTemporal(typeName, value, raw, column string, offsetMinutes int) (string, error) {
 	typ, err := parseTemporalType(typeName)
-	if err != nil || typ.kind == temporalNone {
-		return value
+	if err != nil {
+		return value, err
+	}
+	if typ.kind == temporalNone {
+		return value, nil
 	}
 	if wire, _, prepared := decodePreparedTemporalLiteral(raw); prepared && wire == mysqlTypeDate && typ.kind == temporalDatetime {
 		date, err := canonicalDateValue(value, column, 1)
-		if err == nil {
-			value = date + " 00:00:00"
+		if err != nil {
+			return value, err
 		}
+		value = date + " 00:00:00"
 	}
 	canonical, err := canonicalTemporalValueAtOffset(typ, value, column, 1, offsetMinutes)
 	if err != nil {
-		return value
+		return value, err
 	}
-	return canonical
+	return canonical, nil
 }
 
 func sessionTimeZoneOffset(s *session) (int, error) {
@@ -1960,7 +1975,10 @@ func selectRows(s *relationExecutor, projection string, parts []string, where st
 	if err != nil {
 		return nil, err
 	}
-	return &queryResult{columns: columns, rows: rows, metadata: tableMetadata(namespace, tableName, table, selected)}, nil
+	return &queryResult{
+		columns: columns, rows: rows, nulls: resultNulls(rows),
+		metadata: tableMetadata(namespace, tableName, table, selected),
+	}, nil
 }
 
 func selectedColumns(table catalog.Table, projection string, indexes map[string]int) ([]int, []string, error) {
@@ -2010,6 +2028,17 @@ func projectRows(source [][]string, selected []int, matches func([]string) bool)
 		rows = append(rows, projected)
 	}
 	return rows
+}
+
+func resultNulls(rows [][]string) [][]bool {
+	nulls := make([][]bool, len(rows))
+	for rowIndex, row := range rows {
+		nulls[rowIndex] = make([]bool, len(row))
+		for columnIndex, value := range row {
+			nulls[rowIndex][columnIndex] = strings.EqualFold(value, "null")
+		}
+	}
+	return nulls
 }
 
 func renderSelectedTemporalRows(rows [][]string, selected []int, table catalog.Table, offsetMinutes int) ([][]string, error) {

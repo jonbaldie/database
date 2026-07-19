@@ -42,7 +42,7 @@ func TestParseTemporalTypeReadsPrecision(t *testing.T) {
 
 func TestParseTemporalTypeRejectsInvalidDeclarations(t *testing.T) {
 	for _, input := range []string{
-		"DATETIME(7)", "TIME(-1)", "TIMESTAMP(9)", "DATETIME(x)",
+		"DATETIME(7)", "TIME(-1)", "TIMESTAMP(9)", "DATETIME(x)", "DATETIME()", "DATETIME(3)junk", "DATETIME(",
 		"DATE(3)", "YEAR(4)", "YEAR(2)",
 	} {
 		if _, err := parseTemporalType(input); err == nil {
