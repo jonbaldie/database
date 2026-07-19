@@ -44,6 +44,25 @@ func MaterializedInput(primary, input *Operator, reason, clause, fragment string
 	}
 }
 
+// AdditionalMaterializedInput appends another pre-consumer materialization to
+// an existing composed-input sequence without reversing source order.
+func AdditionalMaterializedInput(primary, input *Operator, reason, clause, fragment string) *Operator {
+	predicates := []Predicate{}
+	if clause != "" && fragment != "" {
+		predicates = append(predicates, Predicate{
+			Role: "residual", Expression: fragment,
+			Sources: []PredicateSource{{Clause: clause, Fragment: fragment}},
+		})
+	}
+	materialized := &Operator{
+		Kind: "materialize", Summary: "Materialize the composed query input for this statement.",
+		Operation: materializeOperation{Reason: reason}, Predicates: predicates,
+		Estimates: input.Estimates, Output: input.Output, Warnings: []Warning{}, Children: []*Operator{input},
+	}
+	insertExecutionInput(primary, materialized)
+	return primary
+}
+
 // ReusedInput records a read from an earlier statement-scoped materialization.
 func ReusedInput(primary *Operator, columns []string) *Operator {
 	reused := &Operator{
@@ -52,14 +71,18 @@ func ReusedInput(primary *Operator, columns []string) *Operator {
 		Output:   Output{Columns: append([]string(nil), columns...), Ordering: []OrderingTerm{}, UniqueKeys: [][]string{}},
 		Warnings: []Warning{}, Children: []*Operator{},
 	}
+	insertExecutionInput(primary, reused)
+	return primary
+}
+
+func insertExecutionInput(primary, input *Operator) {
 	insert := len(primary.Children)
 	if insert > 0 {
 		insert--
 	}
 	primary.Children = append(primary.Children, nil)
 	copy(primary.Children[insert+1:], primary.Children[insert:])
-	primary.Children[insert] = reused
-	return primary
+	primary.Children[insert] = input
 }
 
 // DependentInput records a correlated subquery evaluated for each outer row.
