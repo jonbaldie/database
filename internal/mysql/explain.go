@@ -83,11 +83,11 @@ func (s *textStatementExecutor) explainSelect(relations *relationExecutor, inner
 	if from < 0 {
 		return s.explainScalarSelect(inner, expression)
 	}
-	read, err := s.explainSelectSource(relations, strings.TrimSpace(expression[:from]), strings.TrimSpace(expression[from+len("from"):]))
+	plan, err := parseRelationalSelect(relations, inner)
 	if err != nil {
 		return nil, err
 	}
-	return queryexplanation.PlanSelect(s.server.config.Version, inner, s.database, read), nil
+	return plan.explanation(s.server.config.Version, s.database, inner), nil
 }
 
 func (s *textStatementExecutor) explainScalarSelect(inner, expression string) (*queryexplanation.Document, error) {

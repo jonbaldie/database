@@ -2014,7 +2014,7 @@ func canonicalMatcherTemporal(typeName, value, raw, column string, offsetMinutes
 func sessionTimeZoneOffset(s *session) (int, error) {
 	return parseFixedOffset(s.timeZone)
 }
-func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
+func legacySelectQuery(s *relationExecutor, query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	if from := keywordAt(expression, "from"); from >= 0 {
 		return selectFrom(s, query, expression[:from], expression[from+len("from"):])
@@ -2692,7 +2692,19 @@ func (s *preparedPreparation) parameterizedColumns(query, validated string, para
 			return metadata, nil
 		}
 	}
-	return s.queryColumns(validated, true)
+	metadata, err := s.queryColumns(validated, true)
+	if err == nil {
+		return metadata, nil
+	}
+	zeroValues := make([]string, parameters)
+	for index := range zeroValues {
+		zeroValues[index] = "0"
+	}
+	zeroValidated, bindErr := bindPreparedQuery(query, zeroValues)
+	if bindErr != nil {
+		return nil, err
+	}
+	return s.queryColumns(zeroValidated, true)
 }
 
 func preparedScalarExpression(query string) (string, bool) {

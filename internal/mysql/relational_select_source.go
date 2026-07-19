@@ -1,0 +1,399 @@
+package mysql
+
+import (
+	"sort"
+	"strings"
+
+	"github.com/jonbaldie/database/internal/catalog"
+)
+
+func parseRelationalSource(s *relationExecutor, text string) (relationalSource, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return relationalSource{}, sqlFailure{1064, "42000", "malformed SELECT source"}
+	}
+	first, remainder, err := parseRelationalTableSource(s, text)
+	if err != nil {
+		return relationalSource{}, err
+	}
+	source := relationalSource{}
+	if err := source.appendTable(first, nil); err != nil {
+		return relationalSource{}, err
+	}
+	for strings.TrimSpace(remainder) != "" {
+		join, right, next, err := parseRelationalJoin(s, strings.TrimSpace(remainder), source.columns)
+		if err != nil {
+			return relationalSource{}, err
+		}
+		if err := source.appendTable(right, join.using); err != nil {
+			return relationalSource{}, err
+		}
+		source.joins = append(source.joins, join)
+		remainder = next
+	}
+	return source, nil
+}
+
+func parseRelationalJoin(s *relationExecutor, text string, left []relationColumn) (relationalJoin, relationalTableSource, string, error) {
+	kind, after, _, ok := consumeJoinStart(text)
+	if !ok {
+		return relationalJoin{}, relationalTableSource{}, "", sqlFailure{1064, "42000", "malformed JOIN clause"}
+	}
+	right, after, err := parseRelationalTableSource(s, after)
+	if err != nil {
+		return relationalJoin{}, relationalTableSource{}, "", err
+	}
+	condition, using, remainder, err := parseRelationalJoinCondition(kind, strings.TrimSpace(after), left, right.columns)
+	if err != nil {
+		return relationalJoin{}, relationalTableSource{}, "", err
+	}
+	return relationalJoin{kind: kind, right: right, condition: condition, using: using}, right, remainder, nil
+}
+
+func parseRelationalJoinCondition(kind, text string, left, right []relationColumn) (string, []string, string, error) {
+	if strings.HasPrefix(strings.ToLower(text), "using ") {
+		condition, names, remainder, valid := parseJoinUsing(strings.TrimSpace(text[len("using "):]), left, right)
+		if !valid {
+			return "", nil, "", sqlFailure{1064, "42000", "malformed JOIN USING clause"}
+		}
+		return condition, names, remainder, nil
+	}
+	if strings.HasPrefix(strings.ToLower(text), "on ") {
+		condition, remainder := splitJoinCondition(strings.TrimSpace(text[len("on "):]))
+		if condition == "" {
+			return "", nil, "", sqlFailure{1064, "42000", "malformed JOIN ON clause"}
+		}
+		return condition, nil, remainder, nil
+	}
+	if kind != "cross" {
+		return "", nil, "", sqlFailure{1064, "42000", "JOIN requires ON or USING"}
+	}
+	return "", nil, text, nil
+}
+
+func (source *relationalSource) appendTable(table relationalTableSource, using []string) error {
+	for _, existing := range source.tables {
+		if existing.alias == table.alias {
+			return sqlFailure{1066, "42000", "Not unique table/alias: '" + table.alias + "'"}
+		}
+	}
+	rowOffset := len(source.columns)
+	for _, name := range using {
+		leftIndex, leftOK := findRelationColumnIndex(source.columns, "", name)
+		rightIndex, rightOK := findRelationColumnIndex(table.columns, "", name)
+		if !leftOK || !rightOK {
+			return sqlFailure{1054, "42S22", "unknown column '" + name + "' in 'USING clause'"}
+		}
+		source.columns[leftIndex].coalesce = rowOffset + rightIndex
+		table.columns[rightIndex].hidden = true
+	}
+	source.columns = append(source.columns, table.columns...)
+	source.tables = append(source.tables, table)
+	return nil
+}
+
+func parseRelationalTableSource(s *relationExecutor, text string) (relationalTableSource, string, error) {
+	token, remainder, ok := relationToken(text)
+	if !ok {
+		return relationalTableSource{}, "", sqlFailure{1064, "42000", "invalid table name"}
+	}
+	parts, valid := splitQualifiedIdentifier(token)
+	if !valid || len(parts) == 0 || len(parts) > 2 {
+		return relationalTableSource{}, "", sqlFailure{1064, "42000", "invalid table name"}
+	}
+	namespace, name, err := tableTarget(s, parts)
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
+	table, err := relationTable(s, namespace, name)
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
+	alias, remainder, err := relationAlias(remainder, name)
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
+	columns := relationalTableColumns(namespace, name, alias, table)
+	return relationalTableSource{namespace: namespace, name: name, alias: alias, table: table, columns: columns}, remainder, nil
+}
+
+func relationToken(text string) (string, string, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" || text[0] == ',' {
+		return "", "", false
+	}
+	quoted := false
+	length := len(text)
+	for index := 0; index < length; index++ {
+		if next, handled := relationTokenBacktick(text, index, length, quoted); handled {
+			quoted, index = next.quoted, next.index
+			continue
+		}
+		if !quoted && (isRelationSpace(text[index]) || text[index] == ',') {
+			return text[:index], text[index:], true
+		}
+	}
+	return text, "", !quoted
+}
+
+type relationTokenCursor struct {
+	quoted bool
+	index  int
+}
+
+func relationTokenBacktick(text string, index, length int, quoted bool) (relationTokenCursor, bool) {
+	if text[index] != '`' {
+		return relationTokenCursor{}, false
+	}
+	if quoted && index+1 < length && text[index+1] == '`' {
+		return relationTokenCursor{quoted: quoted, index: index + 1}, true
+	}
+	return relationTokenCursor{quoted: !quoted, index: index}, true
+}
+
+func relationAlias(text, tableName string) (string, string, error) {
+	text = strings.TrimSpace(text)
+	if text == "" || text[0] == ',' || isJoinWord(text) {
+		return tableName, text, nil
+	}
+	if strings.HasPrefix(strings.ToLower(text), "as ") {
+		return explicitRelationAlias(text[len("as "):])
+	}
+	return implicitRelationAlias(text, tableName)
+}
+
+func explicitRelationAlias(text string) (string, string, error) {
+	alias, remainder, ok := relationToken(text)
+	if !ok {
+		return "", "", sqlFailure{1064, "42000", "malformed table alias"}
+	}
+	name, valid := singleIdentifier(alias)
+	if !valid {
+		return "", "", sqlFailure{1064, "42000", "invalid table alias"}
+	}
+	return name, remainder, nil
+}
+
+func implicitRelationAlias(text, tableName string) (string, string, error) {
+	alias, remainder, ok := relationToken(text)
+	if !ok || isJoinWord(alias) {
+		return tableName, text, nil
+	}
+	name, valid := singleIdentifier(alias)
+	if !valid {
+		return tableName, text, nil
+	}
+	return name, remainder, nil
+}
+
+func isJoinWord(text string) bool {
+	word := strings.ToLower(strings.Fields(text)[0])
+	switch word {
+	case "join", "inner", "left", "right", "cross", "outer", "on", "using":
+		return true
+	default:
+		return false
+	}
+}
+
+func consumeJoinStart(text string) (string, string, bool, bool) {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, ",") {
+		return "cross", strings.TrimSpace(text[1:]), false, true
+	}
+	for _, candidate := range []struct {
+		prefix string
+		kind   string
+	}{
+		{"left outer join ", "left"},
+		{"right outer join ", "right"},
+		{"inner join ", "inner"},
+		{"cross join ", "cross"},
+		{"left join ", "left"},
+		{"right join ", "right"},
+		{"join ", "inner"},
+	} {
+		if strings.HasPrefix(strings.ToLower(text), candidate.prefix) {
+			return candidate.kind, strings.TrimSpace(text[len(candidate.prefix):]), false, true
+		}
+	}
+	return "", "", false, false
+}
+
+func parseJoinUsing(text string, left, right []relationColumn) (string, []string, string, bool) {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(strings.ToLower(text), "(") {
+		return "", nil, "", false
+	}
+	close, ok := matchingParenthesis(text, 0)
+	if !ok {
+		return "", nil, "", false
+	}
+	names := splitCSV(text[1:close])
+	if len(names) == 0 {
+		return "", nil, "", false
+	}
+	condition, valid := joinUsingConditions(names, left, right)
+	return condition, names, strings.TrimSpace(text[close+1:]), valid
+}
+
+func joinUsingConditions(names []string, left, right []relationColumn) (string, bool) {
+	conditions := make([]string, 0, len(names))
+	for _, item := range names {
+		condition, valid := joinUsingCondition(item, left, right)
+		if !valid {
+			return "", false
+		}
+		conditions = append(conditions, condition)
+	}
+	return strings.Join(conditions, " AND "), true
+}
+
+func joinUsingCondition(item string, left, right []relationColumn) (string, bool) {
+	name, valid := singleIdentifier(item)
+	if !valid {
+		return "", false
+	}
+	leftColumn, leftOK := findNamedColumn(left, "", name)
+	rightColumn, rightOK := findNamedColumn(right, "", name)
+	if !leftOK || !rightOK {
+		return "", false
+	}
+	return leftColumn.qualifier + "." + leftColumn.name + " = " + rightColumn.qualifier + "." + rightColumn.name, true
+}
+
+func splitJoinCondition(text string) (string, string) {
+	positions := make([]int, 0, 4)
+	for _, word := range []string{"join", "where", "order", "limit"} {
+		if position := keywordAt(text, word); position >= 0 {
+			positions = append(positions, position)
+		}
+	}
+	if len(positions) == 0 {
+		return strings.TrimSpace(text), ""
+	}
+	sort.Ints(positions)
+	position := positions[0]
+	return strings.TrimSpace(text[:position]), strings.TrimSpace(text[position:])
+}
+
+func relationalTableColumns(namespace, tableName, alias string, table catalog.Table) []relationColumn {
+	columns := make([]relationColumn, len(table.Columns))
+	for index, name := range table.Columns {
+		metadata := tableMetadata(namespace, tableName, table, []int{index})[0]
+		typeName, _ := table.ColumnType(index)
+		columns[index] = relationColumn{
+			namespace: namespace, table: tableName, qualifier: alias, name: name,
+			typeName: typeName, index: index, coalesce: -1, metadata: metadata, tableDefinition: table,
+		}
+	}
+	return columns
+}
+
+func findRelationColumnIndex(columns []relationColumn, qualifier, name string) (int, bool) {
+	found := -1
+	for index, column := range columns {
+		if column.hidden && qualifier == "" {
+			continue
+		}
+		if !relationColumnMatchesName(column, qualifier, name) {
+			continue
+		}
+		if found >= 0 {
+			return -1, false
+		}
+		found = index
+	}
+	return found, found >= 0
+}
+
+func (p *relationalSelectPlan) sourceRows() ([]relationRow, error) {
+	rows := tableRelationRows(p.source.tables[0])
+	for _, join := range p.source.joins {
+		var err error
+		rows, err = joinRelationRows(rows, join, len(p.source.columns))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
+}
+
+func tableRelationRows(table relationalTableSource) []relationRow {
+	rows := make([]relationRow, len(table.table.Rows))
+	for index, row := range table.table.Rows {
+		rows[index] = relationRow{values: append([]string(nil), row...)}
+	}
+	return rows
+}
+
+func joinRelationRows(left []relationRow, join relationalJoin, totalColumns int) ([]relationRow, error) {
+	rightRows := tableRelationRows(join.right)
+	result := make([]relationRow, 0, len(left)*maxInt(1, len(rightRows)))
+	matchedRight := make([]bool, len(rightRows))
+	leftWidth := totalColumns - len(join.right.columns)
+	if len(left) > 0 {
+		leftWidth = len(left[0].values)
+	}
+	for _, leftRow := range left {
+		matched, rows, err := appendJoinedMatches(result, leftRow, rightRows, join, matchedRight)
+		if err != nil {
+			return nil, err
+		}
+		result = rows
+		if !matched && join.kind == "left" {
+			result = append(result, appendNullRight(leftRow, len(join.right.columns)))
+		}
+	}
+	if join.kind == "right" {
+		result = appendUnmatchedRight(result, rightRows, matchedRight, leftWidth)
+	}
+	return result, nil
+}
+
+func appendJoinedMatches(result []relationRow, leftRow relationRow, rightRows []relationRow, join relationalJoin, matchedRight []bool) (bool, []relationRow, error) {
+	matched := false
+	for rightIndex, rightRow := range rightRows {
+		candidate := relationRow{values: append(append([]string(nil), leftRow.values...), rightRow.values...)}
+		ok, err := joinCandidateMatches(join, candidate)
+		if err != nil {
+			return false, result, err
+		}
+		if !ok {
+			continue
+		}
+		matched = true
+		matchedRight[rightIndex] = true
+		result = append(result, candidate)
+	}
+	return matched, result, nil
+}
+
+func appendUnmatchedRight(result []relationRow, rightRows []relationRow, matched []bool, leftWidth int) []relationRow {
+	for rightIndex, rightRow := range rightRows {
+		if matched[rightIndex] {
+			continue
+		}
+		values := append(make([]string, leftWidth), rightRow.values...)
+		for index := range values[:leftWidth] {
+			values[index] = storedSQLNullValue
+		}
+		result = append(result, relationRow{values: values})
+	}
+	return result
+}
+
+func joinCandidateMatches(join relationalJoin, row relationRow) (bool, error) {
+	if join.predicate == nil {
+		return true, nil
+	}
+	return predicateMatches(join.predicate, row)
+}
+
+func appendNullRight(left relationRow, width int) relationRow {
+	values := append([]string(nil), left.values...)
+	for index := 0; index < width; index++ {
+		values = append(values, storedSQLNullValue)
+	}
+	return relationRow{values: values}
+}
