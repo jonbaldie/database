@@ -2637,15 +2637,19 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
 	}
 	if len(parameters) > 0 {
-		if expression, ok := preparedScalarExpression(query); ok {
-			if metadata, ok := preparedScalarMetadata(expression, len(parameters)); ok {
-				return metadata, nil
-			}
-		}
-		return s.queryColumns(validated, true)
+		return s.parameterizedColumns(query, validated, len(parameters))
 	}
 	if literal := parseLiteralResult(strings.TrimSpace(query[len("select "):])); literal.supported {
 		return []columnMetadata{literal.metadata}, nil
+	}
+	return s.queryColumns(validated, true)
+}
+
+func (s *preparedPreparation) parameterizedColumns(query, validated string, parameters int) ([]columnMetadata, error) {
+	if expression, ok := preparedScalarExpression(query); ok {
+		if metadata, ok := preparedScalarMetadata(expression, parameters); ok {
+			return metadata, nil
+		}
 	}
 	return s.queryColumns(validated, true)
 }
