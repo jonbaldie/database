@@ -68,3 +68,36 @@ func TestMatcherValueTemporal(t *testing.T) {
 		t.Errorf("malformed temporal predicate literal = %q, want raw fallback", got)
 	}
 }
+
+func TestTimestampSessionOffsetStoresUTCAndRendersLocal(t *testing.T) {
+	table := catalog.Table{
+		Name:        "events",
+		Columns:     []string{"at"},
+		ColumnTypes: []string{"TIMESTAMP"},
+	}
+	stored, err := canonicalColumnValueAtOffset(table, 0, "'2021-01-02 03:04:05'", 1, 330)
+	if err != nil || stored != "2021-01-01 21:34:05" {
+		t.Fatalf("TIMESTAMP storage = %q err %v, want UTC value", stored, err)
+	}
+	if got := matcherValueAtOffset(table, 0, "'2021-01-02 03:04:05'", 330); got != stored {
+		t.Errorf("TIMESTAMP matcher = %q, want %q", got, stored)
+	}
+	if got, err := renderStoredTemporalValue(table.ColumnTypes[0], stored, 330); err != nil || got != "2021-01-02 03:04:05" {
+		t.Errorf("TIMESTAMP read = %q err %v, want session-local value", got, err)
+	}
+}
+
+func TestPreparedDateToDatetimeConversionIsTypedOnly(t *testing.T) {
+	table := catalog.Table{
+		Name:        "events",
+		Columns:     []string{"at"},
+		ColumnTypes: []string{"DATETIME"},
+	}
+	prepared := preparedTemporalLiteral(mysqlTypeDate, "2021-01-02")
+	if got, err := canonicalColumnValueAtOffset(table, 0, prepared, 1, 0); err != nil || got != "2021-01-02 00:00:00" {
+		t.Errorf("typed DATE to DATETIME = %q err %v, want midnight conversion", got, err)
+	}
+	if _, err := canonicalColumnValueAtOffset(table, 0, "'2021-01-02'", 1, 0); err == nil {
+		t.Fatal("text DATE to DATETIME was accepted")
+	}
+}

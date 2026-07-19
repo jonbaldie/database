@@ -117,6 +117,27 @@ func TestCurrentTimePreservesRequestedFractionalPrecision(t *testing.T) {
 	}
 }
 
+func TestTimestampSessionOffsetAppliesToWritePredicateAndRead(t *testing.T) {
+	executor := currentTimeExecutor(t, "+05:30", time.Date(2026, 7, 18, 22, 0, 0, 0, time.UTC))
+	if _, err := executor.execute("CREATE TABLE events (at TIMESTAMP)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := executor.execute("INSERT INTO events VALUES ('2021-01-02 03:04:05')"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	stored := executor.server.config.Catalog.Snapshot().Namespaces["app"].Tables["events"].Rows[0][0]
+	if stored != "2021-01-01 21:34:05" {
+		t.Fatalf("stored TIMESTAMP = %q, want UTC instant", stored)
+	}
+	result, err := executor.execute("SELECT at FROM events WHERE at = '2021-01-02 03:04:05'")
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if len(result.rows) != 1 || result.rows[0][0] != "2021-01-02 03:04:05" {
+		t.Fatalf("selected TIMESTAMP = %#v, want session-local value", result.rows)
+	}
+}
+
 // Prepared binary temporal inputs must decode to the exact canonical spelling a
 // text literal carries, so both paths store equivalent values.
 func TestPreparedTemporalMatchesTextInput(t *testing.T) {
@@ -161,6 +182,15 @@ func TestPreparedAndTextDatetimeCanonicalizeEqually(t *testing.T) {
 	}
 	if fromPrepared != fromText {
 		t.Errorf("prepared %q and text %q disagree", fromPrepared, fromText)
+	}
+}
+
+func TestPreparedMicrosecondsNormalizeIntoTheClock(t *testing.T) {
+	if got, _, err := readPreparedTemporal([]byte{11, 0xE5, 0x07, 1, 2, 3, 4, 5, 0x41, 0x42, 0x0F, 0x00}, 0, preparedParameterType{typ: mysqlTypeDatetime}); err != nil || scalar(got) != "2021-01-02 03:04:06.000001" {
+		t.Errorf("prepared datetime microseconds = %q err %v, want normalized second", scalar(got), err)
+	}
+	if got, _, err := readPreparedTemporal([]byte{12, 0, 0, 0, 0, 0, 12, 0, 0, 0x41, 0x42, 0x0F, 0x00}, 0, preparedParameterType{typ: mysqlTypeTime}); err != nil || scalar(got) != "12:00:01.000001" {
+		t.Errorf("prepared time microseconds = %q err %v, want normalized second", scalar(got), err)
 	}
 }
 

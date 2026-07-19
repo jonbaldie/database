@@ -111,6 +111,9 @@ func scalarColumn(text string) (string, bool, columnMetadata, error) {
 		return "", false, columnMetadata{}, err
 	}
 	rendered := value.render()
+	if _, unwrapped, prepared := decodePreparedTemporalLiteral(rendered); prepared {
+		rendered = unwrapped
+	}
 	return rendered, value.isNull(), scalarMetadata(strings.TrimSpace(text), rendered, value), nil
 }
 

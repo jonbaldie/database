@@ -122,7 +122,7 @@ func (s *textStatementExecutor) explainSelectSource(relations *relationExecutor,
 	}
 	// Validate the predicate exactly as the executor would, so EXPLAIN never
 	// describes a plan for a statement that would fail at run time.
-	if _, err := rowMatcher(strings.TrimSpace(where), table, indexes); err != nil {
+	if err := validateExplainPredicate(relations, where, table, indexes); err != nil {
 		return queryexplanation.Select{}, err
 	}
 	return queryexplanation.Select{
@@ -131,6 +131,15 @@ func (s *textStatementExecutor) explainSelectSource(relations *relationExecutor,
 		AllColumns: projection == "*",
 		Where:      strings.TrimSpace(where),
 	}, nil
+}
+
+func validateExplainPredicate(relations *relationExecutor, where string, table catalog.Table, indexes map[string]int) error {
+	offsetMinutes, err := sessionTimeZoneOffset(relations.session)
+	if err != nil {
+		return err
+	}
+	_, err = rowMatcherAtOffset(strings.TrimSpace(where), table, indexes, offsetMinutes)
+	return err
 }
 
 // explainInsert, explainUpdate, and explainDelete reuse the executor's own plan

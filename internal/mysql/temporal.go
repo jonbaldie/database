@@ -115,20 +115,12 @@ func temporalWireType(typ temporalType) (byte, uint32, uint16) {
 }
 
 func temporalTypeForKind(kind temporalKind, precision int) temporalType {
-	switch kind {
-	case temporalDate:
-		return temporalType{kind: kind, precision: precision, wire: mysqlTypeDate, length: 10}
-	case temporalTime:
-		return temporalType{kind: kind, precision: precision, wire: mysqlTypeTime, length: 10}
-	case temporalDatetime:
-		return temporalType{kind: kind, precision: precision, wire: mysqlTypeDatetime, length: 19}
-	case temporalTimestamp:
-		return temporalType{kind: kind, precision: precision, wire: mysqlTypeTimestamp, length: 19}
-	case temporalYear:
-		return temporalType{kind: kind, precision: precision, wire: mysqlTypeYear, length: 4}
-	default:
-		return temporalType{kind: kind, precision: precision}
+	for _, family := range temporalFamilies {
+		if family.kind == kind {
+			return temporalType{kind: kind, precision: precision, wire: family.wire, length: family.length}
+		}
 	}
+	return temporalType{kind: kind, precision: precision}
 }
 
 func temporalResultMetadata(name string, kind temporalKind, precision int) columnMetadata {
@@ -150,6 +142,14 @@ func temporalResultMetadata(name string, kind temporalKind, precision int) colum
 // precise value is rejected with a MySQL error identity so the caller can fail
 // before durability.
 func canonicalTemporalValue(typ temporalType, raw, column string, row int) (string, error) {
+	return canonicalTemporalValueAtOffset(typ, raw, column, row, 0)
+}
+
+// canonicalTemporalValueAtOffset validates a temporal literal and stores a
+// TIMESTAMP as its UTC instant. Other temporal families remain wall-clock
+// values. The offset is the session-local offset used to interpret a supplied
+// TIMESTAMP literal.
+func canonicalTemporalValueAtOffset(typ temporalType, raw, column string, row, offsetMinutes int) (string, error) {
 	value := strings.TrimSpace(raw)
 	if strings.EqualFold(value, "null") {
 		return "NULL", nil
@@ -164,7 +164,7 @@ func canonicalTemporalValue(typ temporalType, raw, column string, row int) (stri
 	case temporalDatetime:
 		return canonicalDatetimeValue(typ, value, column, row, false)
 	case temporalTimestamp:
-		return canonicalDatetimeValue(typ, value, column, row, true)
+		return canonicalTimestampValue(typ, value, column, row, offsetMinutes)
 	default:
 		return value, nil
 	}
@@ -298,12 +298,43 @@ func canonicalDatetimeValue(typ temporalType, value, column string, row int, tim
 	if err != nil {
 		return "", err
 	}
-	if timestamp {
-		if err := enforceTimestampRange(year, month, day, hours, minutes, seconds, column, row); err != nil {
-			return "", err
-		}
-	}
 	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hours, minutes, seconds) + fraction, nil
+}
+
+func canonicalTimestampValue(typ temporalType, value, column string, row, offsetMinutes int) (string, error) {
+	canonical, err := canonicalDatetimeValue(typ, value, column, row, true)
+	if err != nil {
+		return "", err
+	}
+	instant, err := parseCanonicalInstant(canonical, column, row)
+	if err != nil {
+		return "", err
+	}
+	stored := instant.Add(-time.Duration(offsetMinutes) * time.Minute)
+	if err := enforceTimestampInstantRange(stored, column, row); err != nil {
+		return "", err
+	}
+	return renderInstant(stored, typ.precision), nil
+}
+
+func parseCanonicalInstant(value, column string, row int) (time.Time, error) {
+	datePart, clockPart, found := strings.Cut(value, " ")
+	if !found {
+		return time.Time{}, incorrectTemporal("TIMESTAMP", column, value, row)
+	}
+	clock, fraction, err := splitTemporalFraction(temporalType{precision: 6}, clockPart, "TIMESTAMP", column, row)
+	if err != nil {
+		return time.Time{}, err
+	}
+	year, month, day, err := parseCalendarDate(datePart, column, row)
+	if err != nil {
+		return time.Time{}, err
+	}
+	hours, minutes, seconds, err := parseClock(clock, "TIMESTAMP", column, value, row)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Date(year, time.Month(month), day, hours, minutes, seconds, temporalFractionNanoseconds(fraction), time.UTC), nil
 }
 
 func parseClock(clock, label, column, value string, row int) (int, int, int, error) {
@@ -323,8 +354,12 @@ func parseClock(clock, label, column, value string, row int) (int, int, int, err
 // bounds a fixed-offset session renders against.
 func enforceTimestampRange(year, month, day, hours, minutes, seconds int, column string, row int) error {
 	instant := time.Date(year, time.Month(month), day, hours, minutes, seconds, 0, time.UTC)
+	return enforceTimestampInstantRange(instant, column, row)
+}
+
+func enforceTimestampInstantRange(instant time.Time, column string, row int) error {
 	floor := time.Date(1970, 1, 1, 0, 0, 1, 0, time.UTC)
-	ceiling := time.Date(2038, 1, 19, 3, 14, 7, 0, time.UTC)
+	ceiling := time.Date(2038, 1, 19, 3, 14, 7, 999999999, time.UTC)
 	if instant.Before(floor) || instant.After(ceiling) {
 		return outOfRange(column, row)
 	}
@@ -541,6 +576,7 @@ func decodePreparedDatetime(wire byte, body []byte) string {
 	if len(body) >= 11 {
 		micros = int(binary.LittleEndian.Uint32(body[7:11]))
 	}
+	year, month, day, hour, minute, second, micros = normalizePreparedDatetime(year, month, day, hour, minute, second, micros)
 	date := fmt.Sprintf("%04d-%02d-%02d", year, month, day)
 	if wire == mysqlTypeDate {
 		return date
@@ -560,6 +596,16 @@ func decodePreparedTime(body []byte) string {
 	if len(body) >= 12 {
 		micros = int(binary.LittleEndian.Uint32(body[8:12]))
 	}
+	if hour <= 23 && minute <= 59 && second <= 59 {
+		totalSeconds := int64(days)*24*60*60 + int64(hour)*60*60 + int64(minute)*60 + int64(second) + int64(micros)/1000000
+		days = int(totalSeconds / (24 * 60 * 60))
+		remaining := totalSeconds % (24 * 60 * 60)
+		hour = int(remaining / (60 * 60))
+		remaining %= 60 * 60
+		minute = int(remaining / 60)
+		second = int(remaining % 60)
+	}
+	micros %= 1000000
 	sign := ""
 	if negative {
 		sign = "-"
@@ -571,10 +617,46 @@ func decodePreparedTime(body []byte) string {
 // literal would carry, dropping trailing zeros so an exact prepared value and
 // its text spelling agree on fractional precision.
 func preparedFraction(micros int) string {
+	micros %= 1000000
 	if micros <= 0 {
 		return ""
 	}
 	return "." + strings.TrimRight(fmt.Sprintf("%06d", micros), "0")
+}
+
+func normalizePreparedDatetime(year, month, day, hour, minute, second, micros int) (int, int, int, int, int, int, int) {
+	carry := micros / 1000000
+	micros %= 1000000
+	if carry == 0 {
+		return year, month, day, hour, minute, second, micros
+	}
+	if year >= 1 && month >= 1 && month <= 12 && validCalendarDay(year, month, day) && hour <= 23 && minute <= 59 && second <= 59 {
+		instant := time.Date(year, time.Month(month), day, hour, minute, second, 0, time.UTC).Add(time.Duration(carry) * time.Second)
+		return instant.Year(), int(instant.Month()), instant.Day(), instant.Hour(), instant.Minute(), instant.Second(), micros
+	}
+	return year, month, day, hour, minute, second, micros
+}
+
+const preparedTemporalMarkerPrefix = "\x00database-prepared-temporal:"
+
+func preparedTemporalLiteral(wire byte, value string) string {
+	return quote(preparedTemporalMarkerPrefix + strconv.Itoa(int(wire)) + ":" + value)
+}
+
+func decodePreparedTemporalLiteral(value string) (byte, string, bool) {
+	if !strings.HasPrefix(value, preparedTemporalMarkerPrefix) {
+		return 0, value, false
+	}
+	remainder := strings.TrimPrefix(value, preparedTemporalMarkerPrefix)
+	separator := strings.IndexByte(remainder, ':')
+	if separator <= 0 {
+		return 0, value, false
+	}
+	wire, err := strconv.Atoi(remainder[:separator])
+	if err != nil || wire < 0 || wire > 255 {
+		return 0, value, false
+	}
+	return byte(wire), remainder[separator+1:], true
 }
 
 func incorrectTemporal(kind, column, value string, row int) error {
