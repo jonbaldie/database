@@ -579,22 +579,9 @@ func validPreparedTemporalBodyLength(wire byte, length int) bool {
 }
 
 func decodePreparedDatetime(wire byte, body []byte) (string, error) {
-	year, month, day, hour, minute, second, micros := 0, 0, 0, 0, 0, 0, 0
-	if len(body) >= 4 {
-		year = int(binary.LittleEndian.Uint16(body[0:2]))
-		month = int(body[2])
-		day = int(body[3])
-	}
-	if len(body) >= 7 {
-		hour = int(body[4])
-		minute = int(body[5])
-		second = int(body[6])
-	}
-	if len(body) >= 11 {
-		micros = int(binary.LittleEndian.Uint32(body[7:11]))
-	}
-	if month > 12 || day > 31 || hour > 23 || minute > 59 || second > 59 || micros > 999999 {
-		return "", errors.New("malformed temporal prepared parameter")
+	year, month, day, hour, minute, second, micros, err := preparedDatetimeParts(body)
+	if err != nil {
+		return "", err
 	}
 	date := fmt.Sprintf("%04d-%02d-%02d", year, month, day)
 	if wire == mysqlTypeDate {
@@ -603,11 +590,65 @@ func decodePreparedDatetime(wire byte, body []byte) (string, error) {
 	return date + fmt.Sprintf(" %02d:%02d:%02d", hour, minute, second) + preparedFraction(micros), nil
 }
 
+func preparedDatetimeParts(body []byte) (int, int, int, int, int, int, int, error) {
+	year, month, day := preparedDateParts(body)
+	hour, minute, second := preparedClockParts(body)
+	micros := preparedMicroseconds(body)
+	if !validPreparedDatetimeParts(month, day, hour, minute, second, micros) {
+		return 0, 0, 0, 0, 0, 0, 0, errors.New("malformed temporal prepared parameter")
+	}
+	return year, month, day, hour, minute, second, micros, nil
+}
+
+func preparedDateParts(body []byte) (int, int, int) {
+	if len(body) < 4 {
+		return 0, 0, 0
+	}
+	return int(binary.LittleEndian.Uint16(body[0:2])), int(body[2]), int(body[3])
+}
+
+func preparedClockParts(body []byte) (int, int, int) {
+	if len(body) < 7 {
+		return 0, 0, 0
+	}
+	return int(body[4]), int(body[5]), int(body[6])
+}
+
+func preparedMicroseconds(body []byte) int {
+	if len(body) < 11 {
+		return 0
+	}
+	return int(binary.LittleEndian.Uint32(body[7:11]))
+}
+
+func validPreparedDatetimeParts(month, day, hour, minute, second, micros int) bool {
+	values := []int{month, day, hour, minute, second, micros}
+	limits := []int{12, 31, 23, 59, 59, 999999}
+	for index, value := range values {
+		if value > limits[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func decodePreparedTime(body []byte) (string, error) {
+	negative, totalHours, minute, second, micros, err := preparedTimeParts(body)
+	if err != nil {
+		return "", err
+	}
+	sign := ""
+	if negative {
+		sign = "-"
+	}
+	return sign + fmt.Sprintf("%02d:%02d:%02d", totalHours, minute, second) + preparedFraction(micros), nil
+}
+
+func preparedTimeParts(body []byte) (bool, int64, int, int, int, error) {
 	negative, days, hour, minute, second, micros := false, 0, 0, 0, 0, 0
 	if len(body) >= 8 {
 		if body[0] > 1 {
-			return "", errors.New("malformed temporal prepared parameter")
+			return false, 0, 0, 0, 0, errors.New("malformed temporal prepared parameter")
 		}
 		negative = body[0] == 1
 		days = int(binary.LittleEndian.Uint32(body[1:5]))
@@ -619,17 +660,13 @@ func decodePreparedTime(body []byte) (string, error) {
 		micros = int(binary.LittleEndian.Uint32(body[8:12]))
 	}
 	if hour > 23 || minute > 59 || second > 59 || micros > 999999 {
-		return "", errors.New("malformed temporal prepared parameter")
+		return false, 0, 0, 0, 0, errors.New("malformed temporal prepared parameter")
 	}
 	totalHours := int64(days)*24 + int64(hour)
 	if totalHours > 838 {
-		return "", errors.New("temporal prepared parameter is out of range")
+		return false, 0, 0, 0, 0, errors.New("temporal prepared parameter is out of range")
 	}
-	sign := ""
-	if negative {
-		sign = "-"
-	}
-	return sign + fmt.Sprintf("%02d:%02d:%02d", totalHours, minute, second) + preparedFraction(micros), nil
+	return negative, totalHours, minute, second, micros, nil
 }
 
 // preparedFraction renders a microsecond field as the fractional run a text
