@@ -648,6 +648,7 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 		s.transactionStatement,
 		s.settingStatement,
 		s.builtinStatement,
+		s.ddlStatement,
 		s.catalogStatement,
 		s.relationStatement,
 		s.operationStatement,
@@ -921,7 +922,13 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	if strings.HasPrefix(lower, "create schema ") {
 		keyword = "schema "
 	}
-	name, ok := singleIdentifier(strings.TrimSpace(query[len("create ")+len(keyword):]))
+	value := strings.TrimSpace(query[len("create ")+len(keyword):])
+	ifNotExists := false
+	if strings.HasPrefix(strings.ToLower(value), "if not exists ") {
+		ifNotExists = true
+		value = strings.TrimSpace(value[len("IF NOT EXISTS "):])
+	}
+	name, ok := singleIdentifier(value)
 	if !ok {
 		return sqlFailure{1064, "42000", "malformed CREATE DATABASE"}
 	}
@@ -934,6 +941,9 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
 		key := catalog.Key(name)
 		if _, exists := definition.Namespaces[key]; exists {
+			if ifNotExists {
+				return nil
+			}
 			return errors.New("namespace already exists")
 		}
 		definition.Namespaces[key] = catalog.Namespace{Name: name, Tables: map[string]catalog.Table{}}
@@ -956,37 +966,50 @@ func createTable(s *relationExecutor, query string) error {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
-		namespaceDefinition, exists := definition.Namespaces[catalog.Key(namespace)]
-		if !exists {
-			return errors.New("namespace does not exist")
-		}
-		key := catalog.Key(name)
-		if _, exists := namespaceDefinition.Tables[key]; exists {
-			return errors.New("table already exists")
-		}
-		tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...)}
-		if len(table.types) > 0 {
-			tableDefinition.ColumnTypes = append([]string(nil), table.types...)
-		}
-		namespaceDefinition.Tables[key] = tableDefinition
-		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
-		return nil
+		return createTableInDefinition(definition, namespace, name, table)
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1050, "42S01", err.Error()})
 	}
 	return nil
 }
 
+func createTableInDefinition(definition *catalog.Definition, namespace, name string, table tableDefinition) error {
+	namespaceDefinition, exists := definition.Namespaces[catalog.Key(namespace)]
+	if !exists {
+		return errors.New("namespace does not exist")
+	}
+	key := catalog.Key(name)
+	if _, exists := namespaceDefinition.Tables[key]; exists {
+		if table.ifNotExists {
+			return nil
+		}
+		return errors.New("table already exists")
+	}
+	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...)}
+	if len(table.types) > 0 {
+		tableDefinition.ColumnTypes = append([]string(nil), table.types...)
+	}
+	namespaceDefinition.Tables[key] = tableDefinition
+	definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
+	return nil
+}
+
 type tableDefinition struct {
-	target  []string
-	columns []string
-	types   []string
+	target      []string
+	columns     []string
+	types       []string
+	ifNotExists bool
 }
 
 func parseCreateTable(query string) (tableDefinition, error) {
 	head, body, err := createTableParts(query)
 	if err != nil {
 		return tableDefinition{}, err
+	}
+	ifNotExists := false
+	if strings.HasPrefix(strings.ToLower(head), "if not exists ") {
+		ifNotExists = true
+		head = strings.TrimSpace(head[len("IF NOT EXISTS "):])
 	}
 	target, ok := splitQualifiedIdentifier(head)
 	if !ok || len(target) == 0 || len(target) > 2 {
@@ -998,7 +1021,25 @@ func parseCreateTable(query string) (tableDefinition, error) {
 		}
 	}
 	columns, types, err := parseTableColumns(body)
-	return tableDefinition{target: target, columns: columns, types: types}, err
+	if err == nil {
+		err = validateTableColumns(columns)
+	}
+	return tableDefinition{target: target, columns: columns, types: types, ifNotExists: ifNotExists}, err
+}
+
+func validateTableColumns(columns []string) error {
+	if len(columns) > maxTableColumns {
+		return sqlFailure{1117, "HY000", "too many columns"}
+	}
+	seen := make(map[string]struct{}, len(columns))
+	for _, column := range columns {
+		key := catalog.Key(column)
+		if _, duplicate := seen[key]; duplicate {
+			return sqlFailure{1060, "42S21", "duplicate column name '" + column + "'"}
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
 }
 
 func createTableParts(query string) (string, string, error) {

@@ -171,7 +171,9 @@ func isSettingControl(lower string) bool {
 }
 
 func isDataDefinition(lower string) bool {
-	return strings.HasPrefix(lower, "create database ") || strings.HasPrefix(lower, "create schema ") || strings.HasPrefix(lower, "create table ")
+	return strings.HasPrefix(lower, "create database ") || strings.HasPrefix(lower, "create schema ") || strings.HasPrefix(lower, "create table ") ||
+		strings.HasPrefix(lower, "drop database ") || strings.HasPrefix(lower, "drop schema ") || strings.HasPrefix(lower, "drop table ") ||
+		strings.HasPrefix(lower, "truncate table ") || strings.HasPrefix(lower, "rename table ") || strings.HasPrefix(lower, "alter table ")
 }
 
 func isMutationStatement(lower string) bool {
