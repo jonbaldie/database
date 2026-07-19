@@ -20,6 +20,21 @@ func TestColumnTypeNameValidatesTemporalDeclarations(t *testing.T) {
 	}
 }
 
+func TestTemporalTableMetadataIncludesFractionalPrecision(t *testing.T) {
+	table := catalog.Table{
+		Name:        "events",
+		Columns:     []string{"at", "clock", "day", "year"},
+		ColumnTypes: []string{"DATETIME(3)", "TIME(6)", "DATE", "YEAR"},
+	}
+	metadata := tableMetadata("app", "events", table, []int{0, 1, 2, 3})
+	want := []byte{3, 6, 0, 0}
+	for index, definition := range metadata {
+		if definition.decimals != want[index] {
+			t.Errorf("temporal column %q decimals = %d, want %d", definition.name, definition.decimals, want[index])
+		}
+	}
+}
+
 func temporalColumnTable() catalog.Table {
 	return catalog.Table{
 		Name:        "events",

@@ -114,6 +114,36 @@ func temporalWireType(typ temporalType) (byte, uint32, uint16) {
 	return typ.wire, length, mysqlCharsetBinary
 }
 
+func temporalTypeForKind(kind temporalKind, precision int) temporalType {
+	switch kind {
+	case temporalDate:
+		return temporalType{kind: kind, precision: precision, wire: mysqlTypeDate, length: 10}
+	case temporalTime:
+		return temporalType{kind: kind, precision: precision, wire: mysqlTypeTime, length: 10}
+	case temporalDatetime:
+		return temporalType{kind: kind, precision: precision, wire: mysqlTypeDatetime, length: 19}
+	case temporalTimestamp:
+		return temporalType{kind: kind, precision: precision, wire: mysqlTypeTimestamp, length: 19}
+	case temporalYear:
+		return temporalType{kind: kind, precision: precision, wire: mysqlTypeYear, length: 4}
+	default:
+		return temporalType{kind: kind, precision: precision}
+	}
+}
+
+func temporalResultMetadata(name string, kind temporalKind, precision int) columnMetadata {
+	typ := temporalTypeForKind(kind, precision)
+	wire, length, charset := temporalWireType(typ)
+	return columnMetadata{
+		catalog:      "def",
+		name:         name,
+		characterSet: charset,
+		length:       length,
+		typ:          wire,
+		decimals:     byte(precision),
+	}
+}
+
 // canonicalTemporalValue validates a supplied literal against a temporal column
 // and returns its canonical stored representation. A NULL literal passes through
 // unchanged. Any zero, malformed, ambiguous, out-of-range, or excessively
@@ -400,6 +430,10 @@ func renderTimestampFixedOffset(instant string, offsetMinutes, precision int) (s
 	if !found {
 		return "", sqlFailure{1292, "22007", fmt.Sprintf("Incorrect datetime value: '%s'", instant)}
 	}
+	clockPart, fraction, err := splitTemporalFraction(temporalType{precision: 6}, clockPart, "TIMESTAMP", "timestamp", 0)
+	if err != nil {
+		return "", err
+	}
 	year, month, day, err := parseCalendarDate(datePart, "timestamp", 0)
 	if err != nil {
 		return "", err
@@ -408,9 +442,17 @@ func renderTimestampFixedOffset(instant string, offsetMinutes, precision int) (s
 	if err != nil {
 		return "", err
 	}
-	base := time.Date(year, time.Month(month), day, hours, minutes, seconds, 0, time.UTC)
+	base := time.Date(year, time.Month(month), day, hours, minutes, seconds, temporalFractionNanoseconds(fraction), time.UTC)
 	shifted := base.Add(time.Duration(offsetMinutes) * time.Minute)
 	return renderInstant(shifted, precision), nil
+}
+
+func temporalFractionNanoseconds(fraction string) int {
+	if fraction == "" {
+		return 0
+	}
+	micros, _ := strconv.Atoi(strings.TrimPrefix(fraction, "."))
+	return micros * 1000
 }
 
 // currentTemporal renders a captured instant as the canonical value of a
@@ -463,10 +505,25 @@ func readPreparedTemporal(payload []byte, offset int, typ preparedParameterType)
 		return "", offset, errors.New("malformed temporal prepared parameter")
 	}
 	body := payload[offset+1 : end]
+	if !validPreparedTemporalBodyLength(typ.typ, len(body)) {
+		return "", offset, errors.New("malformed temporal prepared parameter")
+	}
 	if typ.typ == mysqlTypeTime {
 		return quote(decodePreparedTime(body)), end, nil
 	}
 	return quote(decodePreparedDatetime(typ.typ, body)), end, nil
+}
+
+var preparedTemporalBodyLengths = map[byte]map[int]bool{
+	mysqlTypeDate:      {0: true, 4: true},
+	mysqlTypeDatetime:  {0: true, 4: true, 7: true, 11: true},
+	mysqlTypeTimestamp: {0: true, 4: true, 7: true, 11: true},
+	mysqlTypeTime:      {0: true, 8: true, 12: true},
+}
+
+func validPreparedTemporalBodyLength(wire byte, length int) bool {
+	lengths, ok := preparedTemporalBodyLengths[wire]
+	return ok && lengths[length]
 }
 
 func decodePreparedDatetime(wire byte, body []byte) string {

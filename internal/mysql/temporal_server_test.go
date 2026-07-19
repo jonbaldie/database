@@ -65,6 +65,58 @@ func TestCurrentTimeAtUTCIsStableWithinAStatement(t *testing.T) {
 	}
 }
 
+func TestCurrentTimeResultsExposeTemporalMetadata(t *testing.T) {
+	executor := currentTimeExecutor(t, "UTC", time.Date(2026, 7, 18, 14, 5, 6, 0, time.UTC))
+	cases := map[string]struct {
+		kind temporalKind
+		wire byte
+	}{
+		"SELECT CURRENT_DATE":      {kind: temporalDate, wire: mysqlTypeDate},
+		"SELECT CURRENT_TIME":      {kind: temporalTime, wire: mysqlTypeTime},
+		"SELECT CURRENT_TIMESTAMP": {kind: temporalDatetime, wire: mysqlTypeDatetime},
+	}
+	for query, want := range cases {
+		result, err := executor.execute(query)
+		if err != nil {
+			t.Fatalf("execute(%q) error: %v", query, err)
+		}
+		if len(result.metadata) != 1 {
+			t.Fatalf("execute(%q) metadata = %#v, want one definition", query, result.metadata)
+		}
+		definition := result.metadata[0]
+		if definition.typ != want.wire {
+			t.Errorf("execute(%q) type = %#x, want %#x", query, definition.typ, want.wire)
+		}
+		if parsed, err := parseTemporalType(map[temporalKind]string{
+			temporalDate:     "DATE",
+			temporalTime:     "TIME",
+			temporalDatetime: "DATETIME",
+		}[want.kind]); err != nil || definition.length != parsed.length || definition.characterSet != mysqlCharsetBinary {
+			t.Errorf("execute(%q) metadata = %#v, want temporal metadata for %v", query, definition, want.kind)
+		}
+	}
+}
+
+func TestCurrentTimePreservesRequestedFractionalPrecision(t *testing.T) {
+	instant := time.Date(2026, 7, 18, 22, 0, 0, 123456789, time.UTC)
+	executor := currentTimeExecutor(t, "+05:30", instant)
+	cases := map[string]string{
+		"SELECT CURRENT_TIME(3)":      "03:30:00.123",
+		"SELECT CURRENT_TIMESTAMP(6)": "2026-07-19 03:30:00.123456",
+		"SELECT NOW(2)":               "2026-07-19 03:30:00.12",
+		"SELECT CURTIME(0)":           "03:30:00",
+	}
+	for query, want := range cases {
+		result, err := executor.execute(query)
+		if err != nil {
+			t.Fatalf("execute(%q) error: %v", query, err)
+		}
+		if got := result.rows[0][0]; got != want {
+			t.Errorf("execute(%q) = %q, want %q", query, got, want)
+		}
+	}
+}
+
 // Prepared binary temporal inputs must decode to the exact canonical spelling a
 // text literal carries, so both paths store equivalent values.
 func TestPreparedTemporalMatchesTextInput(t *testing.T) {
@@ -118,5 +170,17 @@ func TestPreparedTemporalRejectsMalformedLength(t *testing.T) {
 	}
 	if _, _, err := readPreparedTemporal([]byte{}, 0, preparedParameterType{typ: mysqlTypeDate}); err == nil {
 		t.Fatalf("readPreparedTemporal accepted an empty payload")
+	}
+	for _, test := range []struct {
+		wire    byte
+		payload []byte
+	}{
+		{mysqlTypeDate, []byte{1, 1}},
+		{mysqlTypeDatetime, []byte{5, 0, 0, 1, 1, 1}},
+		{mysqlTypeTime, []byte{9, 0, 0, 0, 0, 0, 1, 2, 3, 4}},
+	} {
+		if _, _, err := readPreparedTemporal(test.payload, 0, preparedParameterType{typ: test.wire}); err == nil {
+			t.Errorf("readPreparedTemporal(%#x) accepted body length %d", test.wire, len(test.payload)-1)
+		}
 	}
 }

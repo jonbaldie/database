@@ -180,6 +180,9 @@ func TestRenderTimestampFixedOffset(t *testing.T) {
 	if got, _ := renderTimestampFixedOffset("2000-06-15 12:00:00", -480, 3); got != "2000-06-15 04:00:00.000" {
 		t.Errorf("render -08:00 precision 3 = %q, want 2000-06-15 04:00:00.000", got)
 	}
+	if got, err := renderTimestampFixedOffset("2000-06-15 12:00:00.123456", -480, 3); err != nil || got != "2000-06-15 04:00:00.123" {
+		t.Errorf("render -08:00 fractional precision 3 = %q err %v, want 2000-06-15 04:00:00.123", got, err)
+	}
 	// Two renderings of the same instant under the same offset are identical.
 	first, _ := renderTimestampFixedOffset("2020-03-01 09:15:30", 0, 0)
 	second, _ := renderTimestampFixedOffset("2020-03-01 09:15:30", 0, 0)

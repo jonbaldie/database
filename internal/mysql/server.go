@@ -624,12 +624,16 @@ func (s *textStatementExecutor) settingStatement(_ string, lower string) (*query
 }
 
 func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
-	if column, kind, ok := currentTimeQuery(lower); ok {
-		value, err := s.renderCurrentTime(kind)
+	if column, kind, precision, ok := currentTimeQuery(lower); ok {
+		value, err := s.renderCurrentTime(kind, precision)
 		if err != nil {
 			return nil, true, err
 		}
-		return &queryResult{columns: []string{column}, rows: [][]string{{value}}}, true, nil
+		return &queryResult{
+			columns:  []string{column},
+			rows:     [][]string{{value}},
+			metadata: []columnMetadata{temporalResultMetadata(column, kind, precision)},
+		}, true, nil
 	}
 	result, found := map[string]*queryResult{
 		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
@@ -640,18 +644,42 @@ func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*query
 }
 
 // currentTimeQuery maps a recognized current-time SELECT to its result column
-// label and the temporal kind that shapes its value.
-func currentTimeQuery(lower string) (string, temporalKind, bool) {
-	switch lower {
-	case "select current_date", "select current_date()", "select curdate()":
-		return "CURRENT_DATE", temporalDate, true
-	case "select current_time", "select current_time()", "select curtime()":
-		return "CURRENT_TIME", temporalTime, true
-	case "select current_timestamp", "select current_timestamp()", "select now()":
-		return "CURRENT_TIMESTAMP", temporalTimestamp, true
-	default:
-		return "", temporalNone, false
+// label, the temporal kind that shapes its value, and its fractional precision.
+func currentTimeQuery(lower string) (string, temporalKind, int, bool) {
+	lower = strings.TrimSpace(lower)
+	for _, candidate := range []struct {
+		functions []string
+		label     string
+		kind      temporalKind
+		fraction  bool
+	}{
+		{functions: []string{"current_date", "curdate"}, label: "CURRENT_DATE", kind: temporalDate},
+		{functions: []string{"current_time", "curtime"}, label: "CURRENT_TIME", kind: temporalTime, fraction: true},
+		{functions: []string{"current_timestamp", "now"}, label: "CURRENT_TIMESTAMP", kind: temporalDatetime, fraction: true},
+	} {
+		for _, function := range candidate.functions {
+			if precision, ok := currentTimeCallPrecision(lower, function, candidate.fraction); ok {
+				return candidate.label, candidate.kind, precision, true
+			}
+		}
 	}
+	return "", temporalNone, 0, false
+}
+
+func currentTimeCallPrecision(query, function string, allowFraction bool) (int, bool) {
+	prefix := "select " + function
+	if query == prefix || query == prefix+"()" {
+		return 0, true
+	}
+	if !allowFraction || !strings.HasPrefix(query, prefix+"(") || !strings.HasSuffix(query, ")") {
+		return 0, false
+	}
+	argument := strings.TrimSpace(query[len(prefix)+1 : len(query)-1])
+	precision, err := strconv.Atoi(argument)
+	if err != nil || precision < 0 || precision > 6 {
+		return 0, false
+	}
+	return precision, true
 }
 
 // renderCurrentTime evaluates a current-time function against the configured
@@ -659,17 +687,14 @@ func currentTimeQuery(lower string) (string, temporalKind, bool) {
 // current instant rendered through the offset; a DATE or TIME is the session-
 // local wall clock. Both read one captured instant, so references within a
 // statement observe the same value.
-func (s *textStatementExecutor) renderCurrentTime(kind temporalKind) (string, error) {
+func (s *textStatementExecutor) renderCurrentTime(kind temporalKind, precision int) (string, error) {
 	offset, err := parseFixedOffset(s.server.config.TimeZone)
 	if err != nil {
 		return "", err
 	}
 	instant := s.server.config.Clock().UTC()
-	if kind == temporalTimestamp {
-		return renderTimestampFixedOffset(instant.Format("2006-01-02 15:04:05"), offset, 0)
-	}
 	local := instant.Add(time.Duration(offset) * time.Minute)
-	return currentTemporal(local, kind, 0), nil
+	return currentTemporal(local, kind, precision), nil
 }
 
 func (s *textStatementExecutor) operationStatement(query, lower string) (*queryResult, bool, error) {
@@ -1869,6 +1894,9 @@ func tableMetadata(namespace, tableName string, table catalog.Table, selected []
 		definition := columnMetadata{catalog: "def", schema: namespace, table: tableName, originalTable: tableName, name: name, originalName: name, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString}
 		if typeName, known := table.ColumnType(columnIndex); known {
 			definition.typ, definition.length, definition.characterSet = catalogColumnWireType(typeName)
+			if temporal, err := parseTemporalType(typeName); err == nil && temporal.kind != temporalNone {
+				definition.decimals = byte(temporal.precision)
+			}
 			if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(typeName)), " UNSIGNED") {
 				definition.flags |= mysqlUnsignedFlag
 			}
