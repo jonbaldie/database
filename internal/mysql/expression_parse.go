@@ -327,11 +327,84 @@ func keywordLiteral(p *exprParser, word string) (exprValue, bool, error) {
 func parseFunctionCall(p *exprParser, name string) (exprValue, error) {
 	p.advance() // name
 	p.advance() // '('
+	if strings.EqualFold(name, "SUBSTRING") {
+		arguments, err := parseSubstringArgumentList(p)
+		if err != nil {
+			return exprValue{}, err
+		}
+		return callFunction(name, arguments)
+	}
 	arguments, err := parseArgumentList(p)
 	if err != nil {
 		return exprValue{}, err
 	}
 	return callFunction(name, arguments)
+}
+
+// parseSubstringArgumentList accepts both comma syntax and MySQL's keyword
+// syntax: SUBSTRING(text, position[, length]) and
+// SUBSTRING(text FROM position[ FOR length]).
+func parseSubstringArgumentList(p *exprParser) ([]exprValue, error) {
+	if matchRParen(p) {
+		return nil, nil
+	}
+	text, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	if p.matchKeyword("FROM") {
+		return parseSubstringFromArguments(p, text)
+	}
+	return parseSubstringCommaArguments(p, text)
+}
+
+func parseSubstringFromArguments(p *exprParser, text exprValue) ([]exprValue, error) {
+	position, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	arguments := []exprValue{text, position}
+	if p.matchKeyword("FOR") {
+		length, lengthErr := p.parseExpression()
+		if lengthErr != nil {
+			return nil, lengthErr
+		}
+		arguments = append(arguments, length)
+	}
+	if !matchRParen(p) {
+		return nil, unsupportedExpression()
+	}
+	return arguments, nil
+}
+
+func parseSubstringCommaArguments(p *exprParser, text exprValue) ([]exprValue, error) {
+	arguments := []exprValue{text}
+	if matchRParen(p) {
+		return arguments, nil
+	}
+	if !matchComma(p) {
+		return nil, unsupportedExpression()
+	}
+	position, positionErr := p.parseExpression()
+	if positionErr != nil {
+		return nil, positionErr
+	}
+	arguments = append(arguments, position)
+	if matchRParen(p) {
+		return arguments, nil
+	}
+	if !matchComma(p) {
+		return nil, unsupportedExpression()
+	}
+	length, lengthErr := p.parseExpression()
+	if lengthErr != nil {
+		return nil, lengthErr
+	}
+	arguments = append(arguments, length)
+	if !matchRParen(p) {
+		return nil, unsupportedExpression()
+	}
+	return arguments, nil
 }
 
 func parseArgumentList(p *exprParser) ([]exprValue, error) {

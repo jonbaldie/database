@@ -51,20 +51,23 @@ func TestSelectExpressionThroughSQL(t *testing.T) {
 func TestSelectExtendedExpressionRegistryThroughSQL(t *testing.T) {
 	executor := expressionExecutor(t)
 	cases := map[string]string{
-		"SELECT ROUND(1.235, 2)":            "1.24",
-		"SELECT ROUND(-1.235, 2)":           "-1.24",
-		"SELECT ROUND(15, -1)":              "20",
-		"SELECT ROUND(1.5e0)":               "2",
-		"SELECT POWER(2, 3)":                "8",
-		"SELECT SQRT(9)":                    "3",
-		"SELECT SUBSTRING('abcdef', 2, 3)":  "bcd",
-		"SELECT SUBSTRING('abcdef', -2, 1)": "e",
-		"SELECT SUBSTRING('abcdef', 3)":     "cdef",
-		"SELECT REPLACE('a-b-a', '-', '_')": "a_b_a",
-		"SELECT REPLACE('abc', '', 'x')":    "abc",
-		"SELECT LOCATE('bc', 'abcd')":       "2",
-		"SELECT LOCATE('z', 'abcd')":        "0",
-		"SELECT LOCATE('é', 'aé')":          "2",
+		"SELECT ROUND(1.235, 2)":                  "1.24",
+		"SELECT ROUND(-1.235, 2)":                 "-1.24",
+		"SELECT ROUND(15, -1)":                    "20",
+		"SELECT ROUND(1.5e0)":                     "2",
+		"SELECT ROUND(2.5e0)":                     "2",
+		"SELECT POWER(2, 3)":                      "8",
+		"SELECT SQRT(9)":                          "3",
+		"SELECT SUBSTRING('abcdef', 2, 3)":        "bcd",
+		"SELECT SUBSTRING('abcdef', -2, 1)":       "e",
+		"SELECT SUBSTRING('abcdef', 3)":           "cdef",
+		"SELECT SUBSTRING('abcdef' FROM 2 FOR 3)": "bcd",
+		"SELECT REPLACE('a-b-a', '-', '_')":       "a_b_a",
+		"SELECT REPLACE('abc', '', 'x')":          "abc",
+		"SELECT LOCATE('bc', 'abcd')":             "2",
+		"SELECT LOCATE('z', 'abcd')":              "0",
+		"SELECT LOCATE('é', 'aé')":                "2",
+		"SELECT LOCATE('B', 'abc')":               "2",
 	}
 	for query, want := range cases {
 		result, err := executor.execute(query)

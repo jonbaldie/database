@@ -109,6 +109,17 @@ func TestExplainRejectsUnsupportedModes(t *testing.T) {
 	}
 }
 
+func TestExplainScalarSubstringFromSyntax(t *testing.T) {
+	executor := explainExecutor(t)
+	result, err := executor.execute("EXPLAIN SELECT SUBSTRING('abcdef' FROM 2 FOR 3)")
+	if err != nil {
+		t.Fatalf("explain substring: %v", err)
+	}
+	if len(result.rows) == 0 || len(result.rows[0]) == 0 {
+		t.Fatalf("explain substring returned no plan: %#v", result)
+	}
+}
+
 // TestExplainMatchesExecutorAcceptance guards that EXPLAIN never describes a
 // plan for a statement the executor itself would reject.
 func TestExplainMatchesExecutorAcceptance(t *testing.T) {

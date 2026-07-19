@@ -126,6 +126,19 @@ func TestScalarColumnDecimalReportsScale(t *testing.T) {
 	}
 }
 
+func TestRoundIntegerPreservesMetadataDomain(t *testing.T) {
+	_, _, metadata, err := scalarColumn("ROUND(15, -1)")
+	if err != nil {
+		t.Fatalf("scalarColumn(ROUND(15, -1)) error: %v", err)
+	}
+	if metadata.typ != mysqlTypeLongLong {
+		t.Errorf("ROUND(15, -1) type = %#x, want integer type %#x", metadata.typ, mysqlTypeLongLong)
+	}
+	if metadata.flags&mysqlUnsignedFlag != 0 || metadata.decimals != 0 {
+		t.Errorf("ROUND(15, -1) metadata = %#v, want signed integer with zero decimals", metadata)
+	}
+}
+
 // TestParsedLiteralMatchesScalarColumn proves the prepared-metadata helper and
 // the execution path derive identical columns, so text and prepared execution of
 // the same expression agree.

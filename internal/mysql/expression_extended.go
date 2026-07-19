@@ -6,9 +6,9 @@ import (
 )
 
 // roundValue implements the finite numeric ROUND function. Exact values keep
-// decimal arithmetic and round half away from zero; approximate values use the
-// same rule in the double domain. A NULL argument remains NULL and character
-// input requires an explicit cast.
+// decimal arithmetic and round half away from zero; approximate values use
+// nearest-even rounding in the double domain. A NULL argument remains NULL and
+// character input requires an explicit cast.
 func roundValue(arguments []exprValue) (exprValue, error) {
 	if roundHasNull(arguments) {
 		return nullValue(), nil
@@ -48,14 +48,35 @@ func roundNumeric(value exprValue, position int) (exprValue, error) {
 	switch value.kind {
 	case valueDouble:
 		return roundDouble(value.f, position)
-	case valueInt, valueUint:
+	case valueInt:
 		if position >= 0 {
 			return value, nil
 		}
-		return boundedDecimal(roundExact(toDecimal(value), position))
+		return roundInteger(value.i, position)
+	case valueUint:
+		if position >= 0 {
+			return value, nil
+		}
+		return roundUnsignedInteger(value.u, position)
 	default:
 		return boundedDecimal(roundExact(value.dec, position))
 	}
+}
+
+func roundInteger(value int64, position int) (exprValue, error) {
+	rounded := roundExact(decimalFromInt(value), position)
+	if !rounded.unscaled.IsInt64() {
+		return exprValue{}, outOfRangeValue()
+	}
+	return intValue(rounded.unscaled.Int64()), nil
+}
+
+func roundUnsignedInteger(value uint64, position int) (exprValue, error) {
+	rounded := roundExact(toDecimal(uintValue(value)), position)
+	if rounded.unscaled.Sign() < 0 || !rounded.unscaled.IsUint64() {
+		return exprValue{}, outOfRangeValue()
+	}
+	return uintValue(rounded.unscaled.Uint64()), nil
 }
 
 func roundDouble(value float64, places int) (exprValue, error) {
@@ -73,10 +94,10 @@ func roundDouble(value float64, places int) (exprValue, error) {
 		if factor == 0 || math.IsInf(factor, 0) || math.Abs(value) > math.MaxFloat64/factor {
 			return doubleValue(value), nil
 		}
-		return checkFinite(math.Round(value*factor) / factor)
+		return checkFinite(math.RoundToEven(value*factor) / factor)
 	}
 	factor := math.Pow10(-places)
-	return checkFinite(math.Round(value/factor) * factor)
+	return checkFinite(math.RoundToEven(value/factor) * factor)
 }
 
 func roundExact(value decimalValue, places int) decimalValue {
@@ -296,8 +317,10 @@ func locateValue(arguments []exprValue) (exprValue, error) {
 		return intValue(0), nil
 	}
 	needleLength, haystackLength := len(needleRunes), len(haystackRunes)
+	needleKey := characterComparisonKey(defaultStringType, needle)
 	for index := int(startIndex); index+needleLength <= haystackLength; index++ {
-		if runesEqual(haystackRunes[index:index+needleLength], needleRunes) {
+		candidate := string(haystackRunes[index : index+needleLength])
+		if characterComparisonKey(defaultStringType, candidate) == needleKey {
 			return intValue(int64(index + 1)), nil
 		}
 	}
@@ -309,16 +332,4 @@ func locateStart(arguments []exprValue) (int64, error) {
 		return 1, nil
 	}
 	return expressionInteger(arguments[2])
-}
-
-func runesEqual(left, right []rune) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }

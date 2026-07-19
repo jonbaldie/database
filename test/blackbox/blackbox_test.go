@@ -795,12 +795,15 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 		t.Fatalf("prepared binary result differs from text: text=%#v binary=%#v", text, binaryResult)
 	}
 	for query, want := range map[string]string{
-		"SELECT ROUND(1.235, 2)":           "1.24",
-		"SELECT POWER(2, 3)":               "8",
-		"SELECT SQRT(9)":                   "3",
-		"SELECT SUBSTRING('abcdef', 2, 3)": "bcd",
-		"SELECT REPLACE('a-b', '-', '_')":  "a_b",
-		"SELECT LOCATE('bc', 'abcd')":      "2",
+		"SELECT ROUND(1.235, 2)":                  "1.24",
+		"SELECT ROUND(15, -1)":                    "20",
+		"SELECT POWER(2, 3)":                      "8",
+		"SELECT SQRT(9)":                          "3",
+		"SELECT SUBSTRING('abcdef', 2, 3)":        "bcd",
+		"SELECT SUBSTRING('abcdef' FROM 2 FOR 3)": "bcd",
+		"SELECT REPLACE('a-b', '-', '_')":         "a_b",
+		"SELECT LOCATE('bc', 'abcd')":             "2",
+		"SELECT LOCATE('B', 'abc')":               "2",
 	} {
 		text = client.query(query)
 		statement = client.prepare(query)
