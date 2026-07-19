@@ -134,6 +134,10 @@ func (s *textStatementExecutor) decorateDerivedInputs(context *composedQueryCont
 		if table.query == "" {
 			continue
 		}
+		if table.reason == "reuse" {
+			root = queryexplanation.ReusedInput(root, "derived", table.alias)
+			continue
+		}
 		input, err := s.explainComposedBody(context, table.query, nil)
 		if err != nil {
 			return nil, err
@@ -190,8 +194,7 @@ func subqueryIsCorrelated(context *composedQueryContext, query string, outer *ou
 	if outer == nil {
 		return false
 	}
-	_, err := describeComposedSelect(context, query, nil)
-	return err != nil
+	return composedQueryIsCorrelated(context, query)
 }
 
 func parenthesizedSelectQueries(value string) []string {

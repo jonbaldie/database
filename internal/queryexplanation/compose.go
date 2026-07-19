@@ -44,6 +44,19 @@ func MaterializedInput(primary, input *Operator, reason, clause, fragment string
 	}
 }
 
+// ReusedInput records a read from an earlier statement-scoped materialization.
+func ReusedInput(primary *Operator, clause, fragment string) *Operator {
+	predicates := []Predicate{{
+		Role: "residual", Expression: fragment,
+		Sources: []PredicateSource{{Clause: clause, Fragment: fragment}},
+	}}
+	return &Operator{
+		Kind: "materialize", Summary: "Reuse the previously materialized composed query input.",
+		Operation: materializeOperation{Reason: "reuse"}, Predicates: predicates,
+		Estimates: primary.Estimates, Output: primary.Output, Warnings: []Warning{}, Children: []*Operator{primary},
+	}
+}
+
 // DependentInput records a correlated subquery evaluated for each outer row.
 func DependentInput(primary, input *Operator, clause, fragment string) *Operator {
 	predicates := []Predicate{{

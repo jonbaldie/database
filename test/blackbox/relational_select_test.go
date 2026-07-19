@@ -91,9 +91,11 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 		"CREATE TABLE authors (id INT, name VARCHAR(32))",
 		"CREATE TABLE posts (id INT, author_id INT, title VARCHAR(32), score INT)",
 		"CREATE TABLE binary_names (name VARCHAR(32) COLLATE utf8mb4_bin)",
+		"CREATE TABLE temporal_values (d DATE, dt DATETIME)",
 		"INSERT INTO authors VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Linus')",
 		"INSERT INTO posts VALUES (10, 1, 'first', 5), (11, 1, 'second', 20), (12, 2, 'third', 15)",
 		"INSERT INTO binary_names VALUES ('a'), ('B')",
+		"INSERT INTO temporal_values VALUES ('2024-01-01', '2024-01-02 03:04:05')",
 	} {
 		if result := client.query(query); result.err != "" {
 			t.Fatalf("%s: %#v", query, result)
@@ -126,6 +128,10 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	outerProjection := client.query("SELECT a.id, (SELECT a.id + p.id FROM posts p WHERE p.author_id = a.id ORDER BY p.id LIMIT 1) AS combined FROM authors a WHERE a.id <= 2 ORDER BY a.id")
 	if outerProjection.err != "" || !reflect.DeepEqual(outerProjection.rows, [][]string{{"1", "11"}, {"2", "14"}}) {
 		t.Fatalf("outer projection scope: %#v", outerProjection)
+	}
+	nestedOuterProjection := client.query("SELECT (SELECT (SELECT p.author_id) FROM posts p WHERE p.author_id = a.id ORDER BY p.id LIMIT 1) FROM authors a WHERE a.id = 1")
+	if nestedOuterProjection.err != "" || !reflect.DeepEqual(nestedOuterProjection.rows, [][]string{{"1"}}) {
+		t.Fatalf("nested outer projection scope: %#v", nestedOuterProjection)
 	}
 	existsProjection := client.query("SELECT a.name FROM authors a WHERE EXISTS (SELECT 1 / (p.id - p.id) FROM posts p WHERE p.author_id = a.id) ORDER BY a.id")
 	if existsProjection.err != "" || !reflect.DeepEqual(existsProjection.rows, [][]string{{"Ada"}, {"Grace"}}) {
@@ -195,6 +201,14 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	if binaryOrder.err != "" || !reflect.DeepEqual(binaryOrder.rows, [][]string{{"B"}, {"B"}}) {
 		t.Fatalf("set binary collation order: %#v", binaryOrder)
 	}
+	mixedCollation := client.query("SELECT name FROM binary_names WHERE name = 'a' UNION SELECT 'A' ORDER BY name")
+	if mixedCollation.err != "" || !reflect.DeepEqual(mixedCollation.rows, [][]string{{"A"}, {"a"}}) {
+		t.Fatalf("set collation coercibility: %#v", mixedCollation)
+	}
+	temporalSet := client.query("SELECT d FROM temporal_values UNION ALL SELECT dt FROM temporal_values")
+	if temporalSet.err != "" || !reflect.DeepEqual(temporalSet.rows, [][]string{{"2024-01-01 00:00:00"}, {"2024-01-02 03:04:05"}}) {
+		t.Fatalf("set temporal promotion: %#v", temporalSet)
+	}
 	derivedBinary := client.query("SELECT name FROM (SELECT name FROM binary_names) AS d WHERE name = 'A'")
 	if derivedBinary.err != "" || len(derivedBinary.rows) != 0 {
 		t.Fatalf("derived collation metadata: %#v", derivedBinary)
@@ -221,6 +235,18 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	correlatedExplanation := client.query("EXPLAIN FORMAT=JSON SELECT a.name, (SELECT p.title FROM posts p WHERE p.author_id = a.id ORDER BY p.id LIMIT 1) AS first_title FROM authors a")
 	if correlatedExplanation.err != "" || len(correlatedExplanation.rows) != 1 || !strings.Contains(correlatedExplanation.rows[0][0], "Evaluate the correlated subquery") {
 		t.Fatalf("correlated explanation: %#v", correlatedExplanation)
+	}
+	outerScalarExplanation := client.query("EXPLAIN FORMAT=JSON SELECT a.id, (SELECT a.id + 1) FROM authors a")
+	if outerScalarExplanation.err != "" || len(outerScalarExplanation.rows) != 1 || !strings.Contains(outerScalarExplanation.rows[0][0], "Evaluate the correlated subquery") {
+		t.Fatalf("outer scalar explanation: %#v", outerScalarExplanation)
+	}
+	existsSetExplanation := client.query("EXPLAIN FORMAT=JSON SELECT name FROM authors WHERE EXISTS (SELECT 1 UNION SELECT 2)")
+	if existsSetExplanation.err != "" || len(existsSetExplanation.rows) != 1 || !strings.Contains(existsSetExplanation.rows[0][0], `"kind":"set_operation"`) {
+		t.Fatalf("EXISTS set explanation: %#v", existsSetExplanation)
+	}
+	cteReuseExplanation := client.query("EXPLAIN FORMAT=JSON WITH ids AS (SELECT id FROM authors) SELECT a.id FROM ids a JOIN ids b ON a.id = b.id")
+	if cteReuseExplanation.err != "" || len(cteReuseExplanation.rows) != 1 || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"cte"`) || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"reuse"`) {
+		t.Fatalf("CTE reuse explanation: %#v", cteReuseExplanation)
 	}
 	preparedCardinality := client.prepare("SELECT (SELECT name FROM authors)")
 	if preparedCardinality.err != "" {

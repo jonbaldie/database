@@ -60,10 +60,7 @@ func parseProjectionItem(item string, columns []relationColumn, context *compose
 }
 
 func subqueryProjection(query, expression, alias string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
-	scope := outer
-	if scope == nil {
-		scope = &outerRelationScope{columns: columns, row: sampleRelationRow(columns)}
-	}
+	scope := &outerRelationScope{columns: columns, row: sampleRelationRow(columns), parent: outer}
 	result, err := describeComposedSelect(context, query, scope)
 	if err != nil {
 		return nil, err
@@ -72,6 +69,14 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 		return nil, sqlFailure{1241, "21000", "operand should contain 1 column"}
 	}
 	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
+	correlated := composedQueryIsCorrelated(context, query)
+	value := exprValue{}
+	if !correlated && !context.planning {
+		value, metadata, err = executeScalarSubquery(context, query, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
 	name := expression
 	if alias != "" {
 		name = alias
@@ -80,7 +85,7 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 	metadata.flags &^= mysqlNotNullFlag
 	return []relationalProjection{{
 		expression: expression, name: name, alias: alias, column: -1,
-		subquery: query, context: context, metadata: metadata,
+		subquery: query, context: context, metadata: metadata, scalar: !correlated, value: value,
 	}}, nil
 }
 
@@ -213,20 +218,7 @@ func (p *relationalSelectPlan) projectValues(row relationRow, result *relational
 	for index, projection := range p.projection {
 		projection = projection.resolveName(p.source.columns)
 		p.projection[index] = projection
-		var value exprValue
-		var err error
-		if projection.subquery != "" {
-			value, _, err = executeScalarSubquery(projection.context, projection.subquery, &outerRelationScope{columns: p.source.columns, row: row, parent: p.outer})
-		} else if projection.scalar {
-			value = projection.value
-		} else if projection.computed {
-			value, err = evaluateRelationExpressionContext(projection.expression, p.source.columns, row, projection.outer)
-		} else {
-			if projection.column < 0 || projection.column >= len(row.values) {
-				return sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
-			}
-			value, err = relationColumnValue(p.source.columns, projection.column, row)
-		}
+		value, err := p.projectionValue(projection, row)
 		if err != nil {
 			return err
 		}
@@ -238,6 +230,23 @@ func (p *relationalSelectPlan) projectValues(row relationRow, result *relational
 		}
 	}
 	return nil
+}
+
+func (p *relationalSelectPlan) projectionValue(projection relationalProjection, row relationRow) (exprValue, error) {
+	if projection.subquery != "" && !projection.scalar {
+		value, _, err := executeScalarSubquery(projection.context, projection.subquery, &outerRelationScope{columns: p.source.columns, row: row, parent: p.outer})
+		return value, err
+	}
+	if projection.scalar {
+		return projection.value, nil
+	}
+	if projection.computed {
+		return evaluateRelationExpressionContext(projection.expression, p.source.columns, row, projection.outer)
+	}
+	if projection.column < 0 || projection.column >= len(row.values) {
+		return exprValue{}, sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
+	}
+	return relationColumnValue(p.source.columns, projection.column, row)
 }
 
 func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relationalResultRow) error {

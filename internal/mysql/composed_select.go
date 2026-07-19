@@ -13,10 +13,11 @@ import (
 const maximumComposedQueryDepth = 64
 
 type composedQueryContext struct {
-	executor *relationExecutor
-	ctes     map[string]composedRelation
-	depth    int
-	planning bool
+	executor    *relationExecutor
+	ctes        map[string]composedRelation
+	depth       int
+	planning    bool
+	strictScope bool
 }
 
 type composedRelation struct {
@@ -67,7 +68,7 @@ func (context *composedQueryContext) child() (*composedQueryContext, error) {
 	}
 	executor := *context.executor
 	executor.streamRows = false
-	return &composedQueryContext{executor: &executor, ctes: context.ctes, depth: context.depth + 1, planning: context.planning}, nil
+	return &composedQueryContext{executor: &executor, ctes: context.ctes, depth: context.depth + 1, planning: context.planning, strictScope: context.strictScope}, nil
 }
 
 func executeComposedSelect(context *composedQueryContext, query string, outer *outerRelationScope) (*queryResult, error) {
@@ -104,6 +105,14 @@ func describeComposedSelect(context *composedQueryContext, query string, outer *
 		return describeSetQuery(local, parsed, outer)
 	}
 	return describeSelectTerm(local, body, outer)
+}
+
+func composedQueryIsCorrelated(context *composedQueryContext, query string) bool {
+	probe := *context
+	probe.strictScope = true
+	_, err := describeComposedSelect(&probe, query, nil)
+	var failure sqlFailure
+	return errors.As(err, &failure) && failure.code == 1054
 }
 
 func describeSelectTerm(context *composedQueryContext, query string, outer *outerRelationScope) (*queryResult, error) {
@@ -152,19 +161,36 @@ func describeScalarSelect(context *composedQueryContext, expression string, oute
 			metadata[index] = resultColumnDefinition(result.columns[0], 0, result.metadata)
 			metadata[index].flags &^= mysqlNotNullFlag
 		} else {
-			metadata[index] = plannedScalarMetadata(expression)
+			metadata[index], err = plannedScalarMetadata(expression, context.strictScope, outer)
+			if err != nil {
+				return nil, err
+			}
 		}
 		columns[index], metadata[index].name = name, name
 	}
 	return &queryResult{columns: columns, metadata: metadata}, nil
 }
 
-func plannedScalarMetadata(expression string) columnMetadata {
+func plannedScalarMetadata(expression string, strictScope bool, outer *outerRelationScope) (columnMetadata, error) {
 	trimmed := strings.TrimSpace(expression)
 	if value, err := evaluateScalar(trimmed); err == nil {
-		return scalarMetadata(trimmed, value.render(), value)
+		return scalarMetadata(trimmed, value.render(), value), nil
 	}
-	return columnMetadata{catalog: "def", name: trimmed, characterSet: mysqlCharsetUTF8MB40900AICI, length: 255, typ: mysqlTypeVarString}
+	if outer != nil {
+		if value, err := evaluateScalarWithResolver(trimmed, func(name string) (exprValue, error) { return outerRelationValue(name, outer) }); err == nil {
+			metadata := scalarMetadata(trimmed, value.render(), value)
+			metadata.flags &^= mysqlNotNullFlag
+			return metadata, nil
+		}
+	}
+	if strictScope {
+		_, err := evaluateScalarWithResolver(trimmed, func(name string) (exprValue, error) { return exprValue{}, unknownColumnError(name) })
+		var failure sqlFailure
+		if errors.As(err, &failure) && failure.code == 1054 {
+			return columnMetadata{}, err
+		}
+	}
+	return columnMetadata{catalog: "def", name: trimmed, characterSet: mysqlCharsetUTF8MB40900AICI, length: 255, typ: mysqlTypeVarString}, nil
 }
 
 func describeSetQuery(context *composedQueryContext, query setQuery, outer *outerRelationScope) (*queryResult, error) {
@@ -203,9 +229,6 @@ func executeSelectTerm(context *composedQueryContext, query string, outer *outer
 
 func executeScalarSelectContext(context *composedQueryContext, expression string, outer *outerRelationScope) (*queryResult, error) {
 	items := splitCSV(expression)
-	if len(items) == 1 && !isScalarSubqueryExpression(items[0]) {
-		return selectLiteral(expression)
-	}
 	columns := make([]string, len(items))
 	row := make([]string, len(items))
 	nulls := make([]bool, len(items))
@@ -283,6 +306,17 @@ func compileExistsSubquery(text string, columns []relationColumn, context *compo
 	if !ok || context == nil {
 		return nil, true, unsupportedExpression()
 	}
+	if !context.planning && !composedQueryIsCorrelated(context, existsProjectionQuery(query)) {
+		child, err := context.child()
+		if err != nil {
+			return nil, true, err
+		}
+		found, err := executeExistsSubquery(child, query, nil)
+		if err != nil {
+			return nil, true, err
+		}
+		return func(relationRow) (exprValue, error) { return boolValue(found), nil }, true, nil
+	}
 	return func(row relationRow) (exprValue, error) {
 		child, err := context.child()
 		if err != nil {
@@ -319,6 +353,9 @@ func executeExistsSubquery(context *composedQueryContext, query string, outer *o
 
 func existsProjectionQuery(query string) string {
 	query = stripWholeQueryParentheses(strings.TrimSpace(query))
+	if _, set, _ := parseSetQuery(query); set {
+		return query
+	}
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
 		return query
 	}
@@ -348,6 +385,12 @@ func compileInSubquery(text string, columns []relationColumn, session *session, 
 		return nil, true, unsupportedExpression()
 	}
 	plan := inSubqueryPredicate{operand: operand, columns: columns, context: context, outer: outer, query: query, negate: negate}
+	if !context.planning && !composedQueryIsCorrelated(context, query) {
+		plan.cached, err = plan.executeScope(nil)
+		if err != nil {
+			return nil, true, err
+		}
+	}
 	return plan.evaluate, true, nil
 }
 
@@ -358,6 +401,7 @@ type inSubqueryPredicate struct {
 	outer   *outerRelationScope
 	query   string
 	negate  bool
+	cached  *queryResult
 }
 
 func stripNotIn(left string) (string, bool) {
@@ -381,11 +425,18 @@ func (plan inSubqueryPredicate) evaluate(row relationRow) (exprValue, error) {
 }
 
 func (plan inSubqueryPredicate) execute(row relationRow) (*queryResult, error) {
+	if plan.cached != nil {
+		return plan.cached, nil
+	}
+	scope := &outerRelationScope{columns: plan.columns, row: row, parent: plan.outer}
+	return plan.executeScope(scope)
+}
+
+func (plan inSubqueryPredicate) executeScope(scope *outerRelationScope) (*queryResult, error) {
 	child, err := plan.context.child()
 	if err != nil {
 		return nil, err
 	}
-	scope := &outerRelationScope{columns: plan.columns, row: row, parent: plan.outer}
 	result, err := executeComposedSelect(child, plan.query, scope)
 	if err != nil {
 		return nil, err
@@ -487,7 +538,7 @@ func parseAndMaterializeCTEs(context *composedQueryContext, query string, _ *out
 	if strings.HasPrefix(strings.ToLower(query), "with recursive ") {
 		return nil, "", sqlFailure{1235, "42000", "recursive CTEs are not supported in v0.1"}
 	}
-	local := &composedQueryContext{executor: context.executor, ctes: cloneComposedRelations(context.ctes), depth: context.depth, planning: context.planning}
+	local := &composedQueryContext{executor: context.executor, ctes: cloneComposedRelations(context.ctes), depth: context.depth, planning: context.planning, strictScope: context.strictScope}
 	localNames := make(map[string]bool)
 	rest := strings.TrimSpace(query[len("WITH "):])
 	for {
@@ -912,10 +963,19 @@ func compatibleNumericSetMetadata(result, left, right columnMetadata) (columnMet
 }
 
 func compatibleCharacterSetMetadata(result, left, right columnMetadata) (columnMetadata, error) {
-	if left.characterSet != right.characterSet {
+	if left.characterSet == right.characterSet {
+		return characterSetMetadata(result, left.characterSet), nil
+	}
+	if left.characterSet == mysqlCharsetBinary || right.characterSet == mysqlCharsetBinary {
 		return columnMetadata{}, strictConversionError()
 	}
-	return characterSetMetadata(result, left, right), nil
+	if left.table != "" && right.table == "" {
+		return characterSetMetadata(result, left.characterSet), nil
+	}
+	if right.table != "" && left.table == "" {
+		return characterSetMetadata(result, right.characterSet), nil
+	}
+	return columnMetadata{}, strictConversionError()
 }
 
 func dateAndDatetime(left, right byte) bool {
@@ -955,13 +1015,13 @@ func numericSetMetadata(result, left, right columnMetadata) columnMetadata {
 	return result
 }
 
-func characterSetMetadata(result, left, right columnMetadata) columnMetadata {
+func characterSetMetadata(result columnMetadata, characterSet uint16) columnMetadata {
 	result.typ = mysqlTypeVarString
-	if left.characterSet == mysqlCharsetBinary || right.characterSet == mysqlCharsetBinary {
+	if characterSet == mysqlCharsetBinary {
 		result.characterSet, result.flags = mysqlCharsetBinary, result.flags|mysqlBinaryFlag
 		return result
 	}
-	if left.characterSet == mysqlCharsetUTF8MB4Bin || right.characterSet == mysqlCharsetUTF8MB4Bin {
+	if characterSet == mysqlCharsetUTF8MB4Bin {
 		result.characterSet = mysqlCharsetUTF8MB4Bin
 		return result
 	}
@@ -999,6 +1059,9 @@ func normalizeSetRow(row []string, nulls []bool, metadata []columnMetadata) []st
 }
 
 func normalizeSetValue(raw string, metadata columnMetadata) string {
+	if metadata.typ == mysqlTypeDatetime && len(raw) == len("2000-01-01") {
+		return raw + " 00:00:00"
+	}
 	if !isNumericWireType(metadata.typ) {
 		return raw
 	}
