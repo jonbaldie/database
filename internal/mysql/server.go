@@ -322,13 +322,15 @@ func (r *connectionRegistry) closeGracefully(listener net.Listener) error {
 }
 
 type session struct {
-	server        *Server
-	username      string
-	database      string
-	initialDB     string
-	statements    map[uint32]*preparedStatement
-	nextStmtID    uint32
-	longDataBytes int
+	server          *Server
+	username        string
+	database        string
+	initialDB       string
+	timeZone        string
+	initialTimeZone string
+	statements      map[uint32]*preparedStatement
+	nextStmtID      uint32
+	longDataBytes   int
 	transactionState
 }
 
@@ -651,13 +653,55 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 	}
 }
 
+func (s *textStatementExecutor) setTimeZone(query string) (bool, error) {
+	assignment := strings.TrimSpace(query[len("SET "):])
+	lhs, value, found := strings.Cut(assignment, "=")
+	if !found {
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(lhs)) {
+	case "time_zone", "session.time_zone", "session time_zone", "@@time_zone", "@@session.time_zone", "@@session time_zone":
+	default:
+		return false, nil
+	}
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "default") {
+		s.timeZone = s.initialTimeZone
+		return true, nil
+	}
+	offset, err := parseFixedOffset(scalar(value))
+	if err != nil {
+		return true, err
+	}
+	s.timeZone = formatFixedOffset(offset)
+	return true, nil
+}
+
 func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
-	if column, kind, ok := currentTimeQuery(lower); ok {
-		value, err := s.renderCurrentTime(kind)
+	if column, kind, precision, ok := currentTimeQuery(lower); ok {
+		value, err := s.renderCurrentTime(kind, precision)
 		if err != nil {
 			return nil, true, err
 		}
-		return &queryResult{columns: []string{column}, rows: [][]string{{value}}}, true, nil
+		return &queryResult{
+			columns:  []string{column},
+			rows:     [][]string{{value}},
+			metadata: []columnMetadata{temporalResultMetadata(column, kind, precision)},
+		}, true, nil
+	}
+	if lower == "select @@time_zone" || lower == "select @@session.time_zone" || lower == "select @@session time_zone" {
+		offset, err := sessionTimeZoneOffset(s.session)
+		if err != nil {
+			return nil, true, err
+		}
+		return &queryResult{
+			columns: []string{"@@time_zone"},
+			rows:    [][]string{{formatFixedOffset(offset)}},
+			metadata: []columnMetadata{{
+				catalog: "def", name: "@@time_zone", characterSet: mysqlCharsetUTF8MB40900AICI,
+				typ: mysqlTypeVarString, length: 6,
+			}},
+		}, true, nil
 	}
 	result, found := map[string]*queryResult{
 		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
@@ -668,18 +712,42 @@ func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*query
 }
 
 // currentTimeQuery maps a recognized current-time SELECT to its result column
-// label and the temporal kind that shapes its value.
-func currentTimeQuery(lower string) (string, temporalKind, bool) {
-	switch lower {
-	case "select current_date", "select current_date()", "select curdate()":
-		return "CURRENT_DATE", temporalDate, true
-	case "select current_time", "select current_time()", "select curtime()":
-		return "CURRENT_TIME", temporalTime, true
-	case "select current_timestamp", "select current_timestamp()", "select now()":
-		return "CURRENT_TIMESTAMP", temporalTimestamp, true
-	default:
-		return "", temporalNone, false
+// label, the temporal kind that shapes its value, and its fractional precision.
+func currentTimeQuery(lower string) (string, temporalKind, int, bool) {
+	lower = strings.TrimSpace(lower)
+	for _, candidate := range []struct {
+		functions []string
+		label     string
+		kind      temporalKind
+		fraction  bool
+	}{
+		{functions: []string{"current_date", "curdate"}, label: "CURRENT_DATE", kind: temporalDate},
+		{functions: []string{"current_time", "curtime"}, label: "CURRENT_TIME", kind: temporalTime, fraction: true},
+		{functions: []string{"current_timestamp", "now"}, label: "CURRENT_TIMESTAMP", kind: temporalDatetime, fraction: true},
+	} {
+		for _, function := range candidate.functions {
+			if precision, ok := currentTimeCallPrecision(lower, function, candidate.fraction); ok {
+				return candidate.label, candidate.kind, precision, true
+			}
+		}
 	}
+	return "", temporalNone, 0, false
+}
+
+func currentTimeCallPrecision(query, function string, allowFraction bool) (int, bool) {
+	prefix := "select " + function
+	if query == prefix || query == prefix+"()" {
+		return 0, true
+	}
+	if !allowFraction || !strings.HasPrefix(query, prefix+"(") || !strings.HasSuffix(query, ")") {
+		return 0, false
+	}
+	argument := strings.TrimSpace(query[len(prefix)+1 : len(query)-1])
+	precision, err := strconv.Atoi(argument)
+	if err != nil || precision < 0 || precision > 6 {
+		return 0, false
+	}
+	return precision, true
 }
 
 // renderCurrentTime evaluates a current-time function against the configured
@@ -687,17 +755,14 @@ func currentTimeQuery(lower string) (string, temporalKind, bool) {
 // current instant rendered through the offset; a DATE or TIME is the session-
 // local wall clock. Both read one captured instant, so references within a
 // statement observe the same value.
-func (s *textStatementExecutor) renderCurrentTime(kind temporalKind) (string, error) {
-	offset, err := parseFixedOffset(s.server.config.TimeZone)
+func (s *textStatementExecutor) renderCurrentTime(kind temporalKind, precision int) (string, error) {
+	offset, err := sessionTimeZoneOffset(s.session)
 	if err != nil {
 		return "", err
 	}
 	instant := s.server.config.Clock().UTC()
-	if kind == temporalTimestamp {
-		return renderTimestampFixedOffset(instant.Format("2006-01-02 15:04:05"), offset, 0)
-	}
 	local := instant.Add(time.Duration(offset) * time.Minute)
-	return currentTemporal(local, kind, 0), nil
+	return currentTemporal(local, kind, precision), nil
 }
 
 func (s *textStatementExecutor) operationStatement(query, lower string) (*queryResult, bool, error) {
@@ -1163,6 +1228,7 @@ type insertPlan struct {
 	table           catalog.Table
 	columns         []int
 	groups          [][]string
+	offsetMinutes   int
 }
 
 func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
@@ -1182,7 +1248,11 @@ func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
 	if err != nil {
 		return insertPlan{}, err
 	}
-	return insertPlan{namespace: namespace, name: name, table: table, columns: indexes, groups: groups}, nil
+	offsetMinutes, err := sessionTimeZoneOffset(s.session)
+	if err != nil {
+		return insertPlan{}, err
+	}
+	return insertPlan{namespace: namespace, name: name, table: table, columns: indexes, groups: groups, offsetMinutes: offsetMinutes}, nil
 }
 
 func parseInsertInput(query string) ([]string, []string, [][]string, error) {
@@ -1231,7 +1301,7 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		row := make([]string, len(plan.table.Columns))
 		for valueIndex, value := range group {
 			columnIndex := plan.columns[valueIndex]
-			canonical, err := canonicalColumnValue(plan.table, columnIndex, value, rowNumber)
+			canonical, err := canonicalColumnValueAtOffset(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -1247,17 +1317,34 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 // A column without a recorded numeric, bit, character, or temporal type keeps
 // its literal scalar so a typeless column is unaffected by this seam.
 func canonicalColumnValue(table catalog.Table, columnIndex int, raw string, row int) (string, error) {
+	return canonicalColumnValueAtOffset(table, columnIndex, raw, row, 0)
+}
+
+func canonicalColumnValueAtOffset(table catalog.Table, columnIndex int, raw string, row, offsetMinutes int) (string, error) {
 	value := scalar(raw)
+	preparedWire, preparedValue, prepared := decodePreparedTemporalLiteral(value)
+	if prepared {
+		value = preparedValue
+	}
 	typeName, known := table.ColumnType(columnIndex)
 	if !known {
 		return value, nil
 	}
-	return canonicalTypedValue(typeName, value, table.Columns[columnIndex], row)
+	if prepared && preparedWire == mysqlTypeDate {
+		if typ, err := parseTemporalType(typeName); err == nil && typ.kind == temporalDatetime {
+			date, err := canonicalDateValue(value, table.Columns[columnIndex], row)
+			if err != nil {
+				return "", err
+			}
+			value = date + " 00:00:00"
+		}
+	}
+	return canonicalTypedValueAtOffset(typeName, value, table.Columns[columnIndex], row, offsetMinutes)
 }
 
 // scalarCanonicalizer reports whether a declared type belongs to its family and,
 // if so, the canonical value or the rejection error for that family.
-type scalarCanonicalizer func(typeName, value, column string, row int) (bool, string, error)
+type scalarCanonicalizer func(typeName, value, column string, row, offsetMinutes int) (bool, string, error)
 
 // scalarCanonicalizers is the ordered set of strict scalar value contracts a
 // written column is routed through: numeric or bit, character or binary, then
@@ -1271,15 +1358,19 @@ var scalarCanonicalizers = []scalarCanonicalizer{
 // canonicalTypedValue routes a value to the strict contract of its declared
 // scalar family, returning the value unchanged for a typeless column.
 func canonicalTypedValue(typeName, value, column string, row int) (string, error) {
+	return canonicalTypedValueAtOffset(typeName, value, column, row, 0)
+}
+
+func canonicalTypedValueAtOffset(typeName, value, column string, row, offsetMinutes int) (string, error) {
 	for _, canonicalize := range scalarCanonicalizers {
-		if matched, canonical, err := canonicalize(typeName, value, column, row); matched {
+		if matched, canonical, err := canonicalize(typeName, value, column, row, offsetMinutes); matched {
 			return canonical, err
 		}
 	}
 	return value, nil
 }
 
-func numericCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+func numericCanonicalizer(typeName, value, column string, row, _ int) (bool, string, error) {
 	typ, err := parseNumericType(typeName)
 	if err != nil {
 		return true, value, err
@@ -1291,7 +1382,7 @@ func numericCanonicalizer(typeName, value, column string, row int) (bool, string
 	return true, canonical, cerr
 }
 
-func characterCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+func characterCanonicalizer(typeName, value, column string, row, _ int) (bool, string, error) {
 	typ, err := parseCharacterType(typeName)
 	if err != nil {
 		return true, value, err
@@ -1303,7 +1394,7 @@ func characterCanonicalizer(typeName, value, column string, row int) (bool, stri
 	return true, canonical, cerr
 }
 
-func temporalCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+func temporalCanonicalizer(typeName, value, column string, row, offsetMinutes int) (bool, string, error) {
 	typ, err := parseTemporalType(typeName)
 	if err != nil {
 		return true, value, err
@@ -1311,7 +1402,7 @@ func temporalCanonicalizer(typeName, value, column string, row int) (bool, strin
 	if typ.kind == temporalNone {
 		return false, value, nil
 	}
-	canonical, cerr := canonicalTemporalValue(typ, value, column, row)
+	canonical, cerr := canonicalTemporalValueAtOffset(typ, value, column, row, offsetMinutes)
 	return true, canonical, cerr
 }
 
@@ -1343,6 +1434,7 @@ type updatePlan struct {
 	table           catalog.Table
 	updates         map[int]string
 	matcher         func([]string) bool
+	offsetMinutes   int
 }
 
 func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
@@ -1362,11 +1454,15 @@ func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
 	if err != nil {
 		return updatePlan{}, err
 	}
-	matcher, err := rowMatcher(where, table, indexes)
+	offsetMinutes, err := sessionTimeZoneOffset(s.session)
 	if err != nil {
 		return updatePlan{}, err
 	}
-	return updatePlan{namespace: namespace, name: name, table: table, updates: updates, matcher: matcher}, nil
+	matcher, err := rowMatcherAtOffset(where, table, indexes, offsetMinutes)
+	if err != nil {
+		return updatePlan{}, err
+	}
+	return updatePlan{namespace: namespace, name: name, table: table, updates: updates, matcher: matcher, offsetMinutes: offsetMinutes}, nil
 }
 
 func parseUpdateInput(query string) (string, string, string, error) {
@@ -1445,7 +1541,7 @@ func applyUpdatePlan(plan updatePlan) ([][]string, uint64, error) {
 func canonicalUpdates(plan updatePlan) (map[int]string, error) {
 	updates := make(map[int]string, len(plan.updates))
 	for column, value := range plan.updates {
-		canonical, err := canonicalColumnValue(plan.table, column, value, 1)
+		canonical, err := canonicalColumnValueAtOffset(plan.table, column, value, 1, plan.offsetMinutes)
 		if err != nil {
 			return nil, err
 		}
@@ -1478,6 +1574,7 @@ type deletePlan struct {
 	namespace, name string
 	table           catalog.Table
 	matcher         func([]string) bool
+	offsetMinutes   int
 }
 
 func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
@@ -1493,11 +1590,15 @@ func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
 	if err != nil {
 		return deletePlan{}, err
 	}
-	matcher, err := rowMatcher(where, table, indexes)
+	offsetMinutes, err := sessionTimeZoneOffset(s.session)
 	if err != nil {
 		return deletePlan{}, err
 	}
-	return deletePlan{namespace: namespace, name: name, table: table, matcher: matcher}, nil
+	matcher, err := rowMatcherAtOffset(where, table, indexes, offsetMinutes)
+	if err != nil {
+		return deletePlan{}, err
+	}
+	return deletePlan{namespace: namespace, name: name, table: table, matcher: matcher, offsetMinutes: offsetMinutes}, nil
 }
 
 func parseDeleteInput(query string) (string, string, error) {
@@ -1705,6 +1806,10 @@ func splitEquals(value string) (string, string, bool) {
 }
 
 func rowMatcher(where string, table catalog.Table, indexes map[string]int) (func([]string) bool, error) {
+	return rowMatcherAtOffset(where, table, indexes, 0)
+}
+
+func rowMatcherAtOffset(where string, table catalog.Table, indexes map[string]int, offsetMinutes int) (func([]string) bool, error) {
 	if where == "" {
 		return func([]string) bool { return true }, nil
 	}
@@ -1720,7 +1825,13 @@ func rowMatcher(where string, table catalog.Table, indexes map[string]int) (func
 	if !found {
 		return nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
 	}
-	want := matcherValue(table, index, value)
+	want, err := matcherValueAtOffsetChecked(table, index, value, offsetMinutes)
+	if err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(want, "null") {
+		return func([]string) bool { return false }, nil
+	}
 	equalityKey := columnEqualityKey(table, index)
 	wantKey := equalityKey(want)
 	return func(row []string) bool { return index < len(row) && equalityKey(row[index]) == wantKey }, nil
@@ -1744,26 +1855,66 @@ func columnEqualityKey(table catalog.Table, index int) func(string) string {
 
 // matcherValue canonicalizes an equality literal to the stored representation of
 // its column, so a numeric predicate compares against the same canonical form a
-// write produced (for example WHERE n = 007 matches a stored 7). A literal that
-// is malformed for the column keeps its scalar and simply matches no row.
+// write produced (for example WHERE n = 007 matches a stored 7). The execution
+// path uses the checked form so malformed temporal predicates fail explicitly.
 func matcherValue(table catalog.Table, index int, value string) string {
-	want := scalar(value)
+	return matcherValueAtOffset(table, index, value, 0)
+}
+
+func matcherValueAtOffset(table catalog.Table, index int, value string, offsetMinutes int) string {
+	canonical, _ := matcherValueAtOffsetChecked(table, index, value, offsetMinutes)
+	return canonical
+}
+
+func matcherValueAtOffsetChecked(table catalog.Table, index int, value string, offsetMinutes int) (string, error) {
+	raw := scalar(value)
+	_, want, _ := decodePreparedTemporalLiteral(raw)
 	typeName, known := table.ColumnType(index)
 	if !known {
-		return want
+		return want, nil
 	}
-	if typ, err := parseNumericType(typeName); err == nil && typ.kind != numericNone {
-		if canonical, cerr := canonicalNumericValue(typ, want, table.Columns[index], 1); cerr == nil {
-			return canonical
+	if canonical, ok := canonicalMatcherNumeric(typeName, want, table.Columns[index]); ok {
+		return canonical, nil
+	}
+	return canonicalMatcherTemporal(typeName, want, raw, table.Columns[index], offsetMinutes)
+}
+
+func canonicalMatcherNumeric(typeName, value, column string) (string, bool) {
+	typ, err := parseNumericType(typeName)
+	if err != nil || typ.kind == numericNone {
+		return value, false
+	}
+	canonical, err := canonicalNumericValue(typ, value, column, 1)
+	if err != nil {
+		return value, true
+	}
+	return canonical, true
+}
+
+func canonicalMatcherTemporal(typeName, value, raw, column string, offsetMinutes int) (string, error) {
+	typ, err := parseTemporalType(typeName)
+	if err != nil {
+		return value, err
+	}
+	if typ.kind == temporalNone {
+		return value, nil
+	}
+	if wire, _, prepared := decodePreparedTemporalLiteral(raw); prepared && wire == mysqlTypeDate && typ.kind == temporalDatetime {
+		date, err := canonicalDateValue(value, column, 1)
+		if err != nil {
+			return value, err
 		}
-		return want
+		value = date + " 00:00:00"
 	}
-	if typ, err := parseTemporalType(typeName); err == nil && typ.kind != temporalNone {
-		if canonical, cerr := canonicalTemporalValue(typ, want, table.Columns[index], 1); cerr == nil {
-			return canonical
-		}
+	canonical, err := canonicalTemporalValueAtOffset(typ, value, column, 1, offsetMinutes)
+	if err != nil {
+		return value, err
 	}
-	return want
+	return canonical, nil
+}
+
+func sessionTimeZoneOffset(s *session) (int, error) {
+	return parseFixedOffset(s.timeZone)
 }
 func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
@@ -1821,12 +1972,23 @@ func selectRows(s *relationExecutor, projection string, parts []string, where st
 	if err != nil {
 		return nil, err
 	}
-	matches, err := rowMatcher(where, table, indexes)
+	offsetMinutes, err := sessionTimeZoneOffset(s.session)
+	if err != nil {
+		return nil, err
+	}
+	matches, err := rowMatcherAtOffset(where, table, indexes, offsetMinutes)
 	if err != nil {
 		return nil, err
 	}
 	rows := projectRows(table.Rows, selected, matches)
-	return &queryResult{columns: columns, rows: rows, metadata: tableMetadata(namespace, tableName, table, selected)}, nil
+	rows, err = renderSelectedTemporalRows(rows, selected, table, offsetMinutes)
+	if err != nil {
+		return nil, err
+	}
+	return &queryResult{
+		columns: columns, rows: rows, nulls: resultNulls(rows),
+		metadata: tableMetadata(namespace, tableName, table, selected),
+	}, nil
 }
 
 func selectedColumns(table catalog.Table, projection string, indexes map[string]int) ([]int, []string, error) {
@@ -1878,6 +2040,46 @@ func projectRows(source [][]string, selected []int, matches func([]string) bool)
 	return rows
 }
 
+func resultNulls(rows [][]string) [][]bool {
+	nulls := make([][]bool, len(rows))
+	for rowIndex, row := range rows {
+		nulls[rowIndex] = make([]bool, len(row))
+		for columnIndex, value := range row {
+			nulls[rowIndex][columnIndex] = strings.EqualFold(value, "null")
+		}
+	}
+	return nulls
+}
+
+func renderSelectedTemporalRows(rows [][]string, selected []int, table catalog.Table, offsetMinutes int) ([][]string, error) {
+	for rowIndex, row := range rows {
+		for resultIndex, columnIndex := range selected {
+			typeName, known := table.ColumnType(columnIndex)
+			if !known {
+				continue
+			}
+			typ, err := parseTemporalType(typeName)
+			if err != nil || typ.kind != temporalTimestamp || strings.EqualFold(row[resultIndex], "null") {
+				continue
+			}
+			rendered, err := renderTimestampFixedOffset(row[resultIndex], offsetMinutes, typ.precision)
+			if err != nil {
+				return nil, err
+			}
+			rows[rowIndex][resultIndex] = rendered
+		}
+	}
+	return rows, nil
+}
+
+func renderStoredTemporalValue(typeName, value string, offsetMinutes int) (string, error) {
+	typ, err := parseTemporalType(typeName)
+	if err != nil || typ.kind != temporalTimestamp || strings.EqualFold(value, "null") {
+		return value, err
+	}
+	return renderTimestampFixedOffset(value, offsetMinutes, typ.precision)
+}
+
 func tableMetadata(namespace, tableName string, table catalog.Table, selected []int) []columnMetadata {
 	metadata := make([]columnMetadata, len(selected))
 	for resultIndex, columnIndex := range selected {
@@ -1885,6 +2087,9 @@ func tableMetadata(namespace, tableName string, table catalog.Table, selected []
 		definition := columnMetadata{catalog: "def", schema: namespace, table: tableName, originalTable: tableName, name: name, originalName: name, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString}
 		if typeName, known := table.ColumnType(columnIndex); known {
 			definition.typ, definition.length, definition.characterSet = catalogColumnWireType(typeName)
+			if temporal, err := parseTemporalType(typeName); err == nil && temporal.kind != temporalNone {
+				definition.decimals = byte(temporal.precision)
+			}
 			if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(typeName)), " UNSIGNED") {
 				definition.flags |= mysqlUnsignedFlag
 			}
@@ -2503,9 +2708,21 @@ func preparedParameterValues(payload []byte, offset int, types []preparedParamet
 		if err != nil {
 			return nil, offset, err
 		}
+		if isPreparedTemporalType(types[index].typ) {
+			value = preparedTemporalLiteral(types[index].typ, scalar(value))
+		}
 		values[index], offset = value, next
 	}
 	return values, offset, nil
+}
+
+func isPreparedTemporalType(wire byte) bool {
+	switch wire {
+	case mysqlTypeDate, mysqlTypeDatetime, mysqlTypeTimestamp, mysqlTypeTime:
+		return true
+	default:
+		return false
+	}
 }
 
 func preparedParameterIsNull(payload []byte, index int) bool {
@@ -2626,6 +2843,7 @@ func (s *preparedLifecycle) resetConnection() error {
 	s.nextIsolation = isolationRepeatableRead
 	s.nextReadOnly = false
 	s.database = s.initialDB
+	s.timeZone = s.initialTimeZone
 	s.closeAllPrepared()
 	s.longDataBytes = 0
 	return nil

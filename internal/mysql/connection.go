@@ -88,8 +88,8 @@ func (c *conversation) authenticate() bool {
 func newSession(server *Server, authentication authenticationResult) *session {
 	return &session{
 		server: server, username: authentication.accountName, database: authentication.database,
-		initialDB: authentication.database, statements: map[uint32]*preparedStatement{},
-		nextStmtID: 1,
+		initialDB: authentication.database, timeZone: server.config.TimeZone, initialTimeZone: server.config.TimeZone,
+		statements: map[uint32]*preparedStatement{}, nextStmtID: 1,
 		transactionState: transactionState{
 			savepointState: savepointState{
 				savepoints:         map[string]catalog.Definition{},

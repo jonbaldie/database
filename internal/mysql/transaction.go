@@ -186,6 +186,11 @@ func (s *textStatementExecutor) settingStatement(query, lower string) (*queryRes
 	if !isSettingControl(lower) {
 		return nil, false, nil
 	}
+	if strings.HasPrefix(lower, "set ") {
+		if handled, err := s.setTimeZone(query); handled {
+			return nil, true, err
+		}
+	}
 	return nil, true, s.applySetting(query, lower)
 }
 

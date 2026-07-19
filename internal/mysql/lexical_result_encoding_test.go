@@ -108,6 +108,29 @@ func TestBinaryRowPreservesValuesAndNullBitmap(t *testing.T) {
 	}
 }
 
+func TestBinaryRowEncodesTemporalValuesInBinaryProtocol(t *testing.T) {
+	cases := []struct {
+		name       string
+		value      string
+		definition columnMetadata
+		want       []byte
+	}{
+		{name: "date", value: "2021-01-02", definition: columnMetadata{typ: mysqlTypeDate}, want: []byte{4, 0xE5, 0x07, 1, 2}},
+		{name: "datetime", value: "2021-01-02 03:04:05.123456", definition: columnMetadata{typ: mysqlTypeDatetime, decimals: 6}, want: []byte{11, 0xE5, 0x07, 1, 2, 3, 4, 5, 0x40, 0xE2, 0x01, 0x00}},
+		{name: "zero clock compresses", value: "2021-01-02 00:00:00", definition: columnMetadata{typ: mysqlTypeDatetime}, want: []byte{4, 0xE5, 0x07, 1, 2}},
+		{name: "time", value: "-38:00:00.123456", definition: columnMetadata{typ: mysqlTypeTime, decimals: 6}, want: []byte{12, 1, 1, 0, 0, 0, 14, 0, 0, 0x40, 0xE2, 0x01, 0x00}},
+		{name: "year", value: "2021", definition: columnMetadata{typ: mysqlTypeYear}, want: []byte{0xE5, 0x07}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := encodeBinaryValue(test.value, test.definition)
+			if err != nil || !bytes.Equal(got, test.want) {
+				t.Fatalf("encodeBinaryValue(%q) = %x err %v, want %x", test.value, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestTextResultPreservesMetadataRowsAndPacketSequence(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()

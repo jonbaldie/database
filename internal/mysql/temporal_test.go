@@ -42,7 +42,7 @@ func TestParseTemporalTypeReadsPrecision(t *testing.T) {
 
 func TestParseTemporalTypeRejectsInvalidDeclarations(t *testing.T) {
 	for _, input := range []string{
-		"DATETIME(7)", "TIME(-1)", "TIMESTAMP(9)", "DATETIME(x)",
+		"DATETIME(7)", "TIME(-1)", "TIMESTAMP(9)", "DATETIME(x)", "DATETIME()", "DATETIME(3)junk", "DATETIME(",
 		"DATE(3)", "YEAR(4)", "YEAR(2)",
 	} {
 		if _, err := parseTemporalType(input); err == nil {
@@ -102,6 +102,7 @@ func TestCanonicalTemporalValueRejects(t *testing.T) {
 		{"YEAR", "2156"},                     // above range
 		{"YEAR", "69"},                       // two-digit expansion
 		{"TIME", "839:00:00"},                // out of range
+		{"TIME", "1234:00:00"},               // ambiguous hour width
 		{"TIME", "12:60:00"},                 // minute out of range
 		{"TIME", "12:00:60"},                 // second out of range
 		{"TIME(0)", "12:00:00.5"},            // excess fractional precision
@@ -179,6 +180,9 @@ func TestRenderTimestampFixedOffset(t *testing.T) {
 	}
 	if got, _ := renderTimestampFixedOffset("2000-06-15 12:00:00", -480, 3); got != "2000-06-15 04:00:00.000" {
 		t.Errorf("render -08:00 precision 3 = %q, want 2000-06-15 04:00:00.000", got)
+	}
+	if got, err := renderTimestampFixedOffset("2000-06-15 12:00:00.123456", -480, 3); err != nil || got != "2000-06-15 04:00:00.123" {
+		t.Errorf("render -08:00 fractional precision 3 = %q err %v, want 2000-06-15 04:00:00.123", got, err)
 	}
 	// Two renderings of the same instant under the same offset are identical.
 	first, _ := renderTimestampFixedOffset("2020-03-01 09:15:30", 0, 0)
