@@ -69,7 +69,7 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 		return nil, sqlFailure{1241, "21000", "operand should contain 1 column"}
 	}
 	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
-	correlated := composedQueryIsCorrelated(context, query)
+	correlated := composedQueryIsCorrelated(context, query, scope)
 	value := exprValue{}
 	if !correlated && !context.planning {
 		value, metadata, err = executeScalarSubquery(context, query, nil)
@@ -283,8 +283,31 @@ func relationExpressionMetadataContext(expression string, columns []relationColu
 		metadata.length = 22
 	case valueString:
 		metadata.length = relationStringExpressionLength(expression, columns, value.render())
+		metadata.characterSet = relationExpressionCharacterSet(expression, columns)
 	}
 	return metadata, nil
+}
+
+func relationExpressionCharacterSet(expression string, columns []relationColumn) uint16 {
+	characterSet := mysqlCharsetUTF8MB40900AICI
+	tokens, _ := tokenizeExpression(expression)
+	for _, token := range tokens {
+		if token.kind != tokenIdent {
+			continue
+		}
+		index, err := resolveRelationColumn(token.text, columns)
+		if err != nil {
+			continue
+		}
+		candidate := columns[index].metadata.characterSet
+		if candidate == mysqlCharsetBinary {
+			return candidate
+		}
+		if candidate == mysqlCharsetUTF8MB4Bin {
+			characterSet = candidate
+		}
+	}
+	return characterSet
 }
 
 func representativeExpressionValue(expression string, columns []relationColumn) (exprValue, error) {

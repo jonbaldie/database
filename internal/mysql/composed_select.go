@@ -107,12 +107,19 @@ func describeComposedSelect(context *composedQueryContext, query string, outer *
 	return describeSelectTerm(local, body, outer)
 }
 
-func composedQueryIsCorrelated(context *composedQueryContext, query string) bool {
+func composedQueryIsCorrelated(context *composedQueryContext, query string, outer *outerRelationScope) bool {
+	if outer == nil {
+		return false
+	}
 	probe := *context
 	probe.strictScope = true
 	_, err := describeComposedSelect(&probe, query, nil)
 	var failure sqlFailure
-	return errors.As(err, &failure) && failure.code == 1054
+	if !errors.As(err, &failure) || failure.code != 1054 {
+		return false
+	}
+	_, err = describeComposedSelect(&probe, query, outer)
+	return err == nil
 }
 
 func describeSelectTerm(context *composedQueryContext, query string, outer *outerRelationScope) (*queryResult, error) {
@@ -306,16 +313,16 @@ func compileExistsSubquery(text string, columns []relationColumn, context *compo
 	if !ok || context == nil {
 		return nil, true, unsupportedExpression()
 	}
-	if !context.planning && !composedQueryIsCorrelated(context, existsProjectionQuery(query)) {
-		child, err := context.child()
+	scope, err := validatedExistsScope(context, query, columns, outer)
+	if err != nil {
+		return nil, true, err
+	}
+	if !context.planning && !composedQueryIsCorrelated(context, existsProjectionQuery(query), scope) {
+		predicate, err := compileCachedExists(context, query)
 		if err != nil {
 			return nil, true, err
 		}
-		found, err := executeExistsSubquery(child, query, nil)
-		if err != nil {
-			return nil, true, err
-		}
-		return func(relationRow) (exprValue, error) { return boolValue(found), nil }, true, nil
+		return predicate, true, nil
 	}
 	return func(row relationRow) (exprValue, error) {
 		child, err := context.child()
@@ -326,6 +333,40 @@ func compileExistsSubquery(text string, columns []relationColumn, context *compo
 		found, err := executeExistsSubquery(child, query, scope)
 		return boolValue(found), err
 	}, true, nil
+}
+
+func validatedExistsScope(context *composedQueryContext, query string, columns []relationColumn, outer *outerRelationScope) (*outerRelationScope, error) {
+	scope := &outerRelationScope{columns: columns, row: sampleRelationRow(columns), parent: outer}
+	if err := validateSubqueryScope(context, query, scope); err != nil {
+		return nil, err
+	}
+	if _, err := describeComposedSelect(context, existsProjectionQuery(query), scope); err != nil {
+		return nil, err
+	}
+	return scope, nil
+}
+
+func compileCachedExists(context *composedQueryContext, query string) (relationPredicate, error) {
+	child, err := context.child()
+	if err != nil {
+		return nil, err
+	}
+	found, err := executeExistsSubquery(child, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	return func(relationRow) (exprValue, error) { return boolValue(found), nil }, nil
+}
+
+func validateSubqueryScope(context *composedQueryContext, query string, outer *outerRelationScope) error {
+	probe := *context
+	probe.strictScope = true
+	_, err := describeComposedSelect(&probe, query, outer)
+	var failure sqlFailure
+	if errors.As(err, &failure) && failure.code == 1054 {
+		return err
+	}
+	return nil
 }
 
 var errExistsRow = errors.New("EXISTS found a row")
@@ -353,7 +394,10 @@ func executeExistsSubquery(context *composedQueryContext, query string, outer *o
 
 func existsProjectionQuery(query string) string {
 	query = stripWholeQueryParentheses(strings.TrimSpace(query))
-	if _, set, _ := parseSetQuery(query); set {
+	if parsed, set, _ := parseSetQuery(query); set {
+		if rewritten, ok := existsUnionQuery(parsed); ok {
+			return rewritten
+		}
 		return query
 	}
 	if !strings.HasPrefix(strings.ToLower(query), "select ") {
@@ -365,6 +409,38 @@ func existsProjectionQuery(query string) string {
 		return "SELECT 1"
 	}
 	return "SELECT 1 " + strings.TrimSpace(expression[from:])
+}
+
+func existsUnionQuery(query setQuery) (string, bool) {
+	allOperations := true
+	for _, operation := range query.operations {
+		if operation.kind != setUnion {
+			return "", false
+		}
+		allOperations = allOperations && operation.all
+	}
+	if !allOperations && setLimitHasOffset(query.limit) {
+		return "", false
+	}
+	terms := make([]string, len(query.terms))
+	for index, term := range query.terms {
+		trimmed := strings.TrimSpace(term)
+		inner := stripWholeQueryParentheses(trimmed)
+		terms[index] = existsProjectionQuery(inner)
+		if inner != trimmed {
+			terms[index] = "(" + terms[index] + ")"
+		}
+	}
+	rewritten := strings.Join(terms, " UNION ALL ")
+	if strings.TrimSpace(query.limit) != "" {
+		rewritten += " LIMIT " + query.limit
+	}
+	return rewritten, true
+}
+
+func setLimitHasOffset(limit string) bool {
+	lower := strings.ToLower(limit)
+	return strings.Contains(limit, ",") || strings.Contains(lower, " offset ")
 }
 
 func compileInSubquery(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, bool, error) {
@@ -385,7 +461,11 @@ func compileInSubquery(text string, columns []relationColumn, session *session, 
 		return nil, true, unsupportedExpression()
 	}
 	plan := inSubqueryPredicate{operand: operand, columns: columns, context: context, outer: outer, query: query, negate: negate}
-	if !context.planning && !composedQueryIsCorrelated(context, query) {
+	scope := &outerRelationScope{columns: columns, row: sampleRelationRow(columns), parent: outer}
+	if _, err := describeComposedSelect(context, query, scope); err != nil {
+		return nil, true, err
+	}
+	if !context.planning && !composedQueryIsCorrelated(context, query, scope) {
 		plan.cached, err = plan.executeScope(nil)
 		if err != nil {
 			return nil, true, err
@@ -969,13 +1049,7 @@ func compatibleCharacterSetMetadata(result, left, right columnMetadata) (columnM
 	if left.characterSet == mysqlCharsetBinary || right.characterSet == mysqlCharsetBinary {
 		return columnMetadata{}, strictConversionError()
 	}
-	if left.table != "" && right.table == "" {
-		return characterSetMetadata(result, left.characterSet), nil
-	}
-	if right.table != "" && left.table == "" {
-		return characterSetMetadata(result, right.characterSet), nil
-	}
-	return columnMetadata{}, strictConversionError()
+	return characterSetMetadata(result, mysqlCharsetUTF8MB4Bin), nil
 }
 
 func dateAndDatetime(left, right byte) bool {

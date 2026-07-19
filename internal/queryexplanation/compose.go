@@ -45,15 +45,17 @@ func MaterializedInput(primary, input *Operator, reason, clause, fragment string
 }
 
 // ReusedInput records a read from an earlier statement-scoped materialization.
-func ReusedInput(primary *Operator, clause, fragment string) *Operator {
-	predicates := []Predicate{{
-		Role: "residual", Expression: fragment,
-		Sources: []PredicateSource{{Clause: clause, Fragment: fragment}},
-	}}
+func ReusedInput(primary *Operator, columns []string) *Operator {
+	reused := &Operator{
+		Kind: "materialize", Summary: "Read the statement-scoped materialized input.",
+		Operation: materializeOperation{Reason: "cte"}, Estimates: Estimates{},
+		Output:   Output{Columns: append([]string(nil), columns...), Ordering: []OrderingTerm{}, UniqueKeys: [][]string{}},
+		Warnings: []Warning{}, Children: []*Operator{},
+	}
 	return &Operator{
 		Kind: "materialize", Summary: "Reuse the previously materialized composed query input.",
-		Operation: materializeOperation{Reason: "reuse"}, Predicates: predicates,
-		Estimates: primary.Estimates, Output: primary.Output, Warnings: []Warning{}, Children: []*Operator{primary},
+		Operation: materializeOperation{Reason: "reuse"},
+		Estimates: primary.Estimates, Output: primary.Output, Warnings: []Warning{}, Children: []*Operator{reused, primary},
 	}
 }
 

@@ -205,6 +205,10 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	if mixedCollation.err != "" || !reflect.DeepEqual(mixedCollation.rows, [][]string{{"A"}, {"a"}}) {
 		t.Fatalf("set collation coercibility: %#v", mixedCollation)
 	}
+	computedCollation := client.query("SELECT UPPER(name) FROM binary_names UNION SELECT LOWER(name) FROM binary_names ORDER BY 1")
+	if computedCollation.err != "" || !reflect.DeepEqual(computedCollation.rows, [][]string{{"A"}, {"B"}, {"a"}, {"b"}}) {
+		t.Fatalf("computed set collation: %#v", computedCollation)
+	}
 	temporalSet := client.query("SELECT d FROM temporal_values UNION ALL SELECT dt FROM temporal_values")
 	if temporalSet.err != "" || !reflect.DeepEqual(temporalSet.rows, [][]string{{"2024-01-01 00:00:00"}, {"2024-01-02 03:04:05"}}) {
 		t.Fatalf("set temporal promotion: %#v", temporalSet)
@@ -243,6 +247,18 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	existsSetExplanation := client.query("EXPLAIN FORMAT=JSON SELECT name FROM authors WHERE EXISTS (SELECT 1 UNION SELECT 2)")
 	if existsSetExplanation.err != "" || len(existsSetExplanation.rows) != 1 || !strings.Contains(existsSetExplanation.rows[0][0], `"kind":"set_operation"`) {
 		t.Fatalf("EXISTS set explanation: %#v", existsSetExplanation)
+	}
+	existsSetProjection := client.query("SELECT name FROM authors WHERE EXISTS (SELECT 1 / (id - id) FROM authors UNION SELECT 2) ORDER BY id LIMIT 1")
+	if existsSetProjection.err != "" || !reflect.DeepEqual(existsSetProjection.rows, [][]string{{"Ada"}}) {
+		t.Fatalf("EXISTS set evaluated projection: %#v", existsSetProjection)
+	}
+	explainExistsSetProjection := client.query("EXPLAIN FORMAT=JSON SELECT name FROM authors WHERE EXISTS (SELECT 1 / (id - id) FROM authors UNION SELECT 2)")
+	if explainExistsSetProjection.err != "" || len(explainExistsSetProjection.rows) != 1 || !strings.Contains(explainExistsSetProjection.rows[0][0], `"kind":"set_operation"`) {
+		t.Fatalf("EXISTS set plan-only explanation: %#v", explainExistsSetProjection)
+	}
+	missingSubqueryColumn := client.query("SELECT id FROM authors WHERE id < 0 AND EXISTS (SELECT missing FROM posts)")
+	if !strings.HasPrefix(missingSubqueryColumn.err, "42S22") {
+		t.Fatalf("missing subquery column deferred: %#v", missingSubqueryColumn)
 	}
 	cteReuseExplanation := client.query("EXPLAIN FORMAT=JSON WITH ids AS (SELECT id FROM authors) SELECT a.id FROM ids a JOIN ids b ON a.id = b.id")
 	if cteReuseExplanation.err != "" || len(cteReuseExplanation.rows) != 1 || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"cte"`) || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"reuse"`) {
