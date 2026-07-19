@@ -64,13 +64,14 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 	if scope == nil {
 		scope = &outerRelationScope{columns: columns, row: sampleRelationRow(columns)}
 	}
-	_, metadata, err := executeScalarSubquery(context, query, scope)
+	result, err := describeComposedSelect(context, query, scope)
 	if err != nil {
-		failure, cardinality := err.(sqlFailure)
-		if !cardinality || failure.code != 1242 || !subqueryReferencesOuterColumns(query, columns) {
-			return nil, err
-		}
+		return nil, err
 	}
+	if len(result.columns) != 1 {
+		return nil, sqlFailure{1241, "21000", "operand should contain 1 column"}
+	}
+	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
 	name := expression
 	if alias != "" {
 		name = alias
@@ -81,17 +82,6 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 		expression: expression, name: name, alias: alias, column: -1,
 		subquery: query, context: context, metadata: metadata,
 	}}, nil
-}
-
-func subqueryReferencesOuterColumns(query string, columns []relationColumn) bool {
-	lower := strings.ToLower(query)
-	for _, column := range columns {
-		qualified := strings.ToLower(column.qualifier + "." + column.name)
-		if column.qualifier != "" && strings.Contains(lower, qualified) {
-			return true
-		}
-	}
-	return false
 }
 
 func wildcardProjections(expression string, columns []relationColumn) ([]relationalProjection, error) {

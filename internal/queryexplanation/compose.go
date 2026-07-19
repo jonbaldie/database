@@ -21,7 +21,7 @@ func SetOperation(operation string, all bool, left, right *Operator) *Operator {
 }
 
 // MaterializedInput records a composed SELECT input and the SQL construct that
-// introduced it. The primary input remains first in execution-input order.
+// introduced it. The materialized input executes before its consumer.
 func MaterializedInput(primary, input *Operator, reason, clause, fragment string) *Operator {
 	predicates := []Predicate{}
 	if clause != "" && fragment != "" {
@@ -39,7 +39,7 @@ func MaterializedInput(primary, input *Operator, reason, clause, fragment string
 			Rows: primary.Estimates.Rows, RowWidthBytes: primary.Estimates.RowWidthBytes,
 			Cost: primary.Estimates.Cost + input.Estimates.Cost, PeakMemoryBytes: input.Estimates.RowWidthBytes * int(input.Estimates.Rows),
 		},
-		Output: primary.Output, Warnings: []Warning{}, Children: []*Operator{primary, input},
+		Output: primary.Output, Warnings: []Warning{}, Children: []*Operator{input, primary},
 	}
 }
 

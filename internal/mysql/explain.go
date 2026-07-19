@@ -64,10 +64,8 @@ func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation
 	relations := relationExecutor{session: s.session}
 	lower := strings.ToLower(inner)
 	switch {
-	case strings.HasPrefix(lower, "select "):
+	case isComposedSelectStatement(inner):
 		return s.explainSelect(&relations, inner)
-	case strings.HasPrefix(lower, "with "):
-		return s.explainComposedSelect(&relations, inner)
 	case strings.HasPrefix(lower, "insert into "):
 		return s.explainInsert(&relations, inner)
 	case strings.HasPrefix(lower, "update "):

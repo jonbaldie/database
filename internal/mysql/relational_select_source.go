@@ -123,7 +123,10 @@ func parseCTETableSource(s *relationExecutor, parts []string, remainder string) 
 	if err != nil {
 		return relationalTableSource{}, "", true, err
 	}
-	table := queryResultTable(relation.name, relation.result)
+	table, err := queryResultTable(relation.name, relation.result)
+	if err != nil {
+		return relationalTableSource{}, "", true, err
+	}
 	columns := relationalResultColumns(relation.name, alias, table, relation.result)
 	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: relation.reason}
 	return source, tail, true, nil
@@ -167,13 +170,23 @@ func parseDerivedTableSource(s *relationExecutor, text string) (relationalTableS
 	if err != nil {
 		return relationalTableSource{}, "", err
 	}
-	result, err := executeComposedSelect(child, query, nil)
+	result, err := composedSourceResult(s.composed, child, query)
 	if err != nil {
 		return relationalTableSource{}, "", err
 	}
-	table := queryResultTable(alias, result)
+	table, err := queryResultTable(alias, result)
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
 	columns := relationalResultColumns(alias, alias, table, result)
 	return relationalTableSource{name: alias, alias: alias, table: table, columns: columns, query: query, reason: "derived_table"}, remainder, nil
+}
+
+func composedSourceResult(context, child *composedQueryContext, query string) (*queryResult, error) {
+	if context.planning {
+		return describeComposedSelect(child, query, nil)
+	}
+	return executeComposedSelect(child, query, nil)
 }
 
 func relationalResultColumns(tableName, alias string, table catalog.Table, result *queryResult) []relationColumn {

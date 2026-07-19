@@ -8,6 +8,7 @@ import (
 
 func (s *textStatementExecutor) explainComposedSelect(relations *relationExecutor, sql string) (*queryexplanation.Document, error) {
 	context := newComposedQueryContext(relations)
+	context.planning = true
 	local, body, err := parseAndMaterializeCTEs(context, sql, nil)
 	if err != nil {
 		return nil, err
@@ -72,14 +73,14 @@ func reduceSetExplanation(operators []*queryexplanation.Operator, operations []s
 			continue
 		}
 		operation := operations[index]
-		operators[index] = queryexplanation.SetOperation(operation.kind, operation.all, operators[index], operators[index+1])
+		operators[index] = queryexplanation.SetOperation(string(operation.kind), operation.all, operators[index], operators[index+1])
 		operators = append(operators[:index+1], operators[index+2:]...)
 		operations = append(operations[:index], operations[index+1:]...)
 		operationCount--
 	}
 	root := operators[0]
 	for index, operation := range operations {
-		root = queryexplanation.SetOperation(operation.kind, operation.all, root, operators[index+1])
+		root = queryexplanation.SetOperation(string(operation.kind), operation.all, root, operators[index+1])
 	}
 	return root
 }
@@ -92,7 +93,8 @@ func (s *textStatementExecutor) explainSelectTerm(context *composedQueryContext,
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	if keywordAt(expression, "from") < 0 {
 		items := splitCSV(expression)
-		return queryexplanation.PlanScalarSelect(s.server.config.Version, query, s.database, items).Plan, nil
+		root := queryexplanation.PlanScalarSelect(s.server.config.Version, query, s.database, items).Plan
+		return s.decorateSubqueryText(context, root, expression, outer, "derived")
 	}
 	executor := *context.executor
 	executor.composed = context
@@ -105,6 +107,29 @@ func (s *textStatementExecutor) explainSelectTerm(context *composedQueryContext,
 }
 
 func (s *textStatementExecutor) decorateComposedInputs(context *composedQueryContext, plan *relationalSelectPlan, root *queryexplanation.Operator) (*queryexplanation.Operator, error) {
+	root, err := s.decorateDerivedInputs(context, plan, root)
+	if err != nil {
+		return nil, err
+	}
+	outer := &outerRelationScope{columns: plan.source.columns, row: sampleRelationRow(plan.source.columns), parent: plan.outer}
+	root, err = s.decorateProjectionSubqueries(context, plan, root, outer)
+	if err != nil {
+		return nil, err
+	}
+	root, err = s.decorateSubqueryText(context, root, plan.whereText, outer, "where")
+	if err != nil {
+		return nil, err
+	}
+	for _, join := range plan.source.joins {
+		root, err = s.decorateSubqueryText(context, root, join.condition, outer, "on")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return root, nil
+}
+
+func (s *textStatementExecutor) decorateDerivedInputs(context *composedQueryContext, plan *relationalSelectPlan, root *queryexplanation.Operator) (*queryexplanation.Operator, error) {
 	for _, table := range plan.source.tables {
 		if table.query == "" {
 			continue
@@ -115,7 +140,10 @@ func (s *textStatementExecutor) decorateComposedInputs(context *composedQueryCon
 		}
 		root = queryexplanation.MaterializedInput(root, input, table.reason, "derived", table.alias)
 	}
-	outer := &outerRelationScope{columns: plan.source.columns, row: sampleRelationRow(plan.source.columns), parent: plan.outer}
+	return root, nil
+}
+
+func (s *textStatementExecutor) decorateProjectionSubqueries(context *composedQueryContext, plan *relationalSelectPlan, root *queryexplanation.Operator, outer *outerRelationScope) (*queryexplanation.Operator, error) {
 	for _, projection := range plan.projection {
 		if projection.subquery == "" {
 			continue
@@ -126,12 +154,16 @@ func (s *textStatementExecutor) decorateComposedInputs(context *composedQueryCon
 		}
 		root = queryexplanation.MaterializedInput(root, input, "subquery", "derived", projection.expression)
 	}
-	for _, query := range parenthesizedSelectQueries(plan.whereText) {
+	return root, nil
+}
+
+func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryContext, root *queryexplanation.Operator, text string, outer *outerRelationScope, clause string) (*queryexplanation.Operator, error) {
+	for _, query := range parenthesizedSelectQueries(text) {
 		input, err := s.explainComposedBody(context, query, outer)
 		if err != nil {
 			return nil, err
 		}
-		root = queryexplanation.MaterializedInput(root, input, "subquery", "where", "("+query+")")
+		root = queryexplanation.MaterializedInput(root, input, "subquery", clause, "("+query+")")
 	}
 	return root, nil
 }

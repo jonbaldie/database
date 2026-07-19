@@ -891,7 +891,7 @@ func (s *textStatementExecutor) relationStatement(query, lower string) (*queryRe
 	case strings.HasPrefix(lower, "delete from "):
 		affected, err := deleteRows(&relations, query)
 		return &queryResult{affected: affected}, true, err
-	case strings.HasPrefix(lower, "select "), strings.HasPrefix(lower, "with "):
+	case isComposedSelectStatement(query):
 		result, err := selectQuery(&relations, query)
 		return result, true, err
 	default:
@@ -2693,6 +2693,9 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 }
 
 func isPreparedStatement(lower string) bool {
+	if isComposedSelectStatement(lower) {
+		return true
+	}
 	for _, prefix := range []string{"select ", "with ", "insert into ", "update ", "delete from "} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
@@ -2702,7 +2705,7 @@ func isPreparedStatement(lower string) bool {
 }
 
 func isPreparedRead(lower string) bool {
-	return strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "with ")
+	return isComposedSelectStatement(lower)
 }
 
 func (s *preparedPreparation) parameterizedColumns(query, validated string, parameters int) ([]columnMetadata, error) {

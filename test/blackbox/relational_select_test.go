@@ -157,6 +157,18 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	if precedence.err != "" || !reflect.DeepEqual(precedence.rows, [][]string{{"1"}, {"2"}}) {
 		t.Fatalf("set precedence: %#v", precedence)
 	}
+	grouped := client.query("(SELECT id FROM authors WHERE id = 1 UNION SELECT id FROM authors WHERE id = 2) INTERSECT SELECT author_id FROM posts ORDER BY id")
+	if grouped.err != "" || !reflect.DeepEqual(grouped.rows, [][]string{{"1"}, {"2"}}) {
+		t.Fatalf("grouped set expression: %#v", grouped)
+	}
+	collated := client.query("SELECT name FROM authors WHERE id = 1 UNION SELECT 'ada'")
+	if collated.err != "" || !reflect.DeepEqual(collated.rows, [][]string{{"Ada"}}) {
+		t.Fatalf("collated set duplicate: %#v", collated)
+	}
+	promoted := client.query("SELECT id FROM authors WHERE id = 1 UNION ALL SELECT 2.50")
+	if promoted.err != "" || len(promoted.metadata) != 1 || promoted.metadata[0].typ != 0xf6 || !reflect.DeepEqual(promoted.rows, [][]string{{"1.00"}, {"2.50"}}) {
+		t.Fatalf("set numeric promotion: %#v", promoted)
+	}
 	nullOrder := client.query("SELECT name FROM authors UNION ALL SELECT NULL FROM authors ORDER BY name LIMIT 2")
 	if nullOrder.err != "" || !reflect.DeepEqual(nullOrder.rows, [][]string{{""}, {""}}) {
 		t.Fatalf("set NULL ordering: %#v", nullOrder)
@@ -179,5 +191,16 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	correlatedExplanation := client.query("EXPLAIN FORMAT=JSON SELECT a.name, (SELECT p.title FROM posts p WHERE p.author_id = a.id ORDER BY p.id LIMIT 1) AS first_title FROM authors a")
 	if correlatedExplanation.err != "" || len(correlatedExplanation.rows) != 1 || !strings.Contains(correlatedExplanation.rows[0][0], `"reason":"subquery"`) {
 		t.Fatalf("correlated explanation: %#v", correlatedExplanation)
+	}
+	for _, query := range []string{
+		"EXPLAIN FORMAT=JSON WITH broken AS (SELECT 1 / (id - 2) AS value FROM authors) SELECT value FROM broken",
+		"EXPLAIN FORMAT=JSON SELECT (SELECT name FROM authors LIMIT 1)",
+		"EXPLAIN FORMAT=JSON SELECT a.name FROM authors a JOIN posts p ON EXISTS (SELECT id FROM posts WHERE author_id = a.id)",
+		"EXPLAIN FORMAT=JSON SELECT (SELECT name FROM authors)",
+	} {
+		result := client.query(query)
+		if result.err != "" || len(result.rows) != 1 || (!strings.Contains(result.rows[0][0], `"reason":"subquery"`) && !strings.Contains(result.rows[0][0], `"reason":"cte"`)) {
+			t.Fatalf("plan-only composed explanation %q: %#v", query, result)
+		}
 	}
 }

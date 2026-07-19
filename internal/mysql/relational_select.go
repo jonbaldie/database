@@ -119,7 +119,7 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 	if err != nil {
 		return nil, err
 	}
-	if s.streamRows {
+	if s.streamRows && !plan.hasRuntimeSubqueries() {
 		return plan.streamingResult(), nil
 	}
 	resultRows, err := collectRelationalResultRows(plan)
@@ -127,6 +127,23 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 		return nil, err
 	}
 	return plan.result(plan.shapeRows(resultRows)), nil
+}
+
+func (p *relationalSelectPlan) hasRuntimeSubqueries() bool {
+	for _, projection := range p.projection {
+		if projection.subquery != "" {
+			return true
+		}
+	}
+	if len(parenthesizedSelectQueries(p.whereText)) > 0 {
+		return true
+	}
+	for _, join := range p.source.joins {
+		if len(parenthesizedSelectQueries(join.condition)) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResultRow, error) {
