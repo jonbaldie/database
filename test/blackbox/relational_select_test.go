@@ -205,6 +205,10 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	if mixedCollation.err != "" || !reflect.DeepEqual(mixedCollation.rows, [][]string{{"A"}, {"a"}}) {
 		t.Fatalf("set collation coercibility: %#v", mixedCollation)
 	}
+	ambiguousCollation := client.query("SELECT name FROM authors UNION SELECT name FROM binary_names")
+	if !strings.HasPrefix(ambiguousCollation.err, "22007") {
+		t.Fatalf("set accepted ambiguous collation: %#v", ambiguousCollation)
+	}
 	computedCollation := client.query("SELECT UPPER(name) FROM binary_names UNION SELECT LOWER(name) FROM binary_names ORDER BY 1")
 	if computedCollation.err != "" || !reflect.DeepEqual(computedCollation.rows, [][]string{{"A"}, {"B"}, {"a"}, {"b"}}) {
 		t.Fatalf("computed set collation: %#v", computedCollation)
@@ -261,7 +265,7 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 		t.Fatalf("missing subquery column deferred: %#v", missingSubqueryColumn)
 	}
 	cteReuseExplanation := client.query("EXPLAIN FORMAT=JSON WITH ids AS (SELECT id FROM authors) SELECT a.id FROM ids a JOIN ids b ON a.id = b.id")
-	if cteReuseExplanation.err != "" || len(cteReuseExplanation.rows) != 1 || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"cte"`) || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"reuse"`) {
+	if cteReuseExplanation.err != "" || len(cteReuseExplanation.rows) != 1 || strings.Count(cteReuseExplanation.rows[0][0], `"reason":"cte"`) != 1 || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"reuse"`) {
 		t.Fatalf("CTE reuse explanation: %#v", cteReuseExplanation)
 	}
 	preparedCardinality := client.prepare("SELECT (SELECT name FROM authors)")

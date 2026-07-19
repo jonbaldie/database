@@ -48,15 +48,18 @@ func MaterializedInput(primary, input *Operator, reason, clause, fragment string
 func ReusedInput(primary *Operator, columns []string) *Operator {
 	reused := &Operator{
 		Kind: "materialize", Summary: "Read the statement-scoped materialized input.",
-		Operation: materializeOperation{Reason: "cte"}, Estimates: Estimates{},
+		Operation: materializeOperation{Reason: "reuse"}, Estimates: Estimates{},
 		Output:   Output{Columns: append([]string(nil), columns...), Ordering: []OrderingTerm{}, UniqueKeys: [][]string{}},
 		Warnings: []Warning{}, Children: []*Operator{},
 	}
-	return &Operator{
-		Kind: "materialize", Summary: "Reuse the previously materialized composed query input.",
-		Operation: materializeOperation{Reason: "reuse"},
-		Estimates: primary.Estimates, Output: primary.Output, Warnings: []Warning{}, Children: []*Operator{reused, primary},
+	insert := len(primary.Children)
+	if insert > 0 {
+		insert--
 	}
+	primary.Children = append(primary.Children, nil)
+	copy(primary.Children[insert+1:], primary.Children[insert:])
+	primary.Children[insert] = reused
+	return primary
 }
 
 // DependentInput records a correlated subquery evaluated for each outer row.

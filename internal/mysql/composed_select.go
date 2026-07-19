@@ -1049,7 +1049,13 @@ func compatibleCharacterSetMetadata(result, left, right columnMetadata) (columnM
 	if left.characterSet == mysqlCharsetBinary || right.characterSet == mysqlCharsetBinary {
 		return columnMetadata{}, strictConversionError()
 	}
-	return characterSetMetadata(result, mysqlCharsetUTF8MB4Bin), nil
+	if left.table != "" && right.table == "" {
+		return characterSetMetadata(result, left.characterSet), nil
+	}
+	if right.table != "" && left.table == "" {
+		return characterSetMetadata(result, right.characterSet), nil
+	}
+	return columnMetadata{}, strictConversionError()
 }
 
 func dateAndDatetime(left, right byte) bool {
