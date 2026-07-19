@@ -152,7 +152,7 @@ func (s *textStatementExecutor) decorateProjectionSubqueries(context *composedQu
 		if err != nil {
 			return nil, err
 		}
-		root = queryexplanation.MaterializedInput(root, input, "subquery", "derived", projection.expression)
+		root = s.composedInputOperator(context, root, input, projection.subquery, outer, "derived", projection.expression)
 	}
 	return root, nil
 }
@@ -163,9 +163,25 @@ func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryConte
 		if err != nil {
 			return nil, err
 		}
-		root = queryexplanation.MaterializedInput(root, input, "subquery", clause, "("+query+")")
+		fragment := "(" + query + ")"
+		root = s.composedInputOperator(context, root, input, query, outer, clause, fragment)
 	}
 	return root, nil
+}
+
+func (s *textStatementExecutor) composedInputOperator(context *composedQueryContext, root, input *queryexplanation.Operator, query string, outer *outerRelationScope, clause, fragment string) *queryexplanation.Operator {
+	if subqueryIsCorrelated(context, query, outer) {
+		return queryexplanation.DependentInput(root, input, clause, fragment)
+	}
+	return queryexplanation.MaterializedInput(root, input, "subquery", clause, fragment)
+}
+
+func subqueryIsCorrelated(context *composedQueryContext, query string, outer *outerRelationScope) bool {
+	if outer == nil {
+		return false
+	}
+	_, err := describeComposedSelect(context, query, nil)
+	return err != nil
 }
 
 func parenthesizedSelectQueries(value string) []string {

@@ -90,8 +90,10 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 		"USE app",
 		"CREATE TABLE authors (id INT, name VARCHAR(32))",
 		"CREATE TABLE posts (id INT, author_id INT, title VARCHAR(32), score INT)",
+		"CREATE TABLE binary_names (name VARCHAR(32) COLLATE utf8mb4_bin)",
 		"INSERT INTO authors VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Linus')",
 		"INSERT INTO posts VALUES (10, 1, 'first', 5), (11, 1, 'second', 20), (12, 2, 'third', 15)",
+		"INSERT INTO binary_names VALUES ('a'), ('B')",
 	} {
 		if result := client.query(query); result.err != "" {
 			t.Fatalf("%s: %#v", query, result)
@@ -107,11 +109,27 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	if cte.err != "" || !reflect.DeepEqual(cte.rows, [][]string{{"Ada", "second"}, {"Grace", "third"}}) {
 		t.Fatalf("CTE: %#v", cte)
 	}
+	unusedCTE := client.query("WITH unused AS (SELECT 1 / 0 AS broken) SELECT 1")
+	if unusedCTE.err != "" || !reflect.DeepEqual(unusedCTE.rows, [][]string{{"1"}}) {
+		t.Fatalf("unused CTE executed: %#v", unusedCTE)
+	}
+	shadowedCTE := client.query("WITH x AS (SELECT id AS n FROM authors WHERE id = 1) SELECT n FROM (WITH x AS (SELECT id AS n FROM authors WHERE id = 2) SELECT n FROM x) AS nested")
+	if shadowedCTE.err != "" || !reflect.DeepEqual(shadowedCTE.rows, [][]string{{"2"}}) {
+		t.Fatalf("inner CTE shadowing: %#v", shadowedCTE)
+	}
 
 	correlated := client.query("SELECT a.name, (SELECT p.title FROM posts p WHERE p.author_id = a.id ORDER BY p.id LIMIT 1) AS first_title FROM authors a ORDER BY a.id")
 	wantCorrelated := [][]string{{"Ada", "first"}, {"Grace", "third"}, {"Linus", ""}}
 	if correlated.err != "" || !reflect.DeepEqual(correlated.rows, wantCorrelated) {
 		t.Fatalf("correlated scalar: %#v", correlated)
+	}
+	outerProjection := client.query("SELECT a.id, (SELECT a.id + p.id FROM posts p WHERE p.author_id = a.id ORDER BY p.id LIMIT 1) AS combined FROM authors a WHERE a.id <= 2 ORDER BY a.id")
+	if outerProjection.err != "" || !reflect.DeepEqual(outerProjection.rows, [][]string{{"1", "11"}, {"2", "14"}}) {
+		t.Fatalf("outer projection scope: %#v", outerProjection)
+	}
+	existsProjection := client.query("SELECT a.name FROM authors a WHERE EXISTS (SELECT 1 / (p.id - p.id) FROM posts p WHERE p.author_id = a.id) ORDER BY a.id")
+	if existsProjection.err != "" || !reflect.DeepEqual(existsProjection.rows, [][]string{{"Ada"}, {"Grace"}}) {
+		t.Fatalf("EXISTS evaluated projection: %#v", existsProjection)
 	}
 
 	predicates := client.query("SELECT a.name FROM authors a WHERE EXISTS (SELECT p.id FROM posts p WHERE p.author_id = a.id) AND a.id IN (SELECT p.author_id FROM posts p WHERE p.score >= 15) ORDER BY a.id")
@@ -169,6 +187,18 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	if promoted.err != "" || len(promoted.metadata) != 1 || promoted.metadata[0].typ != 0xf6 || !reflect.DeepEqual(promoted.rows, [][]string{{"1.00"}, {"2.50"}}) {
 		t.Fatalf("set numeric promotion: %#v", promoted)
 	}
+	strictSet := client.query("SELECT CAST(1 AS UNSIGNED) UNION SELECT 1")
+	if !strings.HasPrefix(strictSet.err, "22007") {
+		t.Fatalf("set accepted signed/unsigned conversion: %#v", strictSet)
+	}
+	binaryOrder := client.query("SELECT name FROM binary_names UNION ALL SELECT name FROM binary_names ORDER BY name LIMIT 2")
+	if binaryOrder.err != "" || !reflect.DeepEqual(binaryOrder.rows, [][]string{{"B"}, {"B"}}) {
+		t.Fatalf("set binary collation order: %#v", binaryOrder)
+	}
+	derivedBinary := client.query("SELECT name FROM (SELECT name FROM binary_names) AS d WHERE name = 'A'")
+	if derivedBinary.err != "" || len(derivedBinary.rows) != 0 {
+		t.Fatalf("derived collation metadata: %#v", derivedBinary)
+	}
 	nullOrder := client.query("SELECT name FROM authors UNION ALL SELECT NULL FROM authors ORDER BY name LIMIT 2")
 	if nullOrder.err != "" || !reflect.DeepEqual(nullOrder.rows, [][]string{{""}, {""}}) {
 		t.Fatalf("set NULL ordering: %#v", nullOrder)
@@ -189,8 +219,16 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 		}
 	}
 	correlatedExplanation := client.query("EXPLAIN FORMAT=JSON SELECT a.name, (SELECT p.title FROM posts p WHERE p.author_id = a.id ORDER BY p.id LIMIT 1) AS first_title FROM authors a")
-	if correlatedExplanation.err != "" || len(correlatedExplanation.rows) != 1 || !strings.Contains(correlatedExplanation.rows[0][0], `"reason":"subquery"`) {
+	if correlatedExplanation.err != "" || len(correlatedExplanation.rows) != 1 || !strings.Contains(correlatedExplanation.rows[0][0], "Evaluate the correlated subquery") {
 		t.Fatalf("correlated explanation: %#v", correlatedExplanation)
+	}
+	preparedCardinality := client.prepare("SELECT (SELECT name FROM authors)")
+	if preparedCardinality.err != "" {
+		t.Fatalf("prepare executed scalar subquery: %#v", preparedCardinality)
+	}
+	defer client.closePrepared(preparedCardinality.id)
+	if executed := client.executePrepared(preparedCardinality.id); !strings.HasPrefix(executed.err, "21000") {
+		t.Fatalf("prepared scalar cardinality execution: %#v", executed)
 	}
 	for _, query := range []string{
 		"EXPLAIN FORMAT=JSON WITH broken AS (SELECT 1 / (id - 2) AS value FROM authors) SELECT value FROM broken",
@@ -199,7 +237,7 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 		"EXPLAIN FORMAT=JSON SELECT (SELECT name FROM authors)",
 	} {
 		result := client.query(query)
-		if result.err != "" || len(result.rows) != 1 || (!strings.Contains(result.rows[0][0], `"reason":"subquery"`) && !strings.Contains(result.rows[0][0], `"reason":"cte"`)) {
+		if result.err != "" || len(result.rows) != 1 || (!strings.Contains(result.rows[0][0], `"reason":"subquery"`) && !strings.Contains(result.rows[0][0], `"reason":"cte"`) && !strings.Contains(result.rows[0][0], "Evaluate the correlated subquery")) {
 			t.Fatalf("plan-only composed explanation %q: %#v", query, result)
 		}
 	}

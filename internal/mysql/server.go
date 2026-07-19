@@ -2844,6 +2844,18 @@ func nullPreparedParameters(count int) []string {
 }
 
 func (s *preparedPreparation) queryColumns(query string, preserveMetadata bool) ([]columnMetadata, error) {
+	if isComposedSelectStatement(query) {
+		relations := &relationExecutor{session: s.session}
+		result, err := describeComposedSelect(newComposedQueryContext(relations), query, nil)
+		if err != nil {
+			return nil, err
+		}
+		metadata := make([]columnMetadata, len(result.columns))
+		for index, name := range result.columns {
+			metadata[index] = resultColumnDefinition(name, index, result.metadata)
+		}
+		return metadata, nil
+	}
 	result, err := newQueryExecutor(s.session).execute(query)
 	if err != nil {
 		return nil, err

@@ -115,9 +115,14 @@ func parseCTETableSource(s *relationExecutor, parts []string, remainder string) 
 	if len(parts) != 1 || s.composed == nil {
 		return relationalTableSource{}, "", false, nil
 	}
-	relation, found := s.composed.ctes[catalog.Key(parts[0])]
+	key := catalog.Key(parts[0])
+	relation, found := s.composed.ctes[key]
 	if !found {
 		return relationalTableSource{}, "", false, nil
+	}
+	relation, err := materializeCTE(s.composed, key, relation)
+	if err != nil {
+		return relationalTableSource{}, "", true, err
 	}
 	alias, tail, err := relationAlias(remainder, relation.name)
 	if err != nil {
@@ -128,7 +133,13 @@ func parseCTETableSource(s *relationExecutor, parts []string, remainder string) 
 		return relationalTableSource{}, "", true, err
 	}
 	columns := relationalResultColumns(relation.name, alias, table, relation.result)
-	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: relation.reason}
+	reason := relation.reason
+	if relation.references > 0 {
+		reason = "reuse"
+	}
+	relation.references++
+	s.composed.ctes[key] = relation
+	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason}
 	return source, tail, true, nil
 }
 

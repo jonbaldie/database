@@ -56,7 +56,7 @@ func parseProjectionItem(item string, columns []relationColumn, context *compose
 	if projection, scalarErr := scalarProjection(expression, alias); scalarErr == nil {
 		return projection, nil
 	}
-	return computedProjection(expression, alias, columns)
+	return computedProjection(expression, alias, columns, outer)
 }
 
 func subqueryProjection(query, expression, alias string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
@@ -120,8 +120,8 @@ func scalarProjection(expression, alias string) ([]relationalProjection, error) 
 	}}, nil
 }
 
-func computedProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, error) {
-	metadata, err := relationExpressionMetadata(expression, columns)
+func computedProjection(expression, alias string, columns []relationColumn, outer *outerRelationScope) ([]relationalProjection, error) {
+	metadata, err := relationExpressionMetadataContext(expression, columns, outer)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func computedProjection(expression, alias string, columns []relationColumn) ([]r
 	metadata.name = name
 	return []relationalProjection{{
 		expression: expression, name: name, alias: alias, column: -1,
-		computed: true, metadata: metadata,
+		computed: true, metadata: metadata, outer: outer,
 	}}, nil
 }
 
@@ -220,7 +220,7 @@ func (p *relationalSelectPlan) projectValues(row relationRow, result *relational
 		} else if projection.scalar {
 			value = projection.value
 		} else if projection.computed {
-			value, err = evaluateRelationExpression(projection.expression, p.source.columns, row)
+			value, err = evaluateRelationExpressionContext(projection.expression, p.source.columns, row, projection.outer)
 		} else {
 			if projection.column < 0 || projection.column >= len(row.values) {
 				return sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
@@ -245,7 +245,7 @@ func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relat
 		if !order.computed {
 			continue
 		}
-		value, err := evaluateRelationExpression(order.expression, p.source.columns, row)
+		value, err := evaluateRelationExpressionContext(order.expression, p.source.columns, row, p.outer)
 		if err != nil {
 			return err
 		}
@@ -255,7 +255,11 @@ func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relat
 }
 
 func relationExpressionMetadata(expression string, columns []relationColumn) (columnMetadata, error) {
-	value, err := representativeExpressionValue(expression, columns)
+	return relationExpressionMetadataContext(expression, columns, nil)
+}
+
+func relationExpressionMetadataContext(expression string, columns []relationColumn, outer *outerRelationScope) (columnMetadata, error) {
+	value, err := representativeExpressionValueContext(expression, columns, outer)
 	if err != nil {
 		return columnMetadata{}, err
 	}
@@ -275,12 +279,16 @@ func relationExpressionMetadata(expression string, columns []relationColumn) (co
 }
 
 func representativeExpressionValue(expression string, columns []relationColumn) (exprValue, error) {
+	return representativeExpressionValueContext(expression, columns, nil)
+}
+
+func representativeExpressionValueContext(expression string, columns []relationColumn, outer *outerRelationScope) (exprValue, error) {
 	var firstError error
 	for _, sample := range []int64{1, 2, 10, 1000, 0, -1} {
 		value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
 			index, err := resolveRelationColumn(name, columns)
 			if err != nil {
-				return exprValue{}, err
+				return outerRelationValue(name, outer)
 			}
 			return relationMetadataValue(columns[index], sample), nil
 		})

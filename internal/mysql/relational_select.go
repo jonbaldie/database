@@ -75,6 +75,7 @@ type relationalProjection struct {
 	context    *composedQueryContext
 	value      exprValue
 	metadata   columnMetadata
+	outer      *outerRelationScope
 }
 
 type relationalOrder struct {

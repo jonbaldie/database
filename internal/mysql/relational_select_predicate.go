@@ -15,6 +15,7 @@ type relationOperand struct {
 	value      exprValue
 	definition relationColumn
 	columns    []relationColumn
+	outer      *outerRelationScope
 }
 
 func compileRelationPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
@@ -288,10 +289,10 @@ func compileRelationOperandContext(text string, columns []relationColumn, sessio
 			return relationOperand{raw: text, value: value, bound: true}, nil
 		}
 	}
-	if _, expressionErr := evaluateRelationExpression(text, columns, sampleRelationRow(columns)); expressionErr != nil {
+	if _, expressionErr := evaluateRelationExpressionContext(text, columns, sampleRelationRow(columns), outer); expressionErr != nil {
 		return relationOperand{}, expressionErr
 	}
-	return relationOperand{computed: true, raw: text, columns: columns}, nil
+	return relationOperand{computed: true, raw: text, columns: columns, outer: outer}, nil
 }
 
 func coerceRelationLiterals(left, right relationOperand, columns []relationColumn, session *session) (relationOperand, relationOperand, error) {
@@ -332,7 +333,7 @@ func typedRelationLiteral(operand relationOperand, column relationColumn, sessio
 
 func relationOperandValue(operand relationOperand, row relationRow) (exprValue, error) {
 	if operand.computed {
-		return evaluateRelationExpression(operand.raw, operand.columns, row)
+		return evaluateRelationExpressionContext(operand.raw, operand.columns, row, operand.outer)
 	}
 	if !operand.isColumn {
 		return operand.value, nil
@@ -348,10 +349,14 @@ func relationOperandValue(operand relationOperand, row relationRow) (exprValue, 
 }
 
 func evaluateRelationExpression(text string, columns []relationColumn, row relationRow) (exprValue, error) {
+	return evaluateRelationExpressionContext(text, columns, row, nil)
+}
+
+func evaluateRelationExpressionContext(text string, columns []relationColumn, row relationRow, outer *outerRelationScope) (exprValue, error) {
 	return evaluateScalarWithResolver(text, func(name string) (exprValue, error) {
 		column, err := resolveRelationColumn(name, columns)
 		if err != nil {
-			return exprValue{}, err
+			return outerRelationValue(name, outer)
 		}
 		return relationColumnValue(columns, column, row)
 	})

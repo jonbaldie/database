@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"errors"
 	"math/big"
 	"sort"
 	"strconv"
@@ -19,11 +20,16 @@ type composedQueryContext struct {
 }
 
 type composedRelation struct {
-	name   string
-	query  string
-	reason string
-	result *queryResult
+	name       string
+	query      string
+	reason     string
+	result     *queryResult
+	ctes       map[string]composedRelation
+	references int
+	state      *composedRelationState
 }
+
+type composedRelationState struct{ result *queryResult }
 
 type outerRelationScope struct {
 	columns []relationColumn
@@ -283,16 +289,45 @@ func compileExistsSubquery(text string, columns []relationColumn, context *compo
 			return exprValue{}, err
 		}
 		scope := &outerRelationScope{columns: columns, row: row, parent: outer}
-		result, err := executeComposedSelect(child, query, scope)
-		if err != nil {
-			return exprValue{}, err
-		}
-		result, err = materializeQueryResult(result)
-		if err != nil {
-			return exprValue{}, err
-		}
-		return boolValue(len(result.rows) > 0), nil
+		found, err := executeExistsSubquery(child, query, scope)
+		return boolValue(found), err
 	}, true, nil
+}
+
+var errExistsRow = errors.New("EXISTS found a row")
+
+func executeExistsSubquery(context *composedQueryContext, query string, outer *outerRelationScope) (bool, error) {
+	local, body, err := parseAndMaterializeCTEs(context, strings.TrimSpace(query), outer)
+	if err != nil {
+		return false, err
+	}
+	body = existsProjectionQuery(body)
+	local.executor.streamRows = true
+	result, err := executeComposedSelect(local, body, outer)
+	if err != nil {
+		return false, err
+	}
+	if result.stream == nil {
+		return len(result.rows) > 0, nil
+	}
+	err = result.stream(func([]string, []bool) error { return errExistsRow })
+	if errors.Is(err, errExistsRow) {
+		return true, nil
+	}
+	return false, err
+}
+
+func existsProjectionQuery(query string) string {
+	query = stripWholeQueryParentheses(strings.TrimSpace(query))
+	if !strings.HasPrefix(strings.ToLower(query), "select ") {
+		return query
+	}
+	expression := strings.TrimSpace(query[len("SELECT "):])
+	from := keywordAt(expression, "from")
+	if from < 0 {
+		return "SELECT 1"
+	}
+	return "SELECT 1 " + strings.TrimSpace(expression[from:])
 }
 
 func compileInSubquery(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, bool, error) {
@@ -342,7 +377,7 @@ func (plan inSubqueryPredicate) evaluate(row relationRow) (exprValue, error) {
 	if err != nil {
 		return exprValue{}, err
 	}
-	return evaluateInMembership(left, result, plan.negate)
+	return evaluateInMembership(left, result, plan.negate, plan.operand)
 }
 
 func (plan inSubqueryPredicate) execute(row relationRow) (*queryResult, error) {
@@ -365,11 +400,11 @@ func (plan inSubqueryPredicate) execute(row relationRow) (*queryResult, error) {
 	return result, nil
 }
 
-func evaluateInMembership(left exprValue, result *queryResult, negate bool) (exprValue, error) {
+func evaluateInMembership(left exprValue, result *queryResult, negate bool, operand relationOperand) (exprValue, error) {
 	matched, unknown := false, left.isNull()
 	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
 	for index := range result.rows {
-		match, rowUnknown, err := compareInRow(left, result, metadata, index)
+		match, rowUnknown, err := compareInRow(left, result, metadata, index, operand)
 		if err != nil {
 			return exprValue{}, err
 		}
@@ -384,7 +419,7 @@ func evaluateInMembership(left exprValue, result *queryResult, negate bool) (exp
 	return boolValue(negate), nil
 }
 
-func compareInRow(left exprValue, result *queryResult, metadata columnMetadata, index int) (bool, bool, error) {
+func compareInRow(left exprValue, result *queryResult, metadata columnMetadata, index int, operand relationOperand) (bool, bool, error) {
 	if resultValueIsNull(index, 0, result.nulls) {
 		return false, true, nil
 	}
@@ -392,12 +427,27 @@ func compareInRow(left exprValue, result *queryResult, metadata columnMetadata, 
 	if err != nil {
 		return false, false, err
 	}
-	comparison, err := compareValues("=", left, right)
+	comparison, err := compareInValues(left, right, metadata, operand)
 	if err != nil {
 		return false, false, err
 	}
 	known, truth, err := truthValue(comparison)
 	return known && truth, !known, err
+}
+
+func compareInValues(left, right exprValue, metadata columnMetadata, operand relationOperand) (exprValue, error) {
+	if left.isNull() || right.isNull() || left.kind != valueString || right.kind != valueString {
+		return compareValues("=", left, right)
+	}
+	characterType := defaultStringType
+	if operand.isColumn {
+		if parsed, err := parseCharacterType(operand.definition.typeName); err == nil && parsed.kind == characterText {
+			characterType = parsed
+		}
+	} else if metadata.characterSet == mysqlCharsetUTF8MB4Bin {
+		characterType.collation = collationBin
+	}
+	return boolValue(characterComparisonKey(characterType, left.s) == characterComparisonKey(characterType, right.s)), nil
 }
 
 func outerRelationValue(name string, outer *outerRelationScope) (exprValue, error) {
@@ -430,7 +480,7 @@ func isNumericWireType(typ byte) bool {
 	}
 }
 
-func parseAndMaterializeCTEs(context *composedQueryContext, query string, outer *outerRelationScope) (*composedQueryContext, string, error) {
+func parseAndMaterializeCTEs(context *composedQueryContext, query string, _ *outerRelationScope) (*composedQueryContext, string, error) {
 	if !strings.HasPrefix(strings.ToLower(query), "with ") {
 		return context, query, nil
 	}
@@ -438,10 +488,11 @@ func parseAndMaterializeCTEs(context *composedQueryContext, query string, outer 
 		return nil, "", sqlFailure{1235, "42000", "recursive CTEs are not supported in v0.1"}
 	}
 	local := &composedQueryContext{executor: context.executor, ctes: cloneComposedRelations(context.ctes), depth: context.depth, planning: context.planning}
+	localNames := make(map[string]bool)
 	rest := strings.TrimSpace(query[len("WITH "):])
 	for {
 		var err error
-		rest, err = parseOneCTE(local, rest, outer)
+		rest, err = parseOneCTE(local, localNames, rest)
 		if err != nil {
 			return nil, "", err
 		}
@@ -452,8 +503,8 @@ func parseAndMaterializeCTEs(context *composedQueryContext, query string, outer 
 	}
 }
 
-func parseOneCTE(context *composedQueryContext, text string, outer *outerRelationScope) (string, error) {
-	name, rest, err := parseCTEName(context, text)
+func parseOneCTE(context *composedQueryContext, localNames map[string]bool, text string) (string, error) {
+	name, rest, err := parseCTEName(localNames, text)
 	if err != nil {
 		return "", err
 	}
@@ -461,18 +512,18 @@ func parseOneCTE(context *composedQueryContext, text string, outer *outerRelatio
 	if err != nil {
 		return "", err
 	}
-	if err := materializeCTE(context, name, query, outer); err != nil {
-		return "", err
-	}
+	key := catalog.Key(name)
+	context.ctes[key] = composedRelation{name: name, query: query, reason: "cte", ctes: cloneComposedRelations(context.ctes), state: &composedRelationState{}}
+	localNames[key] = true
 	return remainder, nil
 }
 
-func parseCTEName(context *composedQueryContext, text string) (string, string, error) {
+func parseCTEName(localNames map[string]bool, text string) (string, string, error) {
 	name, rest, ok := consumeIdentifier(text)
 	if !ok {
 		return "", "", sqlFailure{1064, "42000", "malformed CTE name"}
 	}
-	if _, exists := context.ctes[catalog.Key(name)]; exists {
+	if localNames[catalog.Key(name)] {
 		return "", "", sqlFailure{1060, "42S21", "duplicate CTE name '" + name + "'"}
 	}
 	return name, strings.TrimSpace(rest), nil
@@ -496,26 +547,39 @@ func parseCTEQuery(text string) (string, string, error) {
 	return strings.TrimSpace(text[1:close]), strings.TrimSpace(text[close+1:]), nil
 }
 
-func materializeCTE(context *composedQueryContext, name, query string, outer *outerRelationScope) error {
+func materializeCTE(context *composedQueryContext, key string, relation composedRelation) (composedRelation, error) {
+	if relation.result != nil {
+		return relation, nil
+	}
+	if relation.state != nil && relation.state.result != nil {
+		relation.result = relation.state.result
+		context.ctes[key] = relation
+		return relation, nil
+	}
 	child, err := context.child()
 	if err != nil {
-		return err
+		return composedRelation{}, err
 	}
+	child.ctes = relation.ctes
 	var result *queryResult
 	if context.planning {
-		result, err = describeComposedSelect(child, query, outer)
+		result, err = describeComposedSelect(child, relation.query, nil)
 	} else {
-		result, err = executeComposedSelect(child, query, outer)
+		result, err = executeComposedSelect(child, relation.query, nil)
 	}
 	if err != nil {
-		return err
+		return composedRelation{}, err
 	}
 	result, err = materializeQueryResult(result)
 	if err != nil {
-		return err
+		return composedRelation{}, err
 	}
-	context.ctes[catalog.Key(name)] = composedRelation{name: name, query: query, reason: "cte", result: result}
-	return nil
+	relation.result = result
+	if relation.state != nil {
+		relation.state.result = result
+	}
+	context.ctes[key] = relation
+	return relation, nil
 }
 
 func cloneComposedRelations(source map[string]composedRelation) map[string]composedRelation {
@@ -820,16 +884,34 @@ func commonSetColumnMetadata(left, right columnMetadata) (columnMetadata, error)
 	if right.typ == mysqlTypeNull {
 		return result, nil
 	}
+	return compatibleSetMetadata(result, left, right)
+}
+
+func compatibleSetMetadata(result, left, right columnMetadata) (columnMetadata, error) {
 	if isNumericWireType(left.typ) && isNumericWireType(right.typ) {
+		if isApproximateWireType(left.typ) != isApproximateWireType(right.typ) || left.flags&mysqlUnsignedFlag != right.flags&mysqlUnsignedFlag {
+			return columnMetadata{}, strictConversionError()
+		}
 		return numericSetMetadata(result, left, right), nil
 	}
 	if isCharacterWireType(left.typ) && isCharacterWireType(right.typ) {
+		if left.characterSet != right.characterSet {
+			return columnMetadata{}, strictConversionError()
+		}
 		return characterSetMetadata(result, left, right), nil
+	}
+	if dateAndDatetime(left.typ, right.typ) {
+		result.typ = mysqlTypeDatetime
+		return result, nil
 	}
 	if left.typ == right.typ {
 		return result, nil
 	}
 	return columnMetadata{}, strictConversionError()
+}
+
+func dateAndDatetime(left, right byte) bool {
+	return left == mysqlTypeDate && right == mysqlTypeDatetime || left == mysqlTypeDatetime && right == mysqlTypeDate
 }
 
 func reconcileSetDimensions(result, right columnMetadata) columnMetadata {
@@ -1015,8 +1097,12 @@ func setComparisonKey(value string, metadata columnMetadata) string {
 		}
 		return normalized
 	}
-	if metadata.characterSet == mysqlCharsetUTF8MB40900AICI {
-		return characterComparisonKey(defaultStringType, value)
+	if isCharacterWireType(metadata.typ) {
+		characterType := defaultStringType
+		if metadata.characterSet == mysqlCharsetUTF8MB4Bin {
+			characterType.collation = collationBin
+		}
+		return characterComparisonKey(characterType, value)
 	}
 	return value
 }
@@ -1100,10 +1186,17 @@ func compareSetValues(result *queryResult, left, right, column int) int {
 		}
 		return 1
 	}
+	return compareNonNullSetValues(result, left, right, column)
+}
+
+func compareNonNullSetValues(result *queryResult, left, right, column int) int {
 	metadata := resultColumnDefinition(result.columns[column], column, result.metadata)
 	leftValue, leftErr := expressionValueFromMetadata(result.rows[left][column], metadata)
 	rightValue, rightErr := expressionValueFromMetadata(result.rows[right][column], metadata)
 	if leftErr == nil && rightErr == nil {
+		if leftValue.kind == valueString && rightValue.kind == valueString {
+			return strings.Compare(setComparisonKey(leftValue.s, metadata), setComparisonKey(rightValue.s, metadata))
+		}
 		if comparison, err := compareOperands(leftValue, rightValue); err == nil {
 			return comparison
 		}
@@ -1188,7 +1281,6 @@ var composedWireTypeNames = map[byte]string{
 	mysqlTypeLongLong:   "BIGINT",
 	mysqlTypeFloat:      "FLOAT",
 	mysqlTypeDouble:     "DOUBLE",
-	mysqlTypeNewDecimal: "DECIMAL(65,30)",
 	mysqlTypeDate:       "DATE",
 	mysqlTypeDatetime:   "DATETIME",
 	mysqlTypeTimestamp:  "TIMESTAMP",
@@ -1202,12 +1294,26 @@ var composedWireTypeNames = map[byte]string{
 }
 
 func metadataTypeName(metadata columnMetadata) string {
+	if metadata.typ == mysqlTypeNewDecimal {
+		return "DECIMAL(65," + strconv.Itoa(int(metadata.decimals)) + ")"
+	}
 	if name, found := composedWireTypeNames[metadata.typ]; found {
+		if metadata.flags&mysqlUnsignedFlag != 0 && isNumericWireType(metadata.typ) {
+			name += " UNSIGNED"
+		}
 		return name
 	}
 	length := metadata.length
 	if length == 0 {
 		length = 255
 	}
-	return "VARCHAR(" + strconv.FormatUint(uint64(length), 10) + ")"
+	if metadata.characterSet == mysqlCharsetBinary {
+		return "VARBINARY(" + strconv.FormatUint(uint64(length), 10) + ")"
+	}
+	length = max(uint32(1), length/4)
+	typeName := "VARCHAR(" + strconv.FormatUint(uint64(length), 10) + ")"
+	if metadata.characterSet == mysqlCharsetUTF8MB4Bin {
+		typeName += " COLLATE utf8mb4_bin"
+	}
+	return typeName
 }
