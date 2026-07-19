@@ -220,22 +220,32 @@ func startServer(t *testing.T, runner blackbox.Runner, directory string) (*black
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var event struct {
-		State     string `json:"state"`
-		Address   string `json:"diagnostics_address"`
-		Recovered bool   `json:"recovered"`
-	}
-	if err := process.NextJSONEvent(ctx, &event); err != nil {
-		process.Crash()
-		result := process.Wait()
-		t.Fatalf("wait for ready event: %v; result=%#v", err, result)
-	}
-	if event.State != "ready" || event.Address != address {
+	event := nextReadyEvent(t, process)
+	if event["diagnostics_address"] != address {
 		t.Fatalf("ready event: %#v", event)
 	}
 	return process, address
+}
+
+func nextReadyEvent(t *testing.T, process *blackbox.Process) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		var event map[string]any
+		if err := process.NextJSONEvent(ctx, &event); err != nil {
+			process.Crash()
+			result := process.Wait()
+			t.Fatalf("wait for ready event: %v; result=%#v", err, result)
+		}
+		if event["state"] == "recovering" {
+			continue
+		}
+		if event["state"] != "ready" {
+			t.Fatalf("ready event: %#v", event)
+		}
+		return event
+	}
 }
 
 func TestMySQLProbeRecognizesClassicHandshake(t *testing.T) {
@@ -295,10 +305,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	var event map[string]any
-	if err := process.NextJSONEvent(context.Background(), &event); err != nil || event["state"] != "ready" {
-		t.Fatalf("ready event: %#v %v", event, err)
-	}
+	nextReadyEvent(t, process)
 
 	client := newWireClient(t, mysql, "admin", "secret-password")
 	defer client.close()
@@ -360,10 +367,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var restarted map[string]any
-	if err := process.NextJSONEvent(context.Background(), &restarted); err != nil || restarted["state"] != "ready" {
-		t.Fatalf("restart: %#v %v", restarted, err)
-	}
+	nextReadyEvent(t, process)
 	reopened := newWireClient(t, mysql, "admin", "secret-password")
 	defer reopened.close()
 	rows = reopened.query("USE app")
@@ -935,10 +939,7 @@ func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	var ready map[string]any
-	if err := process.NextJSONEvent(context.Background(), &ready); err != nil || ready["state"] != "ready" {
-		t.Fatalf("ready: %#v %v", ready, err)
-	}
+	nextReadyEvent(t, process)
 
 	client := newTLSWireClient(t, address, "admin", "secure-password")
 	defer client.close()
@@ -1188,18 +1189,9 @@ func startMySQLServerWithReady(t *testing.T, runner blackbox.Runner, directory s
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var event struct {
-		State     string `json:"state"`
-		Recovered bool   `json:"recovered"`
-	}
-	if err := process.NextJSONEvent(ctx, &event); err != nil || event.State != "ready" {
-		process.Crash()
-		result := process.Wait()
-		t.Fatalf("wait for ready event: %v; result=%#v", err, result)
-	}
-	return process, mysqlAddress, event.Recovered
+	event := nextReadyEvent(t, process)
+	recovered, _ := event["recovered"].(bool)
+	return process, mysqlAddress, recovered
 }
 
 func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.T) {

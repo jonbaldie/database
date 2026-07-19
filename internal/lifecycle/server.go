@@ -127,6 +127,9 @@ func (s *server) serve(ctx context.Context) error {
 	defer func() {
 		state.finish(cleanStop)
 	}()
+	if state.recovered {
+		s.emit(Event{Schema: "database.lifecycle/v1", State: "recovering", Recovered: true})
+	}
 	runtime, err := startRuntime(s.options, s.health)
 	if err != nil {
 		return err
@@ -334,10 +337,10 @@ func stateWasRunning(path string) (bool, error) {
 }
 
 func (s claimedState) finish(clean bool) {
-	_ = s.release()
 	if clean {
 		_ = releaseState(s.path)
 	}
+	_ = s.release()
 }
 
 func validateInstance(directory string) error {

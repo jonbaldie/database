@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestOpenRemovesAbandonedCatalogSnapshot(t *testing.T) {
+func TestRecoverRemovesAbandonedCatalogSnapshot(t *testing.T) {
 	directory := t.TempDir()
 	temporary := filepath.Join(directory, ".catalog-crash.tmp")
 	if err := os.WriteFile(temporary, []byte("incomplete"), 0o600); err != nil {
