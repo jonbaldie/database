@@ -412,13 +412,13 @@ func relationColumnMatches(columns []relationColumn, qualifier, name string) []i
 }
 
 func relationColumnMatchesName(column relationColumn, qualifier, name string) bool {
-	if !strings.EqualFold(column.name, name) {
+	if !identifiersEqual(column.name, name) {
 		return false
 	}
 	if qualifier == "" && column.hidden {
 		return false
 	}
-	return qualifier == "" || strings.EqualFold(qualifier, column.qualifier) || strings.EqualFold(qualifier, column.table)
+	return qualifier == "" || identifiersEqual(qualifier, column.qualifier)
 }
 
 func resolveRelationColumnMatch(text string, matched []int) (int, error) {
@@ -436,13 +436,13 @@ func findNamedColumn(columns []relationColumn, qualifier, name string) (relation
 	var found relationColumn
 	count := 0
 	for _, column := range columns {
-		if !strings.EqualFold(column.name, name) {
+		if !identifiersEqual(column.name, name) {
 			continue
 		}
 		if qualifier == "" && column.hidden {
 			continue
 		}
-		if qualifier != "" && !strings.EqualFold(column.qualifier, qualifier) && !strings.EqualFold(column.table, qualifier) {
+		if qualifier != "" && !identifiersEqual(column.qualifier, qualifier) {
 			continue
 		}
 		found, count = column, count+1

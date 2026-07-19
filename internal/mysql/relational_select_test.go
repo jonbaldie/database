@@ -28,6 +28,12 @@ func relationalSelectExecutor(t *testing.T) *textStatementExecutor {
 	if err := store.CreateTableWithTypes("app", "author_labels", []string{"id", "label"}, []string{"INT", "VARCHAR(32)"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.CreateTableWithTypes("app", "unicode_rows", []string{"café"}, []string{"INT"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateTableWithTypes("app", "unicode_other", []string{"café"}, []string{"INT"}); err != nil {
+		t.Fatal(err)
+	}
 	for _, row := range [][]string{{"1", "Ada"}, {"2", "Grace"}, {"3", "Linus"}} {
 		if err := store.Insert("app", "authors", row); err != nil {
 			t.Fatal(err)
@@ -43,6 +49,12 @@ func relationalSelectExecutor(t *testing.T) *textStatementExecutor {
 			t.Fatal(err)
 		}
 	}
+	if err := store.Insert("app", "unicode_rows", []string{"7"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Insert("app", "unicode_other", []string{"7"}); err != nil {
+		t.Fatal(err)
+	}
 	server, err := NewWithConfig("127.0.0.1:0", Config{Catalog: store, Version: "0.1.0"})
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +62,43 @@ func relationalSelectExecutor(t *testing.T) *textStatementExecutor {
 	t.Cleanup(func() { _ = server.Listener.Close() })
 	session := &session{server: server, database: "app", initialDB: "app", timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{}}
 	return &textStatementExecutor{session: session}
+}
+
+func TestRelationalSelectUsesCanonicalCaselessIdentifiers(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	result, err := executor.execute("SELECT café.café + 1 AS résumé FROM unicode_rows AS café ORDER BY résumé")
+	if err != nil {
+		t.Fatalf("canonical identifier query: %v", err)
+	}
+	if !reflect.DeepEqual(result.rows, [][]string{{"8"}}) {
+		t.Fatalf("rows = %#v", result.rows)
+	}
+
+	result, err = executor.execute("SELECT café.* FROM unicode_rows AS café JOIN unicode_other AS other USING (café)")
+	if err != nil {
+		t.Fatalf("canonical wildcard/USING query: %v", err)
+	}
+	if !reflect.DeepEqual(result.rows, [][]string{{"7"}}) {
+		t.Fatalf("wildcard rows = %#v", result.rows)
+	}
+
+	_, err = executor.execute("SELECT * FROM authors AS café JOIN posts AS café ON 1 = 1")
+	if !isFailureCode(err, 1066) {
+		t.Fatalf("canonical duplicate alias error = %v", err)
+	}
+}
+
+func TestRelationalSelectRejectsOverlongAliases(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	alias := strings.Repeat("a", 65)
+	for _, query := range []string{
+		"SELECT * FROM authors AS " + alias,
+		"SELECT id AS " + alias + " FROM authors",
+	} {
+		if _, err := executor.execute(query); !isFailureCode(err, 1059) {
+			t.Errorf("execute(%q) error = %v", query, err)
+		}
+	}
 }
 
 func TestRelationalSelectExplanationTracesUsingClause(t *testing.T) {
@@ -113,6 +162,49 @@ func TestRelationalSelectEvaluatesRowBoundExpressions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result.rows, [][]string{{"21"}, {"16"}}) {
 		t.Fatalf("rows = %#v", result.rows)
+	}
+}
+
+func TestRelationalSelectOrdersByRowExpression(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	result, err := executor.execute("SELECT p.title FROM posts p ORDER BY p.score + 1 DESC")
+	if err != nil {
+		t.Fatalf("ORDER BY expression: %v", err)
+	}
+	if !reflect.DeepEqual(result.rows, [][]string{{"second"}, {"third"}, {"first"}}) {
+		t.Fatalf("rows = %#v", result.rows)
+	}
+
+	if _, err := executor.execute("SELECT DISTINCT p.title FROM posts p ORDER BY p.score + 1"); !isFailureCode(err, 3065) {
+		t.Fatalf("DISTINCT non-projected ORDER BY error = %v", err)
+	}
+}
+
+func TestRelationalSelectComputedMetadataIsStableAndNullable(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	result, err := executor.execute("SELECT p.score + 1 AS adjusted FROM posts p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := result.metadata[0]
+	if metadata.typ != mysqlTypeLongLong || metadata.length != 20 || metadata.flags&mysqlNotNullFlag != 0 {
+		t.Fatalf("computed metadata = %#v", metadata)
+	}
+
+	preparation := &preparedPreparation{executor.session}
+	prepared, err := preparation.preparedColumns("SELECT p.score + ? AS adjusted FROM posts p")
+	if err != nil || len(prepared) != 1 {
+		t.Fatalf("prepared metadata = %#v, err = %v", prepared, err)
+	}
+	if prepared[0].typ != metadata.typ || prepared[0].length != metadata.length || prepared[0].flags&mysqlNotNullFlag != 0 {
+		t.Fatalf("prepared metadata = %#v, text = %#v", prepared[0], metadata)
+	}
+}
+
+func TestRelationalSelectAliasHidesOriginalTableName(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	if _, err := executor.execute("SELECT authors.name FROM authors AS a"); !isFailureCode(err, 1054) {
+		t.Fatalf("hidden original table name error = %v", err)
 	}
 }
 
@@ -183,5 +275,25 @@ func TestRelationalSelectExplanationTracesOperators(t *testing.T) {
 		if !slices.Contains(kinds, kind) {
 			t.Errorf("operator kinds %q missing %q", kinds, kind)
 		}
+	}
+}
+
+func TestRelationalSelectExplanationTracesProjectionExpression(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	result, err := executor.execute("EXPLAIN FORMAT=JSON SELECT p.score + 1 AS adjusted FROM posts p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatal(err)
+	}
+	project := document["plan"].(map[string]any)
+	if project["kind"] != "project" {
+		t.Fatalf("root = %#v", project)
+	}
+	columns := project["output"].(map[string]any)["columns"].([]any)
+	if !slices.Contains(columns, any("p.score + 1")) {
+		t.Fatalf("project output = %#v", columns)
 	}
 }

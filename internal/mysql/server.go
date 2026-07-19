@@ -2698,18 +2698,43 @@ func (s *preparedPreparation) parameterizedColumns(query, validated string, para
 		}
 	}
 	metadata, err := s.queryColumns(validated, true)
+	if err == nil && !hasNullMetadata(metadata) {
+		return metadata, nil
+	}
+	if candidate, ok := s.representativeParameterizedColumns(query, parameters); ok {
+		return candidate, nil
+	}
 	if err == nil {
 		return metadata, nil
 	}
-	zeroValues := make([]string, parameters)
-	for index := range zeroValues {
-		zeroValues[index] = "0"
+	return nil, err
+}
+
+func (s *preparedPreparation) representativeParameterizedColumns(query string, parameters int) ([]columnMetadata, bool) {
+	for _, replacement := range []string{"0", quote(""), "0.0"} {
+		values := make([]string, parameters)
+		for index := range values {
+			values[index] = replacement
+		}
+		candidate, bindErr := bindPreparedQuery(query, values)
+		if bindErr != nil {
+			continue
+		}
+		candidateMetadata, candidateErr := s.queryColumns(candidate, true)
+		if candidateErr == nil && !hasNullMetadata(candidateMetadata) {
+			return candidateMetadata, true
+		}
 	}
-	zeroValidated, bindErr := bindPreparedQuery(query, zeroValues)
-	if bindErr != nil {
-		return nil, err
+	return nil, false
+}
+
+func hasNullMetadata(metadata []columnMetadata) bool {
+	for _, column := range metadata {
+		if column.typ == mysqlTypeNull {
+			return true
+		}
 	}
-	return s.queryColumns(zeroValidated, true)
+	return false
 }
 
 func preparedScalarExpression(query string) (string, bool) {

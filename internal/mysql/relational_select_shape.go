@@ -61,7 +61,7 @@ func wildcardProjections(expression string, columns []relationColumn) ([]relatio
 	qualifier := strings.TrimSpace(trimmed[:len(trimmed)-2])
 	projections := make([]relationalProjection, 0)
 	for index, column := range columns {
-		if strings.EqualFold(column.qualifier, qualifier) || strings.EqualFold(column.table, qualifier) {
+		if identifiersEqual(column.qualifier, qualifier) {
 			projections = append(projections, relationProjection(index, ""))
 		}
 	}
@@ -90,7 +90,7 @@ func scalarProjection(expression, alias string) ([]relationalProjection, error) 
 }
 
 func computedProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, error) {
-	value, err := evaluateRelationExpression(expression, columns, sampleRelationRow(columns))
+	metadata, err := relationExpressionMetadata(expression, columns)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func computedProjection(expression, alias string, columns []relationColumn) ([]r
 	if alias != "" {
 		name = alias
 	}
-	metadata := scalarMetadata(name, value.render(), value)
+	metadata.name = name
 	return []relationalProjection{{
 		expression: expression, name: name, alias: alias, column: -1,
 		computed: true, metadata: metadata,
@@ -129,6 +129,9 @@ func splitProjectionAlias(item string) (string, string, error) {
 		name, valid := singleIdentifier(alias)
 		if !valid {
 			return "", "", sqlFailure{1064, "42000", "invalid SELECT alias"}
+		}
+		if err := validateIdentifierLength(name); err != nil {
+			return "", "", err
 		}
 		return strings.TrimSpace(expression), name, nil
 	}
@@ -164,8 +167,18 @@ func (p relationalProjection) resolveName(columns []relationColumn) relationalPr
 func (p *relationalSelectPlan) projectRow(row relationRow) (relationalResultRow, error) {
 	result := relationalResultRow{
 		values: make([]string, len(p.projection)), nulls: make([]bool, len(p.projection)),
-		source: row, projections: make([]exprValue, len(p.projection)),
+		source: row, projections: make([]exprValue, len(p.projection)), orders: make([]exprValue, len(p.order)),
 	}
+	if err := p.projectValues(row, &result); err != nil {
+		return relationalResultRow{}, err
+	}
+	if err := p.projectOrderValues(row, &result); err != nil {
+		return relationalResultRow{}, err
+	}
+	return result, nil
+}
+
+func (p *relationalSelectPlan) projectValues(row relationRow, result *relationalResultRow) error {
 	for index, projection := range p.projection {
 		projection = projection.resolveName(p.source.columns)
 		p.projection[index] = projection
@@ -177,12 +190,12 @@ func (p *relationalSelectPlan) projectRow(row relationRow) (relationalResultRow,
 			value, err = evaluateRelationExpression(projection.expression, p.source.columns, row)
 		} else {
 			if projection.column < 0 || projection.column >= len(row.values) {
-				return relationalResultRow{}, sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
+				return sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
 			}
 			value, err = relationColumnValue(p.source.columns, projection.column, row)
 		}
 		if err != nil {
-			return relationalResultRow{}, err
+			return err
 		}
 		result.projections[index] = value
 		if value.isNull() {
@@ -191,7 +204,85 @@ func (p *relationalSelectPlan) projectRow(row relationRow) (relationalResultRow,
 			result.values[index] = value.render()
 		}
 	}
-	return result, nil
+	return nil
+}
+
+func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relationalResultRow) error {
+	for index, order := range p.order {
+		if !order.computed {
+			continue
+		}
+		value, err := evaluateRelationExpression(order.expression, p.source.columns, row)
+		if err != nil {
+			return err
+		}
+		result.orders[index] = value
+	}
+	return nil
+}
+
+func relationExpressionMetadata(expression string, columns []relationColumn) (columnMetadata, error) {
+	value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
+		index, err := resolveRelationColumn(name, columns)
+		if err != nil {
+			return exprValue{}, err
+		}
+		return relationMetadataValue(columns[index]), nil
+	})
+	if err != nil {
+		return columnMetadata{}, err
+	}
+	metadata := scalarMetadata(expression, value.render(), value)
+	metadata.flags &^= mysqlNotNullFlag
+	switch value.kind {
+	case valueInt, valueUint:
+		metadata.length = 20
+	case valueDecimal:
+		metadata.length = decimalPrecisionCeiling + 2
+	case valueDouble:
+		metadata.length = 22
+	case valueString:
+		metadata.length = relationStringExpressionLength(columns)
+	}
+	return metadata, nil
+}
+
+func relationMetadataValue(column relationColumn) exprValue {
+	typ, err := parseNumericType(column.typeName)
+	if err != nil {
+		return stringValue("x")
+	}
+	switch typ.kind {
+	case numericInteger:
+		if typ.unsigned {
+			return uintValue(1)
+		}
+		return intValue(1)
+	case numericDecimal:
+		value, _ := parseDecimalText("1" + strings.Repeat("0", typ.scale))
+		value.scale = typ.scale
+		return decimalValueOf(value)
+	case numericFloat:
+		return doubleValue(1)
+	case numericBoolean, numericBit:
+		return intValue(1)
+	default:
+		return stringValue("x")
+	}
+}
+
+func relationStringExpressionLength(columns []relationColumn) uint32 {
+	var length uint64
+	for _, column := range columns {
+		length += uint64(column.metadata.length)
+	}
+	if length == 0 {
+		return 4
+	}
+	if length > uint64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(length)
 }
 
 func parseRelationalOrder(text string, projections []relationalProjection, columns []relationColumn) ([]relationalOrder, error) {
@@ -201,32 +292,41 @@ func parseRelationalOrder(text string, projections []relationalProjection, colum
 	}
 	orders := make([]relationalOrder, 0, len(splitCSV(text)))
 	for _, item := range splitCSV(text) {
-		expression, direction := splitOrderDirection(item)
-		order := relationalOrder{expression: expression, direction: direction, column: -1, projection: -1}
-		if ordinal, err := strconv.Atoi(expression); err == nil {
-			if ordinal < 1 || ordinal > len(projections) {
-				return nil, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
-			}
-			order.projection, order.fromProjection = ordinal-1, true
-			orders = append(orders, order)
-			continue
-		}
-		if projection, ok := projectionIndex(projections, expression); ok {
-			order.projection, order.fromProjection = projection, true
-			if !projections[projection].scalar {
-				order.column = projections[projection].column
-			}
-			orders = append(orders, order)
-			continue
-		}
-		column, err := resolveRelationColumn(expression, columns)
+		order, err := parseRelationalOrderItem(item, projections, columns)
 		if err != nil {
-			return nil, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
+			return nil, err
 		}
-		order.column = column
 		orders = append(orders, order)
 	}
 	return orders, nil
+}
+
+func parseRelationalOrderItem(item string, projections []relationalProjection, columns []relationColumn) (relationalOrder, error) {
+	expression, direction := splitOrderDirection(item)
+	order := relationalOrder{expression: expression, direction: direction, column: -1, projection: -1}
+	if ordinal, err := strconv.Atoi(expression); err == nil {
+		if ordinal < 1 || ordinal > len(projections) {
+			return relationalOrder{}, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
+		}
+		order.projection, order.fromProjection = ordinal-1, true
+		return order, nil
+	}
+	if projection, ok := projectionIndex(projections, expression); ok {
+		order.projection, order.fromProjection = projection, true
+		if !projections[projection].scalar {
+			order.column = projections[projection].column
+		}
+		return order, nil
+	}
+	if column, err := resolveRelationColumn(expression, columns); err == nil {
+		order.column = column
+		return order, nil
+	}
+	if _, err := evaluateRelationExpression(expression, columns, sampleRelationRow(columns)); err != nil {
+		return relationalOrder{}, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
+	}
+	order.computed = true
+	return order, nil
 }
 
 func splitOrderDirection(item string) (string, string) {
@@ -242,7 +342,11 @@ func splitOrderDirection(item string) (string, string) {
 
 func projectionIndex(projections []relationalProjection, expression string) (int, bool) {
 	for index, projection := range projections {
-		if strings.EqualFold(projection.alias, expression) || strings.EqualFold(projection.name, expression) {
+		if strings.EqualFold(strings.TrimSpace(projection.expression), strings.TrimSpace(expression)) {
+			return index, true
+		}
+		if _, identifier := singleIdentifier(expression); identifier &&
+			(identifiersEqual(projection.alias, expression) || identifiersEqual(projection.name, expression)) {
 			return index, true
 		}
 	}
@@ -317,8 +421,8 @@ func sortRelationalRows(rows []relationalResultRow, orders []relationalOrder, co
 		return rows
 	}
 	sort.SliceStable(rows, func(left, right int) bool {
-		for _, order := range orders {
-			comparison := compareRelationalOrder(rows[left], rows[right], order, columns)
+		for orderIndex, order := range orders {
+			comparison := compareRelationalOrder(rows[left], rows[right], orderIndex, order, columns)
 			if comparison == 0 {
 				continue
 			}
@@ -368,8 +472,8 @@ func limitRelationalRows(rows []relationalResultRow, limit relationalLimit) []re
 	return rows[start:end]
 }
 
-func compareRelationalOrder(left, right relationalResultRow, order relationalOrder, columns []relationColumn) int {
-	leftValue, rightValue := orderValues(left, right, order, columns)
+func compareRelationalOrder(left, right relationalResultRow, orderIndex int, order relationalOrder, columns []relationColumn) int {
+	leftValue, rightValue := orderValues(left, right, orderIndex, order, columns)
 	if leftValue.isNull() || rightValue.isNull() {
 		switch {
 		case leftValue.isNull() && rightValue.isNull():
@@ -398,9 +502,12 @@ func compareRelationalOrderValues(left, right exprValue, column *relationColumn)
 	return compareRelationOperands(relationOperand{isColumn: true, definition: *column}, relationOperand{}, left, right)
 }
 
-func orderValues(left, right relationalResultRow, order relationalOrder, columns []relationColumn) (exprValue, exprValue) {
+func orderValues(left, right relationalResultRow, orderIndex int, order relationalOrder, columns []relationColumn) (exprValue, exprValue) {
 	if order.fromProjection {
 		return left.projections[order.projection], right.projections[order.projection]
+	}
+	if order.computed {
+		return left.orders[orderIndex], right.orders[orderIndex]
 	}
 	leftValue, _ := relationColumnValue(columns, order.column, left.source)
 	rightValue, _ := relationColumnValue(columns, order.column, right.source)

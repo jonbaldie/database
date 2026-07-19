@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -17,7 +18,7 @@ func writeResult(connection net.Conn, sequence byte, result *queryResult, maximu
 		return err
 	}
 	if err := writer.writeTextResultRows(result); err != nil {
-		return err
+		return writer.writeStreamError(err)
 	}
 	return writer.writeEOF()
 }
@@ -28,7 +29,7 @@ func writeBinaryResult(connection net.Conn, sequence byte, result *queryResult, 
 		return err
 	}
 	if err := writer.writeBinaryResultRows(result); err != nil {
-		return err
+		return writer.writeStreamError(err)
 	}
 	return writer.writeEOF()
 }
@@ -102,6 +103,14 @@ func (w *resultWriter) writeBinaryRows(rows [][]string, nulls [][]bool) error {
 }
 
 func (w *resultWriter) writeEOF() error { return w.write(eofPacket()) }
+
+func (w *resultWriter) writeStreamError(err error) error {
+	var failure sqlFailure
+	if !errors.As(err, &failure) {
+		return err
+	}
+	return w.write(mysqlError(err))
+}
 
 func (w *resultWriter) write(payload []byte) error {
 	if err := writeBoundedPacket(w.connection, w.sequence, payload, w.maximum); err != nil {

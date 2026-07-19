@@ -76,6 +76,7 @@ type relationalOrder struct {
 	column         int
 	projection     int
 	fromProjection bool
+	computed       bool
 }
 
 type relationalLimit struct {
@@ -91,6 +92,7 @@ type relationalResultRow struct {
 	nulls       []bool
 	source      relationRow
 	projections []exprValue
+	orders      []exprValue
 }
 
 func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
@@ -477,12 +479,13 @@ func renderTemporalColumn(rows [][]string, nulls [][]bool, column, offset, preci
 
 func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql string) *queryexplanation.Document {
 	read := queryexplanation.Select{
-		Columns:    projectionNames(p.projection),
-		AllColumns: p.allColumns,
-		Where:      p.whereText,
-		Distinct:   p.distinct,
-		Orders:     explanationOrders(p.order),
-		Limit:      queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
+		Columns:               projectionNames(p.projection),
+		ProjectionExpressions: projectionExpressions(p.projection, p.source.columns),
+		AllColumns:            p.allColumns,
+		Where:                 p.whereText,
+		Distinct:              p.distinct,
+		Orders:                explanationOrders(p.order),
+		Limit:                 queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
 	}
 	for _, table := range p.source.tables {
 		read.Tables = append(read.Tables, relationInfo(table.namespace, table.name, table.table))
@@ -509,6 +512,17 @@ func projectionNames(projection []relationalProjection) []string {
 		names[index] = item.name
 	}
 	return names
+}
+
+func projectionExpressions(projection []relationalProjection, columns []relationColumn) []string {
+	expressions := make([]string, len(projection))
+	for index, item := range projection {
+		expressions[index] = item.expression
+		if expressions[index] == "" && item.column >= 0 && item.column < len(columns) {
+			expressions[index] = columns[item.column].qualifier + "." + columns[item.column].name
+		}
+	}
+	return expressions
 }
 
 func explanationOrders(order []relationalOrder) []queryexplanation.Order {

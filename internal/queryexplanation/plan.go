@@ -6,15 +6,16 @@ import (
 
 // Select describes a supported read to be explained.
 type Select struct {
-	Table      Table
-	Tables     []Table
-	Joins      []Join
-	Columns    []string // resolved output columns
-	AllColumns bool     // projection was '*'
-	Where      string   // predicate fragment without the WHERE keyword, "" if absent
-	Distinct   bool
-	Orders     []Order
-	Limit      Limit
+	Table                 Table
+	Tables                []Table
+	Joins                 []Join
+	Columns               []string // resolved output columns
+	ProjectionExpressions []string // source SQL expressions, when distinct from output names
+	AllColumns            bool     // projection was '*'
+	Where                 string   // predicate fragment without the WHERE keyword, "" if absent
+	Distinct              bool
+	Orders                []Order
+	Limit                 Limit
 }
 
 // Join records one source relation and its SQL join predicate.
@@ -122,13 +123,7 @@ func selectPlan(read Select) *Operator {
 	if read.Where != "" {
 		root = whereFilter(read.Where, root)
 	}
-	if !read.AllColumns {
-		if len(tables) == 1 {
-			root = projection(tables[0], read.Columns, root)
-		} else {
-			root = projectionColumns(read.Columns, root)
-		}
-	}
+	root = selectProjection(read, tables, root)
 	if read.Distinct {
 		root = distinctOperator(root)
 	}
@@ -139,6 +134,19 @@ func selectPlan(read Select) *Operator {
 		root = limitOperator(read.Limit, root)
 	}
 	return root
+}
+
+func selectProjection(read Select, tables []Table, child *Operator) *Operator {
+	if read.AllColumns {
+		return child
+	}
+	if len(read.ProjectionExpressions) > 0 {
+		return projectionColumns(read.ProjectionExpressions, child)
+	}
+	if len(tables) == 1 {
+		return projection(tables[0], read.Columns, child)
+	}
+	return projectionColumns(read.Columns, child)
 }
 
 func joinOperator(join Join, left, right *Operator) *Operator {

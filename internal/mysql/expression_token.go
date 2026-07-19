@@ -5,7 +5,11 @@
 // is produced.
 package mysql
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 type exprTokenKind int
 
@@ -63,7 +67,7 @@ func scanToken(input string, cursor int) (exprToken, int, error) {
 		return scanString(input, cursor)
 	case startsNumber(input, cursor):
 		return scanNumber(input, cursor)
-	case isIdentifierStart(character):
+	case isIdentifierStart(input, cursor):
 		token, next := scanIdentifier(input, cursor)
 		return token, next, nil
 	default:
@@ -154,16 +158,21 @@ func consumeDigits(input string, index int) int {
 
 func scanIdentifier(input string, cursor int) (exprToken, int) {
 	index, length := consumeIdentifierPart(input, cursor), len(input)
-	for index+1 < length && input[index] == '.' && isIdentifierStart(input[index+1]) {
+	for index+1 < length && input[index] == '.' && isIdentifierStart(input, index+1) {
 		index = consumeIdentifierPart(input, index+1)
 	}
 	return exprToken{kind: tokenIdent, text: input[cursor:index]}, index
 }
 
 func consumeIdentifierPart(input string, cursor int) int {
-	index, length := cursor+1, len(input)
-	for index < length && isIdentifierPart(input[index]) {
-		index++
+	_, size := utf8.DecodeRuneInString(input[cursor:])
+	index, length := cursor+size, len(input)
+	for index < length {
+		r, width := utf8.DecodeRuneInString(input[index:])
+		if !isIdentifierPart(r, width) {
+			break
+		}
+		index += width
 	}
 	return index
 }
@@ -184,10 +193,14 @@ func scanOperator(input string, cursor int) (exprToken, int, error) {
 
 func isDigit(character byte) bool { return character >= '0' && character <= '9' }
 
-func isIdentifierStart(character byte) bool {
-	return character == '_' || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z')
+func isIdentifierStart(input string, cursor int) bool {
+	r, size := utf8.DecodeRuneInString(input[cursor:])
+	return isIdentifierPart(r, size) && !unicode.IsDigit(r)
 }
 
-func isIdentifierPart(character byte) bool {
-	return isIdentifierStart(character) || isDigit(character)
+func isIdentifierPart(character rune, size int) bool {
+	if character == utf8.RuneError && size == 1 {
+		return false
+	}
+	return character == '_' || unicode.IsLetter(character) || unicode.IsDigit(character) || unicode.IsMark(character)
 }

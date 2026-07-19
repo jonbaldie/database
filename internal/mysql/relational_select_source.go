@@ -73,7 +73,7 @@ func parseRelationalJoinCondition(kind, text string, left, right []relationColum
 
 func (source *relationalSource) appendTable(table relationalTableSource, using []string) error {
 	for _, existing := range source.tables {
-		if existing.alias == table.alias {
+		if identifiersEqual(existing.alias, table.alias) {
 			return sqlFailure{1066, "42000", "Not unique table/alias: '" + table.alias + "'"}
 		}
 	}
@@ -171,6 +171,9 @@ func explicitRelationAlias(text string) (string, string, error) {
 	if !valid {
 		return "", "", sqlFailure{1064, "42000", "invalid table alias"}
 	}
+	if err := validateIdentifierLength(name); err != nil {
+		return "", "", err
+	}
 	return name, remainder, nil
 }
 
@@ -182,6 +185,9 @@ func implicitRelationAlias(text, tableName string) (string, string, error) {
 	name, valid := singleIdentifier(alias)
 	if !valid {
 		return tableName, text, nil
+	}
+	if err := validateIdentifierLength(name); err != nil {
+		return "", "", err
 	}
 	return name, remainder, nil
 }
