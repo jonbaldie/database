@@ -236,37 +236,41 @@ func parseJoinUsing(text string, left, right []relationColumn) (string, []string
 	if !ok {
 		return "", nil, "", false
 	}
-	names := splitCSV(text[1:close])
-	if len(names) == 0 {
+	items := splitCSV(text[1:close])
+	if len(items) == 0 {
 		return "", nil, "", false
 	}
-	condition, valid := joinUsingConditions(names, left, right)
+	condition, names, valid := joinUsingConditions(items, left, right)
 	return condition, names, strings.TrimSpace(text[close+1:]), valid
 }
 
-func joinUsingConditions(names []string, left, right []relationColumn) (string, bool) {
-	conditions := make([]string, 0, len(names))
-	for _, item := range names {
-		condition, valid := joinUsingCondition(item, left, right)
+func joinUsingConditions(items []string, left, right []relationColumn) (string, []string, bool) {
+	conditions := make([]string, 0, len(items))
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		condition, name, valid := joinUsingCondition(item, left, right)
 		if !valid {
-			return "", false
+			return "", nil, false
 		}
 		conditions = append(conditions, condition)
+		names = append(names, name)
 	}
-	return strings.Join(conditions, " AND "), true
+	return strings.Join(conditions, " AND "), names, true
 }
 
-func joinUsingCondition(item string, left, right []relationColumn) (string, bool) {
+func joinUsingCondition(item string, left, right []relationColumn) (string, string, bool) {
 	name, valid := singleIdentifier(item)
 	if !valid {
-		return "", false
+		return "", "", false
 	}
 	leftColumn, leftOK := findNamedColumn(left, "", name)
 	rightColumn, rightOK := findNamedColumn(right, "", name)
 	if !leftOK || !rightOK {
-		return "", false
+		return "", "", false
 	}
-	return leftColumn.qualifier + "." + leftColumn.name + " = " + rightColumn.qualifier + "." + rightColumn.name, true
+	leftReference := quoteIdentifier(leftColumn.qualifier) + "." + quoteIdentifier(leftColumn.name)
+	rightReference := quoteIdentifier(rightColumn.qualifier) + "." + quoteIdentifier(rightColumn.name)
+	return leftReference + " = " + rightReference, name, true
 }
 
 func splitJoinCondition(text string) (string, string) {

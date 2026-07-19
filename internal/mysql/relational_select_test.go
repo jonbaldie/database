@@ -149,6 +149,27 @@ func TestRelationalSelectUsingCoalescesColumns(t *testing.T) {
 	}
 }
 
+func TestRelationalSelectUsingPreservesQuotedIdentifiers(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	store := executor.server.config.Catalog
+	for _, table := range []string{"quoted_left", "quoted_right"} {
+		if err := store.CreateTableWithTypes("app", table, []string{"odd.name"}, []string{"INT"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Insert("app", table, []string{"7"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	query := "SELECT * FROM quoted_left AS `l.alias` JOIN quoted_right AS `r``alias` USING (`odd.name`)"
+	result, err := executor.execute(query)
+	if err != nil {
+		t.Fatalf("quoted USING: %v", err)
+	}
+	if !reflect.DeepEqual(result.columns, []string{"odd.name"}) || !reflect.DeepEqual(result.rows, [][]string{{"7"}}) {
+		t.Fatalf("columns/rows = %#v/%#v", result.columns, result.rows)
+	}
+}
+
 func TestRelationalSelectJoinsAndOrderedShape(t *testing.T) {
 	executor := relationalSelectExecutor(t)
 	result, err := executor.execute("SELECT a.name, p.title FROM authors AS a INNER JOIN posts AS p ON a.id = p.author_id WHERE p.score >= 10 ORDER BY p.id DESC LIMIT 2")
