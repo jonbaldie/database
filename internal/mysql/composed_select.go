@@ -889,16 +889,10 @@ func commonSetColumnMetadata(left, right columnMetadata) (columnMetadata, error)
 
 func compatibleSetMetadata(result, left, right columnMetadata) (columnMetadata, error) {
 	if isNumericWireType(left.typ) && isNumericWireType(right.typ) {
-		if isApproximateWireType(left.typ) != isApproximateWireType(right.typ) || left.flags&mysqlUnsignedFlag != right.flags&mysqlUnsignedFlag {
-			return columnMetadata{}, strictConversionError()
-		}
-		return numericSetMetadata(result, left, right), nil
+		return compatibleNumericSetMetadata(result, left, right)
 	}
 	if isCharacterWireType(left.typ) && isCharacterWireType(right.typ) {
-		if left.characterSet != right.characterSet {
-			return columnMetadata{}, strictConversionError()
-		}
-		return characterSetMetadata(result, left, right), nil
+		return compatibleCharacterSetMetadata(result, left, right)
 	}
 	if dateAndDatetime(left.typ, right.typ) {
 		result.typ = mysqlTypeDatetime
@@ -908,6 +902,20 @@ func compatibleSetMetadata(result, left, right columnMetadata) (columnMetadata, 
 		return result, nil
 	}
 	return columnMetadata{}, strictConversionError()
+}
+
+func compatibleNumericSetMetadata(result, left, right columnMetadata) (columnMetadata, error) {
+	if isApproximateWireType(left.typ) != isApproximateWireType(right.typ) || left.flags&mysqlUnsignedFlag != right.flags&mysqlUnsignedFlag {
+		return columnMetadata{}, strictConversionError()
+	}
+	return numericSetMetadata(result, left, right), nil
+}
+
+func compatibleCharacterSetMetadata(result, left, right columnMetadata) (columnMetadata, error) {
+	if left.characterSet != right.characterSet {
+		return columnMetadata{}, strictConversionError()
+	}
+	return characterSetMetadata(result, left, right), nil
 }
 
 func dateAndDatetime(left, right byte) bool {

@@ -44,6 +44,11 @@ Every operator always contains `id`, `kind`, `summary`, `operation`, `estimates`
 
 JSON children are ordered in execution-input order. Positive integer operator IDs are unique within one document. The nested tree is canonical; `parent_operator_id` is derived only for tabular output.
 
+The physical tree contains only work the statement can execute. An unused CTE
+definition therefore has no operator; its submitted text remains source-traceable
+through `statement.sql`. A referenced CTE appears once as `materialize` with
+reason `cte`; later references identify reuse rather than a second execution.
+
 The JSON Schema defines the structural grammar. These semantic rules complete it where a JSON Schema cannot express a document-wide recursive invariant: plan documents omit `actual` at every node; completed analysis includes `actual` at every node (including a zero-invocation node); snapshots include `actual` precisely for nodes with observed runtime evidence. Producers reject duplicate operator IDs and emit children in execution-input order.
 
 ### Absence and nullability

@@ -159,14 +159,24 @@ func (s *textStatementExecutor) decorateProjectionSubqueries(context *composedQu
 
 func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryContext, root *queryexplanation.Operator, text string, outer *outerRelationScope, clause string) (*queryexplanation.Operator, error) {
 	for _, query := range parenthesizedSelectQueries(text) {
-		input, err := s.explainComposedBody(context, query, outer)
+		plannedQuery := query
+		if containsExistsSubquery(text, query) {
+			plannedQuery = existsProjectionQuery(query)
+		}
+		input, err := s.explainComposedBody(context, plannedQuery, outer)
 		if err != nil {
 			return nil, err
 		}
 		fragment := "(" + query + ")"
-		root = s.composedInputOperator(context, root, input, query, outer, clause, fragment)
+		root = s.composedInputOperator(context, root, input, plannedQuery, outer, clause, fragment)
 	}
 	return root, nil
+}
+
+func containsExistsSubquery(text, query string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(text), " "))
+	candidate := strings.ToLower(strings.Join(strings.Fields(query), " "))
+	return strings.Contains(normalized, "exists ("+candidate+")")
 }
 
 func (s *textStatementExecutor) composedInputOperator(context *composedQueryContext, root, input *queryexplanation.Operator, query string, outer *outerRelationScope, clause, fragment string) *queryexplanation.Operator {
