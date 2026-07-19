@@ -1759,11 +1759,11 @@ func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
 }
 
 func selectLiteral(expression string) (*queryResult, error) {
-	literal := parseLiteralResult(expression)
-	if !literal.supported {
-		return nil, sqlFailure{1064, "42000", "unsupported expression"}
+	value, isNull, metadata, err := scalarColumn(expression)
+	if err != nil {
+		return nil, err
 	}
-	return &queryResult{columns: []string{expression}, rows: [][]string{{literal.value}}, nulls: [][]bool{{literal.isNull}}, metadata: []columnMetadata{literal.metadata}}, nil
+	return &queryResult{columns: []string{expression}, rows: [][]string{{value}}, nulls: [][]bool{{isNull}}, metadata: []columnMetadata{metadata}}, nil
 }
 
 func selectFrom(s *relationExecutor, query, projectionText, sourceText string) (*queryResult, error) {
@@ -1967,44 +1967,17 @@ type literalQueryResult struct {
 	supported bool
 }
 
+// parseLiteralResult evaluates a FROM-less SELECT expression for prepared-
+// statement column metadata. It shares the scalar expression engine with text
+// execution, so a prepared and a text SELECT of the same expression advertise
+// identical columns. An expression the engine cannot evaluate returns an
+// unsupported result, leaving execution to surface the specific error.
 func parseLiteralResult(expression string) literalQueryResult {
-	value := strings.TrimSpace(expression)
-	metadata := columnMetadata{catalog: "def", name: value, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString, flags: mysqlNotNullFlag}
-	if strings.EqualFold(value, "null") {
-		metadata.characterSet = mysqlCharsetBinary
-		metadata.typ = mysqlTypeNull
-		metadata.flags = mysqlBinaryFlag
-		return literalQueryResult{metadata: metadata, isNull: true, supported: true}
+	value, isNull, metadata, err := scalarColumn(expression)
+	if err != nil {
+		return literalQueryResult{}
 	}
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		text := strings.ReplaceAll(value[1:len(value)-1], "''", "'")
-		metadata.length = uint32(len([]rune(text)) * 4)
-		return literalQueryResult{value: text, metadata: metadata, supported: true}
-	}
-	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
-		metadata.characterSet = mysqlCharsetBinary
-		metadata.length = uint32(len(value))
-		metadata.typ = mysqlTypeLongLong
-		metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag
-		return literalQueryResult{value: value, metadata: metadata, supported: true}
-	}
-	if _, err := strconv.ParseUint(value, 10, 64); err == nil {
-		metadata.characterSet = mysqlCharsetBinary
-		metadata.length = uint32(len(value))
-		metadata.typ = mysqlTypeLongLong
-		metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag | mysqlUnsignedFlag
-		return literalQueryResult{value: value, metadata: metadata, supported: true}
-	}
-	if strings.ContainsAny(value, ".eE") {
-		if _, err := strconv.ParseFloat(value, 64); err == nil {
-			metadata.characterSet = mysqlCharsetBinary
-			metadata.length = 8
-			metadata.typ = mysqlTypeDouble
-			metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag
-			return literalQueryResult{value: value, metadata: metadata, supported: true}
-		}
-	}
-	return literalQueryResult{}
+	return literalQueryResult{value: value, metadata: metadata, isNull: isNull, supported: true}
 }
 
 func (s *informationSchemaExecutor) selectInformationSchema(query string) (*queryResult, error) {
