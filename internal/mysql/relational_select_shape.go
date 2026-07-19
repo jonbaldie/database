@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func parseRelationalProjection(text string, columns []relationColumn) ([]relationalProjection, bool, error) {
+func parseRelationalProjection(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, bool, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, false, sqlFailure{1064, "42000", "empty SELECT list"}
@@ -15,17 +15,17 @@ func parseRelationalProjection(text string, columns []relationColumn) ([]relatio
 		projections := projectionsForColumns(columns)
 		return projections, len(projections) == len(columns), nil
 	}
-	projections, err := parseProjectionItems(text, columns)
+	projections, err := parseProjectionItems(text, columns, context, outer)
 	if err != nil {
 		return nil, false, err
 	}
 	return projections, false, nil
 }
 
-func parseProjectionItems(text string, columns []relationColumn) ([]relationalProjection, error) {
+func parseProjectionItems(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
 	projections := make([]relationalProjection, 0)
 	for _, item := range splitCSV(text) {
-		parsed, err := parseProjectionItem(item, columns)
+		parsed, err := parseProjectionItem(item, columns, context, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -37,13 +37,16 @@ func parseProjectionItems(text string, columns []relationColumn) ([]relationalPr
 	return projections, nil
 }
 
-func parseProjectionItem(item string, columns []relationColumn) ([]relationalProjection, error) {
+func parseProjectionItem(item string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
 	expression, alias, err := splitProjectionAlias(item)
 	if err != nil {
 		return nil, err
 	}
 	if strings.HasSuffix(strings.TrimSpace(expression), ".*") {
 		return wildcardProjections(expression, columns)
+	}
+	if query, ok := scalarSubquerySQL(expression); ok {
+		return subqueryProjection(query, expression, alias, columns, context, outer)
 	}
 	if column, resolveErr := resolveRelationColumn(expression, columns); resolveErr == nil {
 		projection := relationProjection(column, alias)
@@ -54,6 +57,41 @@ func parseProjectionItem(item string, columns []relationColumn) ([]relationalPro
 		return projection, nil
 	}
 	return computedProjection(expression, alias, columns)
+}
+
+func subqueryProjection(query, expression, alias string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
+	scope := outer
+	if scope == nil {
+		scope = &outerRelationScope{columns: columns, row: sampleRelationRow(columns)}
+	}
+	_, metadata, err := executeScalarSubquery(context, query, scope)
+	if err != nil {
+		failure, cardinality := err.(sqlFailure)
+		if !cardinality || failure.code != 1242 || !subqueryReferencesOuterColumns(query, columns) {
+			return nil, err
+		}
+	}
+	name := expression
+	if alias != "" {
+		name = alias
+	}
+	metadata.name = name
+	metadata.flags &^= mysqlNotNullFlag
+	return []relationalProjection{{
+		expression: expression, name: name, alias: alias, column: -1,
+		subquery: query, context: context, metadata: metadata,
+	}}, nil
+}
+
+func subqueryReferencesOuterColumns(query string, columns []relationColumn) bool {
+	lower := strings.ToLower(query)
+	for _, column := range columns {
+		qualified := strings.ToLower(column.qualifier + "." + column.name)
+		if column.qualifier != "" && strings.Contains(lower, qualified) {
+			return true
+		}
+	}
+	return false
 }
 
 func wildcardProjections(expression string, columns []relationColumn) ([]relationalProjection, error) {
@@ -153,7 +191,7 @@ func literalExprValue(value literalQueryResult) exprValue {
 }
 
 func (p relationalProjection) resolveName(columns []relationColumn) relationalProjection {
-	if p.scalar || p.computed {
+	if p.scalar || p.computed || p.subquery != "" {
 		return p
 	}
 	column := columns[p.column]
@@ -187,7 +225,9 @@ func (p *relationalSelectPlan) projectValues(row relationRow, result *relational
 		p.projection[index] = projection
 		var value exprValue
 		var err error
-		if projection.scalar {
+		if projection.subquery != "" {
+			value, _, err = executeScalarSubquery(projection.context, projection.subquery, &outerRelationScope{columns: p.source.columns, row: row, parent: p.outer})
+		} else if projection.scalar {
 			value = projection.value
 		} else if projection.computed {
 			value, err = evaluateRelationExpression(projection.expression, p.source.columns, row)

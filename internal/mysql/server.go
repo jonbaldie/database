@@ -405,6 +405,7 @@ type databaseSelector struct{ *session }
 type relationExecutor struct {
 	*session
 	streamRows bool
+	composed   *composedQueryContext
 }
 
 type informationSchemaExecutor struct{ *session }
@@ -890,7 +891,7 @@ func (s *textStatementExecutor) relationStatement(query, lower string) (*queryRe
 	case strings.HasPrefix(lower, "delete from "):
 		affected, err := deleteRows(&relations, query)
 		return &queryResult{affected: affected}, true, err
-	case strings.HasPrefix(lower, "select "):
+	case strings.HasPrefix(lower, "select "), strings.HasPrefix(lower, "with "):
 		result, err := selectQuery(&relations, query)
 		return result, true, err
 	default:
@@ -2671,10 +2672,10 @@ func preparedParameterMetadata(index int) columnMetadata {
 func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	lower := strings.ToLower(query)
-	if !strings.HasPrefix(lower, "select ") && !strings.HasPrefix(lower, "insert into ") && !strings.HasPrefix(lower, "update ") && !strings.HasPrefix(lower, "delete from ") {
+	if !isPreparedStatement(lower) {
 		return nil, sqlFailure{1064, "42000", "unsupported prepared statement"}
 	}
-	if !strings.HasPrefix(lower, "select ") {
+	if !isPreparedRead(lower) {
 		return nil, nil
 	}
 	parameters := nullPreparedParameters(parameterCount(query))
@@ -2689,6 +2690,19 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 		return []columnMetadata{literal.metadata}, nil
 	}
 	return s.queryColumns(validated, true)
+}
+
+func isPreparedStatement(lower string) bool {
+	for _, prefix := range []string{"select ", "with ", "insert into ", "update ", "delete from "} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPreparedRead(lower string) bool {
+	return strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "with ")
 }
 
 func (s *preparedPreparation) parameterizedColumns(query, validated string, parameters int) ([]columnMetadata, error) {

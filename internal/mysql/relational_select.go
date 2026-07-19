@@ -14,6 +14,8 @@ import (
 // all later operators consume that same immutable relation image.
 type relationalSelectPlan struct {
 	session    *session
+	composed   *composedQueryContext
+	outer      *outerRelationScope
 	projection []relationalProjection
 	allColumns bool
 	distinct   bool
@@ -36,6 +38,8 @@ type relationalTableSource struct {
 	alias     string
 	table     catalog.Table
 	columns   []relationColumn
+	query     string
+	reason    string
 }
 
 type relationalJoin struct {
@@ -67,6 +71,8 @@ type relationalProjection struct {
 	column     int
 	scalar     bool
 	computed   bool
+	subquery   string
+	context    *composedQueryContext
 	value      exprValue
 	metadata   columnMetadata
 }
@@ -97,19 +103,19 @@ type relationalResultRow struct {
 }
 
 func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
-	expression := strings.TrimSpace(query[len("SELECT "):])
-	if from := keywordAt(expression, "from"); from >= 0 {
-		source := strings.TrimSpace(expression[from+len("from"):])
-		if isInformationSchemaSource(source) {
-			return selectFrom(s, query, expression[:from], source)
-		}
-		return executeRelationalSelect(s, query)
+	context := s.composed
+	if context == nil {
+		context = newComposedQueryContext(s)
 	}
-	return selectLiteral(expression)
+	return executeComposedSelect(context, query, nil)
 }
 
 func executeRelationalSelect(s *relationExecutor, query string) (*queryResult, error) {
-	plan, err := parseRelationalSelect(s, query)
+	return executeRelationalSelectContext(s, query, nil)
+}
+
+func executeRelationalSelectContext(s *relationExecutor, query string, outer *outerRelationScope) (*queryResult, error) {
+	plan, err := parseRelationalSelectContext(s, query, outer)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +239,10 @@ func (s *relationalResultStream) outputRow(row relationalResultRow) ([]string, [
 }
 
 func parseRelationalSelect(s *relationExecutor, query string) (*relationalSelectPlan, error) {
+	return parseRelationalSelectContext(s, query, nil)
+}
+
+func parseRelationalSelectContext(s *relationExecutor, query string, outer *outerRelationScope) (*relationalSelectPlan, error) {
 	expression, err := selectExpression(query)
 	if err != nil {
 		return nil, err
@@ -249,7 +259,7 @@ func parseRelationalSelect(s *relationExecutor, query string) (*relationalSelect
 	if err != nil {
 		return nil, err
 	}
-	plan := &relationalSelectPlan{session: s.session, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
+	plan := &relationalSelectPlan{session: s.session, composed: s.composed, outer: outer, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
 	if err := finishRelationalSelectPlan(plan, projectionText, orderText, limitText); err != nil {
 		return nil, err
 	}
@@ -318,7 +328,7 @@ func splitSelectProjection(expression string) (bool, string, string, error) {
 }
 
 func (p *relationalSelectPlan) compileProjection(text string) error {
-	projection, allColumns, err := parseRelationalProjection(text, p.source.columns)
+	projection, allColumns, err := parseRelationalProjection(text, p.source.columns, p.composed, p.outer)
 	if err != nil {
 		return err
 	}
@@ -331,7 +341,7 @@ func (p *relationalSelectPlan) compileProjection(text string) error {
 
 func (p *relationalSelectPlan) compilePredicates() error {
 	if p.whereText != "" {
-		predicate, err := compileRelationPredicate(p.whereText, p.source.columns, p.session)
+		predicate, err := compileRelationPredicateContext(p.whereText, p.source.columns, p.session, p.composed, p.outer)
 		if err != nil {
 			return err
 		}
@@ -341,7 +351,7 @@ func (p *relationalSelectPlan) compilePredicates() error {
 		if p.source.joins[index].condition == "" {
 			continue
 		}
-		predicate, err := compileRelationPredicate(p.source.joins[index].condition, p.source.joins[index].columns, p.session)
+		predicate, err := compileRelationPredicateContext(p.source.joins[index].condition, p.source.joins[index].columns, p.session, p.composed, p.outer)
 		if err != nil {
 			return err
 		}
@@ -457,7 +467,7 @@ func (p *relationalSelectPlan) renderTemporalResults(rows [][]string, nulls [][]
 		return
 	}
 	for index, projection := range p.projection {
-		if projection.scalar || projection.computed {
+		if projection.scalar || projection.computed || projection.subquery != "" {
 			continue
 		}
 		column := p.source.columns[projection.column]

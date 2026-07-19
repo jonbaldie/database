@@ -1,0 +1,913 @@
+package mysql
+
+import (
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/jonbaldie/database/internal/catalog"
+)
+
+const maximumComposedQueryDepth = 64
+
+type composedQueryContext struct {
+	executor *relationExecutor
+	ctes     map[string]composedRelation
+	depth    int
+}
+
+type composedRelation struct {
+	name   string
+	query  string
+	reason string
+	result *queryResult
+}
+
+type outerRelationScope struct {
+	columns []relationColumn
+	row     relationRow
+	parent  *outerRelationScope
+}
+
+type setQuery struct {
+	terms      []string
+	operations []setQueryOperation
+	order      string
+	limit      string
+}
+
+type setQueryOperation struct {
+	kind string
+	all  bool
+}
+
+func newComposedQueryContext(executor *relationExecutor) *composedQueryContext {
+	return &composedQueryContext{executor: executor, ctes: make(map[string]composedRelation)}
+}
+
+func (context *composedQueryContext) child() (*composedQueryContext, error) {
+	if context.depth >= maximumComposedQueryDepth {
+		return nil, sqlFailure{1473, "HY000", "query nesting exceeds the v0.1 limit"}
+	}
+	executor := *context.executor
+	executor.streamRows = false
+	return &composedQueryContext{executor: &executor, ctes: context.ctes, depth: context.depth + 1}, nil
+}
+
+func executeComposedSelect(context *composedQueryContext, query string, outer *outerRelationScope) (*queryResult, error) {
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	local, body, err := parseAndMaterializeCTEs(context, query, outer)
+	if err != nil {
+		return nil, err
+	}
+	if parsed, ok, err := parseSetQuery(body); err != nil {
+		return nil, err
+	} else if ok {
+		return executeSetQuery(local, parsed, outer)
+	}
+	return executeSelectTerm(local, body, outer)
+}
+
+func executeSelectTerm(context *composedQueryContext, query string, outer *outerRelationScope) (*queryResult, error) {
+	query = stripWholeQueryParentheses(strings.TrimSpace(query))
+	lower := strings.ToLower(query)
+	if strings.HasPrefix(lower, "with ") {
+		return executeComposedSelect(context, query, outer)
+	}
+	if !strings.HasPrefix(lower, "select ") {
+		return nil, sqlFailure{1064, "42000", "composed query term must be SELECT"}
+	}
+	executor := *context.executor
+	executor.composed = context
+	expression := strings.TrimSpace(query[len("SELECT "):])
+	if from := keywordAt(expression, "from"); from >= 0 {
+		source := strings.TrimSpace(expression[from+len("from"):])
+		if isInformationSchemaSource(source) {
+			return selectFrom(&executor, query, expression[:from], source)
+		}
+		return executeRelationalSelectContext(&executor, query, outer)
+	}
+	return executeScalarSelectContext(context, expression, outer)
+}
+
+func executeScalarSelectContext(context *composedQueryContext, expression string, outer *outerRelationScope) (*queryResult, error) {
+	items := splitCSV(expression)
+	if len(items) == 1 && !isScalarSubqueryExpression(items[0]) {
+		return selectLiteral(expression)
+	}
+	columns := make([]string, len(items))
+	row := make([]string, len(items))
+	nulls := make([]bool, len(items))
+	metadata := make([]columnMetadata, len(items))
+	for index, item := range items {
+		expression, alias, err := splitProjectionAlias(item)
+		if err != nil {
+			return nil, err
+		}
+		value, definition, err := evaluateComposedScalar(context, expression, outer)
+		if err != nil {
+			return nil, err
+		}
+		name := expression
+		if alias != "" {
+			name = alias
+		}
+		definition.name = name
+		columns[index], metadata[index] = name, definition
+		if value.isNull() {
+			row[index], nulls[index] = storedSQLNullValue, true
+		} else {
+			row[index] = value.render()
+		}
+	}
+	return &queryResult{columns: columns, rows: [][]string{row}, nulls: [][]bool{nulls}, metadata: metadata}, nil
+}
+
+func evaluateComposedScalar(context *composedQueryContext, expression string, outer *outerRelationScope) (exprValue, columnMetadata, error) {
+	if query, ok := scalarSubquerySQL(expression); ok {
+		return executeScalarSubquery(context, query, outer)
+	}
+	value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
+		return outerRelationValue(name, outer)
+	})
+	if err != nil {
+		return exprValue{}, columnMetadata{}, err
+	}
+	return value, scalarMetadata(expression, value.render(), value), nil
+}
+
+func executeScalarSubquery(context *composedQueryContext, query string, outer *outerRelationScope) (exprValue, columnMetadata, error) {
+	if context == nil {
+		return exprValue{}, columnMetadata{}, unsupportedExpression()
+	}
+	child, err := context.child()
+	if err != nil {
+		return exprValue{}, columnMetadata{}, err
+	}
+	result, err := executeComposedSelect(child, query, outer)
+	if err != nil {
+		return exprValue{}, columnMetadata{}, err
+	}
+	if len(result.columns) != 1 {
+		return exprValue{}, columnMetadata{}, sqlFailure{1241, "21000", "operand should contain 1 column"}
+	}
+	definition := resultColumnDefinition(result.columns[0], 0, result.metadata)
+	if len(result.rows) > 1 {
+		return exprValue{}, columnMetadata{}, sqlFailure{1242, "21000", "subquery returns more than 1 row"}
+	}
+	if len(result.rows) == 0 || resultValueIsNull(0, 0, result.nulls) {
+		definition.flags &^= mysqlNotNullFlag
+		return nullValue(), definition, nil
+	}
+	value, err := expressionValueFromMetadata(result.rows[0][0], definition)
+	return value, definition, err
+}
+
+func compileExistsSubquery(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, bool, error) {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(strings.ToLower(trimmed), "exists ") {
+		return nil, false, nil
+	}
+	query, ok := scalarSubquerySQL(strings.TrimSpace(trimmed[len("EXISTS "):]))
+	if !ok || context == nil {
+		return nil, true, unsupportedExpression()
+	}
+	return func(row relationRow) (exprValue, error) {
+		child, err := context.child()
+		if err != nil {
+			return exprValue{}, err
+		}
+		scope := &outerRelationScope{columns: columns, row: row, parent: outer}
+		result, err := executeComposedSelect(child, query, scope)
+		if err != nil {
+			return exprValue{}, err
+		}
+		result = materializeQueryResult(result)
+		return boolValue(len(result.rows) > 0), nil
+	}, true, nil
+}
+
+func compileInSubquery(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, bool, error) {
+	found, left, right := splitRelationKeywordOnce(strings.TrimSpace(text), "IN")
+	if !found {
+		return nil, false, nil
+	}
+	query, ok := scalarSubquerySQL(right)
+	if !ok {
+		return nil, false, nil
+	}
+	left, negate := stripNotIn(left)
+	operand, err := compileRelationOperandContext(left, columns, session, outer)
+	if err != nil {
+		return nil, true, err
+	}
+	if context == nil {
+		return nil, true, unsupportedExpression()
+	}
+	plan := inSubqueryPredicate{operand: operand, columns: columns, context: context, outer: outer, query: query, negate: negate}
+	return plan.evaluate, true, nil
+}
+
+type inSubqueryPredicate struct {
+	operand relationOperand
+	columns []relationColumn
+	context *composedQueryContext
+	outer   *outerRelationScope
+	query   string
+	negate  bool
+}
+
+func stripNotIn(left string) (string, bool) {
+	left = strings.TrimSpace(left)
+	if !strings.HasSuffix(strings.ToLower(left), " not") {
+		return left, false
+	}
+	return strings.TrimSpace(left[:len(left)-len(" not")]), true
+}
+
+func (plan inSubqueryPredicate) evaluate(row relationRow) (exprValue, error) {
+	left, err := relationOperandValue(plan.operand, row)
+	if err != nil {
+		return exprValue{}, err
+	}
+	result, err := plan.execute(row)
+	if err != nil {
+		return exprValue{}, err
+	}
+	return evaluateInMembership(left, result, plan.negate)
+}
+
+func (plan inSubqueryPredicate) execute(row relationRow) (*queryResult, error) {
+	child, err := plan.context.child()
+	if err != nil {
+		return nil, err
+	}
+	scope := &outerRelationScope{columns: plan.columns, row: row, parent: plan.outer}
+	result, err := executeComposedSelect(child, plan.query, scope)
+	if err != nil {
+		return nil, err
+	}
+	result = materializeQueryResult(result)
+	if len(result.columns) != 1 {
+		return nil, sqlFailure{1241, "21000", "operand should contain 1 column"}
+	}
+	return result, nil
+}
+
+func evaluateInMembership(left exprValue, result *queryResult, negate bool) (exprValue, error) {
+	matched, unknown := false, left.isNull()
+	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
+	for index := range result.rows {
+		match, rowUnknown, err := compareInRow(left, result, metadata, index)
+		if err != nil {
+			return exprValue{}, err
+		}
+		matched, unknown = matched || match, unknown || rowUnknown
+		if matched {
+			return boolValue(!negate), nil
+		}
+	}
+	if unknown {
+		return nullValue(), nil
+	}
+	return boolValue(negate), nil
+}
+
+func compareInRow(left exprValue, result *queryResult, metadata columnMetadata, index int) (bool, bool, error) {
+	if resultValueIsNull(index, 0, result.nulls) {
+		return false, true, nil
+	}
+	right, err := expressionValueFromMetadata(result.rows[index][0], metadata)
+	if err != nil {
+		return false, false, err
+	}
+	comparison, err := compareValues("=", left, right)
+	if err != nil {
+		return false, false, err
+	}
+	known, truth, err := truthValue(comparison)
+	return known && truth, !known, err
+}
+
+func outerRelationValue(name string, outer *outerRelationScope) (exprValue, error) {
+	if outer == nil {
+		return exprValue{}, sqlFailure{1054, "42S22", "Unknown column '" + name + "'"}
+	}
+	index, err := resolveRelationColumn(name, outer.columns)
+	if err != nil {
+		if outer.parent != nil {
+			return outerRelationValue(name, outer.parent)
+		}
+		return exprValue{}, err
+	}
+	return relationColumnValue(outer.columns, index, outer.row)
+}
+
+func expressionValueFromMetadata(raw string, metadata columnMetadata) (exprValue, error) {
+	if isNumericWireType(metadata.typ) {
+		return evaluateScalar(raw)
+	}
+	return stringValue(raw), nil
+}
+
+func isNumericWireType(typ byte) bool {
+	switch typ {
+	case mysqlTypeTiny, mysqlTypeShort, mysqlTypeLong, mysqlTypeLongLong, mysqlTypeInt24, mysqlTypeFloat, mysqlTypeDouble, mysqlTypeNewDecimal, mysqlTypeBit:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseAndMaterializeCTEs(context *composedQueryContext, query string, outer *outerRelationScope) (*composedQueryContext, string, error) {
+	if !strings.HasPrefix(strings.ToLower(query), "with ") {
+		return context, query, nil
+	}
+	if strings.HasPrefix(strings.ToLower(query), "with recursive ") {
+		return nil, "", sqlFailure{1235, "42000", "recursive CTEs are not supported in v0.1"}
+	}
+	local := &composedQueryContext{executor: context.executor, ctes: cloneComposedRelations(context.ctes), depth: context.depth}
+	rest := strings.TrimSpace(query[len("WITH "):])
+	for {
+		var err error
+		rest, err = parseOneCTE(local, rest, outer)
+		if err != nil {
+			return nil, "", err
+		}
+		if !strings.HasPrefix(rest, ",") {
+			return local, rest, nil
+		}
+		rest = strings.TrimSpace(rest[1:])
+	}
+}
+
+func parseOneCTE(context *composedQueryContext, text string, outer *outerRelationScope) (string, error) {
+	name, rest, err := parseCTEName(context, text)
+	if err != nil {
+		return "", err
+	}
+	query, remainder, err := parseCTEQuery(rest)
+	if err != nil {
+		return "", err
+	}
+	if err := materializeCTE(context, name, query, outer); err != nil {
+		return "", err
+	}
+	return remainder, nil
+}
+
+func parseCTEName(context *composedQueryContext, text string) (string, string, error) {
+	name, rest, ok := consumeIdentifier(text)
+	if !ok {
+		return "", "", sqlFailure{1064, "42000", "malformed CTE name"}
+	}
+	if _, exists := context.ctes[catalog.Key(name)]; exists {
+		return "", "", sqlFailure{1060, "42S21", "duplicate CTE name '" + name + "'"}
+	}
+	return name, strings.TrimSpace(rest), nil
+}
+
+func parseCTEQuery(text string) (string, string, error) {
+	if strings.HasPrefix(text, "(") {
+		return "", "", sqlFailure{1235, "42000", "CTE column lists are not supported in v0.1"}
+	}
+	if !strings.HasPrefix(strings.ToLower(text), "as ") {
+		return "", "", sqlFailure{1064, "42000", "CTE requires AS"}
+	}
+	text = strings.TrimSpace(text[len("AS "):])
+	if !strings.HasPrefix(text, "(") {
+		return "", "", sqlFailure{1064, "42000", "CTE query must be parenthesized"}
+	}
+	close, found := matchingParenthesis(text, 0)
+	if !found {
+		return "", "", sqlFailure{1064, "42000", "unterminated CTE query"}
+	}
+	return strings.TrimSpace(text[1:close]), strings.TrimSpace(text[close+1:]), nil
+}
+
+func materializeCTE(context *composedQueryContext, name, query string, outer *outerRelationScope) error {
+	child, err := context.child()
+	if err != nil {
+		return err
+	}
+	result, err := executeComposedSelect(child, query, outer)
+	if err != nil {
+		return err
+	}
+	context.ctes[catalog.Key(name)] = composedRelation{name: name, query: query, reason: "cte", result: materializeQueryResult(result)}
+	return nil
+}
+
+func cloneComposedRelations(source map[string]composedRelation) map[string]composedRelation {
+	copy := make(map[string]composedRelation, len(source))
+	for key, relation := range source {
+		copy[key] = relation
+	}
+	return copy
+}
+
+func materializeQueryResult(result *queryResult) *queryResult {
+	if result == nil || result.stream == nil {
+		return result
+	}
+	rows := make([][]string, 0)
+	nulls := make([][]bool, 0)
+	_ = result.stream(func(row []string, rowNulls []bool) error {
+		rows = append(rows, append([]string(nil), row...))
+		nulls = append(nulls, append([]bool(nil), rowNulls...))
+		return nil
+	})
+	return &queryResult{columns: result.columns, rows: rows, nulls: nulls, metadata: result.metadata}
+}
+
+func parseSetQuery(query string) (setQuery, bool, error) {
+	positions := topLevelSetOperations(query)
+	if len(positions) == 0 {
+		return setQuery{}, false, nil
+	}
+	body, order, limit, err := splitSetTail(query, positions[0])
+	if err != nil {
+		return setQuery{}, false, err
+	}
+	positions = topLevelSetOperations(body)
+	parsed := setQuery{order: order, limit: limit}
+	start := 0
+	for _, position := range positions {
+		term := strings.TrimSpace(body[start:position.start])
+		if term == "" {
+			return setQuery{}, false, sqlFailure{1064, "42000", "empty set-operation term"}
+		}
+		parsed.terms = append(parsed.terms, term)
+		parsed.operations = append(parsed.operations, position.operation)
+		start = position.end
+	}
+	parsed.terms = append(parsed.terms, strings.TrimSpace(body[start:]))
+	return parsed, true, nil
+}
+
+type setOperationPosition struct {
+	start, end int
+	operation  setQueryOperation
+}
+
+func topLevelSetOperations(query string) []setOperationPosition {
+	positions := make([]setOperationPosition, 0, 2)
+	state := queryScanState{}
+	queryLength := len(query)
+	for index := 0; index < queryLength; index++ {
+		index = state.advance(query, index)
+		if state.depth != 0 || state.quote != 0 {
+			continue
+		}
+		for _, keyword := range []string{"UNION", "INTERSECT", "EXCEPT"} {
+			if !keywordAtIndex(query, index, keyword) {
+				continue
+			}
+			end := index + len(keyword)
+			all := false
+			next := skipSQLSpace(query, end)
+			if keywordAtIndex(query, next, "ALL") {
+				all, end = true, next+len("ALL")
+			} else if keywordAtIndex(query, next, "DISTINCT") {
+				end = next + len("DISTINCT")
+			}
+			positions = append(positions, setOperationPosition{start: index, end: end, operation: setQueryOperation{kind: strings.ToLower(keyword), all: all}})
+			index = end - 1
+			break
+		}
+	}
+	return positions
+}
+
+type queryScanState struct {
+	depth int
+	quote byte
+}
+
+func (state *queryScanState) advance(value string, index int) int {
+	character := value[index]
+	if state.quote != 0 {
+		return state.advanceQuoted(value, index, character)
+	}
+	if isQueryQuote(character) {
+		state.quote = character
+		return index
+	}
+	state.advanceParenthesis(character)
+	return index
+}
+
+func (state *queryScanState) advanceQuoted(value string, index int, character byte) int {
+	if character != state.quote {
+		return index
+	}
+	if index+1 < len(value) && value[index+1] == state.quote {
+		return index + 1
+	}
+	state.quote = 0
+	return index
+}
+
+func isQueryQuote(character byte) bool {
+	return character == '\'' || character == '`' || character == '"'
+}
+
+func (state *queryScanState) advanceParenthesis(character byte) {
+	if character == '(' {
+		state.depth++
+		return
+	}
+	if character == ')' && state.depth > 0 {
+		state.depth--
+	}
+}
+
+func keywordAtIndex(value string, index int, keyword string) bool {
+	if index < 0 || index+len(keyword) > len(value) || !strings.EqualFold(value[index:index+len(keyword)], keyword) {
+		return false
+	}
+	return relationWordBoundary(value, index, len(keyword))
+}
+
+func skipSQLSpace(value string, index int) int {
+	valueLength := len(value)
+	for index < valueLength && isRelationSpace(value[index]) {
+		index++
+	}
+	return index
+}
+
+func splitSetTail(query string, firstOperation setOperationPosition) (string, string, string, error) {
+	orderAt, limitAt := topLevelKeywordAfter(query, "ORDER", firstOperation.end), topLevelKeywordAfter(query, "LIMIT", firstOperation.end)
+	tailAt := firstNonNegative(orderAt, limitAt)
+	if tailAt < 0 {
+		return query, "", "", nil
+	}
+	body, tail := strings.TrimSpace(query[:tailAt]), strings.TrimSpace(query[tailAt:])
+	if orderAt == tailAt {
+		if !strings.HasPrefix(strings.ToLower(tail), "order by ") {
+			return "", "", "", sqlFailure{1064, "42000", "ORDER requires BY"}
+		}
+		rest := strings.TrimSpace(tail[len("ORDER BY "):])
+		limit := keywordAt(rest, "limit")
+		if limit < 0 {
+			return body, rest, "", nil
+		}
+		return body, strings.TrimSpace(rest[:limit]), strings.TrimSpace(rest[limit+len("limit"):]), nil
+	}
+	return body, "", strings.TrimSpace(tail[len("LIMIT "):]), nil
+}
+
+func topLevelKeywordAfter(value, keyword string, after int) int {
+	state := queryScanState{}
+	valueLength := len(value)
+	for index := 0; index < valueLength; index++ {
+		index = state.advance(value, index)
+		if index < after || state.depth != 0 || state.quote != 0 {
+			continue
+		}
+		if keywordAtIndex(value, index, keyword) {
+			return index
+		}
+	}
+	return -1
+}
+
+func firstNonNegative(left, right int) int {
+	if left < 0 {
+		return right
+	}
+	if right < 0 || left < right {
+		return left
+	}
+	return right
+}
+
+func executeSetQuery(context *composedQueryContext, query setQuery, outer *outerRelationScope) (*queryResult, error) {
+	results := make([]*queryResult, len(query.terms))
+	for index, term := range query.terms {
+		result, err := executeComposedSelect(context, term, outer)
+		if err != nil {
+			return nil, err
+		}
+		results[index] = materializeQueryResult(result)
+	}
+	result, err := reduceSetResults(results, append([]setQueryOperation(nil), query.operations...))
+	if err != nil {
+		return nil, err
+	}
+	if err := orderSetResult(result, query.order); err != nil {
+		return nil, err
+	}
+	limit, err := parseRelationalLimit(query.limit)
+	if err != nil {
+		return nil, err
+	}
+	applySetLimit(result, limit)
+	return result, nil
+}
+
+func reduceSetResults(results []*queryResult, operations []setQueryOperation) (*queryResult, error) {
+	operationCount := len(operations)
+	for index := 0; index < operationCount; {
+		if operations[index].kind != "intersect" {
+			index++
+			continue
+		}
+		if err := validateSetArity(results[index], results[index+1]); err != nil {
+			return nil, err
+		}
+		results[index] = applySetOperation(results[index], results[index+1], operations[index])
+		results, operations = removeSetRightInput(results, operations, index)
+		operationCount--
+	}
+	result := results[0]
+	for index, operation := range operations {
+		if err := validateSetArity(result, results[index+1]); err != nil {
+			return nil, err
+		}
+		result = applySetOperation(result, results[index+1], operation)
+	}
+	return result, nil
+}
+
+func removeSetRightInput(results []*queryResult, operations []setQueryOperation, index int) ([]*queryResult, []setQueryOperation) {
+	results = append(results[:index+1], results[index+2:]...)
+	operations = append(operations[:index], operations[index+1:]...)
+	return results, operations
+}
+
+func validateSetArity(left, right *queryResult) error {
+	if len(left.columns) != len(right.columns) {
+		return sqlFailure{1222, "21000", "used SELECT statements have a different number of columns"}
+	}
+	return nil
+}
+
+func applySetOperation(left, right *queryResult, operation setQueryOperation) *queryResult {
+	result := &queryResult{columns: append([]string(nil), left.columns...), metadata: append([]columnMetadata(nil), left.metadata...)}
+	switch operation.kind {
+	case "union":
+		appendResultRows(result, left)
+		appendResultRows(result, right)
+		if !operation.all {
+			deduplicateSetRows(result)
+		}
+	case "intersect":
+		selectSetRows(result, left, right, operation.all, true)
+	case "except":
+		selectSetRows(result, left, right, operation.all, false)
+	}
+	return result
+}
+
+func appendResultRows(target, source *queryResult) {
+	for index, row := range source.rows {
+		target.rows = append(target.rows, append([]string(nil), row...))
+		target.nulls = append(target.nulls, resultNullRow(source, index))
+	}
+}
+
+func resultNullRow(result *queryResult, index int) []bool {
+	if index >= len(result.nulls) {
+		return make([]bool, len(result.columns))
+	}
+	return append([]bool(nil), result.nulls[index]...)
+}
+
+func deduplicateSetRows(result *queryResult) {
+	seen := make(map[string]bool, len(result.rows))
+	rows, nulls := result.rows[:0], result.nulls[:0]
+	for index, row := range result.rows {
+		key := setResultRowKey(row, resultNullRow(result, index))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rows, nulls = append(rows, row), append(nulls, resultNullRow(result, index))
+	}
+	result.rows, result.nulls = rows, nulls
+}
+
+func selectSetRows(target, left, right *queryResult, all, intersection bool) {
+	rightCounts := make(map[string]int, len(right.rows))
+	for index, row := range right.rows {
+		rightCounts[setResultRowKey(row, resultNullRow(right, index))]++
+	}
+	emitted := make(map[string]bool)
+	for index, row := range left.rows {
+		nulls := resultNullRow(left, index)
+		key := setResultRowKey(row, nulls)
+		if !includeSetRow(key, rightCounts, emitted, all, intersection) {
+			continue
+		}
+		emitted[key] = true
+		target.rows = append(target.rows, append([]string(nil), row...))
+		target.nulls = append(target.nulls, nulls)
+	}
+}
+
+func includeSetRow(key string, rightCounts map[string]int, emitted map[string]bool, all, intersection bool) bool {
+	match := rightCounts[key] > 0
+	if all && match {
+		rightCounts[key]--
+		return intersection
+	}
+	if all {
+		return !intersection
+	}
+	return match == intersection && !emitted[key]
+}
+
+func setResultRowKey(row []string, nulls []bool) string {
+	var builder strings.Builder
+	for index, value := range row {
+		if index < len(nulls) && nulls[index] {
+			builder.WriteString("N;")
+			continue
+		}
+		builder.WriteString(strconv.Itoa(len(value)))
+		builder.WriteByte(':')
+		builder.WriteString(value)
+		builder.WriteByte(';')
+	}
+	return builder.String()
+}
+
+func orderSetResult(result *queryResult, orderText string) error {
+	if strings.TrimSpace(orderText) == "" {
+		return nil
+	}
+	type setOrder struct {
+		column    int
+		direction string
+	}
+	orders := make([]setOrder, 0)
+	for _, item := range splitCSV(orderText) {
+		expression, direction := splitOrderDirection(item)
+		column, err := setOrderColumn(expression, result.columns)
+		if err != nil {
+			return err
+		}
+		orders = append(orders, setOrder{column: column, direction: direction})
+	}
+	permutation := make([]int, len(result.rows))
+	for index := range permutation {
+		permutation[index] = index
+	}
+	sort.SliceStable(permutation, func(left, right int) bool {
+		for _, order := range orders {
+			comparison := compareSetValues(result, permutation[left], permutation[right], order.column)
+			if comparison == 0 {
+				continue
+			}
+			return orderedBefore(comparison, order.direction)
+		}
+		return false
+	})
+	reorderSetResult(result, permutation)
+	return nil
+}
+
+func reorderSetResult(result *queryResult, permutation []int) {
+	rows := make([][]string, len(permutation))
+	nulls := make([][]bool, len(permutation))
+	for index, source := range permutation {
+		rows[index] = result.rows[source]
+		nulls[index] = resultNullRow(result, source)
+	}
+	result.rows, result.nulls = rows, nulls
+}
+
+func setOrderColumn(expression string, columns []string) (int, error) {
+	if ordinal, err := strconv.Atoi(expression); err == nil {
+		if ordinal > 0 && ordinal <= len(columns) {
+			return ordinal - 1, nil
+		}
+		return 0, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
+	}
+	found := -1
+	for index, name := range columns {
+		if identifiersEqual(name, expression) {
+			if found >= 0 {
+				return 0, sqlFailure{1052, "23000", "Column '" + expression + "' in order clause is ambiguous"}
+			}
+			found = index
+		}
+	}
+	if found < 0 {
+		return 0, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
+	}
+	return found, nil
+}
+
+func compareSetValues(result *queryResult, left, right, column int) int {
+	leftNull := resultValueIsNull(left, column, result.nulls)
+	rightNull := resultValueIsNull(right, column, result.nulls)
+	if leftNull || rightNull {
+		if leftNull == rightNull {
+			return 0
+		}
+		if leftNull {
+			return -1
+		}
+		return 1
+	}
+	metadata := resultColumnDefinition(result.columns[column], column, result.metadata)
+	leftValue, leftErr := expressionValueFromMetadata(result.rows[left][column], metadata)
+	rightValue, rightErr := expressionValueFromMetadata(result.rows[right][column], metadata)
+	if leftErr == nil && rightErr == nil {
+		if comparison, err := compareOperands(leftValue, rightValue); err == nil {
+			return comparison
+		}
+	}
+	return strings.Compare(result.rows[left][column], result.rows[right][column])
+}
+
+func applySetLimit(result *queryResult, limit relationalLimit) {
+	if !limit.present {
+		return
+	}
+	start := min(limit.offset, len(result.rows))
+	end := min(start+limit.count, len(result.rows))
+	result.rows, result.nulls = result.rows[start:end], result.nulls[start:end]
+}
+
+func stripWholeQueryParentheses(query string) string {
+	for strings.HasPrefix(query, "(") {
+		close, ok := matchingParenthesis(query, 0)
+		if !ok || close != len(query)-1 {
+			return query
+		}
+		query = strings.TrimSpace(query[1:close])
+	}
+	return query
+}
+
+func scalarSubquerySQL(expression string) (string, bool) {
+	expression = strings.TrimSpace(expression)
+	if !strings.HasPrefix(expression, "(") {
+		return "", false
+	}
+	close, ok := matchingParenthesis(expression, 0)
+	if !ok || close != len(expression)-1 {
+		return "", false
+	}
+	query := strings.TrimSpace(expression[1:close])
+	lower := strings.ToLower(query)
+	return query, strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "with ")
+}
+
+func isScalarSubqueryExpression(expression string) bool {
+	_, ok := scalarSubquerySQL(expression)
+	return ok
+}
+
+func queryResultTable(name string, result *queryResult) catalog.Table {
+	result = materializeQueryResult(result)
+	table := catalog.Table{Name: name, Columns: append([]string(nil), result.columns...), Rows: make([][]string, len(result.rows)), ColumnTypes: make([]string, len(result.columns))}
+	for index, row := range result.rows {
+		table.Rows[index] = append([]string(nil), row...)
+		for column := range table.Columns {
+			if resultValueIsNull(index, column, result.nulls) {
+				table.Rows[index][column] = storedSQLNullValue
+			}
+		}
+	}
+	for index, column := range result.columns {
+		table.ColumnTypes[index] = metadataTypeName(resultColumnDefinition(column, index, result.metadata))
+	}
+	return table
+}
+
+var composedWireTypeNames = map[byte]string{
+	mysqlTypeTiny:       "TINYINT",
+	mysqlTypeShort:      "SMALLINT",
+	mysqlTypeLong:       "INT",
+	mysqlTypeInt24:      "INT",
+	mysqlTypeLongLong:   "BIGINT",
+	mysqlTypeFloat:      "FLOAT",
+	mysqlTypeDouble:     "DOUBLE",
+	mysqlTypeNewDecimal: "DECIMAL(65,30)",
+	mysqlTypeDate:       "DATE",
+	mysqlTypeDatetime:   "DATETIME",
+	mysqlTypeTimestamp:  "TIMESTAMP",
+	mysqlTypeTime:       "TIME",
+	mysqlTypeYear:       "YEAR",
+	mysqlTypeBit:        "BIT(64)",
+	mysqlTypeBlob:       "BLOB",
+	mysqlTypeTinyBlob:   "BLOB",
+	mysqlTypeMediumBlob: "BLOB",
+	mysqlTypeLongBlob:   "BLOB",
+}
+
+func metadataTypeName(metadata columnMetadata) string {
+	if name, found := composedWireTypeNames[metadata.typ]; found {
+		return name
+	}
+	length := metadata.length
+	if length == 0 {
+		length = 255
+	}
+	return "VARCHAR(" + strconv.FormatUint(uint64(length), 10) + ")"
+}
