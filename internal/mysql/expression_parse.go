@@ -13,8 +13,9 @@ import (
 )
 
 type exprParser struct {
-	tokens []exprToken
-	pos    int
+	tokens            []exprToken
+	pos               int
+	resolveIdentifier func(string) (exprValue, error)
 }
 
 func (p *exprParser) atEnd() bool { return p.pos >= len(p.tokens) }
@@ -294,6 +295,10 @@ func parseIdentifierPrimary(p *exprParser, token exprToken) (exprValue, error) {
 	}
 	if identifierStartsCall(p) {
 		return parseFunctionCall(p, token.text)
+	}
+	if p.resolveIdentifier != nil {
+		p.advance()
+		return p.resolveIdentifier(token.text)
 	}
 	return exprValue{}, unknownColumnError(token.text)
 }

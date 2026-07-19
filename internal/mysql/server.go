@@ -391,7 +391,10 @@ type preparedParameterType struct {
 // language implementation.
 type queryExecutor struct{ statements textStatementExecutor }
 
-type textStatementExecutor struct{ *session }
+type textStatementExecutor struct {
+	*session
+	streamRows bool
+}
 
 type transactionExecutor struct{ *session }
 
@@ -399,12 +402,15 @@ type catalogExecutor struct{ *session }
 
 type databaseSelector struct{ *session }
 
-type relationExecutor struct{ *session }
+type relationExecutor struct {
+	*session
+	streamRows bool
+}
 
 type informationSchemaExecutor struct{ *session }
 
 func newQueryExecutor(session *session) *queryExecutor {
-	return &queryExecutor{statements: textStatementExecutor{session}}
+	return &queryExecutor{statements: textStatementExecutor{session: session}}
 }
 
 type preparedPreparation struct{ *session }
@@ -549,6 +555,7 @@ type queryResult struct {
 	rows     [][]string
 	metadata []columnMetadata
 	affected uint64
+	stream   queryRowStream
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
@@ -608,7 +615,7 @@ var informationSchemaViews = []informationSchemaView{
 }
 
 func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
-	result, err := s.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := s.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
@@ -623,6 +630,12 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 
 func (s *queryExecutor) execute(query string) (*queryResult, error) {
 	return s.statements.execute(query)
+}
+
+func (s *queryExecutor) executeProtocol(query string) (*queryResult, error) {
+	executor := s.statements
+	executor.streamRows = true
+	return executor.execute(query)
 }
 
 func (s *queryExecutor) useDatabase(name string) { s.statements.useDatabase(name) }
@@ -864,7 +877,7 @@ func namespaceTables(name string, namespace catalog.Namespace) *queryResult {
 }
 
 func (s *textStatementExecutor) relationStatement(query, lower string) (*queryResult, bool, error) {
-	relations := relationExecutor{s.session}
+	relations := relationExecutor{session: s.session, streamRows: s.streamRows}
 	switch {
 	case strings.HasPrefix(lower, "create table "):
 		return nil, true, createTable(&relations, query)
@@ -2014,14 +2027,6 @@ func canonicalMatcherTemporal(typeName, value, raw, column string, offsetMinutes
 func sessionTimeZoneOffset(s *session) (int, error) {
 	return parseFixedOffset(s.timeZone)
 }
-func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
-	expression := strings.TrimSpace(query[len("SELECT "):])
-	if from := keywordAt(expression, "from"); from >= 0 {
-		return selectFrom(s, query, expression[:from], expression[from+len("from"):])
-	}
-	return selectLiteral(expression)
-}
-
 func selectLiteral(expression string) (*queryResult, error) {
 	value, isNull, metadata, err := scalarColumn(expression)
 	if err != nil {
@@ -2692,7 +2697,94 @@ func (s *preparedPreparation) parameterizedColumns(query, validated string, para
 			return metadata, nil
 		}
 	}
-	return s.queryColumns(validated, true)
+	metadata, err := s.queryColumns(validated, true)
+	if err == nil && !hasNullMetadata(metadata) {
+		return restorePreparedColumnNames(query, metadata), nil
+	}
+	if candidate, ok := s.representativeParameterizedColumns(query, parameters); ok {
+		return restorePreparedColumnNames(query, candidate), nil
+	}
+	if err == nil {
+		return metadata, nil
+	}
+	return nil, err
+}
+
+func (s *preparedPreparation) representativeParameterizedColumns(query string, parameters int) ([]columnMetadata, bool) {
+	for _, values := range representativeParameterValues(parameters) {
+		candidate, bindErr := bindPreparedQuery(query, values)
+		if bindErr != nil {
+			continue
+		}
+		candidateMetadata, candidateErr := s.queryColumns(candidate, true)
+		if candidateErr == nil && !hasNullMetadata(candidateMetadata) {
+			return candidateMetadata, true
+		}
+	}
+	return nil, false
+}
+
+func representativeParameterValues(parameters int) [][]string {
+	replacements := []string{"0", quote(""), "0.0"}
+	if parameters > 4 {
+		values := make([][]string, 0, len(replacements))
+		for _, replacement := range replacements {
+			values = append(values, repeatedParameterValue(parameters, replacement))
+		}
+		return values
+	}
+	values := make([][]string, 0)
+	appendParameterCombinations(&values, make([]string, parameters), replacements, 0)
+	return values
+}
+
+func appendParameterCombinations(result *[][]string, current, replacements []string, index int) {
+	if index == len(current) {
+		*result = append(*result, append([]string(nil), current...))
+		return
+	}
+	for _, replacement := range replacements {
+		current[index] = replacement
+		appendParameterCombinations(result, current, replacements, index+1)
+	}
+}
+
+func repeatedParameterValue(parameters int, replacement string) []string {
+	values := make([]string, parameters)
+	for index := range values {
+		values[index] = replacement
+	}
+	return values
+}
+
+func restorePreparedColumnNames(query string, metadata []columnMetadata) []columnMetadata {
+	expression := strings.TrimSpace(query[len("select "):])
+	if from := keywordAt(expression, "from"); from >= 0 {
+		expression = strings.TrimSpace(expression[:from])
+	}
+	_, expression = parseDistinctProjection(expression)
+	items := splitCSV(expression)
+	if len(items) != len(metadata) {
+		return metadata
+	}
+	for index, item := range items {
+		expression, alias, err := splitProjectionAlias(item)
+		if err == nil && alias != "" {
+			metadata[index].name = alias
+		} else {
+			metadata[index].name = strings.TrimSpace(expression)
+		}
+	}
+	return metadata
+}
+
+func hasNullMetadata(metadata []columnMetadata) bool {
+	for _, column := range metadata {
+		if column.typ == mysqlTypeNull {
+			return true
+		}
+	}
+	return false
 }
 
 func preparedScalarExpression(query string) (string, bool) {
@@ -2770,7 +2862,7 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
-	result, err := queries.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := queries.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}

@@ -5,7 +5,11 @@
 // is produced.
 package mysql
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 type exprTokenKind int
 
@@ -63,9 +67,8 @@ func scanToken(input string, cursor int) (exprToken, int, error) {
 		return scanString(input, cursor)
 	case startsNumber(input, cursor):
 		return scanNumber(input, cursor)
-	case isIdentifierStart(character):
-		token, next := scanIdentifier(input, cursor)
-		return token, next, nil
+	case character == '`' || isIdentifierStart(input, cursor):
+		return scanIdentifier(input, cursor)
 	default:
 		return scanPunctuationOrOperator(input, cursor, character)
 	}
@@ -152,12 +155,57 @@ func consumeDigits(input string, index int) int {
 	return index
 }
 
-func scanIdentifier(input string, cursor int) (exprToken, int) {
-	index, length := cursor+1, len(input)
-	for index < length && isIdentifierPart(input[index]) {
-		index++
+func scanIdentifier(input string, cursor int) (exprToken, int, error) {
+	index, ok := consumeExpressionIdentifierPart(input, cursor)
+	if !ok {
+		return exprToken{}, 0, unsupportedExpression()
 	}
-	return exprToken{kind: tokenIdent, text: input[cursor:index]}, index
+	length := len(input)
+	for index+1 < length && input[index] == '.' {
+		next, valid := consumeExpressionIdentifierPart(input, index+1)
+		if !valid {
+			break
+		}
+		index = next
+	}
+	return exprToken{kind: tokenIdent, text: input[cursor:index]}, index, nil
+}
+
+func consumeExpressionIdentifierPart(input string, cursor int) (int, bool) {
+	if cursor >= len(input) {
+		return 0, false
+	}
+	if input[cursor] != '`' {
+		if !isIdentifierStart(input, cursor) {
+			return 0, false
+		}
+		return consumeIdentifierPart(input, cursor), true
+	}
+	length := len(input)
+	for index := cursor + 1; index < length; index++ {
+		if input[index] != '`' {
+			continue
+		}
+		if index+1 < length && input[index+1] == '`' {
+			index++
+			continue
+		}
+		return index + 1, index > cursor+1
+	}
+	return 0, false
+}
+
+func consumeIdentifierPart(input string, cursor int) int {
+	_, size := utf8.DecodeRuneInString(input[cursor:])
+	index, length := cursor+size, len(input)
+	for index < length {
+		r, width := utf8.DecodeRuneInString(input[index:])
+		if !isIdentifierPart(r, width) {
+			break
+		}
+		index += width
+	}
+	return index
 }
 
 // scanOperator reads the longest matching operator spelling. A byte that starts
@@ -176,10 +224,14 @@ func scanOperator(input string, cursor int) (exprToken, int, error) {
 
 func isDigit(character byte) bool { return character >= '0' && character <= '9' }
 
-func isIdentifierStart(character byte) bool {
-	return character == '_' || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z')
+func isIdentifierStart(input string, cursor int) bool {
+	r, size := utf8.DecodeRuneInString(input[cursor:])
+	return isIdentifierPart(r, size) && !unicode.IsDigit(r)
 }
 
-func isIdentifierPart(character byte) bool {
-	return isIdentifierStart(character) || isDigit(character)
+func isIdentifierPart(character rune, size int) bool {
+	if character == utf8.RuneError && size == 1 {
+		return false
+	}
+	return character == '_' || unicode.IsLetter(character) || unicode.IsDigit(character) || unicode.IsMark(character)
 }

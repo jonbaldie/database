@@ -6,10 +6,38 @@ import (
 
 // Select describes a supported read to be explained.
 type Select struct {
-	Table      Table
-	Columns    []string // resolved output columns
-	AllColumns bool     // projection was '*'
-	Where      string   // predicate fragment without the WHERE keyword, "" if absent
+	Table                 Table
+	Tables                []Table
+	Joins                 []Join
+	Columns               []string // resolved output columns
+	ProjectionExpressions []string // source SQL expressions, when distinct from output names
+	AllColumns            bool     // projection was '*'
+	Where                 string   // predicate fragment without the WHERE keyword, "" if absent
+	Distinct              bool
+	Orders                []Order
+	Limit                 Limit
+}
+
+// Join records one source relation and its SQL join predicate.
+type Join struct {
+	Type           string
+	Table          Table
+	Condition      string
+	SourceClause   string
+	SourceFragment string
+}
+
+// Order records one ORDER BY expression and direction.
+type Order struct {
+	Expression string
+	Direction  string
+}
+
+// Limit records the bounded row window requested by LIMIT.
+type Limit struct {
+	Present bool
+	Offset  int
+	Count   int
 }
 
 // Write describes a supported insert, update, or delete to be explained.
@@ -84,14 +112,124 @@ func assignIdentifiers(operator *Operator, counter *int) {
 }
 
 func selectPlan(read Select) *Operator {
-	root := tableScan(read.Table)
+	tables := read.Tables
+	if len(tables) == 0 {
+		tables = []Table{read.Table}
+	}
+	root := tableScan(tables[0])
+	for _, join := range read.Joins {
+		root = joinOperator(join, root, tableScan(join.Table))
+	}
 	if read.Where != "" {
 		root = whereFilter(read.Where, root)
 	}
-	if !read.AllColumns {
-		root = projection(read.Table, read.Columns, root)
+	root = selectProjection(read, tables, root)
+	if read.Distinct {
+		root = distinctOperator(root)
+	}
+	if len(read.Orders) > 0 {
+		root = sortOperator(read.Orders, root)
+	}
+	if read.Limit.Present {
+		root = limitOperator(read.Limit, root)
 	}
 	return root
+}
+
+func selectProjection(read Select, tables []Table, child *Operator) *Operator {
+	if read.AllColumns {
+		return child
+	}
+	if len(read.ProjectionExpressions) > 0 {
+		return projectionColumns(read.ProjectionExpressions, child)
+	}
+	if len(tables) == 1 {
+		return projection(tables[0], read.Columns, child)
+	}
+	return projectionColumns(read.Columns, child)
+}
+
+func joinOperator(join Join, left, right *Operator) *Operator {
+	joinType := join.Type
+	if joinType == "" {
+		joinType = "inner"
+	}
+	predicates := []Predicate{}
+	if join.Condition != "" {
+		clause, fragment := join.SourceClause, join.SourceFragment
+		if clause == "" {
+			clause = "on"
+		}
+		if fragment == "" {
+			fragment = join.Condition
+		}
+		predicates = append(predicates, Predicate{
+			Role: "join", Expression: join.Condition,
+			Sources: []PredicateSource{{Clause: clause, Fragment: fragment}},
+		})
+	}
+	rows := left.Estimates.Rows * right.Estimates.Rows
+	return &Operator{
+		Kind: "join", Summary: "Combine rows from the joined relations.",
+		Operation: joinOperation{JoinType: joinType}, Predicates: predicates,
+		Objects:   append(append([]ObjectReference{}, left.Objects...), right.Objects...),
+		Estimates: Estimates{Rows: rows, RowWidthBytes: left.Estimates.RowWidthBytes + right.Estimates.RowWidthBytes, Cost: left.Estimates.Cost + right.Estimates.Cost + rows, PeakMemoryBytes: 0},
+		Output:    concatenateOutput(left.Output, right.Output), Warnings: []Warning{}, Children: []*Operator{left, right},
+	}
+}
+
+func projectionColumns(columns []string, child *Operator) *Operator {
+	output := child.Output
+	output.Columns = append([]string(nil), columns...)
+	return &Operator{
+		Kind: "project", Summary: "Keep only the requested output columns.",
+		Operation: projectOperation{ExpressionCount: len(columns)},
+		Estimates: Estimates{Rows: child.Estimates.Rows, RowWidthBytes: rowWidth(len(columns)), Cost: child.Estimates.Cost, PeakMemoryBytes: 0},
+		Output:    output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
+}
+
+func concatenateOutput(left, right Output) Output {
+	return Output{
+		Columns:  append(append([]string(nil), left.Columns...), right.Columns...),
+		Ordering: []OrderingTerm{}, UniqueKeys: [][]string{},
+	}
+}
+
+func distinctOperator(child *Operator) *Operator {
+	return &Operator{
+		Kind: "distinct", Summary: "Remove duplicate result rows.",
+		Operation: distinctOperation{Scope: "row"},
+		Estimates: child.Estimates, Output: child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
+}
+
+func sortOperator(orders []Order, child *Operator) *Operator {
+	ordering := make([]OrderingTerm, len(orders))
+	for index, order := range orders {
+		ordering[index] = OrderingTerm{Expression: order.Expression, Direction: order.Direction}
+	}
+	output := child.Output
+	output.Ordering = ordering
+	return &Operator{
+		Kind: "sort", Summary: "Order result rows by the requested expressions.",
+		Operation: sortOperation{Purpose: "order_by"},
+		Estimates: Estimates{Rows: child.Estimates.Rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: child.Estimates.RowWidthBytes * int(child.Estimates.Rows)},
+		Output:    output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
+}
+
+func limitOperator(limit Limit, child *Operator) *Operator {
+	rows := float64(limit.Count)
+	if rows > child.Estimates.Rows {
+		rows = child.Estimates.Rows
+	}
+	return &Operator{
+		Kind: "limit", Summary: "Return only the requested row window.",
+		Operation: limitOperation{OffsetPresent: limit.Offset > 0},
+		Estimates: Estimates{Rows: rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost, PeakMemoryBytes: child.Estimates.PeakMemoryBytes},
+		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
 }
 
 func writePlan(write Write) *Operator {

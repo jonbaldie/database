@@ -161,3 +161,40 @@ func TestTextResultPreservesMetadataRowsAndPacketSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestResultStreamWritesRecoverableSQLErrorTerminator(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() {
+		result := &queryResult{
+			columns:  []string{"value"},
+			metadata: []columnMetadata{{catalog: "def", name: "value", typ: mysqlTypeLongLong}},
+			stream: func(yield func([]string, []bool) error) error {
+				if err := yield([]string{"1"}, []bool{false}); err != nil {
+					return err
+				}
+				return sqlFailure{1365, "22012", "division by zero"}
+			},
+		}
+		done <- writeResult(server, 7, result, 1024)
+	}()
+	var final []byte
+	for sequence := byte(7); sequence != 12; sequence++ {
+		actual, payload, err := readPacket(client, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if actual != sequence {
+			t.Fatalf("packet sequence = %d, want %d", actual, sequence)
+		}
+		final = payload
+	}
+	if len(final) < 3 || final[0] != 0xff || binary.LittleEndian.Uint16(final[1:3]) != 1365 {
+		t.Fatalf("final packet = %x", final)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("stream SQL error closed conversation: %v", err)
+	}
+}
