@@ -102,6 +102,7 @@ func TestCanonicalTemporalValueRejects(t *testing.T) {
 		{"YEAR", "2156"},                     // above range
 		{"YEAR", "69"},                       // two-digit expansion
 		{"TIME", "839:00:00"},                // out of range
+		{"TIME", "1234:00:00"},               // ambiguous hour width
 		{"TIME", "12:60:00"},                 // minute out of range
 		{"TIME", "12:00:60"},                 // second out of range
 		{"TIME(0)", "12:00:00.5"},            // excess fractional precision

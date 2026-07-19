@@ -326,6 +326,8 @@ type session struct {
 	username            string
 	database            string
 	initialDB           string
+	timeZone            string
+	initialTimeZone     string
 	statements          map[uint32]*preparedStatement
 	nextStmtID          uint32
 	longDataBytes       int
@@ -619,8 +621,38 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 	}
 }
 
-func (s *textStatementExecutor) settingStatement(_ string, lower string) (*queryResult, bool, error) {
-	return nil, strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset "), nil
+func (s *textStatementExecutor) settingStatement(query, lower string) (*queryResult, bool, error) {
+	if strings.HasPrefix(lower, "set ") {
+		if handled, err := s.setTimeZone(query); handled {
+			return nil, true, err
+		}
+		return nil, true, nil
+	}
+	return nil, strings.HasPrefix(lower, "reset "), nil
+}
+
+func (s *textStatementExecutor) setTimeZone(query string) (bool, error) {
+	assignment := strings.TrimSpace(query[len("SET "):])
+	lhs, value, found := strings.Cut(assignment, "=")
+	if !found {
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(lhs)) {
+	case "time_zone", "session.time_zone", "session time_zone", "@@time_zone", "@@session.time_zone", "@@session time_zone":
+	default:
+		return false, nil
+	}
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "default") {
+		s.timeZone = s.initialTimeZone
+		return true, nil
+	}
+	offset, err := parseFixedOffset(scalar(value))
+	if err != nil {
+		return true, err
+	}
+	s.timeZone = formatFixedOffset(offset)
+	return true, nil
 }
 
 func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
@@ -633,6 +665,20 @@ func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*query
 			columns:  []string{column},
 			rows:     [][]string{{value}},
 			metadata: []columnMetadata{temporalResultMetadata(column, kind, precision)},
+		}, true, nil
+	}
+	if lower == "select @@time_zone" || lower == "select @@session.time_zone" || lower == "select @@session time_zone" {
+		offset, err := sessionTimeZoneOffset(s.session)
+		if err != nil {
+			return nil, true, err
+		}
+		return &queryResult{
+			columns: []string{"@@time_zone"},
+			rows:    [][]string{{formatFixedOffset(offset)}},
+			metadata: []columnMetadata{{
+				catalog: "def", name: "@@time_zone", characterSet: mysqlCharsetUTF8MB40900AICI,
+				typ: mysqlTypeVarString, length: 6,
+			}},
 		}, true, nil
 	}
 	result, found := map[string]*queryResult{
@@ -688,7 +734,7 @@ func currentTimeCallPrecision(query, function string, allowFraction bool) (int, 
 // local wall clock. Both read one captured instant, so references within a
 // statement observe the same value.
 func (s *textStatementExecutor) renderCurrentTime(kind temporalKind, precision int) (string, error) {
-	offset, err := parseFixedOffset(s.server.config.TimeZone)
+	offset, err := sessionTimeZoneOffset(s.session)
 	if err != nil {
 		return "", err
 	}
@@ -1843,7 +1889,7 @@ func canonicalMatcherTemporal(typeName, value, raw, column string, offsetMinutes
 }
 
 func sessionTimeZoneOffset(s *session) (int, error) {
-	return parseFixedOffset(s.server.config.TimeZone)
+	return parseFixedOffset(s.timeZone)
 }
 func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
@@ -2753,6 +2799,7 @@ func (s *preparedLifecycle) resetConnection() error {
 		return err
 	}
 	s.database = s.initialDB
+	s.timeZone = s.initialTimeZone
 	s.closeAllPrepared()
 	s.longDataBytes = 0
 	s.savepoints = make(map[string]catalog.Definition)

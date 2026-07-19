@@ -26,7 +26,7 @@ func currentTimeExecutor(t *testing.T, zone string, instant time.Time) *textStat
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
-	session := &session{server: server, database: "app", initialDB: "app", statements: map[uint32]*preparedStatement{}}
+	session := &session{server: server, database: "app", initialDB: "app", timeZone: zone, initialTimeZone: zone, statements: map[uint32]*preparedStatement{}}
 	return &textStatementExecutor{session}
 }
 
@@ -138,6 +138,35 @@ func TestTimestampSessionOffsetAppliesToWritePredicateAndRead(t *testing.T) {
 	}
 }
 
+func TestTimestampOffsetBelongsToTheSession(t *testing.T) {
+	executor := currentTimeExecutor(t, "UTC", time.Date(2021, 1, 2, 3, 4, 5, 0, time.UTC))
+	if result, err := executor.execute("SELECT @@time_zone"); err != nil || result.rows[0][0] != "+00:00" {
+		t.Fatalf("initial session time zone = %#v err %v", result, err)
+	}
+	if _, err := executor.execute("SET time_zone = '+05:30'"); err != nil {
+		t.Fatalf("set time zone: %v", err)
+	}
+	if result, err := executor.execute("SELECT CURRENT_TIMESTAMP"); err != nil || result.rows[0][0] != "2021-01-02 08:34:05" {
+		t.Fatalf("session current timestamp = %#v err %v", result, err)
+	}
+	if _, err := executor.execute("CREATE TABLE events (at TIMESTAMP)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := executor.execute("INSERT INTO events VALUES ('2021-01-02 08:34:05')"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	stored := executor.server.config.Catalog.Snapshot().Namespaces["app"].Tables["events"].Rows[0][0]
+	if stored != "2021-01-02 03:04:05" {
+		t.Fatalf("session-adjusted TIMESTAMP storage = %q", stored)
+	}
+	if _, err := executor.execute("SET time_zone = DEFAULT"); err != nil {
+		t.Fatalf("reset time zone: %v", err)
+	}
+	if result, err := executor.execute("SELECT at FROM events WHERE at = '2021-01-02 03:04:05'"); err != nil || len(result.rows) != 1 {
+		t.Fatalf("default-zone TIMESTAMP read/predicate = %#v err %v", result, err)
+	}
+}
+
 // Prepared binary temporal inputs must decode to the exact canonical spelling a
 // text literal carries, so both paths store equivalent values.
 func TestPreparedTemporalMatchesTextInput(t *testing.T) {
@@ -185,12 +214,17 @@ func TestPreparedAndTextDatetimeCanonicalizeEqually(t *testing.T) {
 	}
 }
 
-func TestPreparedMicrosecondsNormalizeIntoTheClock(t *testing.T) {
-	if got, _, err := readPreparedTemporal([]byte{11, 0xE5, 0x07, 1, 2, 3, 4, 5, 0x41, 0x42, 0x0F, 0x00}, 0, preparedParameterType{typ: mysqlTypeDatetime}); err != nil || scalar(got) != "2021-01-02 03:04:06.000001" {
-		t.Errorf("prepared datetime microseconds = %q err %v, want normalized second", scalar(got), err)
-	}
-	if got, _, err := readPreparedTemporal([]byte{12, 0, 0, 0, 0, 0, 12, 0, 0, 0x41, 0x42, 0x0F, 0x00}, 0, preparedParameterType{typ: mysqlTypeTime}); err != nil || scalar(got) != "12:00:01.000001" {
-		t.Errorf("prepared time microseconds = %q err %v, want normalized second", scalar(got), err)
+func TestPreparedMicrosecondsDoNotNormalize(t *testing.T) {
+	for _, test := range []struct {
+		wire    byte
+		payload []byte
+	}{
+		{mysqlTypeDatetime, []byte{11, 0xE5, 0x07, 1, 2, 3, 4, 5, 0x41, 0x42, 0x0F, 0x00}},
+		{mysqlTypeTime, []byte{12, 0, 0, 0, 0, 0, 12, 0, 0, 0x41, 0x42, 0x0F, 0x00}},
+	} {
+		if _, _, err := readPreparedTemporal(test.payload, 0, preparedParameterType{typ: test.wire}); err == nil {
+			t.Errorf("readPreparedTemporal(%#x) normalized excessive microseconds", test.wire)
+		}
 	}
 }
 
@@ -211,6 +245,17 @@ func TestPreparedTemporalRejectsMalformedLength(t *testing.T) {
 	} {
 		if _, _, err := readPreparedTemporal(test.payload, 0, preparedParameterType{typ: test.wire}); err == nil {
 			t.Errorf("readPreparedTemporal(%#x) accepted body length %d", test.wire, len(test.payload)-1)
+		}
+	}
+	for _, test := range []struct {
+		wire    byte
+		payload []byte
+	}{
+		{mysqlTypeTime, []byte{8, 2, 0, 0, 0, 0, 0, 0, 0}},
+		{mysqlTypeTime, []byte{8, 0, 0, 0, 0, 24, 0, 0, 0}},
+	} {
+		if _, _, err := readPreparedTemporal(test.payload, 0, preparedParameterType{typ: test.wire}); err == nil {
+			t.Errorf("readPreparedTemporal(%#x) accepted malformed TIME fields", test.wire)
 		}
 	}
 }
