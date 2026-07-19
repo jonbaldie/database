@@ -412,6 +412,19 @@ func TestMySQLTransactionsProvideIsolationAndReadYourOwnWrites(t *testing.T) {
 	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 0 {
 		t.Fatalf("initial repeatable-read snapshot: %#v", result)
 	}
+	if result := second.query("CREATE TABLE metadata_visible (id INT)"); result.err != "" {
+		t.Fatalf("committed concurrent DDL: %#v", result)
+	}
+	metadata := first.query("SELECT TABLE_NAME FROM information_schema.tables")
+	foundMetadataTable := false
+	for _, row := range metadata.rows {
+		if len(row) > 0 && row[0] == "metadata_visible" {
+			foundMetadataTable = true
+		}
+	}
+	if metadata.err != "" || !foundMetadataTable {
+		t.Fatalf("catalog metadata was transaction-frozen: %#v", metadata)
+	}
 	if result := second.query("INSERT INTO entries VALUES (2)"); result.err != "" {
 		t.Fatalf("committed concurrent insert: %#v", result)
 	}
@@ -446,8 +459,41 @@ func TestMySQLTransactionsProvideIsolationAndReadYourOwnWrites(t *testing.T) {
 	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 2 {
 		t.Fatalf("read-committed snapshot: %#v", result)
 	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 2 {
+		t.Fatalf("read-committed statement snapshot: %#v", result)
+	}
+	if result := second.query("INSERT INTO entries VALUES (4)"); result.err != "" {
+		t.Fatalf("second read-committed insert: %#v", result)
+	}
+	if result := first.query("INSERT INTO entries VALUES (5)"); result.err != "" {
+		t.Fatalf("read-committed own insert: %#v", result)
+	}
+	if result := second.query("INSERT INTO entries VALUES (6)"); result.err != "" {
+		t.Fatalf("third committed insert: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 5 {
+		t.Fatalf("read-committed own and concurrent writes: %#v", result)
+	}
 	if result := first.query("COMMIT"); result.err != "" {
 		t.Fatalf("read-committed commit: %#v", result)
+	}
+	if result := first.query("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"); result.err != "" {
+		t.Fatalf("restore repeatable read: %#v", result)
+	}
+	if result := first.query("BEGIN"); result.err != "" {
+		t.Fatalf("begin write-before-read transaction: %#v", result)
+	}
+	if result := first.query("INSERT INTO entries VALUES (7)"); result.err != "" {
+		t.Fatalf("repeatable-read own insert: %#v", result)
+	}
+	if result := second.query("INSERT INTO entries VALUES (8)"); result.err != "" {
+		t.Fatalf("repeatable-read concurrent insert: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 7 {
+		t.Fatalf("repeatable-read first snapshot after write: %#v", result)
+	}
+	if result := first.query("ROLLBACK"); result.err != "" {
+		t.Fatalf("repeatable-read write rollback: %#v", result)
 	}
 }
 
@@ -483,6 +529,8 @@ func TestMySQLTransactionsEnforceAutocommitReadOnlyAndAtomicErrors(t *testing.T)
 	for _, query := range []string{
 		"SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
 		"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED",
+		"SET unsupported_setting = 1",
+		"RESET unsupported_setting",
 	} {
 		if result := first.query(query); result.err == "" {
 			t.Fatalf("unsupported isolation accepted: %s", query)
@@ -777,6 +825,9 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 		t.Fatalf("closed statement executed: %#v", result)
 	}
 
+	if result := client.query("SET autocommit = 0"); result.err != "" {
+		t.Fatalf("disable autocommit before reset: %#v", result)
+	}
 	for _, query := range []string{
 		"CREATE DATABASE reset_rollback",
 		"USE reset_rollback",
@@ -800,6 +851,17 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	}
 	if result := client.query("SELECT * FROM pending"); result.err != "" || len(result.rows) != 0 {
 		t.Fatalf("connection reset did not roll back work: %#v", result)
+	}
+	if result := client.query("INSERT INTO pending VALUES (2)"); result.err != "" {
+		t.Fatalf("connection reset did not restore autocommit: %#v", result)
+	}
+	probe := newWireClient(t, mysqlAddress, "admin", "prepared-secret")
+	defer probe.close()
+	if result := probe.query("USE reset_rollback"); result.err != "" {
+		t.Fatalf("probe USE after reset: %#v", result)
+	}
+	if result := probe.query("SELECT * FROM pending"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "2" {
+		t.Fatalf("connection reset left autocommit disabled: %#v", result)
 	}
 	if result := client.executePrepared(resetStatement.id); result.err == "" {
 		t.Fatalf("connection reset retained prepared statement: %#v", result)

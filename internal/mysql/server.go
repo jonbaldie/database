@@ -333,21 +333,37 @@ type session struct {
 }
 
 type transactionState struct {
-	autocommitOff        bool
-	isolation            isolationLevel
-	readOnly             bool
-	nextIsolation        isolationLevel
-	nextReadOnly         bool
+	transactionSettings
+	transactionWork
+	savepointState
+	statementState
+}
+
+type transactionSettings struct {
+	autocommitOff bool
+	isolation     isolationLevel
+	readOnly      bool
+	nextIsolation isolationLevel
+	nextReadOnly  bool
+}
+
+type transactionWork struct {
 	transaction          bool
 	transactionSnapshot  catalog.Definition
 	transactionRevision  uint64
 	transactionStateSet  bool
+	transactionReadSet   bool
 	transactionDirty     bool
 	transactionIsolation isolationLevel
 	transactionReadOnly  bool
-	savepoints           map[string]catalog.Definition
-	savepointDirty       map[string]bool
-	statementState
+	transactionMutations []func(*catalog.Definition) error
+}
+
+type savepointState struct {
+	savepoints         map[string]catalog.Definition
+	savepointDirty     map[string]bool
+	savepointMutations map[string]int
+	savepointRead      map[string]bool
 }
 
 type statementState struct {
@@ -821,7 +837,12 @@ func (s *databaseSelector) databaseExists(name string) error {
 }
 
 func (s *catalogExecutor) metadataDefinition() catalog.Definition {
-	return s.session.currentDefinition()
+	if s.server.config.Catalog == nil {
+		return emptyDefinition()
+	}
+	// Catalog metadata is statement-scoped even when ordinary data reads use
+	// a repeatable-read transaction snapshot.
+	return s.server.config.Catalog.Snapshot()
 }
 
 func snapshotNamespace(s *relationExecutor, name string) (catalog.Namespace, bool) {
@@ -1094,29 +1115,44 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
+
+func mutateTableRows(definition *catalog.Definition, namespaceName, tableName string, transform func(catalog.Table) ([][]string, error)) error {
+	namespace, found := definition.Namespaces[catalog.Key(namespaceName)]
+	if !found {
+		return errors.New("namespace does not exist")
+	}
+	table, found := namespace.Tables[catalog.Key(tableName)]
+	if !found {
+		return errors.New("table does not exist")
+	}
+	rows, err := transform(table)
+	if err != nil {
+		return err
+	}
+	table.Rows = cloneRows(rows)
+	namespace.Tables[catalog.Key(tableName)] = table
+	definition.Namespaces[catalog.Key(namespaceName)] = namespace
+	return nil
+}
+
 func insertRows(s *relationExecutor, query string) (uint64, error) {
 	plan, err := makeInsertPlan(s, query)
 	if err != nil {
 		return 0, err
 	}
-	rows, affected, err := applyInsertPlan(plan)
+	_, affected, err := applyInsertPlan(plan)
 	if err != nil {
 		return 0, err
 	}
-	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
-		namespace, found := definition.Namespaces[catalog.Key(plan.namespace)]
-		if !found {
-			return errors.New("namespace does not exist")
-		}
-		table, found := namespace.Tables[catalog.Key(plan.name)]
-		if !found {
-			return errors.New("table does not exist")
-		}
-		table.Rows = cloneRows(rows)
-		namespace.Tables[catalog.Key(plan.name)] = table
-		definition.Namespaces[catalog.Key(plan.namespace)] = namespace
-		return nil
-	}); err != nil {
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _, err := applyInsertPlan(currentPlan)
+			return rows, err
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
 		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
@@ -1284,24 +1320,19 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	rows, affected, err := applyUpdatePlan(plan)
+	_, affected, err := applyUpdatePlan(plan)
 	if err != nil {
 		return 0, err
 	}
-	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
-		namespace, found := definition.Namespaces[catalog.Key(plan.namespace)]
-		if !found {
-			return errors.New("namespace does not exist")
-		}
-		table, found := namespace.Tables[catalog.Key(plan.name)]
-		if !found {
-			return errors.New("table does not exist")
-		}
-		table.Rows = cloneRows(rows)
-		namespace.Tables[catalog.Key(plan.name)] = table
-		definition.Namespaces[catalog.Key(plan.namespace)] = namespace
-		return nil
-	}); err != nil {
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _, err := applyUpdatePlan(currentPlan)
+			return rows, err
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
 		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
@@ -1428,21 +1459,16 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	rows, affected := applyDeletePlan(plan)
-	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
-		namespace, found := definition.Namespaces[catalog.Key(plan.namespace)]
-		if !found {
-			return errors.New("namespace does not exist")
-		}
-		table, found := namespace.Tables[catalog.Key(plan.name)]
-		if !found {
-			return errors.New("table does not exist")
-		}
-		table.Rows = cloneRows(rows)
-		namespace.Tables[catalog.Key(plan.name)] = table
-		definition.Namespaces[catalog.Key(plan.namespace)] = namespace
-		return nil
-	}); err != nil {
+	_, affected := applyDeletePlan(plan)
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _ := applyDeletePlan(currentPlan)
+			return rows, nil
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
 		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
@@ -2594,10 +2620,14 @@ func (s *preparedLifecycle) resetConnection() error {
 	if err := rollbackTransaction(s.session); err != nil {
 		return err
 	}
+	s.autocommitOff = false
+	s.isolation = isolationRepeatableRead
+	s.readOnly = false
+	s.nextIsolation = isolationRepeatableRead
+	s.nextReadOnly = false
 	s.database = s.initialDB
 	s.closeAllPrepared()
 	s.longDataBytes = 0
-	s.savepoints = make(map[string]catalog.Definition)
 	return nil
 }
 

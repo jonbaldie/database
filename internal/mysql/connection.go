@@ -89,8 +89,15 @@ func newSession(server *Server, authentication authenticationResult) *session {
 	return &session{
 		server: server, username: authentication.accountName, database: authentication.database,
 		initialDB: authentication.database, statements: map[uint32]*preparedStatement{},
-		nextStmtID:       1,
-		transactionState: transactionState{savepoints: map[string]catalog.Definition{}, savepointDirty: map[string]bool{}},
+		nextStmtID: 1,
+		transactionState: transactionState{
+			savepointState: savepointState{
+				savepoints:         map[string]catalog.Definition{},
+				savepointDirty:     map[string]bool{},
+				savepointMutations: map[string]int{},
+				savepointRead:      map[string]bool{},
+			},
+		},
 	}
 }
 

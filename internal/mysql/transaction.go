@@ -191,7 +191,7 @@ func (s *textStatementExecutor) settingStatement(query, lower string) (*queryRes
 
 func (s *textStatementExecutor) applySetting(_ string, lower string) error {
 	if strings.HasPrefix(lower, "reset ") {
-		return nil
+		return sqlFailure{1235, "42000", "unsupported session reset"}
 	}
 	normalized := strings.Join(strings.Fields(lower), " ")
 	if handled, err := s.applyAutocommitSetting(normalized); handled {
@@ -203,7 +203,7 @@ func (s *textStatementExecutor) applySetting(_ string, lower string) error {
 	if handled, err := s.applyReadOnlySetting(normalized); handled {
 		return err
 	}
-	return nil
+	return sqlFailure{1193, "HY000", "unknown or unsupported session setting"}
 }
 
 func (s *session) applyAutocommitSetting(normalized string) (bool, error) {
@@ -352,11 +352,15 @@ func (s *session) beginTransaction(isolation isolationLevel, readOnly bool) {
 	s.transactionSnapshot = catalog.Definition{}
 	s.transactionRevision = 0
 	s.transactionStateSet = false
+	s.transactionReadSet = false
 	s.transactionDirty = false
 	s.transactionIsolation = isolation
 	s.transactionReadOnly = readOnly
 	s.savepoints = make(map[string]catalog.Definition)
 	s.savepointDirty = make(map[string]bool)
+	s.savepointMutations = make(map[string]int)
+	s.savepointRead = make(map[string]bool)
+	s.transactionMutations = nil
 }
 
 func (s *session) consumeNextCharacteristics() {
@@ -367,18 +371,25 @@ func (s *session) prepareStatementDefinition(forWrite bool) error {
 	if !s.transaction {
 		return nil
 	}
-	if err := s.ensureWorkingDefinition(forWrite); err != nil {
+	if err := s.ensureWorkingDefinition(); err != nil {
 		return err
 	}
-	if s.transactionDirty || s.transactionIsolation == isolationRepeatableRead || forWrite {
-		s.statementDefinition = s.transactionSnapshot
-	} else if s.server.config.Catalog == nil {
-		s.statementDefinition = emptyDefinition()
-	} else {
-		s.statementDefinition = s.server.config.Catalog.Snapshot()
+	if !forWrite {
+		s.transactionReadSet = true
 	}
+	s.statementDefinition = s.statementDefinitionFor(forWrite)
 	s.statementDefinitionSet = true
 	return nil
+}
+
+func (s *session) statementDefinitionFor(forWrite bool) catalog.Definition {
+	if forWrite || s.transactionDirty || s.transactionIsolation == isolationRepeatableRead && s.transactionReadSet {
+		return s.transactionSnapshot
+	}
+	if s.server.config.Catalog == nil {
+		return emptyDefinition()
+	}
+	return s.server.config.Catalog.Snapshot()
 }
 
 func (s *session) clearStatementDefinition() {
@@ -386,11 +397,14 @@ func (s *session) clearStatementDefinition() {
 	s.statementDefinitionSet = false
 }
 
-func (s *session) ensureWorkingDefinition(forWrite bool) error {
+func (s *session) ensureWorkingDefinition() error {
 	if !s.transaction {
 		return nil
 	}
-	if s.transactionStateSet && (!forWrite || s.transactionDirty || s.transactionIsolation == isolationRepeatableRead || s.statementDefinitionSet) {
+	if s.transactionStateSet {
+		if s.transactionDirty && (s.transactionIsolation == isolationReadCommitted || !s.transactionReadSet) {
+			return s.refreshWorkingDefinition()
+		}
 		return nil
 	}
 	if s.server.config.Catalog == nil {
@@ -405,15 +419,33 @@ func (s *session) ensureWorkingDefinition(forWrite bool) error {
 	return nil
 }
 
+func (s *session) refreshWorkingDefinition() error {
+	if s.server.config.Catalog == nil {
+		s.transactionSnapshot = emptyDefinition()
+		s.transactionRevision = 0
+		s.transactionStateSet = true
+		return nil
+	}
+	definition, revision := s.server.config.Catalog.SnapshotWithRevision()
+	for _, mutation := range s.transactionMutations {
+		staged, err := catalog.Apply(definition, mutation)
+		if err != nil {
+			return err
+		}
+		definition = staged
+	}
+	s.transactionSnapshot, s.transactionRevision = definition, revision
+	s.transactionStateSet = true
+	return nil
+}
+
 func (s *session) currentDefinition() catalog.Definition {
 	if s.statementDefinitionSet {
 		return s.statementDefinition
 	}
 	if s.transaction {
+		_ = s.ensureWorkingDefinition()
 		if s.transactionDirty || s.transactionIsolation == isolationRepeatableRead {
-			if !s.transactionStateSet {
-				_ = s.ensureWorkingDefinition(false)
-			}
 			return s.transactionSnapshot
 		}
 		if s.server.config.Catalog == nil {
@@ -439,7 +471,7 @@ func (s *session) mutateCatalog(action func(*catalog.Definition) error) error {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
 	if s.transaction {
-		if err := s.ensureWorkingDefinition(true); err != nil {
+		if err := s.ensureWorkingDefinition(); err != nil {
 			return err
 		}
 		staged, err := catalog.Apply(s.transactionSnapshot, action)
@@ -448,6 +480,7 @@ func (s *session) mutateCatalog(action func(*catalog.Definition) error) error {
 		}
 		s.transactionSnapshot = staged
 		s.transactionDirty = true
+		s.transactionMutations = append(s.transactionMutations, action)
 		return nil
 	}
 	definition, revision := s.server.config.Catalog.SnapshotWithRevision()
@@ -505,18 +538,22 @@ func (s *session) finishTransaction() {
 	s.transactionSnapshot = catalog.Definition{}
 	s.transactionRevision = 0
 	s.transactionStateSet = false
+	s.transactionReadSet = false
 	s.transactionDirty = false
 	s.transactionIsolation = isolationRepeatableRead
 	s.transactionReadOnly = false
 	s.savepoints = make(map[string]catalog.Definition)
 	s.savepointDirty = make(map[string]bool)
+	s.savepointMutations = make(map[string]int)
+	s.savepointRead = make(map[string]bool)
+	s.transactionMutations = nil
 }
 
 func (s *transactionExecutor) save(value string) error {
 	if !s.transaction {
 		return sqlFailure{1196, "HY000", "no active transaction"}
 	}
-	if err := s.ensureWorkingDefinition(false); err != nil {
+	if err := s.ensureWorkingDefinition(); err != nil {
 		return err
 	}
 	if s.savepoints == nil {
@@ -525,9 +562,17 @@ func (s *transactionExecutor) save(value string) error {
 	if s.savepointDirty == nil {
 		s.savepointDirty = make(map[string]bool)
 	}
+	if s.savepointMutations == nil {
+		s.savepointMutations = make(map[string]int)
+	}
+	if s.savepointRead == nil {
+		s.savepointRead = make(map[string]bool)
+	}
 	name := identifier(strings.TrimSpace(value))
 	s.savepoints[catalog.Key(name)] = s.transactionSnapshot
 	s.savepointDirty[catalog.Key(name)] = s.transactionDirty
+	s.savepointMutations[catalog.Key(name)] = len(s.transactionMutations)
+	s.savepointRead[catalog.Key(name)] = s.transactionReadSet
 	return nil
 }
 
@@ -544,6 +589,11 @@ func (s *transactionExecutor) rollbackTo(value string) error {
 	s.transactionSnapshot = snapshot
 	s.transactionStateSet = true
 	s.transactionDirty = s.savepointDirty[key]
+	s.transactionReadSet = s.savepointRead[key]
+	mutationCount := s.savepointMutations[key]
+	if mutationCount < len(s.transactionMutations) {
+		s.transactionMutations = append([]func(*catalog.Definition) error(nil), s.transactionMutations[:mutationCount]...)
+	}
 	return nil
 }
 
@@ -555,6 +605,8 @@ func (s *transactionExecutor) release(value string) error {
 	}
 	delete(s.savepoints, key)
 	delete(s.savepointDirty, key)
+	delete(s.savepointMutations, key)
+	delete(s.savepointRead, key)
 	return nil
 }
 
