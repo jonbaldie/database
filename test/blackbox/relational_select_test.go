@@ -209,6 +209,10 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	if !strings.HasPrefix(ambiguousCollation.err, "22007") {
 		t.Fatalf("set accepted ambiguous collation: %#v", ambiguousCollation)
 	}
+	multiTermCollation := client.query("SELECT 'A' UNION SELECT name FROM binary_names UNION SELECT 'B' ORDER BY 1")
+	if multiTermCollation.err != "" || !reflect.DeepEqual(multiTermCollation.rows, [][]string{{"A"}, {"B"}, {"a"}}) {
+		t.Fatalf("multi-term set coercibility: %#v", multiTermCollation)
+	}
 	computedCollation := client.query("SELECT UPPER(name) FROM binary_names UNION SELECT LOWER(name) FROM binary_names ORDER BY 1")
 	if computedCollation.err != "" || !reflect.DeepEqual(computedCollation.rows, [][]string{{"A"}, {"B"}, {"a"}, {"b"}}) {
 		t.Fatalf("computed set collation: %#v", computedCollation)
@@ -265,8 +269,12 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 		t.Fatalf("missing subquery column deferred: %#v", missingSubqueryColumn)
 	}
 	cteReuseExplanation := client.query("EXPLAIN FORMAT=JSON WITH ids AS (SELECT id FROM authors) SELECT a.id FROM ids a JOIN ids b ON a.id = b.id")
-	if cteReuseExplanation.err != "" || len(cteReuseExplanation.rows) != 1 || strings.Count(cteReuseExplanation.rows[0][0], `"reason":"cte"`) != 1 || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"reuse"`) {
+	if cteReuseExplanation.err != "" || len(cteReuseExplanation.rows) != 1 || strings.Count(cteReuseExplanation.rows[0][0], `"reason":"cte"`) != 1 || !strings.Contains(cteReuseExplanation.rows[0][0], `"reason":"reuse"`) || strings.Index(cteReuseExplanation.rows[0][0], `"reason":"cte"`) > strings.Index(cteReuseExplanation.rows[0][0], `"reason":"reuse"`) {
 		t.Fatalf("CTE reuse explanation: %#v", cteReuseExplanation)
+	}
+	cteOrderExplanation := client.query("EXPLAIN FORMAT=JSON WITH first_ids AS (SELECT id FROM authors), second_ids AS (SELECT author_id FROM posts) SELECT a.id FROM first_ids a JOIN second_ids b ON a.id = b.author_id")
+	if cteOrderExplanation.err != "" || len(cteOrderExplanation.rows) != 1 || strings.Index(cteOrderExplanation.rows[0][0], `"fragment":"a"`) > strings.Index(cteOrderExplanation.rows[0][0], `"fragment":"b"`) {
+		t.Fatalf("CTE explanation input order: %#v", cteOrderExplanation)
 	}
 	preparedCardinality := client.prepare("SELECT (SELECT name FROM authors)")
 	if preparedCardinality.err != "" {

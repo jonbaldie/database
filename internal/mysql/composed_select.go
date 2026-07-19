@@ -1043,19 +1043,37 @@ func compatibleNumericSetMetadata(result, left, right columnMetadata) (columnMet
 }
 
 func compatibleCharacterSetMetadata(result, left, right columnMetadata) (columnMetadata, error) {
+	leftCoercibility := setCollationCoercibility(left)
+	rightCoercibility := setCollationCoercibility(right)
 	if left.characterSet == right.characterSet {
-		return characterSetMetadata(result, left.characterSet), nil
+		result = characterSetMetadata(result, left.characterSet)
+		result.coercibility = min(leftCoercibility, rightCoercibility)
+		return result, nil
 	}
 	if left.characterSet == mysqlCharsetBinary || right.characterSet == mysqlCharsetBinary {
 		return columnMetadata{}, strictConversionError()
 	}
-	if left.table != "" && right.table == "" {
-		return characterSetMetadata(result, left.characterSet), nil
+	if leftCoercibility < rightCoercibility {
+		result = characterSetMetadata(result, left.characterSet)
+		result.coercibility = leftCoercibility
+		return result, nil
 	}
-	if right.table != "" && left.table == "" {
-		return characterSetMetadata(result, right.characterSet), nil
+	if rightCoercibility < leftCoercibility {
+		result = characterSetMetadata(result, right.characterSet)
+		result.coercibility = rightCoercibility
+		return result, nil
 	}
 	return columnMetadata{}, strictConversionError()
+}
+
+func setCollationCoercibility(metadata columnMetadata) byte {
+	if metadata.coercibility != 0 {
+		return metadata.coercibility
+	}
+	if metadata.table != "" {
+		return 2
+	}
+	return 4
 }
 
 func dateAndDatetime(left, right byte) bool {

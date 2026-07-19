@@ -130,7 +130,8 @@ func (s *textStatementExecutor) decorateComposedInputs(context *composedQueryCon
 }
 
 func (s *textStatementExecutor) decorateDerivedInputs(context *composedQueryContext, plan *relationalSelectPlan, root *queryexplanation.Operator) (*queryexplanation.Operator, error) {
-	for _, table := range plan.source.tables {
+	for index := len(plan.source.tables) - 1; index >= 0; index-- {
+		table := plan.source.tables[index]
 		if table.query == "" {
 			continue
 		}

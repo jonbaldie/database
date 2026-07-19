@@ -572,6 +572,7 @@ type columnMetadata struct {
 	typ                                                       byte
 	flags                                                     uint16
 	decimals                                                  byte
+	coercibility                                              byte
 }
 
 const informationSchemaName = "information_schema"

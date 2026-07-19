@@ -283,13 +283,14 @@ func relationExpressionMetadataContext(expression string, columns []relationColu
 		metadata.length = 22
 	case valueString:
 		metadata.length = relationStringExpressionLength(expression, columns, value.render())
-		metadata.characterSet = relationExpressionCharacterSet(expression, columns)
+		metadata.characterSet, metadata.coercibility = relationExpressionCharacterMetadata(expression, columns)
 	}
 	return metadata, nil
 }
 
-func relationExpressionCharacterSet(expression string, columns []relationColumn) uint16 {
+func relationExpressionCharacterMetadata(expression string, columns []relationColumn) (uint16, byte) {
 	characterSet := mysqlCharsetUTF8MB40900AICI
+	coercibility := byte(4)
 	tokens, _ := tokenizeExpression(expression)
 	for _, token := range tokens {
 		if token.kind != tokenIdent {
@@ -300,14 +301,15 @@ func relationExpressionCharacterSet(expression string, columns []relationColumn)
 			continue
 		}
 		candidate := columns[index].metadata.characterSet
+		coercibility = min(coercibility, byte(2))
 		if candidate == mysqlCharsetBinary {
-			return candidate
+			return candidate, coercibility
 		}
 		if candidate == mysqlCharsetUTF8MB4Bin {
 			characterSet = candidate
 		}
 	}
-	return characterSet
+	return characterSet, coercibility
 }
 
 func representativeExpressionValue(expression string, columns []relationColumn) (exprValue, error) {
