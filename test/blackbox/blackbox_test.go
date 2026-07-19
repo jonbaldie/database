@@ -794,6 +794,22 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	if binaryResult.err != "" || len(binaryResult.rows) != 1 || len(binaryResult.rows[0]) != 1 || binaryResult.rows[0][0] != "7" || len(binaryResult.metadata) != 1 || len(text.metadata) != 1 || binaryResult.metadata[0] != text.metadata[0] {
 		t.Fatalf("prepared binary result differs from text: text=%#v binary=%#v", text, binaryResult)
 	}
+	for query, want := range map[string]string{
+		"SELECT ROUND(1.235, 2)":           "1.24",
+		"SELECT POWER(2, 3)":               "8",
+		"SELECT SQRT(9)":                   "3",
+		"SELECT SUBSTRING('abcdef', 2, 3)": "bcd",
+		"SELECT REPLACE('a-b', '-', '_')":  "a_b",
+		"SELECT LOCATE('bc', 'abcd')":      "2",
+	} {
+		text = client.query(query)
+		statement = client.prepare(query)
+		binaryResult = client.executePrepared(statement.id)
+		if text.err != "" || statement.err != "" || binaryResult.err != "" || len(text.rows) != 1 || len(binaryResult.rows) != 1 || text.rows[0][0] != want || binaryResult.rows[0][0] != want || binaryResult.metadata[0] != text.metadata[0] {
+			t.Fatalf("prepared extended expression differs from text: query=%q text=%#v binary=%#v", query, text, binaryResult)
+		}
+		client.closePrepared(statement.id)
+	}
 
 	bound := client.prepare("SELECT ?")
 	if bound.err != "" {

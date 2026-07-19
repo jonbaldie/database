@@ -81,6 +81,11 @@ func TestFunctionSignaturesAreDiscoverableAndStable(t *testing.T) {
 	if concat := byName["CONCAT"]; concat.minArgs != 1 || concat.maxArgs != variadicArity {
 		t.Errorf("CONCAT signature = %+v, want 1..variadic", concat)
 	}
+	for _, name := range []string{"LOCATE", "POWER", "REPLACE", "ROUND", "SQRT", "SUBSTRING"} {
+		if _, ok := byName[name]; !ok {
+			t.Errorf("function registry missing %s", name)
+		}
+	}
 }
 
 func TestScalarColumnMetadataMatchesDomain(t *testing.T) {
