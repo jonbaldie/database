@@ -27,7 +27,7 @@ func currentTimeExecutor(t *testing.T, zone string, instant time.Time) *textStat
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
 	session := &session{server: server, database: "app", initialDB: "app", timeZone: zone, initialTimeZone: zone, statements: map[uint32]*preparedStatement{}}
-	return &textStatementExecutor{session}
+	return &textStatementExecutor{session: session}
 }
 
 func TestCurrentTimeRendersThroughFixedOffset(t *testing.T) {

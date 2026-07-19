@@ -391,7 +391,10 @@ type preparedParameterType struct {
 // language implementation.
 type queryExecutor struct{ statements textStatementExecutor }
 
-type textStatementExecutor struct{ *session }
+type textStatementExecutor struct {
+	*session
+	streamRows bool
+}
 
 type transactionExecutor struct{ *session }
 
@@ -399,12 +402,15 @@ type catalogExecutor struct{ *session }
 
 type databaseSelector struct{ *session }
 
-type relationExecutor struct{ *session }
+type relationExecutor struct {
+	*session
+	streamRows bool
+}
 
 type informationSchemaExecutor struct{ *session }
 
 func newQueryExecutor(session *session) *queryExecutor {
-	return &queryExecutor{statements: textStatementExecutor{session}}
+	return &queryExecutor{statements: textStatementExecutor{session: session}}
 }
 
 type preparedPreparation struct{ *session }
@@ -549,6 +555,7 @@ type queryResult struct {
 	rows     [][]string
 	metadata []columnMetadata
 	affected uint64
+	stream   queryRowStream
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
@@ -608,7 +615,7 @@ var informationSchemaViews = []informationSchemaView{
 }
 
 func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
-	result, err := s.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := s.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
@@ -623,6 +630,12 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 
 func (s *queryExecutor) execute(query string) (*queryResult, error) {
 	return s.statements.execute(query)
+}
+
+func (s *queryExecutor) executeProtocol(query string) (*queryResult, error) {
+	executor := s.statements
+	executor.streamRows = true
+	return executor.execute(query)
 }
 
 func (s *queryExecutor) useDatabase(name string) { s.statements.useDatabase(name) }
@@ -864,7 +877,7 @@ func namespaceTables(name string, namespace catalog.Namespace) *queryResult {
 }
 
 func (s *textStatementExecutor) relationStatement(query, lower string) (*queryResult, bool, error) {
-	relations := relationExecutor{s.session}
+	relations := relationExecutor{session: s.session, streamRows: s.streamRows}
 	switch {
 	case strings.HasPrefix(lower, "create table "):
 		return nil, true, createTable(&relations, query)
@@ -2014,14 +2027,6 @@ func canonicalMatcherTemporal(typeName, value, raw, column string, offsetMinutes
 func sessionTimeZoneOffset(s *session) (int, error) {
 	return parseFixedOffset(s.timeZone)
 }
-func legacySelectQuery(s *relationExecutor, query string) (*queryResult, error) {
-	expression := strings.TrimSpace(query[len("SELECT "):])
-	if from := keywordAt(expression, "from"); from >= 0 {
-		return selectFrom(s, query, expression[:from], expression[from+len("from"):])
-	}
-	return selectLiteral(expression)
-}
-
 func selectLiteral(expression string) (*queryResult, error) {
 	value, isNull, metadata, err := scalarColumn(expression)
 	if err != nil {
@@ -2782,7 +2787,7 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
-	result, err := queries.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := queries.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}

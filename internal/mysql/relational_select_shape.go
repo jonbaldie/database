@@ -46,9 +46,14 @@ func parseProjectionItem(item string, columns []relationColumn) ([]relationalPro
 		return wildcardProjections(expression, columns)
 	}
 	if column, resolveErr := resolveRelationColumn(expression, columns); resolveErr == nil {
-		return []relationalProjection{relationProjection(column, alias)}, nil
+		projection := relationProjection(column, alias)
+		projection.expression = expression
+		return []relationalProjection{projection}, nil
 	}
-	return scalarProjection(expression, alias, columns)
+	if projection, scalarErr := scalarProjection(expression, alias); scalarErr == nil {
+		return projection, nil
+	}
+	return computedProjection(expression, alias, columns)
 }
 
 func wildcardProjections(expression string, columns []relationColumn) ([]relationalProjection, error) {
@@ -66,13 +71,9 @@ func wildcardProjections(expression string, columns []relationColumn) ([]relatio
 	return projections, nil
 }
 
-func scalarProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, error) {
+func scalarProjection(expression, alias string) ([]relationalProjection, error) {
 	rendered, isNull, metadata, scalarErr := scalarColumn(expression)
 	if scalarErr != nil {
-		_, resolveErr := resolveRelationColumn(expression, columns)
-		if resolveErr != nil {
-			return nil, resolveErr
-		}
 		return nil, scalarErr
 	}
 	value := literalQueryResult{value: rendered, isNull: isNull, metadata: metadata, supported: true}
@@ -85,6 +86,22 @@ func scalarProjection(expression, alias string, columns []relationColumn) ([]rel
 	return []relationalProjection{{
 		expression: expression, name: name, alias: alias, column: -1,
 		scalar: true, value: literalExprValue(value), metadata: value.metadata,
+	}}, nil
+}
+
+func computedProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, error) {
+	value, err := evaluateRelationExpression(expression, columns, sampleRelationRow(columns))
+	if err != nil {
+		return nil, err
+	}
+	name := expression
+	if alias != "" {
+		name = alias
+	}
+	metadata := scalarMetadata(name, value.render(), value)
+	return []relationalProjection{{
+		expression: expression, name: name, alias: alias, column: -1,
+		computed: true, metadata: metadata,
 	}}, nil
 }
 
@@ -130,7 +147,7 @@ func literalExprValue(value literalQueryResult) exprValue {
 }
 
 func (p relationalProjection) resolveName(columns []relationColumn) relationalProjection {
-	if p.scalar {
+	if p.scalar || p.computed {
 		return p
 	}
 	column := columns[p.column]
@@ -156,6 +173,8 @@ func (p *relationalSelectPlan) projectRow(row relationRow) (relationalResultRow,
 		var err error
 		if projection.scalar {
 			value = projection.value
+		} else if projection.computed {
+			value, err = evaluateRelationExpression(projection.expression, p.source.columns, row)
 		} else {
 			if projection.column < 0 || projection.column >= len(row.values) {
 				return relationalResultRow{}, sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
@@ -288,8 +307,8 @@ func nonNegativeLimitValue(text string) (int, error) {
 func maxIntValue() int { return int(^uint(0) >> 1) }
 
 func (p *relationalSelectPlan) shapeRows(rows []relationalResultRow) []relationalResultRow {
-	rows = sortRelationalRows(rows, p.order, p.source.columns)
 	rows = distinctRelationalRows(rows, p.distinct, p.projection, p.source.columns)
+	rows = sortRelationalRows(rows, p.order, p.source.columns)
 	return limitRelationalRows(rows, p.limit)
 }
 

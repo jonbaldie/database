@@ -59,6 +59,10 @@ func TestMySQLRelationalShapingMatchesTextAndPreparedWirePaths(t *testing.T) {
 	if distinct.err != "" || !reflect.DeepEqual(distinct.rows, [][]string{{"Linus"}, {"Grace"}}) {
 		t.Fatalf("distinct/cross select: %#v", distinct)
 	}
+	computed := client.query("SELECT p.score + 1 AS adjusted FROM posts p WHERE p.score * 2 >= 30 ORDER BY adjusted DESC")
+	if computed.err != "" || !reflect.DeepEqual(computed.rows, [][]string{{"21"}, {"16"}}) {
+		t.Fatalf("computed select: %#v", computed)
+	}
 
 	explained := client.query("EXPLAIN FORMAT=JSON SELECT DISTINCT a.name FROM authors a JOIN posts p ON a.id = p.author_id ORDER BY a.name DESC LIMIT 1")
 	if explained.err != "" || len(explained.rows) != 1 {

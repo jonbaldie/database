@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jonbaldie/database/internal/catalog"
@@ -48,7 +49,19 @@ func relationalSelectExecutor(t *testing.T) *textStatementExecutor {
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
 	session := &session{server: server, database: "app", initialDB: "app", timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{}}
-	return &textStatementExecutor{session}
+	return &textStatementExecutor{session: session}
+}
+
+func TestRelationalSelectExplanationTracesUsingClause(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	result, err := executor.execute("EXPLAIN FORMAT=JSON SELECT * FROM authors a JOIN author_labels l USING (id)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	explanation := result.rows[0][0]
+	if !strings.Contains(explanation, `"clause":"using"`) || !strings.Contains(explanation, `"fragment":"(id)"`) {
+		t.Fatalf("USING source missing: %s", explanation)
+	}
 }
 
 func TestRelationalSelectUsingCoalescesColumns(t *testing.T) {
@@ -92,15 +105,58 @@ func TestRelationalSelectJoinsAndOrderedShape(t *testing.T) {
 	}
 }
 
+func TestRelationalSelectEvaluatesRowBoundExpressions(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	result, err := executor.execute("SELECT p.score + 1 AS adjusted FROM posts p WHERE p.score * 2 >= 30 ORDER BY adjusted DESC")
+	if err != nil {
+		t.Fatalf("row expression: %v", err)
+	}
+	if !reflect.DeepEqual(result.rows, [][]string{{"21"}, {"16"}}) {
+		t.Fatalf("rows = %#v", result.rows)
+	}
+}
+
+func TestRelationalSelectStreamsFromStatementSnapshot(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	executor.streamRows = true
+	result, err := executor.execute("SELECT id FROM authors WHERE id >= 1 LIMIT 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.stream == nil || len(result.rows) != 0 {
+		t.Fatalf("result was buffered: %#v", result)
+	}
+	if err := executor.server.config.Catalog.Insert("app", "authors", []string{"4", "Margaret"}); err != nil {
+		t.Fatal(err)
+	}
+	var rows [][]string
+	if err := result.stream(func(row []string, _ []bool) error {
+		rows = append(rows, append([]string(nil), row...))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rows, [][]string{{"1"}, {"2"}}) {
+		t.Fatalf("streamed rows = %#v", rows)
+	}
+}
+
 func TestRelationalSelectOuterJoinDistinctAndNulls(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT DISTINCT a.name, p.title FROM authors a LEFT JOIN posts p ON a.id = p.author_id ORDER BY a.id ASC")
+	result, err := executor.execute("SELECT DISTINCT a.name, p.title FROM authors a LEFT JOIN posts p ON a.id = p.author_id ORDER BY a.name ASC, p.title ASC")
 	if err != nil {
 		t.Fatalf("left join: %v", err)
 	}
 	want := [][]string{{"Ada", "first"}, {"Ada", "second"}, {"Grace", "third"}, {"Linus", "NULL"}}
 	if !reflect.DeepEqual(result.rows, want) || !reflect.DeepEqual(result.nulls, [][]bool{{false, false}, {false, false}, {false, false}, {false, true}}) {
 		t.Fatalf("rows/nulls = %#v/%#v", result.rows, result.nulls)
+	}
+}
+
+func TestRelationalSelectRejectsDistinctOrderOutsideProjection(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	if _, err := executor.execute("SELECT DISTINCT a.name FROM authors a JOIN posts p ON a.id = p.author_id ORDER BY p.id"); err == nil {
+		t.Fatal("DISTINCT accepted ORDER BY outside the projection")
 	}
 }
 

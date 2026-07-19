@@ -35,7 +35,7 @@ func parseRelationalSource(s *relationExecutor, text string) (relationalSource, 
 }
 
 func parseRelationalJoin(s *relationExecutor, text string, left []relationColumn) (relationalJoin, relationalTableSource, string, error) {
-	kind, after, _, ok := consumeJoinStart(text)
+	kind, after, ok := consumeJoinStart(text)
 	if !ok {
 		return relationalJoin{}, relationalTableSource{}, "", sqlFailure{1064, "42000", "malformed JOIN clause"}
 	}
@@ -196,10 +196,10 @@ func isJoinWord(text string) bool {
 	}
 }
 
-func consumeJoinStart(text string) (string, string, bool, bool) {
+func consumeJoinStart(text string) (string, string, bool) {
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, ",") {
-		return "cross", strings.TrimSpace(text[1:]), false, true
+		return "cross", strings.TrimSpace(text[1:]), true
 	}
 	for _, candidate := range []struct {
 		prefix string
@@ -214,10 +214,10 @@ func consumeJoinStart(text string) (string, string, bool, bool) {
 		{"join ", "inner"},
 	} {
 		if strings.HasPrefix(strings.ToLower(text), candidate.prefix) {
-			return candidate.kind, strings.TrimSpace(text[len(candidate.prefix):]), false, true
+			return candidate.kind, strings.TrimSpace(text[len(candidate.prefix):]), true
 		}
 	}
-	return "", "", false, false
+	return "", "", false
 }
 
 func parseJoinUsing(text string, left, right []relationColumn) (string, []string, string, bool) {
@@ -307,80 +307,90 @@ func findRelationColumnIndex(columns []relationColumn, qualifier, name string) (
 	return found, found >= 0
 }
 
-func (p *relationalSelectPlan) sourceRows() ([]relationRow, error) {
-	rows := tableRelationRows(p.source.tables[0])
-	for _, join := range p.source.joins {
-		var err error
-		rows, err = joinRelationRows(rows, join, len(p.source.columns))
-		if err != nil {
-			return nil, err
-		}
-	}
-	return rows, nil
+type relationRowYield func(relationRow) error
+type relationRowIterator func(relationRowYield) error
+
+func (p *relationalSelectPlan) forEachSourceRow(yield relationRowYield) error {
+	return p.source.rowIterator()(yield)
 }
 
-func tableRelationRows(table relationalTableSource) []relationRow {
-	rows := make([]relationRow, len(table.table.Rows))
-	for index, row := range table.table.Rows {
-		rows[index] = relationRow{values: append([]string(nil), row...)}
+func (source relationalSource) rowIterator() relationRowIterator {
+	iterator := tableRowIterator(source.tables[0])
+	leftWidth := len(source.tables[0].columns)
+	for _, join := range source.joins {
+		iterator = joinedRowIterator(iterator, join, leftWidth)
+		leftWidth += len(join.right.columns)
 	}
-	return rows
+	return iterator
 }
 
-func joinRelationRows(left []relationRow, join relationalJoin, totalColumns int) ([]relationRow, error) {
-	rightRows := tableRelationRows(join.right)
-	result := make([]relationRow, 0, len(left)*maxInt(1, len(rightRows)))
-	matchedRight := make([]bool, len(rightRows))
-	leftWidth := totalColumns - len(join.right.columns)
-	if len(left) > 0 {
-		leftWidth = len(left[0].values)
-	}
-	for _, leftRow := range left {
-		matched, rows, err := appendJoinedMatches(result, leftRow, rightRows, join, matchedRight)
-		if err != nil {
-			return nil, err
+func tableRowIterator(table relationalTableSource) relationRowIterator {
+	return func(yield relationRowYield) error {
+		for _, row := range table.table.Rows {
+			if err := yield(relationRow{values: append([]string(nil), row...)}); err != nil {
+				return err
+			}
 		}
-		result = rows
-		if !matched && join.kind == "left" {
-			result = append(result, appendNullRight(leftRow, len(join.right.columns)))
-		}
+		return nil
 	}
-	if join.kind == "right" {
-		result = appendUnmatchedRight(result, rightRows, matchedRight, leftWidth)
-	}
-	return result, nil
 }
 
-func appendJoinedMatches(result []relationRow, leftRow relationRow, rightRows []relationRow, join relationalJoin, matchedRight []bool) (bool, []relationRow, error) {
+func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth int) relationRowIterator {
+	return func(yield relationRowYield) error {
+		matchedRight := make([]bool, len(join.right.table.Rows))
+		if err := left(func(row relationRow) error {
+			return yieldJoinedRows(row, join, matchedRight, yield)
+		}); err != nil {
+			return err
+		}
+		if join.kind != "right" {
+			return nil
+		}
+		return yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, yield)
+	}
+}
+
+func yieldJoinedRows(left relationRow, join relationalJoin, matchedRight []bool, yield relationRowYield) error {
 	matched := false
-	for rightIndex, rightRow := range rightRows {
-		candidate := relationRow{values: append(append([]string(nil), leftRow.values...), rightRow.values...)}
+	for rightIndex, values := range join.right.table.Rows {
+		candidate := relationRow{values: append(append([]string(nil), left.values...), values...)}
 		ok, err := joinCandidateMatches(join, candidate)
 		if err != nil {
-			return false, result, err
+			return err
 		}
 		if !ok {
 			continue
 		}
-		matched = true
-		matchedRight[rightIndex] = true
-		result = append(result, candidate)
+		matched, matchedRight[rightIndex] = true, true
+		if err := yield(candidate); err != nil {
+			return err
+		}
 	}
-	return matched, result, nil
+	if !matched && join.kind == "left" {
+		return yield(appendNullRight(left, len(join.right.columns)))
+	}
+	return nil
 }
 
-func appendUnmatchedRight(result []relationRow, rightRows []relationRow, matched []bool, leftWidth int) []relationRow {
-	for rightIndex, rightRow := range rightRows {
-		if matched[rightIndex] {
+func yieldUnmatchedRight(rows [][]string, matched []bool, leftWidth int, yield relationRowYield) error {
+	for index, values := range rows {
+		if matched[index] {
 			continue
 		}
-		values := append(make([]string, leftWidth), rightRow.values...)
-		for index := range values[:leftWidth] {
-			values[index] = storedSQLNullValue
+		if err := yield(appendNullLeft(values, leftWidth)); err != nil {
+			return err
 		}
-		result = append(result, relationRow{values: values})
 	}
-	return result
+	return nil
+}
+
+func appendNullLeft(right []string, width int) relationRow {
+	values := make([]string, width, width+len(right))
+	for index := range values {
+		values[index] = storedSQLNullValue
+	}
+	values = append(values, right...)
+	return relationRow{values: values}
 }
 
 func joinCandidateMatches(join relationalJoin, row relationRow) (bool, error) {

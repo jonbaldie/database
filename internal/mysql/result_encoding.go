@@ -9,12 +9,14 @@ import (
 	"strings"
 )
 
+type queryRowStream func(func([]string, []bool) error) error
+
 func writeResult(connection net.Conn, sequence byte, result *queryResult, maximum int64) error {
 	writer := newResultWriter(connection, sequence, maximum)
 	if err := writer.writeColumns(result.columns, result.metadata); err != nil {
 		return err
 	}
-	if err := writer.writeTextRows(result.rows, result.nulls); err != nil {
+	if err := writer.writeTextResultRows(result); err != nil {
 		return err
 	}
 	return writer.writeEOF()
@@ -25,10 +27,32 @@ func writeBinaryResult(connection net.Conn, sequence byte, result *queryResult, 
 	if err := writer.writeColumns(result.columns, result.metadata); err != nil {
 		return err
 	}
-	if err := writer.writeBinaryRows(result.rows, result.nulls); err != nil {
+	if err := writer.writeBinaryResultRows(result); err != nil {
 		return err
 	}
 	return writer.writeEOF()
+}
+
+func (w *resultWriter) writeTextResultRows(result *queryResult) error {
+	if result.stream == nil {
+		return w.writeTextRows(result.rows, result.nulls)
+	}
+	return result.stream(func(row []string, nulls []bool) error {
+		return w.write(textRow(row, 0, [][]bool{nulls}))
+	})
+}
+
+func (w *resultWriter) writeBinaryResultRows(result *queryResult) error {
+	if result.stream == nil {
+		return w.writeBinaryRows(result.rows, result.nulls)
+	}
+	return result.stream(func(row []string, nulls []bool) error {
+		payload, err := binaryRow(row, 0, [][]bool{nulls}, w.definitions)
+		if err != nil {
+			return err
+		}
+		return w.write(payload)
+	})
 }
 
 type resultWriter struct {

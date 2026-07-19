@@ -61,7 +61,7 @@ func splitLeadingWord(text string) (string, string, bool) {
 }
 
 func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation.Document, error) {
-	relations := relationExecutor{s.session}
+	relations := relationExecutor{session: s.session}
 	lower := strings.ToLower(inner)
 	switch {
 	case strings.HasPrefix(lower, "select "):

@@ -153,11 +153,19 @@ func consumeDigits(input string, index int) int {
 }
 
 func scanIdentifier(input string, cursor int) (exprToken, int) {
+	index, length := consumeIdentifierPart(input, cursor), len(input)
+	for index+1 < length && input[index] == '.' && isIdentifierStart(input[index+1]) {
+		index = consumeIdentifierPart(input, index+1)
+	}
+	return exprToken{kind: tokenIdent, text: input[cursor:index]}, index
+}
+
+func consumeIdentifierPart(input string, cursor int) int {
 	index, length := cursor+1, len(input)
 	for index < length && isIdentifierPart(input[index]) {
 		index++
 	}
-	return exprToken{kind: tokenIdent, text: input[cursor:index]}, index
+	return index
 }
 
 // scanOperator reads the longest matching operator spelling. A byte that starts

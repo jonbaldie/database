@@ -9,9 +9,11 @@ type relationPredicate func(relationRow) (exprValue, error)
 type relationOperand struct {
 	column     int
 	isColumn   bool
+	computed   bool
 	raw        string
 	value      exprValue
 	definition relationColumn
+	columns    []relationColumn
 }
 
 func compileRelationPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
@@ -247,10 +249,13 @@ func compileRelationOperand(text string, columns []relationColumn, session *sess
 		return relationOperand{raw: text, value: value}, nil
 	}
 	column, err := resolveRelationColumn(text, columns)
-	if err != nil {
-		return relationOperand{}, err
+	if err == nil {
+		return relationOperand{column: column, isColumn: true, raw: text, definition: columns[column]}, nil
 	}
-	return relationOperand{column: column, isColumn: true, raw: text, definition: columns[column]}, nil
+	if _, expressionErr := evaluateRelationExpression(text, columns, sampleRelationRow(columns)); expressionErr != nil {
+		return relationOperand{}, expressionErr
+	}
+	return relationOperand{computed: true, raw: text, columns: columns}, nil
 }
 
 func coerceRelationLiterals(left, right relationOperand, columns []relationColumn, session *session) (relationOperand, relationOperand, error) {
@@ -290,6 +295,9 @@ func typedRelationLiteral(operand relationOperand, column relationColumn, sessio
 }
 
 func relationOperandValue(operand relationOperand, row relationRow) (exprValue, error) {
+	if operand.computed {
+		return evaluateRelationExpression(operand.raw, operand.columns, row)
+	}
 	if !operand.isColumn {
 		return operand.value, nil
 	}
@@ -301,6 +309,45 @@ func relationOperandValue(operand relationOperand, row relationRow) (exprValue, 
 		raw = row.values[operand.definition.coalesce]
 	}
 	return relationStoredValue(operand.definition, raw)
+}
+
+func evaluateRelationExpression(text string, columns []relationColumn, row relationRow) (exprValue, error) {
+	return evaluateScalarWithResolver(text, func(name string) (exprValue, error) {
+		column, err := resolveRelationColumn(name, columns)
+		if err != nil {
+			return exprValue{}, err
+		}
+		return relationColumnValue(columns, column, row)
+	})
+}
+
+func sampleRelationRow(columns []relationColumn) relationRow {
+	values := make([]string, len(columns))
+	for index, column := range columns {
+		values[index] = sampleRelationValue(column)
+	}
+	return relationRow{values: values}
+}
+
+func sampleRelationValue(column relationColumn) string {
+	numeric, numericErr := parseNumericType(column.typeName)
+	if numericErr == nil && numeric.kind != numericNone {
+		return "1"
+	}
+	temporal, temporalErr := parseTemporalType(column.typeName)
+	if temporalErr == nil {
+		switch temporal.kind {
+		case temporalDate:
+			return "2000-01-01"
+		case temporalDatetime, temporalTimestamp:
+			return "2000-01-01 00:00:00"
+		case temporalTime:
+			return "01:00:00"
+		case temporalYear:
+			return "2000"
+		}
+	}
+	return "x"
 }
 
 func relationColumnValue(columns []relationColumn, index int, row relationRow) (exprValue, error) {

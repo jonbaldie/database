@@ -19,9 +19,11 @@ type Select struct {
 
 // Join records one source relation and its SQL join predicate.
 type Join struct {
-	Type      string
-	Table     Table
-	Condition string
+	Type           string
+	Table          Table
+	Condition      string
+	SourceClause   string
+	SourceFragment string
 }
 
 // Order records one ORDER BY expression and direction.
@@ -146,9 +148,16 @@ func joinOperator(join Join, left, right *Operator) *Operator {
 	}
 	predicates := []Predicate{}
 	if join.Condition != "" {
+		clause, fragment := join.SourceClause, join.SourceFragment
+		if clause == "" {
+			clause = "on"
+		}
+		if fragment == "" {
+			fragment = join.Condition
+		}
 		predicates = append(predicates, Predicate{
 			Role: "join", Expression: join.Condition,
-			Sources: []PredicateSource{{Clause: "on", Fragment: join.Condition}},
+			Sources: []PredicateSource{{Clause: clause, Fragment: fragment}},
 		})
 	}
 	rows := left.Estimates.Rows * right.Estimates.Rows

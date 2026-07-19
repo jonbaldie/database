@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"errors"
 	"sort"
 	"strings"
 
@@ -64,6 +65,7 @@ type relationalProjection struct {
 	alias      string
 	column     int
 	scalar     bool
+	computed   bool
 	value      exprValue
 	metadata   columnMetadata
 }
@@ -108,29 +110,123 @@ func executeRelationalSelect(s *relationExecutor, query string) (*queryResult, e
 	if err != nil {
 		return nil, err
 	}
-	rows, err := plan.sourceRows()
+	if s.streamRows {
+		return plan.streamingResult(), nil
+	}
+	resultRows, err := collectRelationalResultRows(plan)
 	if err != nil {
 		return nil, err
 	}
-	resultRows := make([]relationalResultRow, 0, len(rows))
-	for _, row := range rows {
+	return plan.result(plan.shapeRows(resultRows)), nil
+}
+
+func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResultRow, error) {
+	resultRows := make([]relationalResultRow, 0)
+	err := plan.forEachSourceRow(func(row relationRow) error {
 		if plan.where != nil {
 			matched, err := predicateMatches(plan.where, row)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if !matched {
-				continue
+				return nil
 			}
 		}
 		result, err := plan.projectRow(row)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		resultRows = append(resultRows, result)
+		return nil
+	})
+	return resultRows, err
+}
+
+var errStopRelationStream = errors.New("relational row stream complete")
+
+type relationalResultStream struct {
+	plan    *relationalSelectPlan
+	skipped int
+	emitted int
+}
+
+func (p *relationalSelectPlan) streamingResult() *queryResult {
+	columns, metadata := p.resultColumns()
+	stream := &relationalResultStream{plan: p}
+	return &queryResult{columns: columns, metadata: metadata, stream: stream.rows}
+}
+
+func (s *relationalResultStream) rows(yield func([]string, []bool) error) error {
+	if s.plan.distinct || len(s.plan.order) > 0 {
+		rows, err := collectRelationalResultRows(s.plan)
+		if err != nil {
+			return err
+		}
+		return s.yieldRows(s.plan.shapeRows(rows), yield)
 	}
-	resultRows = plan.shapeRows(resultRows)
-	return plan.result(resultRows), nil
+	return s.incrementalRows(yield)
+}
+
+func (s *relationalResultStream) incrementalRows(yield func([]string, []bool) error) error {
+	if s.plan.limit.present && s.plan.limit.count == 0 {
+		return nil
+	}
+	err := s.plan.forEachSourceRow(func(row relationRow) error {
+		return s.yieldSourceRow(row, yield)
+	})
+	if errors.Is(err, errStopRelationStream) {
+		return nil
+	}
+	return err
+}
+
+func (s *relationalResultStream) yieldSourceRow(row relationRow, yield func([]string, []bool) error) error {
+	matched, err := relationalRowMatches(s.plan.where, row)
+	if err != nil || !matched {
+		return err
+	}
+	if s.plan.limit.present && s.skipped < s.plan.limit.offset {
+		s.skipped++
+		return nil
+	}
+	result, err := s.plan.projectRow(row)
+	if err != nil {
+		return err
+	}
+	values, nulls := s.outputRow(result)
+	if err := yield(values, nulls); err != nil {
+		return err
+	}
+	s.emitted++
+	if s.plan.limit.present && s.emitted >= s.plan.limit.count {
+		return errStopRelationStream
+	}
+	return nil
+}
+
+func relationalRowMatches(predicate relationPredicate, row relationRow) (bool, error) {
+	if predicate == nil {
+		return true, nil
+	}
+	return predicateMatches(predicate, row)
+}
+
+func (s *relationalResultStream) yieldRows(rows []relationalResultRow, yield func([]string, []bool) error) error {
+	for _, row := range rows {
+		values, nulls := s.outputRow(row)
+		if err := yield(values, nulls); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *relationalResultStream) outputRow(row relationalResultRow) ([]string, []bool) {
+	values := append([]string(nil), row.values...)
+	nulls := append([]bool(nil), row.nulls...)
+	s.plan.renderTemporalResults([][]string{values}, [][]bool{nulls})
+	displayStoredNulls([][]string{values})
+	return values, nulls
 }
 
 func parseRelationalSelect(s *relationExecutor, query string) (*relationalSelectPlan, error) {
@@ -168,12 +264,37 @@ func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, order, l
 	if err != nil {
 		return err
 	}
+	if err := validateDistinctOrder(plan.distinct, parsedOrder, plan.projection); err != nil {
+		return err
+	}
 	parsedLimit, err := parseRelationalLimit(limit)
 	if err != nil {
 		return err
 	}
 	plan.order, plan.limit = parsedOrder, parsedLimit
 	return nil
+}
+
+func validateDistinctOrder(distinct bool, orders []relationalOrder, projections []relationalProjection) error {
+	if !distinct {
+		return nil
+	}
+	for _, order := range orders {
+		if order.fromProjection || projectedColumn(order.column, projections) {
+			continue
+		}
+		return sqlFailure{3065, "HY000", "ORDER BY expression is not in SELECT list; this is incompatible with DISTINCT"}
+	}
+	return nil
+}
+
+func projectedColumn(column int, projections []relationalProjection) bool {
+	for _, projection := range projections {
+		if !projection.scalar && !projection.computed && projection.column == column {
+			return true
+		}
+	}
+	return false
 }
 
 func selectExpression(query string) (string, error) {
@@ -333,7 +454,7 @@ func (p *relationalSelectPlan) renderTemporalResults(rows [][]string, nulls [][]
 		return
 	}
 	for index, projection := range p.projection {
-		if projection.scalar {
+		if projection.scalar || projection.computed {
 			continue
 		}
 		column := p.source.columns[projection.column]
@@ -370,7 +491,14 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		read.Table = read.Tables[0]
 	}
 	for _, join := range p.source.joins {
-		read.Joins = append(read.Joins, queryexplanation.Join{Type: join.kind, Table: relationInfo(join.right.namespace, join.right.name, join.right.table), Condition: join.condition})
+		clause, fragment := "on", join.condition
+		if len(join.using) > 0 {
+			clause, fragment = "using", "("+strings.Join(join.using, ", ")+")"
+		}
+		read.Joins = append(read.Joins, queryexplanation.Join{
+			Type: join.kind, Table: relationInfo(join.right.namespace, join.right.name, join.right.table), Condition: join.condition,
+			SourceClause: clause, SourceFragment: fragment,
+		})
 	}
 	return queryexplanation.PlanSelect(serverVersion, sql, currentDatabase, read)
 }

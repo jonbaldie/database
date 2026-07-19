@@ -86,11 +86,15 @@ func renderDouble(value float64) string {
 // error means the expression is outside the supported grammar, names an unknown
 // function, violates a strict-conversion rule, or hit a runtime domain error.
 func evaluateScalar(text string) (exprValue, error) {
+	return evaluateScalarWithResolver(text, nil)
+}
+
+func evaluateScalarWithResolver(text string, resolve func(string) (exprValue, error)) (exprValue, error) {
 	tokens, err := tokenizeExpression(text)
 	if err != nil {
 		return exprValue{}, err
 	}
-	parser := &exprParser{tokens: tokens}
+	parser := &exprParser{tokens: tokens, resolveIdentifier: resolve}
 	value, err := parser.parseExpression()
 	if err != nil {
 		return exprValue{}, err
