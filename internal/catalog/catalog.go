@@ -66,6 +66,33 @@ func Open(directory string) (*Store, error) {
 	return s, nil
 }
 
+// Recover removes abandoned catalog snapshots left by an interrupted commit.
+// Callers must hold the data-directory ownership claim before invoking it.
+func Recover(directory string) error {
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	removed := false
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, ".catalog-") || !strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(directory, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		removed = true
+	}
+	if !removed {
+		return nil
+	}
+	return syncCatalogDirectory(filepath.Join(directory, "catalog.json"))
+}
+
 func validateDefinition(definition Definition) error {
 	for namespaceName, namespace := range definition.Namespaces {
 		if namespace.Tables == nil {

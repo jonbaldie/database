@@ -220,22 +220,32 @@ func startServer(t *testing.T, runner blackbox.Runner, directory string) (*black
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var event struct {
-		State     string `json:"state"`
-		Address   string `json:"diagnostics_address"`
-		Recovered bool   `json:"recovered"`
-	}
-	if err := process.NextJSONEvent(ctx, &event); err != nil {
-		process.Crash()
-		result := process.Wait()
-		t.Fatalf("wait for ready event: %v; result=%#v", err, result)
-	}
-	if event.State != "ready" || event.Address != address {
+	event := nextReadyEvent(t, process)
+	if event["diagnostics_address"] != address {
 		t.Fatalf("ready event: %#v", event)
 	}
 	return process, address
+}
+
+func nextReadyEvent(t *testing.T, process *blackbox.Process) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		var event map[string]any
+		if err := process.NextJSONEvent(ctx, &event); err != nil {
+			process.Crash()
+			result := process.Wait()
+			t.Fatalf("wait for ready event: %v; result=%#v", err, result)
+		}
+		if event["state"] == "recovering" {
+			continue
+		}
+		if event["state"] != "ready" {
+			t.Fatalf("ready event: %#v", event)
+		}
+		return event
+	}
 }
 
 func TestMySQLProbeRecognizesClassicHandshake(t *testing.T) {
@@ -295,10 +305,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	var event map[string]any
-	if err := process.NextJSONEvent(context.Background(), &event); err != nil || event["state"] != "ready" {
-		t.Fatalf("ready event: %#v %v", event, err)
-	}
+	nextReadyEvent(t, process)
 
 	client := newWireClient(t, mysql, "admin", "secret-password")
 	defer client.close()
@@ -360,10 +367,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var restarted map[string]any
-	if err := process.NextJSONEvent(context.Background(), &restarted); err != nil || restarted["state"] != "ready" {
-		t.Fatalf("restart: %#v %v", restarted, err)
-	}
+	nextReadyEvent(t, process)
 	reopened := newWireClient(t, mysql, "admin", "secret-password")
 	defer reopened.close()
 	rows = reopened.query("USE app")
@@ -935,10 +939,7 @@ func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	var ready map[string]any
-	if err := process.NextJSONEvent(context.Background(), &ready); err != nil || ready["state"] != "ready" {
-		t.Fatalf("ready: %#v %v", ready, err)
-	}
+	nextReadyEvent(t, process)
 
 	client := newTLSWireClient(t, address, "admin", "secure-password")
 	defer client.close()
@@ -1173,6 +1174,11 @@ func TestMySQLMetadataIsHonestEscapedAndCommittedConsistent(t *testing.T) {
 }
 
 func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string, extraArguments ...string) (*blackbox.Process, string) {
+	process, address, _ := startMySQLServerWithReady(t, runner, directory, extraArguments...)
+	return process, address
+}
+
+func startMySQLServerWithReady(t *testing.T, runner blackbox.Runner, directory string, extraArguments ...string) (*blackbox.Process, string, bool) {
 	t.Helper()
 	diagnostics := freeAddress(t)
 	mysqlAddress := freeAddress(t)
@@ -1183,15 +1189,9 @@ func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string, ex
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var event map[string]any
-	if err := process.NextJSONEvent(ctx, &event); err != nil || event["state"] != "ready" {
-		process.Crash()
-		result := process.Wait()
-		t.Fatalf("wait for ready event: %v; result=%#v", err, result)
-	}
-	return process, mysqlAddress
+	event := nextReadyEvent(t, process)
+	recovered, _ := event["recovered"].(bool)
+	return process, mysqlAddress, recovered
 }
 
 func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.T) {
@@ -1258,6 +1258,63 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 	}
 	if result := runner.Run(context.Background(), "serve", "--data-directory", damaged, "--mysql-listen-address", freeAddress(t), "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stdout, "catalog") {
 		t.Fatalf("damaged directory: %#v", result)
+	}
+}
+
+func TestCrashRecoveryPreservesDurableCommitAndDropsInFlightTransaction(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("crash-recovery-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+
+	process, address, recovered := startMySQLServerWithReady(t, runner, directory)
+	if recovered {
+		t.Fatal("first start reported recovery")
+	}
+	client := newWireClient(t, address, "admin", "crash-recovery-secret")
+	for _, query := range []string{
+		"CREATE DATABASE crash_recovery",
+		"USE crash_recovery",
+		"CREATE TABLE entries (id INT)",
+		"INSERT INTO entries VALUES (1)",
+		"BEGIN",
+		"INSERT INTO entries VALUES (2)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("setup %s: %#v", query, result)
+		}
+	}
+	if err := process.Crash(); err != nil {
+		t.Fatal(err)
+	}
+	crash := process.Wait()
+	if crash.ExitCode == 0 {
+		t.Fatalf("crash unexpectedly exited successfully: %#v", crash)
+	}
+	_ = client.conn.Close()
+
+	process, address, recovered = startMySQLServerWithReady(t, runner, directory)
+	defer func() {
+		_ = process.Stop()
+		_ = process.Wait()
+	}()
+	if !recovered {
+		t.Fatal("restart did not report recovery")
+	}
+	client = newWireClient(t, address, "admin", "crash-recovery-secret")
+	defer client.close()
+	rows := client.query("USE crash_recovery")
+	if rows.err != "" {
+		t.Fatalf("reopen database: %#v", rows)
+	}
+	rows = client.query("SELECT * FROM entries")
+	if rows.err != "" || len(rows.rows) != 1 || rows.rows[0][0] != "1" {
+		t.Fatalf("recovered rows: %#v", rows)
 	}
 }
 

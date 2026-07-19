@@ -61,9 +61,8 @@ type ConnectionLimits struct {
 	MaxPreparedStmtCount int
 }
 
-// Event is emitted once the process has reached a lifecycle state. It is
-// intentionally small: durable database and query state is owned by later
-// feature seams.
+// Event is emitted once the process has reached a lifecycle state. Recovered
+// reports that the previous owner of the data directory did not stop cleanly.
 type Event struct {
 	Schema             string `json:"schema"`
 	State              string `json:"state"`
@@ -91,6 +90,9 @@ type server struct {
 func newServer(opts Options, emit func(Event)) (*server, error) {
 	if err := validateOptions(&opts); err != nil {
 		return nil, err
+	}
+	if opts.StateFile == "" && opts.DataDirectory != "" {
+		opts.StateFile = filepath.Join(opts.DataDirectory, ".database-state")
 	}
 	return &server{options: opts, emit: emit, health: newHealth()}, nil
 }
@@ -125,6 +127,9 @@ func (s *server) serve(ctx context.Context) error {
 	defer func() {
 		state.finish(cleanStop)
 	}()
+	if state.recovered {
+		s.emit(Event{Schema: "database.lifecycle/v1", State: "recovering", Recovered: true})
+	}
 	runtime, err := startRuntime(s.options, s.health)
 	if err != nil {
 		return err
@@ -188,6 +193,9 @@ func openServerData(directory string) (instance.Metadata, *catalog.Store, error)
 	metadata, err := instance.Load(directory)
 	if err != nil {
 		return instance.Metadata{}, nil, fmt.Errorf("load instance metadata: %w", err)
+	}
+	if err := catalog.Recover(directory); err != nil {
+		return instance.Metadata{}, nil, fmt.Errorf("recover catalog: %w", err)
 	}
 	store, err := catalog.Open(directory)
 	if err != nil {
@@ -311,7 +319,7 @@ func markStateRunning(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(path, []byte("running\n"), 0o644); err != nil {
+	if err := writeState(path, []byte("running\n")); err != nil {
 		return false, fmt.Errorf("write state file: %w", err)
 	}
 	return recovered, nil
@@ -329,10 +337,10 @@ func stateWasRunning(path string) (bool, error) {
 }
 
 func (s claimedState) finish(clean bool) {
-	_ = s.release()
 	if clean {
 		_ = releaseState(s.path)
 	}
+	_ = s.release()
 }
 
 func validateInstance(directory string) error {
@@ -368,7 +376,41 @@ func releaseState(path string) error {
 	if path == "" {
 		return nil
 	}
-	return os.WriteFile(path, []byte("stopped\n"), 0o644)
+	return writeState(path, []byte("stopped\n"))
+}
+
+func writeState(path string, contents []byte) error {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".database-state-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o644); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(contents); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return err
+	}
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer directoryFile.Close()
+	return directoryFile.Sync()
 }
 
 type health struct {
