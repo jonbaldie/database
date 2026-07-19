@@ -1773,9 +1773,23 @@ func matchingParenthesis(value string, open int) (int, bool) {
 func keywordAt(value, keyword string) int {
 	lower := strings.ToLower(value)
 	limit := len(lower) - len(keyword)
+	depth := 0
 	for index := 0; index <= limit; index++ {
 		if lower[index] == '\'' {
 			index = skipQuoted(lower, index)
+			continue
+		}
+		switch lower[index] {
+		case '(':
+			depth++
+			continue
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth != 0 {
 			continue
 		}
 		if lower[index:index+len(keyword)] != keyword || !keywordBoundary(lower, index, len(keyword)) {
@@ -1961,9 +1975,8 @@ func sessionTimeZoneOffset(s *session) (int, error) {
 }
 func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
 	expression := strings.TrimSpace(query[len("SELECT "):])
-	lower := strings.ToLower(expression)
-	if from := strings.Index(lower, " from "); from >= 0 {
-		return selectFrom(s, query, expression[:from], expression[from+6:])
+	if from := keywordAt(expression, "from"); from >= 0 {
+		return selectFrom(s, query, expression[:from], expression[from+len("from"):])
 	}
 	return selectLiteral(expression)
 }

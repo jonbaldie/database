@@ -231,3 +231,23 @@ func TestEvaluateRejectsMalformedExpressions(t *testing.T) {
 		evalError(t, expression)
 	}
 }
+
+func TestEvaluateExtendedFunctionSemantics(t *testing.T) {
+	cases := map[string]string{
+		"ROUND(2.5e0)":                      "2",
+		"ROUND(-2.5e0)":                     "-2",
+		"ROUND(25e0, -1)":                   "20",
+		"SUBSTRING('abcdef' FROM 2 FOR 3)":  "bcd",
+		"SUBSTRING('abcdef' FROM -2 FOR 1)": "e",
+		"SUBSTRING('abcdef' FROM 3)":        "cdef",
+		"LOCATE('B', 'abc')":                "2",
+	}
+	for expression, want := range cases {
+		if got := evalRender(t, expression); got != want {
+			t.Errorf("evaluateScalar(%q) = %q, want %q", expression, got, want)
+		}
+	}
+	for _, expression := range []string{"POW(2, 3)", "SUBSTR('abc', 1)"} {
+		evalError(t, expression)
+	}
+}

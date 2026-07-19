@@ -48,6 +48,61 @@ func TestSelectExpressionThroughSQL(t *testing.T) {
 	}
 }
 
+func TestSelectExtendedExpressionRegistryThroughSQL(t *testing.T) {
+	executor := expressionExecutor(t)
+	cases := map[string]string{
+		"SELECT ROUND(1.235, 2)":                  "1.24",
+		"SELECT ROUND(-1.235, 2)":                 "-1.24",
+		"SELECT ROUND(15, -1)":                    "20",
+		"SELECT ROUND(1.5e0)":                     "2",
+		"SELECT ROUND(2.5e0)":                     "2",
+		"SELECT POWER(2, 3)":                      "8",
+		"SELECT SQRT(9)":                          "3",
+		"SELECT SUBSTRING('abcdef', 2, 3)":        "bcd",
+		"SELECT SUBSTRING('abcdef', -2, 1)":       "e",
+		"SELECT SUBSTRING('abcdef', 3)":           "cdef",
+		"SELECT SUBSTRING('abcdef' FROM 2 FOR 3)": "bcd",
+		"SELECT REPLACE('a-b-a', '-', '_')":       "a_b_a",
+		"SELECT REPLACE('abc', '', 'x')":          "abc",
+		"SELECT LOCATE('bc', 'abcd')":             "2",
+		"SELECT LOCATE('z', 'abcd')":              "0",
+		"SELECT LOCATE('é', 'aé')":                "2",
+		"SELECT LOCATE('B', 'abc')":               "2",
+	}
+	for query, want := range cases {
+		result, err := executor.execute(query)
+		if err != nil {
+			t.Fatalf("execute(%q) error: %v", query, err)
+		}
+		if len(result.rows) != 1 || result.rows[0][0] != want {
+			t.Errorf("execute(%q) = %#v, want single row %q", query, result.rows, want)
+		}
+	}
+	nullResult, err := executor.execute("SELECT POWER(NULL, 2)")
+	if err != nil {
+		t.Fatalf("execute NULL expression: %v", err)
+	}
+	if len(nullResult.nulls) != 1 || len(nullResult.nulls[0]) != 1 || !nullResult.nulls[0][0] {
+		t.Fatalf("NULL function result not reported as NULL: %#v", nullResult.nulls)
+	}
+}
+
+func TestSelectExtendedExpressionRegistryFailsClosedThroughSQL(t *testing.T) {
+	executor := expressionExecutor(t)
+	for _, query := range []string{
+		"SELECT ROUND(1, 1, 1)",
+		"SELECT POWER(-1, 0.5)",
+		"SELECT SQRT(-1)",
+		"SELECT SUBSTRING('abc', '1')",
+		"SELECT REPLACE('abc', 1, 'x')",
+		"SELECT LOCATE('a', 'abc', '1')",
+	} {
+		if _, err := executor.execute(query); err == nil {
+			t.Errorf("execute(%q) expected an error", query)
+		}
+	}
+}
+
 func TestSelectExpressionFailsClosedThroughSQL(t *testing.T) {
 	executor := expressionExecutor(t)
 	for _, query := range []string{

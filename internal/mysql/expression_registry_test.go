@@ -81,6 +81,11 @@ func TestFunctionSignaturesAreDiscoverableAndStable(t *testing.T) {
 	if concat := byName["CONCAT"]; concat.minArgs != 1 || concat.maxArgs != variadicArity {
 		t.Errorf("CONCAT signature = %+v, want 1..variadic", concat)
 	}
+	for _, name := range []string{"LOCATE", "POWER", "REPLACE", "ROUND", "SQRT", "SUBSTRING"} {
+		if _, ok := byName[name]; !ok {
+			t.Errorf("function registry missing %s", name)
+		}
+	}
 }
 
 func TestScalarColumnMetadataMatchesDomain(t *testing.T) {
@@ -118,6 +123,19 @@ func TestScalarColumnDecimalReportsScale(t *testing.T) {
 	}
 	if metadata.decimals != 3 {
 		t.Errorf("scalarColumn(1.250) decimals = %d, want 3", metadata.decimals)
+	}
+}
+
+func TestRoundIntegerPreservesMetadataDomain(t *testing.T) {
+	_, _, metadata, err := scalarColumn("ROUND(15, -1)")
+	if err != nil {
+		t.Fatalf("scalarColumn(ROUND(15, -1)) error: %v", err)
+	}
+	if metadata.typ != mysqlTypeLongLong {
+		t.Errorf("ROUND(15, -1) type = %#x, want integer type %#x", metadata.typ, mysqlTypeLongLong)
+	}
+	if metadata.flags&mysqlUnsignedFlag != 0 || metadata.decimals != 0 {
+		t.Errorf("ROUND(15, -1) metadata = %#v, want signed integer with zero decimals", metadata)
 	}
 }
 

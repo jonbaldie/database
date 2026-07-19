@@ -79,11 +79,11 @@ func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation
 
 func (s *textStatementExecutor) explainSelect(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
 	expression := strings.TrimSpace(inner[len("select "):])
-	from := strings.Index(strings.ToLower(expression), " from ")
+	from := keywordAt(expression, "from")
 	if from < 0 {
 		return s.explainScalarSelect(inner, expression)
 	}
-	read, err := s.explainSelectSource(relations, strings.TrimSpace(expression[:from]), strings.TrimSpace(expression[from+6:]))
+	read, err := s.explainSelectSource(relations, strings.TrimSpace(expression[:from]), strings.TrimSpace(expression[from+len("from"):]))
 	if err != nil {
 		return nil, err
 	}
