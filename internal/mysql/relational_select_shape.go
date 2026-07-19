@@ -58,7 +58,10 @@ func parseProjectionItem(item string, columns []relationColumn) ([]relationalPro
 
 func wildcardProjections(expression string, columns []relationColumn) ([]relationalProjection, error) {
 	trimmed := strings.TrimSpace(expression)
-	qualifier := strings.TrimSpace(trimmed[:len(trimmed)-2])
+	qualifier, valid := singleIdentifier(strings.TrimSpace(trimmed[:len(trimmed)-2]))
+	if !valid {
+		return nil, sqlFailure{1146, "42S02", "unknown table '" + expression + "'"}
+	}
 	projections := make([]relationalProjection, 0)
 	for index, column := range columns {
 		if identifiersEqual(column.qualifier, qualifier) {
@@ -222,13 +225,7 @@ func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relat
 }
 
 func relationExpressionMetadata(expression string, columns []relationColumn) (columnMetadata, error) {
-	value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
-		index, err := resolveRelationColumn(name, columns)
-		if err != nil {
-			return exprValue{}, err
-		}
-		return relationMetadataValue(columns[index]), nil
-	})
+	value, err := representativeExpressionValue(expression, columns)
 	if err != nil {
 		return columnMetadata{}, err
 	}
@@ -242,12 +239,32 @@ func relationExpressionMetadata(expression string, columns []relationColumn) (co
 	case valueDouble:
 		metadata.length = 22
 	case valueString:
-		metadata.length = relationStringExpressionLength(columns)
+		metadata.length = relationStringExpressionLength(expression, columns, value.render())
 	}
 	return metadata, nil
 }
 
-func relationMetadataValue(column relationColumn) exprValue {
+func representativeExpressionValue(expression string, columns []relationColumn) (exprValue, error) {
+	var firstError error
+	for _, sample := range []int64{1, 2, 10, 1000, 0, -1} {
+		value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
+			index, err := resolveRelationColumn(name, columns)
+			if err != nil {
+				return exprValue{}, err
+			}
+			return relationMetadataValue(columns[index], sample), nil
+		})
+		if err == nil {
+			return value, nil
+		}
+		if firstError == nil {
+			firstError = err
+		}
+	}
+	return exprValue{}, firstError
+}
+
+func relationMetadataValue(column relationColumn, sample int64) exprValue {
 	typ, err := parseNumericType(column.typeName)
 	if err != nil {
 		return stringValue("x")
@@ -255,29 +272,41 @@ func relationMetadataValue(column relationColumn) exprValue {
 	switch typ.kind {
 	case numericInteger:
 		if typ.unsigned {
-			return uintValue(1)
+			if sample < 0 {
+				sample = -sample
+			}
+			return uintValue(uint64(sample))
 		}
-		return intValue(1)
+		return intValue(sample)
 	case numericDecimal:
-		value, _ := parseDecimalText("1" + strings.Repeat("0", typ.scale))
+		value, _ := parseDecimalText(strconv.FormatInt(sample, 10) + strings.Repeat("0", typ.scale))
 		value.scale = typ.scale
 		return decimalValueOf(value)
 	case numericFloat:
-		return doubleValue(1)
+		return doubleValue(float64(sample))
 	case numericBoolean, numericBit:
-		return intValue(1)
+		return intValue(sample)
 	default:
 		return stringValue("x")
 	}
 }
 
-func relationStringExpressionLength(columns []relationColumn) uint32 {
+func relationStringExpressionLength(expression string, columns []relationColumn, rendered string) uint32 {
 	var length uint64
-	for _, column := range columns {
-		length += uint64(column.metadata.length)
+	seen := make(map[int]bool)
+	tokens, _ := tokenizeExpression(expression)
+	for _, token := range tokens {
+		if token.kind != tokenIdent {
+			continue
+		}
+		index, err := resolveRelationColumn(token.text, columns)
+		if err == nil && !seen[index] {
+			length += uint64(columns[index].metadata.length)
+			seen[index] = true
+		}
 	}
 	if length == 0 {
-		return 4
+		return uint32(len([]rune(rendered)) * 4)
 	}
 	if length > uint64(^uint32(0)) {
 		return ^uint32(0)
@@ -345,8 +374,8 @@ func projectionIndex(projections []relationalProjection, expression string) (int
 		if strings.EqualFold(strings.TrimSpace(projection.expression), strings.TrimSpace(expression)) {
 			return index, true
 		}
-		if _, identifier := singleIdentifier(expression); identifier &&
-			(identifiersEqual(projection.alias, expression) || identifiersEqual(projection.name, expression)) {
+		if name, identifier := singleIdentifier(expression); identifier &&
+			(identifiersEqual(projection.alias, name) || identifiersEqual(projection.name, name)) {
 			return index, true
 		}
 	}

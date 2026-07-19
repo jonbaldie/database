@@ -82,6 +82,19 @@ func TestRelationalSelectUsesCanonicalCaselessIdentifiers(t *testing.T) {
 		t.Fatalf("wildcard rows = %#v", result.rows)
 	}
 
+	result, err = executor.execute("SELECT `café`.`café` + 1 AS `résumé` FROM unicode_rows AS `café` ORDER BY `résumé`")
+	if err != nil {
+		t.Fatalf("quoted computed identifier query: %v", err)
+	}
+	if !reflect.DeepEqual(result.rows, [][]string{{"8"}}) {
+		t.Fatalf("quoted computed rows = %#v", result.rows)
+	}
+
+	result, err = executor.execute("SELECT `café`.* FROM unicode_rows AS `café`")
+	if err != nil || !reflect.DeepEqual(result.rows, [][]string{{"7"}}) {
+		t.Fatalf("quoted wildcard rows = %#v, err = %v", result.rows, err)
+	}
+
 	_, err = executor.execute("SELECT * FROM authors AS café JOIN posts AS café ON 1 = 1")
 	if !isFailureCode(err, 1066) {
 		t.Fatalf("canonical duplicate alias error = %v", err)
@@ -201,10 +214,49 @@ func TestRelationalSelectComputedMetadataIsStableAndNullable(t *testing.T) {
 	}
 }
 
+func TestRelationalSelectComputedMetadataIgnoresSyntheticDomains(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	result, err := executor.execute("SELECT SQRT(p.score - 2) AS rooted FROM posts p WHERE p.score >= 5")
+	if err != nil {
+		t.Fatalf("domain-independent metadata: %v", err)
+	}
+	if result.metadata[0].typ != mysqlTypeDouble {
+		t.Fatalf("SQRT metadata = %#v", result.metadata[0])
+	}
+
+	result, err = executor.execute("SELECT UPPER(a.name) AS upper_name FROM authors a JOIN posts p ON a.id = p.author_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.metadata[0].length != 128 {
+		t.Fatalf("UPPER metadata length = %d, want referenced VARCHAR length 128", result.metadata[0].length)
+	}
+}
+
+func TestRelationalSelectPreparedMetadataSupportsMixedParameterDomains(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	preparation := &preparedPreparation{executor.session}
+	metadata, err := preparation.preparedColumns("SELECT CONCAT(p.title, ?), p.score + ? FROM posts p")
+	if err != nil || len(metadata) != 2 {
+		t.Fatalf("mixed prepared metadata = %#v, err = %v", metadata, err)
+	}
+	if metadata[0].typ != mysqlTypeVarString || metadata[1].typ != mysqlTypeLongLong {
+		t.Fatalf("mixed prepared metadata = %#v", metadata)
+	}
+}
+
 func TestRelationalSelectAliasHidesOriginalTableName(t *testing.T) {
 	executor := relationalSelectExecutor(t)
 	if _, err := executor.execute("SELECT authors.name FROM authors AS a"); !isFailureCode(err, 1054) {
 		t.Fatalf("hidden original table name error = %v", err)
+	}
+}
+
+func TestRelationalSelectJoinOnCannotReferenceLaterTable(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	query := "SELECT a.name FROM authors a JOIN posts p ON l.id = a.id JOIN author_labels l ON l.id = a.id"
+	if _, err := executor.execute(query); !isFailureCode(err, 1054) {
+		t.Fatalf("later-table ON reference error = %v", err)
 	}
 }
 

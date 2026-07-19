@@ -28,6 +28,7 @@ func parseRelationalSource(s *relationExecutor, text string) (relationalSource, 
 		if err := source.appendTable(right, join.using); err != nil {
 			return relationalSource{}, err
 		}
+		join.columns = append([]relationColumn(nil), source.columns...)
 		source.joins = append(source.joins, join)
 		remainder = next
 	}

@@ -44,6 +44,7 @@ type relationalJoin struct {
 	condition string
 	using     []string
 	predicate relationPredicate
+	columns   []relationColumn
 }
 
 type relationColumn struct {
@@ -340,7 +341,7 @@ func (p *relationalSelectPlan) compilePredicates() error {
 		if p.source.joins[index].condition == "" {
 			continue
 		}
-		predicate, err := compileRelationPredicate(p.source.joins[index].condition, p.source.columns, p.session)
+		predicate, err := compileRelationPredicate(p.source.joins[index].condition, p.source.joins[index].columns, p.session)
 		if err != nil {
 			return err
 		}

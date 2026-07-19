@@ -2699,10 +2699,10 @@ func (s *preparedPreparation) parameterizedColumns(query, validated string, para
 	}
 	metadata, err := s.queryColumns(validated, true)
 	if err == nil && !hasNullMetadata(metadata) {
-		return metadata, nil
+		return restorePreparedColumnNames(query, metadata), nil
 	}
 	if candidate, ok := s.representativeParameterizedColumns(query, parameters); ok {
-		return candidate, nil
+		return restorePreparedColumnNames(query, candidate), nil
 	}
 	if err == nil {
 		return metadata, nil
@@ -2711,11 +2711,7 @@ func (s *preparedPreparation) parameterizedColumns(query, validated string, para
 }
 
 func (s *preparedPreparation) representativeParameterizedColumns(query string, parameters int) ([]columnMetadata, bool) {
-	for _, replacement := range []string{"0", quote(""), "0.0"} {
-		values := make([]string, parameters)
-		for index := range values {
-			values[index] = replacement
-		}
+	for _, values := range representativeParameterValues(parameters) {
 		candidate, bindErr := bindPreparedQuery(query, values)
 		if bindErr != nil {
 			continue
@@ -2726,6 +2722,60 @@ func (s *preparedPreparation) representativeParameterizedColumns(query string, p
 		}
 	}
 	return nil, false
+}
+
+func representativeParameterValues(parameters int) [][]string {
+	replacements := []string{"0", quote(""), "0.0"}
+	if parameters > 4 {
+		values := make([][]string, 0, len(replacements))
+		for _, replacement := range replacements {
+			values = append(values, repeatedParameterValue(parameters, replacement))
+		}
+		return values
+	}
+	values := make([][]string, 0)
+	appendParameterCombinations(&values, make([]string, parameters), replacements, 0)
+	return values
+}
+
+func appendParameterCombinations(result *[][]string, current, replacements []string, index int) {
+	if index == len(current) {
+		*result = append(*result, append([]string(nil), current...))
+		return
+	}
+	for _, replacement := range replacements {
+		current[index] = replacement
+		appendParameterCombinations(result, current, replacements, index+1)
+	}
+}
+
+func repeatedParameterValue(parameters int, replacement string) []string {
+	values := make([]string, parameters)
+	for index := range values {
+		values[index] = replacement
+	}
+	return values
+}
+
+func restorePreparedColumnNames(query string, metadata []columnMetadata) []columnMetadata {
+	expression := strings.TrimSpace(query[len("select "):])
+	if from := keywordAt(expression, "from"); from >= 0 {
+		expression = strings.TrimSpace(expression[:from])
+	}
+	_, expression = parseDistinctProjection(expression)
+	items := splitCSV(expression)
+	if len(items) != len(metadata) {
+		return metadata
+	}
+	for index, item := range items {
+		expression, alias, err := splitProjectionAlias(item)
+		if err == nil && alias != "" {
+			metadata[index].name = alias
+		} else {
+			metadata[index].name = strings.TrimSpace(expression)
+		}
+	}
+	return metadata
 }
 
 func hasNullMetadata(metadata []columnMetadata) bool {

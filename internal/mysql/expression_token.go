@@ -67,9 +67,8 @@ func scanToken(input string, cursor int) (exprToken, int, error) {
 		return scanString(input, cursor)
 	case startsNumber(input, cursor):
 		return scanNumber(input, cursor)
-	case isIdentifierStart(input, cursor):
-		token, next := scanIdentifier(input, cursor)
-		return token, next, nil
+	case character == '`' || isIdentifierStart(input, cursor):
+		return scanIdentifier(input, cursor)
 	default:
 		return scanPunctuationOrOperator(input, cursor, character)
 	}
@@ -156,12 +155,44 @@ func consumeDigits(input string, index int) int {
 	return index
 }
 
-func scanIdentifier(input string, cursor int) (exprToken, int) {
-	index, length := consumeIdentifierPart(input, cursor), len(input)
-	for index+1 < length && input[index] == '.' && isIdentifierStart(input, index+1) {
-		index = consumeIdentifierPart(input, index+1)
+func scanIdentifier(input string, cursor int) (exprToken, int, error) {
+	index, ok := consumeExpressionIdentifierPart(input, cursor)
+	if !ok {
+		return exprToken{}, 0, unsupportedExpression()
 	}
-	return exprToken{kind: tokenIdent, text: input[cursor:index]}, index
+	length := len(input)
+	for index+1 < length && input[index] == '.' {
+		next, valid := consumeExpressionIdentifierPart(input, index+1)
+		if !valid {
+			break
+		}
+		index = next
+	}
+	return exprToken{kind: tokenIdent, text: input[cursor:index]}, index, nil
+}
+
+func consumeExpressionIdentifierPart(input string, cursor int) (int, bool) {
+	if cursor >= len(input) {
+		return 0, false
+	}
+	if input[cursor] != '`' {
+		if !isIdentifierStart(input, cursor) {
+			return 0, false
+		}
+		return consumeIdentifierPart(input, cursor), true
+	}
+	length := len(input)
+	for index := cursor + 1; index < length; index++ {
+		if input[index] != '`' {
+			continue
+		}
+		if index+1 < length && input[index+1] == '`' {
+			index++
+			continue
+		}
+		return index + 1, index > cursor+1
+	}
+	return 0, false
 }
 
 func consumeIdentifierPart(input string, cursor int) int {
