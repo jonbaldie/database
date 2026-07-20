@@ -76,6 +76,7 @@ const (
 	maxPreparedLongDataBytes        = 16 * 1024 * 1024
 	preparedTypesUnchanged   byte   = 0
 	preparedTypesSupplied    byte   = 1
+	storedSQLNullValue              = "\x00database-sql-null"
 )
 
 type Config struct {
@@ -322,16 +323,55 @@ func (r *connectionRegistry) closeGracefully(listener net.Listener) error {
 }
 
 type session struct {
-	server              *Server
-	username            string
-	database            string
-	initialDB           string
-	statements          map[uint32]*preparedStatement
-	nextStmtID          uint32
-	longDataBytes       int
-	transaction         bool
-	transactionSnapshot catalog.Definition
-	savepoints          map[string]catalog.Definition
+	server          *Server
+	username        string
+	database        string
+	initialDB       string
+	timeZone        string
+	initialTimeZone string
+	statements      map[uint32]*preparedStatement
+	nextStmtID      uint32
+	longDataBytes   int
+	transactionState
+}
+
+type transactionState struct {
+	transactionSettings
+	transactionWork
+	savepointState
+	statementState
+}
+
+type transactionSettings struct {
+	autocommitOff bool
+	isolation     isolationLevel
+	readOnly      bool
+	nextIsolation isolationLevel
+	nextReadOnly  bool
+}
+
+type transactionWork struct {
+	transaction          bool
+	transactionSnapshot  catalog.Definition
+	transactionRevision  uint64
+	transactionStateSet  bool
+	transactionReadSet   bool
+	transactionDirty     bool
+	transactionIsolation isolationLevel
+	transactionReadOnly  bool
+	transactionMutations []func(*catalog.Definition) error
+}
+
+type savepointState struct {
+	savepoints         map[string]catalog.Definition
+	savepointDirty     map[string]bool
+	savepointMutations map[string]int
+	savepointRead      map[string]bool
+}
+
+type statementState struct {
+	statementDefinition    catalog.Definition
+	statementDefinitionSet bool
 }
 
 type preparedStatement struct {
@@ -351,7 +391,10 @@ type preparedParameterType struct {
 // language implementation.
 type queryExecutor struct{ statements textStatementExecutor }
 
-type textStatementExecutor struct{ *session }
+type textStatementExecutor struct {
+	*session
+	streamRows bool
+}
 
 type transactionExecutor struct{ *session }
 
@@ -359,12 +402,15 @@ type catalogExecutor struct{ *session }
 
 type databaseSelector struct{ *session }
 
-type relationExecutor struct{ *session }
+type relationExecutor struct {
+	*session
+	streamRows bool
+}
 
 type informationSchemaExecutor struct{ *session }
 
 func newQueryExecutor(session *session) *queryExecutor {
-	return &queryExecutor{statements: textStatementExecutor{session}}
+	return &queryExecutor{statements: textStatementExecutor{session: session}}
 }
 
 type preparedPreparation struct{ *session }
@@ -509,6 +555,7 @@ type queryResult struct {
 	rows     [][]string
 	metadata []columnMetadata
 	affected uint64
+	stream   queryRowStream
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
@@ -568,7 +615,7 @@ var informationSchemaViews = []informationSchemaView{
 }
 
 func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
-	result, err := s.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := s.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
@@ -585,6 +632,12 @@ func (s *queryExecutor) execute(query string) (*queryResult, error) {
 	return s.statements.execute(query)
 }
 
+func (s *queryExecutor) executeProtocol(query string) (*queryResult, error) {
+	executor := s.statements
+	executor.streamRows = true
+	return executor.execute(query)
+}
+
 func (s *queryExecutor) useDatabase(name string) { s.statements.useDatabase(name) }
 
 func (s *queryExecutor) databaseExists(name string) error {
@@ -593,17 +646,12 @@ func (s *queryExecutor) databaseExists(name string) error {
 }
 
 func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	lower := strings.ToLower(query)
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
 	}
-	for _, handler := range s.statementHandlers() {
-		result, handled, err := handler(query, lower)
-		if handled {
-			return result, err
-		}
-	}
-	return nil, sqlFailure{1064, "42000", "unsupported query: " + query}
+	return s.executeWithTransaction(query, lower)
 }
 
 type statementHandler func(query, lower string) (*queryResult, bool, error)
@@ -613,23 +661,62 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 		s.transactionStatement,
 		s.settingStatement,
 		s.builtinStatement,
+		s.ddlStatement,
 		s.catalogStatement,
 		s.relationStatement,
 		s.operationStatement,
 	}
 }
 
-func (s *textStatementExecutor) settingStatement(_ string, lower string) (*queryResult, bool, error) {
-	return nil, strings.HasPrefix(lower, "set ") || strings.HasPrefix(lower, "reset "), nil
+func (s *textStatementExecutor) setTimeZone(query string) (bool, error) {
+	assignment := strings.TrimSpace(query[len("SET "):])
+	lhs, value, found := strings.Cut(assignment, "=")
+	if !found {
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(lhs)) {
+	case "time_zone", "session.time_zone", "session time_zone", "@@time_zone", "@@session.time_zone", "@@session time_zone":
+	default:
+		return false, nil
+	}
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "default") {
+		s.timeZone = s.initialTimeZone
+		return true, nil
+	}
+	offset, err := parseFixedOffset(scalar(value))
+	if err != nil {
+		return true, err
+	}
+	s.timeZone = formatFixedOffset(offset)
+	return true, nil
 }
 
 func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
-	if column, kind, ok := currentTimeQuery(lower); ok {
-		value, err := s.renderCurrentTime(kind)
+	if column, kind, precision, ok := currentTimeQuery(lower); ok {
+		value, err := s.renderCurrentTime(kind, precision)
 		if err != nil {
 			return nil, true, err
 		}
-		return &queryResult{columns: []string{column}, rows: [][]string{{value}}}, true, nil
+		return &queryResult{
+			columns:  []string{column},
+			rows:     [][]string{{value}},
+			metadata: []columnMetadata{temporalResultMetadata(column, kind, precision)},
+		}, true, nil
+	}
+	if lower == "select @@time_zone" || lower == "select @@session.time_zone" || lower == "select @@session time_zone" {
+		offset, err := sessionTimeZoneOffset(s.session)
+		if err != nil {
+			return nil, true, err
+		}
+		return &queryResult{
+			columns: []string{"@@time_zone"},
+			rows:    [][]string{{formatFixedOffset(offset)}},
+			metadata: []columnMetadata{{
+				catalog: "def", name: "@@time_zone", characterSet: mysqlCharsetUTF8MB40900AICI,
+				typ: mysqlTypeVarString, length: 6,
+			}},
+		}, true, nil
 	}
 	result, found := map[string]*queryResult{
 		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
@@ -640,18 +727,42 @@ func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*query
 }
 
 // currentTimeQuery maps a recognized current-time SELECT to its result column
-// label and the temporal kind that shapes its value.
-func currentTimeQuery(lower string) (string, temporalKind, bool) {
-	switch lower {
-	case "select current_date", "select current_date()", "select curdate()":
-		return "CURRENT_DATE", temporalDate, true
-	case "select current_time", "select current_time()", "select curtime()":
-		return "CURRENT_TIME", temporalTime, true
-	case "select current_timestamp", "select current_timestamp()", "select now()":
-		return "CURRENT_TIMESTAMP", temporalTimestamp, true
-	default:
-		return "", temporalNone, false
+// label, the temporal kind that shapes its value, and its fractional precision.
+func currentTimeQuery(lower string) (string, temporalKind, int, bool) {
+	lower = strings.TrimSpace(lower)
+	for _, candidate := range []struct {
+		functions []string
+		label     string
+		kind      temporalKind
+		fraction  bool
+	}{
+		{functions: []string{"current_date", "curdate"}, label: "CURRENT_DATE", kind: temporalDate},
+		{functions: []string{"current_time", "curtime"}, label: "CURRENT_TIME", kind: temporalTime, fraction: true},
+		{functions: []string{"current_timestamp", "now"}, label: "CURRENT_TIMESTAMP", kind: temporalDatetime, fraction: true},
+	} {
+		for _, function := range candidate.functions {
+			if precision, ok := currentTimeCallPrecision(lower, function, candidate.fraction); ok {
+				return candidate.label, candidate.kind, precision, true
+			}
+		}
 	}
+	return "", temporalNone, 0, false
+}
+
+func currentTimeCallPrecision(query, function string, allowFraction bool) (int, bool) {
+	prefix := "select " + function
+	if query == prefix || query == prefix+"()" {
+		return 0, true
+	}
+	if !allowFraction || !strings.HasPrefix(query, prefix+"(") || !strings.HasSuffix(query, ")") {
+		return 0, false
+	}
+	argument := strings.TrimSpace(query[len(prefix)+1 : len(query)-1])
+	precision, err := strconv.Atoi(argument)
+	if err != nil || precision < 0 || precision > 6 {
+		return 0, false
+	}
+	return precision, true
 }
 
 // renderCurrentTime evaluates a current-time function against the configured
@@ -659,17 +770,14 @@ func currentTimeQuery(lower string) (string, temporalKind, bool) {
 // current instant rendered through the offset; a DATE or TIME is the session-
 // local wall clock. Both read one captured instant, so references within a
 // statement observe the same value.
-func (s *textStatementExecutor) renderCurrentTime(kind temporalKind) (string, error) {
-	offset, err := parseFixedOffset(s.server.config.TimeZone)
+func (s *textStatementExecutor) renderCurrentTime(kind temporalKind, precision int) (string, error) {
+	offset, err := sessionTimeZoneOffset(s.session)
 	if err != nil {
 		return "", err
 	}
 	instant := s.server.config.Clock().UTC()
-	if kind == temporalTimestamp {
-		return renderTimestampFixedOffset(instant.Format("2006-01-02 15:04:05"), offset, 0)
-	}
 	local := instant.Add(time.Duration(offset) * time.Minute)
-	return currentTemporal(local, kind, 0), nil
+	return currentTemporal(local, kind, precision), nil
 }
 
 func (s *textStatementExecutor) operationStatement(query, lower string) (*queryResult, bool, error) {
@@ -684,80 +792,11 @@ func (s *textStatementExecutor) operationStatement(query, lower string) (*queryR
 }
 
 func (s *textStatementExecutor) transactionStatement(query, lower string) (*queryResult, bool, error) {
-	transactions := transactionExecutor{s.session}
-	switch {
-	case lower == "begin" || lower == "start transaction":
-		return nil, true, transactions.begin()
-	case lower == "commit":
-		return nil, true, transactions.commit()
-	case strings.HasPrefix(lower, "savepoint "):
-		return nil, true, transactions.save(query[len("SAVEPOINT "):])
-	case strings.HasPrefix(lower, "rollback to savepoint "):
-		return nil, true, transactions.rollbackTo(query[len("ROLLBACK TO SAVEPOINT "):])
-	case strings.HasPrefix(lower, "release savepoint "):
-		return nil, true, transactions.release(query[len("RELEASE SAVEPOINT "):])
-	case lower == "rollback":
-		return nil, true, transactions.rollback()
-	default:
+	handler, handled := findTransactionHandler(lower)
+	if !handled {
 		return nil, false, nil
 	}
-}
-
-func (s *transactionExecutor) begin() error {
-	if s.server.config.Catalog != nil {
-		s.transactionSnapshot = s.server.config.Catalog.Snapshot()
-		s.transaction = true
-	}
-	return nil
-}
-
-func (s *transactionExecutor) commit() error {
-	s.transaction = false
-	s.transactionSnapshot = catalog.Definition{}
-	return nil
-}
-
-func (s *transactionExecutor) save(value string) error {
-	if s.server.config.Catalog == nil {
-		return sqlFailure{1105, "HY000", "database is not initialized"}
-	}
-	name := identifier(strings.TrimSpace(value))
-	s.savepoints[catalog.Key(name)] = s.server.config.Catalog.Snapshot()
-	return nil
-}
-
-func (s *transactionExecutor) rollbackTo(value string) error {
-	if s.server.config.Catalog == nil {
-		return sqlFailure{1105, "HY000", "database is not initialized"}
-	}
-	name := identifier(strings.TrimSpace(value))
-	snapshot, found := s.savepoints[catalog.Key(name)]
-	if !found {
-		return sqlFailure{1305, "42000", "savepoint does not exist"}
-	}
-	if err := s.server.config.Catalog.Replace(snapshot); err != nil {
-		return sqlFailure{1105, "HY000", err.Error()}
-	}
-	return nil
-}
-
-func (s *transactionExecutor) release(value string) error {
-	name := identifier(strings.TrimSpace(value))
-	key := catalog.Key(name)
-	if _, found := s.savepoints[key]; !found {
-		return sqlFailure{1305, "42000", "savepoint does not exist"}
-	}
-	delete(s.savepoints, key)
-	return nil
-}
-
-func (s *transactionExecutor) rollback() error {
-	if s.transaction && s.server.config.Catalog != nil {
-		if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
-			return sqlFailure{1105, "HY000", err.Error()}
-		}
-	}
-	return s.commit()
+	return nil, true, handler(s.session, query)
 }
 
 func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryResult, bool, error) {
@@ -838,7 +877,7 @@ func namespaceTables(name string, namespace catalog.Namespace) *queryResult {
 }
 
 func (s *textStatementExecutor) relationStatement(query, lower string) (*queryResult, bool, error) {
-	relations := relationExecutor{s.session}
+	relations := relationExecutor{session: s.session, streamRows: s.streamRows}
 	switch {
 	case strings.HasPrefix(lower, "create table "):
 		return nil, true, createTable(&relations, query)
@@ -874,24 +913,20 @@ func (s *databaseSelector) use(name string) error {
 }
 
 func (s *databaseSelector) databaseExists(name string) error {
-	return s.server.auth.databaseExists(identifier(name))
+	return s.session.databaseExists(identifier(name))
 }
 
 func (s *catalogExecutor) metadataDefinition() catalog.Definition {
-	if s.transaction {
-		return s.transactionSnapshot
-	}
 	if s.server.config.Catalog == nil {
-		return catalog.Definition{Namespaces: map[string]catalog.Namespace{}}
+		return emptyDefinition()
 	}
+	// Catalog metadata is statement-scoped even when ordinary data reads use
+	// a repeatable-read transaction snapshot.
 	return s.server.config.Catalog.Snapshot()
 }
 
 func snapshotNamespace(s *relationExecutor, name string) (catalog.Namespace, bool) {
-	if s.server.config.Catalog == nil {
-		return catalog.Namespace{}, false
-	}
-	ns, ok := s.server.config.Catalog.Snapshot().Namespaces[catalog.Key(name)]
+	ns, ok := s.session.currentDefinition().Namespaces[catalog.Key(name)]
 	return ns, ok
 }
 func (s *catalogExecutor) createDatabase(query string) error {
@@ -900,7 +935,13 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	if strings.HasPrefix(lower, "create schema ") {
 		keyword = "schema "
 	}
-	name, ok := singleIdentifier(strings.TrimSpace(query[len("create ")+len(keyword):]))
+	value := strings.TrimSpace(query[len("create ")+len(keyword):])
+	ifNotExists := false
+	if strings.HasPrefix(strings.ToLower(value), "if not exists ") {
+		ifNotExists = true
+		value = strings.TrimSpace(value[len("IF NOT EXISTS "):])
+	}
+	name, ok := singleIdentifier(value)
 	if !ok {
 		return sqlFailure{1064, "42000", "malformed CREATE DATABASE"}
 	}
@@ -910,11 +951,18 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	if strings.EqualFold(name, informationSchemaName) {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
-	if s.server.config.Catalog == nil {
-		return sqlFailure{1105, "HY000", "database is not initialized"}
-	}
-	if err := s.server.config.Catalog.CreateNamespace(name); err != nil {
-		return sqlFailure{1007, "HY000", err.Error()}
+	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
+		key := catalog.Key(name)
+		if _, exists := definition.Namespaces[key]; exists {
+			if ifNotExists {
+				return nil
+			}
+			return errors.New("namespace already exists")
+		}
+		definition.Namespaces[key] = catalog.Namespace{Name: name, Tables: map[string]catalog.Table{}}
+		return nil
+	}); err != nil {
+		return catalogMutationFailure(err, sqlFailure{1007, "HY000", err.Error()})
 	}
 	return nil
 }
@@ -930,22 +978,51 @@ func createTable(s *relationExecutor, query string) error {
 	if len(table.columns) == 0 || s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
-	if err := s.server.config.Catalog.CreateTableWithTypes(namespace, name, table.columns, table.types); err != nil {
-		return sqlFailure{1050, "42S01", err.Error()}
+	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
+		return createTableInDefinition(definition, namespace, name, table)
+	}); err != nil {
+		return catalogMutationFailure(err, sqlFailure{1050, "42S01", err.Error()})
 	}
 	return nil
 }
 
+func createTableInDefinition(definition *catalog.Definition, namespace, name string, table tableDefinition) error {
+	namespaceDefinition, exists := definition.Namespaces[catalog.Key(namespace)]
+	if !exists {
+		return errors.New("namespace does not exist")
+	}
+	key := catalog.Key(name)
+	if _, exists := namespaceDefinition.Tables[key]; exists {
+		if table.ifNotExists {
+			return nil
+		}
+		return errors.New("table already exists")
+	}
+	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...)}
+	if len(table.types) > 0 {
+		tableDefinition.ColumnTypes = append([]string(nil), table.types...)
+	}
+	namespaceDefinition.Tables[key] = tableDefinition
+	definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
+	return nil
+}
+
 type tableDefinition struct {
-	target  []string
-	columns []string
-	types   []string
+	target      []string
+	columns     []string
+	types       []string
+	ifNotExists bool
 }
 
 func parseCreateTable(query string) (tableDefinition, error) {
 	head, body, err := createTableParts(query)
 	if err != nil {
 		return tableDefinition{}, err
+	}
+	ifNotExists := false
+	if strings.HasPrefix(strings.ToLower(head), "if not exists ") {
+		ifNotExists = true
+		head = strings.TrimSpace(head[len("IF NOT EXISTS "):])
 	}
 	target, ok := splitQualifiedIdentifier(head)
 	if !ok || len(target) == 0 || len(target) > 2 {
@@ -957,7 +1034,25 @@ func parseCreateTable(query string) (tableDefinition, error) {
 		}
 	}
 	columns, types, err := parseTableColumns(body)
-	return tableDefinition{target: target, columns: columns, types: types}, err
+	if err == nil {
+		err = validateTableColumns(columns)
+	}
+	return tableDefinition{target: target, columns: columns, types: types, ifNotExists: ifNotExists}, err
+}
+
+func validateTableColumns(columns []string) error {
+	if len(columns) > maxTableColumns {
+		return sqlFailure{1117, "HY000", "too many columns"}
+	}
+	seen := make(map[string]struct{}, len(columns))
+	for _, column := range columns {
+		key := catalog.Key(column)
+		if _, duplicate := seen[key]; duplicate {
+			return sqlFailure{1060, "42S21", "duplicate column name '" + column + "'"}
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
 }
 
 func createTableParts(query string) (string, string, error) {
@@ -1140,20 +1235,45 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
+
+func mutateTableRows(definition *catalog.Definition, namespaceName, tableName string, transform func(catalog.Table) ([][]string, error)) error {
+	namespace, found := definition.Namespaces[catalog.Key(namespaceName)]
+	if !found {
+		return errors.New("namespace does not exist")
+	}
+	table, found := namespace.Tables[catalog.Key(tableName)]
+	if !found {
+		return errors.New("table does not exist")
+	}
+	rows, err := transform(table)
+	if err != nil {
+		return err
+	}
+	table.Rows = cloneRows(rows)
+	namespace.Tables[catalog.Key(tableName)] = table
+	definition.Namespaces[catalog.Key(namespaceName)] = namespace
+	return nil
+}
+
 func insertRows(s *relationExecutor, query string) (uint64, error) {
 	plan, err := makeInsertPlan(s, query)
 	if err != nil {
 		return 0, err
 	}
-	rows, affected, err := applyInsertPlan(plan)
+	_, affected, err := applyInsertPlan(plan)
 	if err != nil {
 		return 0, err
 	}
-	if s.server.config.Catalog == nil {
-		return 0, sqlFailure{1105, "HY000", "database is not initialized"}
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _, err := applyInsertPlan(currentPlan)
+			return rows, err
+		})
 	}
-	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
-		return 0, sqlFailure{1105, "HY000", err.Error()}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
 }
@@ -1163,6 +1283,7 @@ type insertPlan struct {
 	table           catalog.Table
 	columns         []int
 	groups          [][]string
+	offsetMinutes   int
 }
 
 func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
@@ -1182,7 +1303,11 @@ func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
 	if err != nil {
 		return insertPlan{}, err
 	}
-	return insertPlan{namespace: namespace, name: name, table: table, columns: indexes, groups: groups}, nil
+	offsetMinutes, err := sessionTimeZoneOffset(s.session)
+	if err != nil {
+		return insertPlan{}, err
+	}
+	return insertPlan{namespace: namespace, name: name, table: table, columns: indexes, groups: groups, offsetMinutes: offsetMinutes}, nil
 }
 
 func parseInsertInput(query string) ([]string, []string, [][]string, error) {
@@ -1231,7 +1356,7 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		row := make([]string, len(plan.table.Columns))
 		for valueIndex, value := range group {
 			columnIndex := plan.columns[valueIndex]
-			canonical, err := canonicalColumnValue(plan.table, columnIndex, value, rowNumber)
+			canonical, err := canonicalColumnValueAtOffset(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -1247,17 +1372,64 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 // A column without a recorded numeric, bit, character, or temporal type keeps
 // its literal scalar so a typeless column is unaffected by this seam.
 func canonicalColumnValue(table catalog.Table, columnIndex int, raw string, row int) (string, error) {
+	return canonicalColumnValueAtOffset(table, columnIndex, raw, row, 0)
+}
+
+func canonicalColumnValueAtOffset(table catalog.Table, columnIndex int, raw string, row, offsetMinutes int) (string, error) {
+	if isSQLNullLiteral(raw) {
+		return storedSQLNullValue, nil
+	}
 	value := scalar(raw)
+	preparedWire, preparedValue, prepared := decodePreparedTemporalLiteral(value)
+	if prepared {
+		value = preparedValue
+	}
 	typeName, known := table.ColumnType(columnIndex)
 	if !known {
 		return value, nil
 	}
-	return canonicalTypedValue(typeName, value, table.Columns[columnIndex], row)
+	if err := rejectQuotedTemporalNull(typeName, value, table.Columns[columnIndex], row); err != nil {
+		return "", err
+	}
+	value, err := normalizePreparedDate(typeName, value, preparedWire, prepared, table.Columns[columnIndex], row)
+	if err != nil {
+		return "", err
+	}
+	return canonicalTypedValueAtOffset(typeName, value, table.Columns[columnIndex], row, offsetMinutes)
+}
+
+func rejectQuotedTemporalNull(typeName, value, column string, row int) error {
+	if !isSQLNullSpelling(value) {
+		return nil
+	}
+	typ, err := parseTemporalType(typeName)
+	if err != nil {
+		return err
+	}
+	if typ.kind == temporalNone {
+		return nil
+	}
+	return incorrectTemporal(temporalLabel(typ.kind), column, value, row)
+}
+
+func normalizePreparedDate(typeName, value string, wire byte, prepared bool, column string, row int) (string, error) {
+	if !prepared || wire != mysqlTypeDate {
+		return value, nil
+	}
+	typ, err := parseTemporalType(typeName)
+	if err != nil || typ.kind != temporalDatetime {
+		return value, nil
+	}
+	date, err := canonicalDateValue(value, column, row)
+	if err != nil {
+		return "", err
+	}
+	return date + " 00:00:00", nil
 }
 
 // scalarCanonicalizer reports whether a declared type belongs to its family and,
 // if so, the canonical value or the rejection error for that family.
-type scalarCanonicalizer func(typeName, value, column string, row int) (bool, string, error)
+type scalarCanonicalizer func(typeName, value, column string, row, offsetMinutes int) (bool, string, error)
 
 // scalarCanonicalizers is the ordered set of strict scalar value contracts a
 // written column is routed through: numeric or bit, character or binary, then
@@ -1271,15 +1443,19 @@ var scalarCanonicalizers = []scalarCanonicalizer{
 // canonicalTypedValue routes a value to the strict contract of its declared
 // scalar family, returning the value unchanged for a typeless column.
 func canonicalTypedValue(typeName, value, column string, row int) (string, error) {
+	return canonicalTypedValueAtOffset(typeName, value, column, row, 0)
+}
+
+func canonicalTypedValueAtOffset(typeName, value, column string, row, offsetMinutes int) (string, error) {
 	for _, canonicalize := range scalarCanonicalizers {
-		if matched, canonical, err := canonicalize(typeName, value, column, row); matched {
+		if matched, canonical, err := canonicalize(typeName, value, column, row, offsetMinutes); matched {
 			return canonical, err
 		}
 	}
 	return value, nil
 }
 
-func numericCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+func numericCanonicalizer(typeName, value, column string, row, _ int) (bool, string, error) {
 	typ, err := parseNumericType(typeName)
 	if err != nil {
 		return true, value, err
@@ -1291,7 +1467,7 @@ func numericCanonicalizer(typeName, value, column string, row int) (bool, string
 	return true, canonical, cerr
 }
 
-func characterCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+func characterCanonicalizer(typeName, value, column string, row, _ int) (bool, string, error) {
 	typ, err := parseCharacterType(typeName)
 	if err != nil {
 		return true, value, err
@@ -1303,7 +1479,7 @@ func characterCanonicalizer(typeName, value, column string, row int) (bool, stri
 	return true, canonical, cerr
 }
 
-func temporalCanonicalizer(typeName, value, column string, row int) (bool, string, error) {
+func temporalCanonicalizer(typeName, value, column string, row, offsetMinutes int) (bool, string, error) {
 	typ, err := parseTemporalType(typeName)
 	if err != nil {
 		return true, value, err
@@ -1311,7 +1487,7 @@ func temporalCanonicalizer(typeName, value, column string, row int) (bool, strin
 	if typ.kind == temporalNone {
 		return false, value, nil
 	}
-	canonical, cerr := canonicalTemporalValue(typ, value, column, row)
+	canonical, cerr := canonicalTemporalValueAtOffset(typ, value, column, row, offsetMinutes)
 	return true, canonical, cerr
 }
 
@@ -1320,12 +1496,20 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	rows, affected, err := applyUpdatePlan(plan)
+	_, affected, err := applyUpdatePlan(plan)
 	if err != nil {
 		return 0, err
 	}
-	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
-		return 0, sqlFailure{1105, "HY000", err.Error()}
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _, err := applyUpdatePlan(currentPlan)
+			return rows, err
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
 }
@@ -1335,6 +1519,7 @@ type updatePlan struct {
 	table           catalog.Table
 	updates         map[int]string
 	matcher         func([]string) bool
+	offsetMinutes   int
 }
 
 func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
@@ -1354,11 +1539,15 @@ func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
 	if err != nil {
 		return updatePlan{}, err
 	}
-	matcher, err := rowMatcher(where, table, indexes)
+	offsetMinutes, err := sessionTimeZoneOffset(s.session)
 	if err != nil {
 		return updatePlan{}, err
 	}
-	return updatePlan{namespace: namespace, name: name, table: table, updates: updates, matcher: matcher}, nil
+	matcher, err := rowMatcherAtOffset(where, table, indexes, offsetMinutes)
+	if err != nil {
+		return updatePlan{}, err
+	}
+	return updatePlan{namespace: namespace, name: name, table: table, updates: updates, matcher: matcher, offsetMinutes: offsetMinutes}, nil
 }
 
 func parseUpdateInput(query string) (string, string, string, error) {
@@ -1437,7 +1626,7 @@ func applyUpdatePlan(plan updatePlan) ([][]string, uint64, error) {
 func canonicalUpdates(plan updatePlan) (map[int]string, error) {
 	updates := make(map[int]string, len(plan.updates))
 	for column, value := range plan.updates {
-		canonical, err := canonicalColumnValue(plan.table, column, value, 1)
+		canonical, err := canonicalColumnValueAtOffset(plan.table, column, value, 1, plan.offsetMinutes)
 		if err != nil {
 			return nil, err
 		}
@@ -1451,9 +1640,17 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	rows, affected := applyDeletePlan(plan)
-	if err := s.server.config.Catalog.ReplaceRows(plan.namespace, plan.name, rows); err != nil {
-		return 0, sqlFailure{1105, "HY000", err.Error()}
+	_, affected := applyDeletePlan(plan)
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			rows, _ := applyDeletePlan(currentPlan)
+			return rows, nil
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return affected, nil
 }
@@ -1462,6 +1659,7 @@ type deletePlan struct {
 	namespace, name string
 	table           catalog.Table
 	matcher         func([]string) bool
+	offsetMinutes   int
 }
 
 func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
@@ -1477,11 +1675,15 @@ func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
 	if err != nil {
 		return deletePlan{}, err
 	}
-	matcher, err := rowMatcher(where, table, indexes)
+	offsetMinutes, err := sessionTimeZoneOffset(s.session)
 	if err != nil {
 		return deletePlan{}, err
 	}
-	return deletePlan{namespace: namespace, name: name, table: table, matcher: matcher}, nil
+	matcher, err := rowMatcherAtOffset(where, table, indexes, offsetMinutes)
+	if err != nil {
+		return deletePlan{}, err
+	}
+	return deletePlan{namespace: namespace, name: name, table: table, matcher: matcher, offsetMinutes: offsetMinutes}, nil
 }
 
 func parseDeleteInput(query string) (string, string, error) {
@@ -1625,9 +1827,23 @@ func matchingParenthesis(value string, open int) (int, bool) {
 func keywordAt(value, keyword string) int {
 	lower := strings.ToLower(value)
 	limit := len(lower) - len(keyword)
+	depth := 0
 	for index := 0; index <= limit; index++ {
 		if lower[index] == '\'' {
 			index = skipQuoted(lower, index)
+			continue
+		}
+		switch lower[index] {
+		case '(':
+			depth++
+			continue
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth != 0 {
 			continue
 		}
 		if lower[index:index+len(keyword)] != keyword || !keywordBoundary(lower, index, len(keyword)) {
@@ -1689,6 +1905,10 @@ func splitEquals(value string) (string, string, bool) {
 }
 
 func rowMatcher(where string, table catalog.Table, indexes map[string]int) (func([]string) bool, error) {
+	return rowMatcherAtOffset(where, table, indexes, 0)
+}
+
+func rowMatcherAtOffset(where string, table catalog.Table, indexes map[string]int, offsetMinutes int) (func([]string) bool, error) {
 	if where == "" {
 		return func([]string) bool { return true }, nil
 	}
@@ -1704,7 +1924,16 @@ func rowMatcher(where string, table catalog.Table, indexes map[string]int) (func
 	if !found {
 		return nil, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
 	}
-	want := matcherValue(table, index, value)
+	if isSQLNullLiteral(value) {
+		return func([]string) bool { return false }, nil
+	}
+	want, err := matcherValueAtOffsetChecked(table, index, value, offsetMinutes)
+	if err != nil {
+		return nil, err
+	}
+	if strings.EqualFold(want, "null") {
+		return func([]string) bool { return false }, nil
+	}
 	equalityKey := columnEqualityKey(table, index)
 	wantKey := equalityKey(want)
 	return func(row []string) bool { return index < len(row) && equalityKey(row[index]) == wantKey }, nil
@@ -1728,42 +1957,82 @@ func columnEqualityKey(table catalog.Table, index int) func(string) string {
 
 // matcherValue canonicalizes an equality literal to the stored representation of
 // its column, so a numeric predicate compares against the same canonical form a
-// write produced (for example WHERE n = 007 matches a stored 7). A literal that
-// is malformed for the column keeps its scalar and simply matches no row.
+// write produced (for example WHERE n = 007 matches a stored 7). The execution
+// path uses the checked form so malformed temporal predicates fail explicitly.
 func matcherValue(table catalog.Table, index int, value string) string {
-	want := scalar(value)
-	typeName, known := table.ColumnType(index)
-	if !known {
-		return want
-	}
-	if typ, err := parseNumericType(typeName); err == nil && typ.kind != numericNone {
-		if canonical, cerr := canonicalNumericValue(typ, want, table.Columns[index], 1); cerr == nil {
-			return canonical
-		}
-		return want
-	}
-	if typ, err := parseTemporalType(typeName); err == nil && typ.kind != temporalNone {
-		if canonical, cerr := canonicalTemporalValue(typ, want, table.Columns[index], 1); cerr == nil {
-			return canonical
-		}
-	}
-	return want
-}
-func selectQuery(s *relationExecutor, query string) (*queryResult, error) {
-	expression := strings.TrimSpace(query[len("SELECT "):])
-	lower := strings.ToLower(expression)
-	if from := strings.Index(lower, " from "); from >= 0 {
-		return selectFrom(s, query, expression[:from], expression[from+6:])
-	}
-	return selectLiteral(expression)
+	return matcherValueAtOffset(table, index, value, 0)
 }
 
-func selectLiteral(expression string) (*queryResult, error) {
-	literal := parseLiteralResult(expression)
-	if !literal.supported {
-		return nil, sqlFailure{1064, "42000", "unsupported expression"}
+func matcherValueAtOffset(table catalog.Table, index int, value string, offsetMinutes int) string {
+	canonical, _ := matcherValueAtOffsetChecked(table, index, value, offsetMinutes)
+	return canonical
+}
+
+func matcherValueAtOffsetChecked(table catalog.Table, index int, value string, offsetMinutes int) (string, error) {
+	raw := scalar(value)
+	_, want, _ := decodePreparedTemporalLiteral(raw)
+	typeName, known := table.ColumnType(index)
+	if !known {
+		return want, nil
 	}
-	return &queryResult{columns: []string{expression}, rows: [][]string{{literal.value}}, nulls: [][]bool{{literal.isNull}}, metadata: []columnMetadata{literal.metadata}}, nil
+	if isSQLNullSpelling(want) && !isSQLNullLiteral(value) {
+		typ, err := parseTemporalType(typeName)
+		if err != nil {
+			return want, err
+		}
+		if typ.kind != temporalNone {
+			return want, incorrectTemporal(temporalLabel(typ.kind), table.Columns[index], want, 1)
+		}
+	}
+	if canonical, ok := canonicalMatcherNumeric(typeName, want, table.Columns[index]); ok {
+		return canonical, nil
+	}
+	return canonicalMatcherTemporal(typeName, want, raw, table.Columns[index], offsetMinutes)
+}
+
+func canonicalMatcherNumeric(typeName, value, column string) (string, bool) {
+	typ, err := parseNumericType(typeName)
+	if err != nil || typ.kind == numericNone {
+		return value, false
+	}
+	canonical, err := canonicalNumericValue(typ, value, column, 1)
+	if err != nil {
+		return value, true
+	}
+	return canonical, true
+}
+
+func canonicalMatcherTemporal(typeName, value, raw, column string, offsetMinutes int) (string, error) {
+	typ, err := parseTemporalType(typeName)
+	if err != nil {
+		return value, err
+	}
+	if typ.kind == temporalNone {
+		return value, nil
+	}
+	if wire, _, prepared := decodePreparedTemporalLiteral(raw); prepared && wire == mysqlTypeDate && typ.kind == temporalDatetime {
+		date, err := canonicalDateValue(value, column, 1)
+		if err != nil {
+			return value, err
+		}
+		value = date + " 00:00:00"
+	}
+	canonical, err := canonicalTemporalValueAtOffset(typ, value, column, 1, offsetMinutes)
+	if err != nil {
+		return value, err
+	}
+	return canonical, nil
+}
+
+func sessionTimeZoneOffset(s *session) (int, error) {
+	return parseFixedOffset(s.timeZone)
+}
+func selectLiteral(expression string) (*queryResult, error) {
+	value, isNull, metadata, err := scalarColumn(expression)
+	if err != nil {
+		return nil, err
+	}
+	return &queryResult{columns: []string{expression}, rows: [][]string{{value}}, nulls: [][]bool{{isNull}}, metadata: []columnMetadata{metadata}}, nil
 }
 
 func selectFrom(s *relationExecutor, query, projectionText, sourceText string) (*queryResult, error) {
@@ -1805,12 +2074,25 @@ func selectRows(s *relationExecutor, projection string, parts []string, where st
 	if err != nil {
 		return nil, err
 	}
-	matches, err := rowMatcher(where, table, indexes)
+	offsetMinutes, err := sessionTimeZoneOffset(s.session)
+	if err != nil {
+		return nil, err
+	}
+	matches, err := rowMatcherAtOffset(where, table, indexes, offsetMinutes)
 	if err != nil {
 		return nil, err
 	}
 	rows := projectRows(table.Rows, selected, matches)
-	return &queryResult{columns: columns, rows: rows, metadata: tableMetadata(namespace, tableName, table, selected)}, nil
+	rows, err = renderSelectedTemporalRows(rows, selected, table, offsetMinutes)
+	if err != nil {
+		return nil, err
+	}
+	nulls := resultNulls(rows)
+	displayStoredNulls(rows)
+	return &queryResult{
+		columns: columns, rows: rows, nulls: nulls,
+		metadata: tableMetadata(namespace, tableName, table, selected),
+	}, nil
 }
 
 func selectedColumns(table catalog.Table, projection string, indexes map[string]int) ([]int, []string, error) {
@@ -1862,6 +2144,64 @@ func projectRows(source [][]string, selected []int, matches func([]string) bool)
 	return rows
 }
 
+func resultNulls(rows [][]string) [][]bool {
+	nulls := make([][]bool, len(rows))
+	for rowIndex, row := range rows {
+		nulls[rowIndex] = make([]bool, len(row))
+		for columnIndex, value := range row {
+			nulls[rowIndex][columnIndex] = value == storedSQLNullValue
+		}
+	}
+	return nulls
+}
+
+func isSQLNullLiteral(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "null")
+}
+
+func isSQLNullSpelling(value string) bool {
+	return strings.EqualFold(value, "null")
+}
+
+func displayStoredNulls(rows [][]string) {
+	for _, row := range rows {
+		for columnIndex, value := range row {
+			if value == storedSQLNullValue {
+				row[columnIndex] = "NULL"
+			}
+		}
+	}
+}
+
+func renderSelectedTemporalRows(rows [][]string, selected []int, table catalog.Table, offsetMinutes int) ([][]string, error) {
+	for rowIndex, row := range rows {
+		for resultIndex, columnIndex := range selected {
+			typeName, known := table.ColumnType(columnIndex)
+			if !known {
+				continue
+			}
+			typ, err := parseTemporalType(typeName)
+			if err != nil || typ.kind != temporalTimestamp || row[resultIndex] == storedSQLNullValue {
+				continue
+			}
+			rendered, err := renderTimestampFixedOffset(row[resultIndex], offsetMinutes, typ.precision)
+			if err != nil {
+				return nil, err
+			}
+			rows[rowIndex][resultIndex] = rendered
+		}
+	}
+	return rows, nil
+}
+
+func renderStoredTemporalValue(typeName, value string, offsetMinutes int) (string, error) {
+	typ, err := parseTemporalType(typeName)
+	if err != nil || typ.kind != temporalTimestamp || value == storedSQLNullValue {
+		return value, err
+	}
+	return renderTimestampFixedOffset(value, offsetMinutes, typ.precision)
+}
+
 func tableMetadata(namespace, tableName string, table catalog.Table, selected []int) []columnMetadata {
 	metadata := make([]columnMetadata, len(selected))
 	for resultIndex, columnIndex := range selected {
@@ -1869,6 +2209,9 @@ func tableMetadata(namespace, tableName string, table catalog.Table, selected []
 		definition := columnMetadata{catalog: "def", schema: namespace, table: tableName, originalTable: tableName, name: name, originalName: name, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString}
 		if typeName, known := table.ColumnType(columnIndex); known {
 			definition.typ, definition.length, definition.characterSet = catalogColumnWireType(typeName)
+			if temporal, err := parseTemporalType(typeName); err == nil && temporal.kind != temporalNone {
+				definition.decimals = byte(temporal.precision)
+			}
 			if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(typeName)), " UNSIGNED") {
 				definition.flags |= mysqlUnsignedFlag
 			}
@@ -1932,7 +2275,7 @@ func tableTarget(s *relationExecutor, parts []string) (string, string, error) {
 	}
 	// parts have already been parsed as SQL identifiers. Re-parsing would turn
 	// a literal dot or backtick in a quoted identifier into syntax.
-	if err := s.server.auth.databaseExists(namespace); err != nil {
+	if err := (&databaseSelector{s.session}).databaseExists(namespace); err != nil {
 		return "", "", err
 	}
 	return namespace, table, nil
@@ -1967,44 +2310,17 @@ type literalQueryResult struct {
 	supported bool
 }
 
+// parseLiteralResult evaluates a FROM-less SELECT expression for prepared-
+// statement column metadata. It shares the scalar expression engine with text
+// execution, so a prepared and a text SELECT of the same expression advertise
+// identical columns. An expression the engine cannot evaluate returns an
+// unsupported result, leaving execution to surface the specific error.
 func parseLiteralResult(expression string) literalQueryResult {
-	value := strings.TrimSpace(expression)
-	metadata := columnMetadata{catalog: "def", name: value, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString, flags: mysqlNotNullFlag}
-	if strings.EqualFold(value, "null") {
-		metadata.characterSet = mysqlCharsetBinary
-		metadata.typ = mysqlTypeNull
-		metadata.flags = mysqlBinaryFlag
-		return literalQueryResult{metadata: metadata, isNull: true, supported: true}
+	value, isNull, metadata, err := scalarColumn(expression)
+	if err != nil {
+		return literalQueryResult{}
 	}
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		text := strings.ReplaceAll(value[1:len(value)-1], "''", "'")
-		metadata.length = uint32(len([]rune(text)) * 4)
-		return literalQueryResult{value: text, metadata: metadata, supported: true}
-	}
-	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
-		metadata.characterSet = mysqlCharsetBinary
-		metadata.length = uint32(len(value))
-		metadata.typ = mysqlTypeLongLong
-		metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag
-		return literalQueryResult{value: value, metadata: metadata, supported: true}
-	}
-	if _, err := strconv.ParseUint(value, 10, 64); err == nil {
-		metadata.characterSet = mysqlCharsetBinary
-		metadata.length = uint32(len(value))
-		metadata.typ = mysqlTypeLongLong
-		metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag | mysqlUnsignedFlag
-		return literalQueryResult{value: value, metadata: metadata, supported: true}
-	}
-	if strings.ContainsAny(value, ".eE") {
-		if _, err := strconv.ParseFloat(value, 64); err == nil {
-			metadata.characterSet = mysqlCharsetBinary
-			metadata.length = 8
-			metadata.typ = mysqlTypeDouble
-			metadata.flags = mysqlNotNullFlag | mysqlBinaryFlag
-			return literalQueryResult{value: value, metadata: metadata, supported: true}
-		}
-	}
-	return literalQueryResult{}
+	return literalQueryResult{value: value, metadata: metadata, isNull: isNull, supported: true}
 }
 
 func (s *informationSchemaExecutor) selectInformationSchema(query string) (*queryResult, error) {
@@ -2367,12 +2683,139 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
 	}
 	if len(parameters) > 0 {
-		return s.queryColumns(validated, true)
+		return s.parameterizedColumns(query, validated, len(parameters))
 	}
 	if literal := parseLiteralResult(strings.TrimSpace(query[len("select "):])); literal.supported {
 		return []columnMetadata{literal.metadata}, nil
 	}
 	return s.queryColumns(validated, true)
+}
+
+func (s *preparedPreparation) parameterizedColumns(query, validated string, parameters int) ([]columnMetadata, error) {
+	if expression, ok := preparedScalarExpression(query); ok {
+		if metadata, ok := preparedScalarMetadata(expression, parameters); ok {
+			return metadata, nil
+		}
+	}
+	metadata, err := s.queryColumns(validated, true)
+	if err == nil && !hasNullMetadata(metadata) {
+		return restorePreparedColumnNames(query, metadata), nil
+	}
+	if candidate, ok := s.representativeParameterizedColumns(query, parameters); ok {
+		return restorePreparedColumnNames(query, candidate), nil
+	}
+	if err == nil {
+		return metadata, nil
+	}
+	return nil, err
+}
+
+func (s *preparedPreparation) representativeParameterizedColumns(query string, parameters int) ([]columnMetadata, bool) {
+	for _, values := range representativeParameterValues(parameters) {
+		candidate, bindErr := bindPreparedQuery(query, values)
+		if bindErr != nil {
+			continue
+		}
+		candidateMetadata, candidateErr := s.queryColumns(candidate, true)
+		if candidateErr == nil && !hasNullMetadata(candidateMetadata) {
+			return candidateMetadata, true
+		}
+	}
+	return nil, false
+}
+
+func representativeParameterValues(parameters int) [][]string {
+	replacements := []string{"0", quote(""), "0.0"}
+	if parameters > 4 {
+		values := make([][]string, 0, len(replacements))
+		for _, replacement := range replacements {
+			values = append(values, repeatedParameterValue(parameters, replacement))
+		}
+		return values
+	}
+	values := make([][]string, 0)
+	appendParameterCombinations(&values, make([]string, parameters), replacements, 0)
+	return values
+}
+
+func appendParameterCombinations(result *[][]string, current, replacements []string, index int) {
+	if index == len(current) {
+		*result = append(*result, append([]string(nil), current...))
+		return
+	}
+	for _, replacement := range replacements {
+		current[index] = replacement
+		appendParameterCombinations(result, current, replacements, index+1)
+	}
+}
+
+func repeatedParameterValue(parameters int, replacement string) []string {
+	values := make([]string, parameters)
+	for index := range values {
+		values[index] = replacement
+	}
+	return values
+}
+
+func restorePreparedColumnNames(query string, metadata []columnMetadata) []columnMetadata {
+	expression := strings.TrimSpace(query[len("select "):])
+	if from := keywordAt(expression, "from"); from >= 0 {
+		expression = strings.TrimSpace(expression[:from])
+	}
+	_, expression = parseDistinctProjection(expression)
+	items := splitCSV(expression)
+	if len(items) != len(metadata) {
+		return metadata
+	}
+	for index, item := range items {
+		expression, alias, err := splitProjectionAlias(item)
+		if err == nil && alias != "" {
+			metadata[index].name = alias
+		} else {
+			metadata[index].name = strings.TrimSpace(expression)
+		}
+	}
+	return metadata
+}
+
+func hasNullMetadata(metadata []columnMetadata) bool {
+	for _, column := range metadata {
+		if column.typ == mysqlTypeNull {
+			return true
+		}
+	}
+	return false
+}
+
+func preparedScalarExpression(query string) (string, bool) {
+	expression := strings.TrimSpace(query[len("select "):])
+	return expression, keywordAt(expression, "from") < 0
+}
+
+// preparedScalarMetadata evaluates a FROM-less expression with representative
+// parameter domains. Preparing with NULL makes every NULL-propagating function
+// advertise NULL metadata, even though the bound execution will return its
+// actual result type. String and numeric representatives cover the strict
+// function families without allowing prepare-time metadata to depend on a
+// particular bound value.
+func preparedScalarMetadata(expression string, parameters int) ([]columnMetadata, bool) {
+	for _, replacement := range []string{quote(""), "0", "0.0"} {
+		values := make([]string, parameters)
+		for index := range values {
+			values[index] = replacement
+		}
+		bound, err := bindPreparedQuery(expression, values)
+		if err != nil {
+			continue
+		}
+		_, _, metadata, err := scalarColumn(bound)
+		if err != nil {
+			continue
+		}
+		metadata.name = expression
+		return []columnMetadata{metadata}, true
+	}
+	return nil, false
 }
 
 func nullPreparedParameters(count int) []string {
@@ -2419,7 +2862,7 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
-	result, err := queries.execute(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	result, err := queries.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
@@ -2514,9 +2957,21 @@ func preparedParameterValues(payload []byte, offset int, types []preparedParamet
 		if err != nil {
 			return nil, offset, err
 		}
+		if isPreparedTemporalType(types[index].typ) {
+			value = preparedTemporalLiteral(types[index].typ, scalar(value))
+		}
 		values[index], offset = value, next
 	}
 	return values, offset, nil
+}
+
+func isPreparedTemporalType(wire byte) bool {
+	switch wire {
+	case mysqlTypeDate, mysqlTypeDatetime, mysqlTypeTimestamp, mysqlTypeTime:
+		return true
+	default:
+		return false
+	}
 }
 
 func preparedParameterIsNull(payload []byte, index int) bool {
@@ -2631,10 +3086,15 @@ func (s *preparedLifecycle) resetConnection() error {
 	if err := rollbackTransaction(s.session); err != nil {
 		return err
 	}
+	s.autocommitOff = false
+	s.isolation = isolationRepeatableRead
+	s.readOnly = false
+	s.nextIsolation = isolationRepeatableRead
+	s.nextReadOnly = false
 	s.database = s.initialDB
+	s.timeZone = s.initialTimeZone
 	s.closeAllPrepared()
 	s.longDataBytes = 0
-	s.savepoints = make(map[string]catalog.Definition)
 	return nil
 }
 
@@ -2657,18 +3117,6 @@ func clearPreparedLongData(session *session, statement *preparedStatement) {
 		session.longDataBytes -= len(value)
 	}
 	statement.longData = make(map[uint16][]byte)
-}
-
-func rollbackTransaction(s *session) error {
-	if s.transaction && s.server.config.Catalog != nil {
-		if err := s.server.config.Catalog.Replace(s.transactionSnapshot); err != nil {
-			return sqlFailure{1105, "HY000", err.Error()}
-		}
-	}
-	s.transaction = false
-	s.transactionSnapshot = catalog.Definition{}
-	s.savepoints = make(map[string]catalog.Definition)
-	return nil
 }
 
 func bindPreparedQuery(query string, values []string) (string, error) {

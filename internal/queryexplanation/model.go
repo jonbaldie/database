@@ -143,6 +143,22 @@ type mutationOperation struct {
 	MutationType string `json:"mutation_type"`
 }
 
+type joinOperation struct {
+	JoinType string `json:"join_type"`
+}
+
+type sortOperation struct {
+	Purpose string `json:"purpose"`
+}
+
+type limitOperation struct {
+	OffsetPresent bool `json:"offset_present"`
+}
+
+type distinctOperation struct {
+	Scope string `json:"scope"`
+}
+
 // Table is the neutral relation description a planner needs.
 type Table struct {
 	Database string

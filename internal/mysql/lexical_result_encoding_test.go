@@ -108,6 +108,29 @@ func TestBinaryRowPreservesValuesAndNullBitmap(t *testing.T) {
 	}
 }
 
+func TestBinaryRowEncodesTemporalValuesInBinaryProtocol(t *testing.T) {
+	cases := []struct {
+		name       string
+		value      string
+		definition columnMetadata
+		want       []byte
+	}{
+		{name: "date", value: "2021-01-02", definition: columnMetadata{typ: mysqlTypeDate}, want: []byte{4, 0xE5, 0x07, 1, 2}},
+		{name: "datetime", value: "2021-01-02 03:04:05.123456", definition: columnMetadata{typ: mysqlTypeDatetime, decimals: 6}, want: []byte{11, 0xE5, 0x07, 1, 2, 3, 4, 5, 0x40, 0xE2, 0x01, 0x00}},
+		{name: "zero clock compresses", value: "2021-01-02 00:00:00", definition: columnMetadata{typ: mysqlTypeDatetime}, want: []byte{4, 0xE5, 0x07, 1, 2}},
+		{name: "time", value: "-38:00:00.123456", definition: columnMetadata{typ: mysqlTypeTime, decimals: 6}, want: []byte{12, 1, 1, 0, 0, 0, 14, 0, 0, 0x40, 0xE2, 0x01, 0x00}},
+		{name: "year", value: "2021", definition: columnMetadata{typ: mysqlTypeYear}, want: []byte{0xE5, 0x07}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := encodeBinaryValue(test.value, test.definition)
+			if err != nil || !bytes.Equal(got, test.want) {
+				t.Fatalf("encodeBinaryValue(%q) = %x err %v, want %x", test.value, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestTextResultPreservesMetadataRowsAndPacketSequence(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()
@@ -136,5 +159,42 @@ func TestTextResultPreservesMetadataRowsAndPacketSequence(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResultStreamWritesRecoverableSQLErrorTerminator(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() {
+		result := &queryResult{
+			columns:  []string{"value"},
+			metadata: []columnMetadata{{catalog: "def", name: "value", typ: mysqlTypeLongLong}},
+			stream: func(yield func([]string, []bool) error) error {
+				if err := yield([]string{"1"}, []bool{false}); err != nil {
+					return err
+				}
+				return sqlFailure{1365, "22012", "division by zero"}
+			},
+		}
+		done <- writeResult(server, 7, result, 1024)
+	}()
+	var final []byte
+	for sequence := byte(7); sequence != 12; sequence++ {
+		actual, payload, err := readPacket(client, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if actual != sequence {
+			t.Fatalf("packet sequence = %d, want %d", actual, sequence)
+		}
+		final = payload
+	}
+	if len(final) < 3 || final[0] != 0xff || binary.LittleEndian.Uint16(final[1:3]) != 1365 {
+		t.Fatalf("final packet = %x", final)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("stream SQL error closed conversation: %v", err)
 	}
 }

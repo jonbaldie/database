@@ -30,8 +30,8 @@ func explainExecutor(t *testing.T) *textStatementExecutor {
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
-	session := &session{server: server, database: "app", initialDB: "app", statements: map[uint32]*preparedStatement{}}
-	return &textStatementExecutor{session}
+	session := &session{server: server, database: "app", initialDB: "app", timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{}}
+	return &textStatementExecutor{session: session}
 }
 
 func TestExplainTraditionalProjection(t *testing.T) {
@@ -106,6 +106,17 @@ func TestExplainRejectsUnsupportedModes(t *testing.T) {
 	}
 	if _, err := executor.execute("EXPLAIN SELECT * FROM missing_table"); err == nil {
 		t.Error("EXPLAIN of unknown table was accepted")
+	}
+}
+
+func TestExplainScalarSubstringFromSyntax(t *testing.T) {
+	executor := explainExecutor(t)
+	result, err := executor.execute("EXPLAIN SELECT SUBSTRING('abcdef' FROM 2 FOR 3)")
+	if err != nil {
+		t.Fatalf("explain substring: %v", err)
+	}
+	if len(result.rows) == 0 || len(result.rows[0]) == 0 {
+		t.Fatalf("explain substring returned no plan: %#v", result)
 	}
 }
 

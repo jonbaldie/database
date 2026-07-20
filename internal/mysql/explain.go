@@ -61,7 +61,7 @@ func splitLeadingWord(text string) (string, string, bool) {
 }
 
 func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation.Document, error) {
-	relations := relationExecutor{s.session}
+	relations := relationExecutor{session: s.session}
 	lower := strings.ToLower(inner)
 	switch {
 	case strings.HasPrefix(lower, "select "):
@@ -79,15 +79,15 @@ func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation
 
 func (s *textStatementExecutor) explainSelect(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
 	expression := strings.TrimSpace(inner[len("select "):])
-	from := strings.Index(strings.ToLower(expression), " from ")
+	from := keywordAt(expression, "from")
 	if from < 0 {
 		return s.explainScalarSelect(inner, expression)
 	}
-	read, err := s.explainSelectSource(relations, strings.TrimSpace(expression[:from]), strings.TrimSpace(expression[from+6:]))
+	plan, err := parseRelationalSelect(relations, inner)
 	if err != nil {
 		return nil, err
 	}
-	return queryexplanation.PlanSelect(s.server.config.Version, inner, s.database, read), nil
+	return plan.explanation(s.server.config.Version, s.database, inner), nil
 }
 
 func (s *textStatementExecutor) explainScalarSelect(inner, expression string) (*queryexplanation.Document, error) {
@@ -122,7 +122,7 @@ func (s *textStatementExecutor) explainSelectSource(relations *relationExecutor,
 	}
 	// Validate the predicate exactly as the executor would, so EXPLAIN never
 	// describes a plan for a statement that would fail at run time.
-	if _, err := rowMatcher(strings.TrimSpace(where), table, indexes); err != nil {
+	if err := validateExplainPredicate(relations, where, table, indexes); err != nil {
 		return queryexplanation.Select{}, err
 	}
 	return queryexplanation.Select{
@@ -131,6 +131,15 @@ func (s *textStatementExecutor) explainSelectSource(relations *relationExecutor,
 		AllColumns: projection == "*",
 		Where:      strings.TrimSpace(where),
 	}, nil
+}
+
+func validateExplainPredicate(relations *relationExecutor, where string, table catalog.Table, indexes map[string]int) error {
+	offsetMinutes, err := sessionTimeZoneOffset(relations.session)
+	if err != nil {
+		return err
+	}
+	_, err = rowMatcherAtOffset(strings.TrimSpace(where), table, indexes, offsetMinutes)
+	return err
 }
 
 // explainInsert, explainUpdate, and explainDelete reuse the executor's own plan

@@ -120,6 +120,10 @@ func TestServeReportsReadinessAndWritesCleanStateOnShutdown(t *testing.T) {
 			StateFile:          stateFile,
 		}, func(event Event) { events <- event })
 	}()
+	recovering := receiveEvent(t, events, "recovering")
+	if !recovering.Recovered {
+		t.Fatal("recovery event did not report recovery")
+	}
 	ready := receiveEvent(t, events, "ready")
 	if !ready.Recovered {
 		t.Fatal("ready event did not report recovery from the running state")

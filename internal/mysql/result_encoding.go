@@ -2,18 +2,23 @@ package mysql
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"math"
 	"net"
 	"strconv"
+	"strings"
 )
+
+type queryRowStream func(func([]string, []bool) error) error
 
 func writeResult(connection net.Conn, sequence byte, result *queryResult, maximum int64) error {
 	writer := newResultWriter(connection, sequence, maximum)
 	if err := writer.writeColumns(result.columns, result.metadata); err != nil {
 		return err
 	}
-	if err := writer.writeTextRows(result.rows, result.nulls); err != nil {
-		return err
+	if err := writer.writeTextResultRows(result); err != nil {
+		return writer.writeStreamError(err)
 	}
 	return writer.writeEOF()
 }
@@ -23,10 +28,32 @@ func writeBinaryResult(connection net.Conn, sequence byte, result *queryResult, 
 	if err := writer.writeColumns(result.columns, result.metadata); err != nil {
 		return err
 	}
-	if err := writer.writeBinaryRows(result.rows, result.nulls); err != nil {
-		return err
+	if err := writer.writeBinaryResultRows(result); err != nil {
+		return writer.writeStreamError(err)
 	}
 	return writer.writeEOF()
+}
+
+func (w *resultWriter) writeTextResultRows(result *queryResult) error {
+	if result.stream == nil {
+		return w.writeTextRows(result.rows, result.nulls)
+	}
+	return result.stream(func(row []string, nulls []bool) error {
+		return w.write(textRow(row, 0, [][]bool{nulls}))
+	})
+}
+
+func (w *resultWriter) writeBinaryResultRows(result *queryResult) error {
+	if result.stream == nil {
+		return w.writeBinaryRows(result.rows, result.nulls)
+	}
+	return result.stream(func(row []string, nulls []bool) error {
+		payload, err := binaryRow(row, 0, [][]bool{nulls}, w.definitions)
+		if err != nil {
+			return err
+		}
+		return w.write(payload)
+	})
 }
 
 type resultWriter struct {
@@ -76,6 +103,14 @@ func (w *resultWriter) writeBinaryRows(rows [][]string, nulls [][]bool) error {
 }
 
 func (w *resultWriter) writeEOF() error { return w.write(eofPacket()) }
+
+func (w *resultWriter) writeStreamError(err error) error {
+	var failure sqlFailure
+	if !errors.As(err, &failure) {
+		return err
+	}
+	return w.write(mysqlError(err))
+}
 
 func (w *resultWriter) write(payload []byte) error {
 	if err := writeBoundedPacket(w.connection, w.sequence, payload, w.maximum); err != nil {
@@ -144,9 +179,183 @@ func encodeBinaryValue(value string, definition columnMetadata) ([]byte, error) 
 		return encodeBinaryLong(value)
 	case mysqlTypeDouble:
 		return encodeBinaryDouble(value)
+	case mysqlTypeDate, mysqlTypeDatetime, mysqlTypeTimestamp, mysqlTypeTime:
+		return encodeBinaryTemporal(value, definition.typ)
+	case mysqlTypeYear:
+		return encodeBinaryYear(value)
 	default:
 		return lengthEncodedString(value), nil
 	}
+}
+
+func encodeBinaryTemporal(value string, wire byte) ([]byte, error) {
+	switch wire {
+	case mysqlTypeDate:
+		return encodeBinaryDate(value)
+	case mysqlTypeDatetime, mysqlTypeTimestamp:
+		return encodeBinaryDatetime(value)
+	case mysqlTypeTime:
+		return encodeBinaryTime(value)
+	default:
+		return nil, fmt.Errorf("unsupported binary temporal type %#x", wire)
+	}
+}
+
+func encodeBinaryDate(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "0000-00-00" {
+		return []byte{0}, nil
+	}
+	year, month, day, err := parseBinaryDate(value)
+	if err != nil {
+		return nil, err
+	}
+	return []byte{4, byte(year), byte(year >> 8), byte(month), byte(day)}, nil
+}
+
+func encodeBinaryDatetime(value string) ([]byte, error) {
+	parts, err := parseBinaryDatetime(value)
+	if err != nil {
+		return nil, err
+	}
+	if parts.zero {
+		return []byte{0}, nil
+	}
+	return binaryDatetimePayload(parts), nil
+}
+
+func encodeBinaryTime(value string) ([]byte, error) {
+	parts, err := parseBinaryTime(value)
+	if err != nil {
+		return nil, err
+	}
+	if parts.zero {
+		return []byte{0}, nil
+	}
+	return binaryTimePayload(parts), nil
+}
+
+type binaryDatetimeParts struct {
+	year, month, day     int
+	hour, minute, second int
+	micros               int
+	zero                 bool
+}
+
+func parseBinaryDatetime(value string) (binaryDatetimeParts, error) {
+	value = strings.TrimSpace(value)
+	if value == "0000-00-00 00:00:00" || value == "0000-00-00 00:00:00.000000" {
+		return binaryDatetimeParts{zero: true}, nil
+	}
+	datePart, clockPart, found := strings.Cut(value, " ")
+	if !found {
+		return binaryDatetimeParts{}, fmt.Errorf("malformed binary datetime %q", value)
+	}
+	year, month, day, err := parseBinaryDate(datePart)
+	if err != nil {
+		return binaryDatetimeParts{}, err
+	}
+	clock, fraction, err := splitTemporalFraction(temporalType{precision: 6}, clockPart, "DATETIME", "result", 0)
+	if err != nil {
+		return binaryDatetimeParts{}, err
+	}
+	hour, minute, second, err := parseClock(clock, "DATETIME", "result", value, 0)
+	if err != nil {
+		return binaryDatetimeParts{}, err
+	}
+	micros, err := binaryTemporalMicros(fraction)
+	if err != nil {
+		return binaryDatetimeParts{}, err
+	}
+	return binaryDatetimeParts{year: year, month: month, day: day, hour: hour, minute: minute, second: second, micros: micros}, nil
+}
+
+func binaryDatetimePayload(parts binaryDatetimeParts) []byte {
+	body := []byte{4, byte(parts.year), byte(parts.year >> 8), byte(parts.month), byte(parts.day)}
+	if parts.hour == 0 && parts.minute == 0 && parts.second == 0 && parts.micros == 0 {
+		return body
+	}
+	body[0] = 7
+	body = append(body, byte(parts.hour), byte(parts.minute), byte(parts.second))
+	if parts.micros == 0 {
+		return body
+	}
+	body[0] = 11
+	microseconds := make([]byte, 4)
+	binary.LittleEndian.PutUint32(microseconds, uint32(parts.micros))
+	return append(body, microseconds...)
+}
+
+type binaryTimeParts struct {
+	negative           bool
+	days, hour, minute int
+	second, micros     int
+	zero               bool
+}
+
+func parseBinaryTime(value string) (binaryTimeParts, error) {
+	value = strings.TrimSpace(value)
+	negative := strings.HasPrefix(value, "-")
+	body := strings.TrimPrefix(value, "-")
+	clock, fraction, err := splitTemporalFraction(temporalType{precision: 6}, body, "TIME", "result", 0)
+	if err != nil {
+		return binaryTimeParts{}, err
+	}
+	hours, minutes, seconds, ok := parseTimeClock(clock)
+	if !validBinaryTimeClock(hours, minutes, seconds, ok) {
+		return binaryTimeParts{}, fmt.Errorf("malformed binary time %q", value)
+	}
+	micros, err := binaryTemporalMicros(fraction)
+	if err != nil {
+		return binaryTimeParts{}, err
+	}
+	days, hour := hours/24, hours%24
+	return binaryTimeParts{negative: negative, days: days, hour: hour, minute: minutes, second: seconds, micros: micros, zero: days == 0 && hour == 0 && minutes == 0 && seconds == 0 && micros == 0}, nil
+}
+
+func validBinaryTimeClock(hours, minutes, seconds int, parsed bool) bool {
+	return parsed && minutes <= 59 && seconds <= 59 && hours <= 838
+}
+
+func binaryTimePayload(parts binaryTimeParts) []byte {
+	body := []byte{8, 0, byte(parts.days), byte(parts.days >> 8), byte(parts.days >> 16), byte(parts.days >> 24), byte(parts.hour), byte(parts.minute), byte(parts.second)}
+	if parts.negative {
+		body[1] = 1
+	}
+	if parts.micros == 0 {
+		return body
+	}
+	body[0] = 12
+	microseconds := make([]byte, 4)
+	binary.LittleEndian.PutUint32(microseconds, uint32(parts.micros))
+	return append(body, microseconds...)
+}
+
+func encodeBinaryYear(value string) ([]byte, error) {
+	year, ok := parseFixedDigits(strings.TrimSpace(value))
+	if !ok || year < 0 || year > 65535 {
+		return nil, fmt.Errorf("malformed binary year %q", value)
+	}
+	return []byte{byte(year), byte(year >> 8)}, nil
+}
+
+func parseBinaryDate(value string) (int, int, int, error) {
+	year, month, day, err := parseCalendarDate(value, "result", 0)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return year, month, day, nil
+}
+
+func binaryTemporalMicros(fraction string) (int, error) {
+	if fraction == "" {
+		return 0, nil
+	}
+	micros, err := strconv.Atoi(strings.TrimPrefix(fraction, "."))
+	if err != nil || micros < 0 || micros > 999999 {
+		return 0, fmt.Errorf("malformed binary temporal fraction %q", fraction)
+	}
+	return micros, nil
 }
 
 func encodeBinaryLongLong(value string, unsigned bool) ([]byte, error) {

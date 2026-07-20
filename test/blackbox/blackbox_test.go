@@ -220,22 +220,32 @@ func startServer(t *testing.T, runner blackbox.Runner, directory string) (*black
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var event struct {
-		State     string `json:"state"`
-		Address   string `json:"diagnostics_address"`
-		Recovered bool   `json:"recovered"`
-	}
-	if err := process.NextJSONEvent(ctx, &event); err != nil {
-		process.Crash()
-		result := process.Wait()
-		t.Fatalf("wait for ready event: %v; result=%#v", err, result)
-	}
-	if event.State != "ready" || event.Address != address {
+	event := nextReadyEvent(t, process)
+	if event["diagnostics_address"] != address {
 		t.Fatalf("ready event: %#v", event)
 	}
 	return process, address
+}
+
+func nextReadyEvent(t *testing.T, process *blackbox.Process) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		var event map[string]any
+		if err := process.NextJSONEvent(ctx, &event); err != nil {
+			process.Crash()
+			result := process.Wait()
+			t.Fatalf("wait for ready event: %v; result=%#v", err, result)
+		}
+		if event["state"] == "recovering" {
+			continue
+		}
+		if event["state"] != "ready" {
+			t.Fatalf("ready event: %#v", event)
+		}
+		return event
+	}
 }
 
 func TestMySQLProbeRecognizesClassicHandshake(t *testing.T) {
@@ -295,10 +305,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	var event map[string]any
-	if err := process.NextJSONEvent(context.Background(), &event); err != nil || event["state"] != "ready" {
-		t.Fatalf("ready event: %#v %v", event, err)
-	}
+	nextReadyEvent(t, process)
 
 	client := newWireClient(t, mysql, "admin", "secret-password")
 	defer client.close()
@@ -311,8 +318,8 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	if got := client.query("ROLLBACK"); got.err != "" {
 		t.Fatalf("rollback: %#v", got)
 	}
-	if got := client.query("USE rolled_back"); got.err == "" {
-		t.Fatalf("rolled back namespace remained: %#v", got)
+	if got := client.query("USE rolled_back"); got.err != "" {
+		t.Fatalf("DDL was not implicitly committed: %#v", got)
 	}
 	if got := client.query("CREATE DATABASE app"); got.err != "" {
 		t.Fatalf("create database: %#v", got)
@@ -360,10 +367,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var restarted map[string]any
-	if err := process.NextJSONEvent(context.Background(), &restarted); err != nil || restarted["state"] != "ready" {
-		t.Fatalf("restart: %#v %v", restarted, err)
-	}
+	nextReadyEvent(t, process)
 	reopened := newWireClient(t, mysql, "admin", "secret-password")
 	defer reopened.close()
 	rows = reopened.query("USE app")
@@ -373,6 +377,215 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	rows = reopened.query("SELECT * FROM users")
 	if rows.err != "" || len(rows.rows) != 1 || strings.Join(rows.rows[0], ",") != "1,Ada" {
 		t.Fatalf("durable row: %#v", rows)
+	}
+}
+
+func TestMySQLTransactionsProvideIsolationAndReadYourOwnWrites(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("transaction-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	first := newWireClient(t, address, "admin", "transaction-secret")
+	defer first.close()
+	second := newWireClient(t, address, "admin", "transaction-secret")
+	defer second.close()
+
+	for _, query := range []string{
+		"CREATE DATABASE transactions",
+		"USE transactions",
+		"CREATE TABLE entries (id INT)",
+	} {
+		if result := first.query(query); result.err != "" {
+			t.Fatalf("setup %s: %#v", query, result)
+		}
+	}
+	if result := second.query("USE transactions"); result.err != "" {
+		t.Fatalf("second USE: %#v", result)
+	}
+
+	if result := first.query("BEGIN"); result.err != "" {
+		t.Fatalf("begin repeatable read: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 0 {
+		t.Fatalf("initial repeatable-read snapshot: %#v", result)
+	}
+	if result := second.query("CREATE TABLE metadata_visible (id INT)"); result.err != "" {
+		t.Fatalf("committed concurrent DDL: %#v", result)
+	}
+	metadata := first.query("SELECT TABLE_NAME FROM information_schema.tables")
+	foundMetadataTable := false
+	for _, row := range metadata.rows {
+		if len(row) > 0 && row[0] == "metadata_visible" {
+			foundMetadataTable = true
+		}
+	}
+	if metadata.err != "" || !foundMetadataTable {
+		t.Fatalf("catalog metadata was transaction-frozen: %#v", metadata)
+	}
+	if result := second.query("INSERT INTO entries VALUES (2)"); result.err != "" {
+		t.Fatalf("committed concurrent insert: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 0 {
+		t.Fatalf("repeatable-read snapshot changed: %#v", result)
+	}
+	if result := first.query("INSERT INTO entries VALUES (1)"); result.err != "" {
+		t.Fatalf("own insert: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "1" {
+		t.Fatalf("read-your-own-write: %#v", result)
+	}
+	if result := second.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "2" {
+		t.Fatalf("uncommitted row leaked: %#v", result)
+	}
+	if result := first.query("ROLLBACK"); result.err != "" {
+		t.Fatalf("rollback: %#v", result)
+	}
+	if result := second.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "2" {
+		t.Fatalf("rolled-back row persisted: %#v", result)
+	}
+
+	if result := first.query("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"); result.err != "" {
+		t.Fatalf("set read committed: %#v", result)
+	}
+	if result := first.query("BEGIN"); result.err != "" {
+		t.Fatalf("begin read committed: %#v", result)
+	}
+	if result := second.query("INSERT INTO entries VALUES (3)"); result.err != "" {
+		t.Fatalf("second committed insert: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 2 {
+		t.Fatalf("read-committed snapshot: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 2 {
+		t.Fatalf("read-committed statement snapshot: %#v", result)
+	}
+	if result := second.query("INSERT INTO entries VALUES (4)"); result.err != "" {
+		t.Fatalf("second read-committed insert: %#v", result)
+	}
+	if result := first.query("INSERT INTO entries VALUES (5)"); result.err != "" {
+		t.Fatalf("read-committed own insert: %#v", result)
+	}
+	if result := second.query("INSERT INTO entries VALUES (6)"); result.err != "" {
+		t.Fatalf("third committed insert: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 5 {
+		t.Fatalf("read-committed own and concurrent writes: %#v", result)
+	}
+	if result := first.query("COMMIT"); result.err != "" {
+		t.Fatalf("read-committed commit: %#v", result)
+	}
+	if result := first.query("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"); result.err != "" {
+		t.Fatalf("restore repeatable read: %#v", result)
+	}
+	if result := first.query("BEGIN"); result.err != "" {
+		t.Fatalf("begin write-before-read transaction: %#v", result)
+	}
+	if result := first.query("INSERT INTO entries VALUES (7)"); result.err != "" {
+		t.Fatalf("repeatable-read own insert: %#v", result)
+	}
+	if result := second.query("INSERT INTO entries VALUES (8)"); result.err != "" {
+		t.Fatalf("repeatable-read concurrent insert: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 7 {
+		t.Fatalf("repeatable-read first snapshot after write: %#v", result)
+	}
+	if result := first.query("ROLLBACK"); result.err != "" {
+		t.Fatalf("repeatable-read write rollback: %#v", result)
+	}
+}
+
+func TestMySQLTransactionsEnforceAutocommitReadOnlyAndAtomicErrors(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("transaction-settings-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	first := newWireClient(t, address, "admin", "transaction-settings-secret")
+	defer first.close()
+	second := newWireClient(t, address, "admin", "transaction-settings-secret")
+	defer second.close()
+	for _, query := range []string{
+		"CREATE DATABASE transaction_settings",
+		"USE transaction_settings",
+		"CREATE TABLE entries (id INT)",
+	} {
+		if result := first.query(query); result.err != "" {
+			t.Fatalf("setup %s: %#v", query, result)
+		}
+	}
+	if result := second.query("USE transaction_settings"); result.err != "" {
+		t.Fatalf("second USE: %#v", result)
+	}
+
+	for _, query := range []string{
+		"SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+		"SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED",
+		"SET unsupported_setting = 1",
+		"RESET unsupported_setting",
+	} {
+		if result := first.query(query); result.err == "" {
+			t.Fatalf("unsupported isolation accepted: %s", query)
+		}
+	}
+	if result := first.query("START TRANSACTION READ ONLY"); result.err != "" {
+		t.Fatalf("read-only transaction: %#v", result)
+	}
+	if result := first.query("INSERT INTO entries VALUES (9)"); result.err == "" {
+		t.Fatal("mutation succeeded in read-only transaction")
+	}
+	if result := first.query("ROLLBACK"); result.err != "" {
+		t.Fatalf("read-only rollback: %#v", result)
+	}
+
+	if result := first.query("SET autocommit = 0"); result.err != "" {
+		t.Fatalf("disable autocommit: %#v", result)
+	}
+	if result := first.query("INSERT INTO entries VALUES (4)"); result.err != "" {
+		t.Fatalf("implicit transaction insert: %#v", result)
+	}
+	if result := second.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 0 {
+		t.Fatalf("autocommit-off row leaked: %#v", result)
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "4" {
+		t.Fatalf("autocommit-off own row: %#v", result)
+	}
+	if result := first.query("ROLLBACK"); result.err != "" {
+		t.Fatalf("autocommit-off rollback: %#v", result)
+	}
+	if result := second.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 0 {
+		t.Fatalf("autocommit-off rollback persisted row: %#v", result)
+	}
+	if result := first.query("SET autocommit = 1"); result.err != "" {
+		t.Fatalf("enable autocommit: %#v", result)
+	}
+
+	if result := first.query("BEGIN"); result.err != "" {
+		t.Fatalf("begin atomic-error transaction: %#v", result)
+	}
+	if result := first.query("INSERT INTO entries VALUES (5), ('not-an-int')"); result.err == "" {
+		t.Fatal("invalid multi-row mutation succeeded")
+	}
+	if result := first.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 0 {
+		t.Fatalf("failed statement left partial rows: %#v", result)
+	}
+	if result := first.query("COMMIT"); result.err != "" {
+		t.Fatalf("atomic-error commit: %#v", result)
+	}
+	if result := second.query("SELECT * FROM entries"); result.err != "" || len(result.rows) != 0 {
+		t.Fatalf("failed statement became durable: %#v", result)
 	}
 }
 
@@ -581,6 +794,25 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	if binaryResult.err != "" || len(binaryResult.rows) != 1 || len(binaryResult.rows[0]) != 1 || binaryResult.rows[0][0] != "7" || len(binaryResult.metadata) != 1 || len(text.metadata) != 1 || binaryResult.metadata[0] != text.metadata[0] {
 		t.Fatalf("prepared binary result differs from text: text=%#v binary=%#v", text, binaryResult)
 	}
+	for query, want := range map[string]string{
+		"SELECT ROUND(1.235, 2)":                  "1.24",
+		"SELECT ROUND(15, -1)":                    "20",
+		"SELECT POWER(2, 3)":                      "8",
+		"SELECT SQRT(9)":                          "3",
+		"SELECT SUBSTRING('abcdef', 2, 3)":        "bcd",
+		"SELECT SUBSTRING('abcdef' FROM 2 FOR 3)": "bcd",
+		"SELECT REPLACE('a-b', '-', '_')":         "a_b",
+		"SELECT LOCATE('bc', 'abcd')":             "2",
+		"SELECT LOCATE('B', 'abc')":               "2",
+	} {
+		text = client.query(query)
+		statement = client.prepare(query)
+		binaryResult = client.executePrepared(statement.id)
+		if text.err != "" || statement.err != "" || binaryResult.err != "" || len(text.rows) != 1 || len(binaryResult.rows) != 1 || text.rows[0][0] != want || binaryResult.rows[0][0] != want || binaryResult.metadata[0] != text.metadata[0] {
+			t.Fatalf("prepared extended expression differs from text: query=%q text=%#v binary=%#v", query, text, binaryResult)
+		}
+		client.closePrepared(statement.id)
+	}
 
 	bound := client.prepare("SELECT ?")
 	if bound.err != "" {
@@ -616,11 +848,19 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 		t.Fatalf("closed statement executed: %#v", result)
 	}
 
-	if result := client.query("BEGIN"); result.err != "" {
-		t.Fatalf("begin: %#v", result)
+	if result := client.query("SET autocommit = 0"); result.err != "" {
+		t.Fatalf("disable autocommit before reset: %#v", result)
 	}
-	if result := client.query("CREATE DATABASE reset_rollback"); result.err != "" {
-		t.Fatalf("transactional create: %#v", result)
+	for _, query := range []string{
+		"CREATE DATABASE reset_rollback",
+		"USE reset_rollback",
+		"CREATE TABLE pending (id INT)",
+		"BEGIN",
+		"INSERT INTO pending VALUES (1)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("transaction setup %s: %#v", query, result)
+		}
 	}
 	resetStatement := client.prepare("SELECT 1")
 	if resetStatement.err != "" {
@@ -629,8 +869,22 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	if err := client.reset(); err != nil {
 		t.Fatal(err)
 	}
-	if result := client.query("USE reset_rollback"); result.err == "" {
+	if result := client.query("USE reset_rollback"); result.err != "" {
+		t.Fatalf("connection reset lost committed namespace: %#v", result)
+	}
+	if result := client.query("SELECT * FROM pending"); result.err != "" || len(result.rows) != 0 {
 		t.Fatalf("connection reset did not roll back work: %#v", result)
+	}
+	if result := client.query("INSERT INTO pending VALUES (2)"); result.err != "" {
+		t.Fatalf("connection reset did not restore autocommit: %#v", result)
+	}
+	probe := newWireClient(t, mysqlAddress, "admin", "prepared-secret")
+	defer probe.close()
+	if result := probe.query("USE reset_rollback"); result.err != "" {
+		t.Fatalf("probe USE after reset: %#v", result)
+	}
+	if result := probe.query("SELECT * FROM pending"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "2" {
+		t.Fatalf("connection reset left autocommit disabled: %#v", result)
 	}
 	if result := client.executePrepared(resetStatement.id); result.err == "" {
 		t.Fatalf("connection reset retained prepared statement: %#v", result)
@@ -704,10 +958,7 @@ func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	var ready map[string]any
-	if err := process.NextJSONEvent(context.Background(), &ready); err != nil || ready["state"] != "ready" {
-		t.Fatalf("ready: %#v %v", ready, err)
-	}
+	nextReadyEvent(t, process)
 
 	client := newTLSWireClient(t, address, "admin", "secure-password")
 	defer client.close()
@@ -917,16 +1168,20 @@ func TestMySQLMetadataIsHonestEscapedAndCommittedConsistent(t *testing.T) {
 		t.Fatalf("create pending table: %#v", result)
 	}
 	metadata := client.query("SELECT TABLE_NAME FROM information_schema.tables")
+	found := false
 	for _, row := range metadata.rows {
 		if row[0] == "pending" {
-			t.Fatalf("uncommitted table leaked into metadata: %#v", metadata)
+			found = true
 		}
+	}
+	if !found {
+		t.Fatalf("implicitly committed table missing from metadata: %#v", metadata)
 	}
 	if result := client.query("COMMIT"); result.err != "" {
 		t.Fatalf("commit: %#v", result)
 	}
 	metadata = client.query("SELECT TABLE_NAME FROM information_schema.tables")
-	found := false
+	found = false
 	for _, row := range metadata.rows {
 		if row[0] == "pending" {
 			found = true
@@ -938,6 +1193,11 @@ func TestMySQLMetadataIsHonestEscapedAndCommittedConsistent(t *testing.T) {
 }
 
 func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string, extraArguments ...string) (*blackbox.Process, string) {
+	process, address, _ := startMySQLServerWithReady(t, runner, directory, extraArguments...)
+	return process, address
+}
+
+func startMySQLServerWithReady(t *testing.T, runner blackbox.Runner, directory string, extraArguments ...string) (*blackbox.Process, string, bool) {
 	t.Helper()
 	diagnostics := freeAddress(t)
 	mysqlAddress := freeAddress(t)
@@ -948,15 +1208,9 @@ func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string, ex
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var event map[string]any
-	if err := process.NextJSONEvent(ctx, &event); err != nil || event["state"] != "ready" {
-		process.Crash()
-		result := process.Wait()
-		t.Fatalf("wait for ready event: %v; result=%#v", err, result)
-	}
-	return process, mysqlAddress
+	event := nextReadyEvent(t, process)
+	recovered, _ := event["recovered"].(bool)
+	return process, mysqlAddress, recovered
 }
 
 func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.T) {
@@ -977,11 +1231,16 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 	}
 
 	client := newWireClient(t, address, "admin", "shutdown-secret")
-	if result := client.query("BEGIN"); result.err != "" {
-		t.Fatalf("begin: %#v", result)
-	}
-	if result := client.query("CREATE DATABASE interrupted"); result.err != "" {
-		t.Fatalf("create uncommitted database: %#v", result)
+	for _, query := range []string{
+		"CREATE DATABASE interrupted",
+		"USE interrupted",
+		"CREATE TABLE pending (id INT)",
+		"BEGIN",
+		"INSERT INTO pending VALUES (1)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("shutdown transaction setup %s: %#v", query, result)
+		}
 	}
 	if err := process.Stop(); err != nil {
 		t.Fatal(err)
@@ -993,8 +1252,11 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 
 	process, address = startMySQLServer(t, runner, directory)
 	client = newWireClient(t, address, "admin", "shutdown-secret")
-	if result := client.query("USE interrupted"); result.err == "" {
-		t.Fatalf("uncommitted database survived shutdown: %#v", result)
+	if result := client.query("USE interrupted"); result.err != "" {
+		t.Fatalf("committed database missing after shutdown: %#v", result)
+	}
+	if result := client.query("SELECT * FROM pending"); result.err != "" || len(result.rows) != 0 {
+		t.Fatalf("uncommitted row survived shutdown: %#v", result)
 	}
 	if err := client.close(); err != nil {
 		t.Fatal(err)
@@ -1015,6 +1277,63 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 	}
 	if result := runner.Run(context.Background(), "serve", "--data-directory", damaged, "--mysql-listen-address", freeAddress(t), "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stdout, "catalog") {
 		t.Fatalf("damaged directory: %#v", result)
+	}
+}
+
+func TestCrashRecoveryPreservesDurableCommitAndDropsInFlightTransaction(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("crash-recovery-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+
+	process, address, recovered := startMySQLServerWithReady(t, runner, directory)
+	if recovered {
+		t.Fatal("first start reported recovery")
+	}
+	client := newWireClient(t, address, "admin", "crash-recovery-secret")
+	for _, query := range []string{
+		"CREATE DATABASE crash_recovery",
+		"USE crash_recovery",
+		"CREATE TABLE entries (id INT)",
+		"INSERT INTO entries VALUES (1)",
+		"BEGIN",
+		"INSERT INTO entries VALUES (2)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("setup %s: %#v", query, result)
+		}
+	}
+	if err := process.Crash(); err != nil {
+		t.Fatal(err)
+	}
+	crash := process.Wait()
+	if crash.ExitCode == 0 {
+		t.Fatalf("crash unexpectedly exited successfully: %#v", crash)
+	}
+	_ = client.conn.Close()
+
+	process, address, recovered = startMySQLServerWithReady(t, runner, directory)
+	defer func() {
+		_ = process.Stop()
+		_ = process.Wait()
+	}()
+	if !recovered {
+		t.Fatal("restart did not report recovery")
+	}
+	client = newWireClient(t, address, "admin", "crash-recovery-secret")
+	defer client.close()
+	rows := client.query("USE crash_recovery")
+	if rows.err != "" {
+		t.Fatalf("reopen database: %#v", rows)
+	}
+	rows = client.query("SELECT * FROM entries")
+	if rows.err != "" || len(rows.rows) != 1 || rows.rows[0][0] != "1" {
+		t.Fatalf("recovered rows: %#v", rows)
 	}
 }
 
