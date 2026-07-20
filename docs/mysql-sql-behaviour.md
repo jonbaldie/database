@@ -63,6 +63,29 @@ In particular, multiple `NULL`-containing keys may exist under `UNIQUE`, and a
 order is unspecified, including with `LIMIT`; reproducible plan choice does not
 promise row-order stability.
 
+## Composed relational queries
+
+The v0.1 relational surface supports scalar subqueries in projections,
+`EXISTS` and single-column `[NOT] IN` predicates, derived tables with required
+aliases, and non-recursive `WITH` common table expressions. A subquery may
+reference columns from any enclosing query scope; its own columns shadow outer
+columns. A scalar subquery must return one column and at most one row: no row
+produces `NULL`, while extra columns or rows fail with MySQL error 1241 or 1242.
+Derived tables and CTEs expose their projected names, types, collations, and
+nullability to their consumers. Recursive CTEs and CTE column lists are outside
+v0.1.
+
+`UNION`, `INTERSECT`, and `EXCEPT`, with optional `ALL` or `DISTINCT`, are
+supported. `INTERSECT` binds more tightly than `UNION` and `EXCEPT`; parentheses
+override that precedence. Distinct set comparison treats `NULL` values as equal
+and compares character values through the reconciled collation. `ALL` preserves
+duplicate multiplicity. Inputs must have equal arity and a lossless common type
+under this contract's conversion rules. Result names come from the first term;
+types, lengths, collations, and nullability are reconciled across every term.
+A whole-expression `ORDER BY` may use a first-term name or ordinal, and is
+applied before a whole-expression `LIMIT`; without it, result order is
+unspecified.
+
 ## Temporal values
 
 `TIMESTAMP` is an instant rendered through the session time zone; `DATETIME` is

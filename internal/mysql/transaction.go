@@ -181,7 +181,7 @@ func isMutationStatement(lower string) bool {
 }
 
 func isTransactionalStatement(lower string) bool {
-	return strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "show ") || strings.HasPrefix(lower, "explain ") || isMutationStatement(lower)
+	return isComposedSelectStatement(lower) || strings.HasPrefix(lower, "show ") || strings.HasPrefix(lower, "explain ") || isMutationStatement(lower)
 }
 
 func (s *textStatementExecutor) settingStatement(query, lower string) (*queryResult, bool, error) {

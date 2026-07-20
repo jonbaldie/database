@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func parseRelationalProjection(text string, columns []relationColumn) ([]relationalProjection, bool, error) {
+func parseRelationalProjection(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, bool, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, false, sqlFailure{1064, "42000", "empty SELECT list"}
@@ -15,17 +15,17 @@ func parseRelationalProjection(text string, columns []relationColumn) ([]relatio
 		projections := projectionsForColumns(columns)
 		return projections, len(projections) == len(columns), nil
 	}
-	projections, err := parseProjectionItems(text, columns)
+	projections, err := parseProjectionItems(text, columns, context, outer)
 	if err != nil {
 		return nil, false, err
 	}
 	return projections, false, nil
 }
 
-func parseProjectionItems(text string, columns []relationColumn) ([]relationalProjection, error) {
+func parseProjectionItems(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
 	projections := make([]relationalProjection, 0)
 	for _, item := range splitCSV(text) {
-		parsed, err := parseProjectionItem(item, columns)
+		parsed, err := parseProjectionItem(item, columns, context, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -37,13 +37,16 @@ func parseProjectionItems(text string, columns []relationColumn) ([]relationalPr
 	return projections, nil
 }
 
-func parseProjectionItem(item string, columns []relationColumn) ([]relationalProjection, error) {
+func parseProjectionItem(item string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
 	expression, alias, err := splitProjectionAlias(item)
 	if err != nil {
 		return nil, err
 	}
 	if strings.HasSuffix(strings.TrimSpace(expression), ".*") {
 		return wildcardProjections(expression, columns)
+	}
+	if query, ok := scalarSubquerySQL(expression); ok {
+		return subqueryProjection(query, expression, alias, columns, context, outer)
 	}
 	if column, resolveErr := resolveRelationColumn(expression, columns); resolveErr == nil {
 		projection := relationProjection(column, alias)
@@ -53,7 +56,37 @@ func parseProjectionItem(item string, columns []relationColumn) ([]relationalPro
 	if projection, scalarErr := scalarProjection(expression, alias); scalarErr == nil {
 		return projection, nil
 	}
-	return computedProjection(expression, alias, columns)
+	return computedProjection(expression, alias, columns, outer)
+}
+
+func subqueryProjection(query, expression, alias string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
+	scope := &outerRelationScope{columns: columns, row: sampleRelationRow(columns), parent: outer}
+	result, err := describeComposedSelect(context, query, scope)
+	if err != nil {
+		return nil, err
+	}
+	if len(result.columns) != 1 {
+		return nil, sqlFailure{1241, "21000", "operand should contain 1 column"}
+	}
+	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
+	correlated := composedQueryIsCorrelated(context, query, scope)
+	value := exprValue{}
+	if !correlated && !context.planning {
+		value, metadata, err = executeScalarSubquery(context, query, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	name := expression
+	if alias != "" {
+		name = alias
+	}
+	metadata.name = name
+	metadata.flags &^= mysqlNotNullFlag
+	return []relationalProjection{{
+		expression: expression, name: name, alias: alias, column: -1,
+		subquery: query, context: context, metadata: metadata, scalar: !correlated, value: value,
+	}}, nil
 }
 
 func wildcardProjections(expression string, columns []relationColumn) ([]relationalProjection, error) {
@@ -92,8 +125,8 @@ func scalarProjection(expression, alias string) ([]relationalProjection, error) 
 	}}, nil
 }
 
-func computedProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, error) {
-	metadata, err := relationExpressionMetadata(expression, columns)
+func computedProjection(expression, alias string, columns []relationColumn, outer *outerRelationScope) ([]relationalProjection, error) {
+	metadata, err := relationExpressionMetadataContext(expression, columns, outer)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +137,7 @@ func computedProjection(expression, alias string, columns []relationColumn) ([]r
 	metadata.name = name
 	return []relationalProjection{{
 		expression: expression, name: name, alias: alias, column: -1,
-		computed: true, metadata: metadata,
+		computed: true, metadata: metadata, outer: outer,
 	}}, nil
 }
 
@@ -153,7 +186,7 @@ func literalExprValue(value literalQueryResult) exprValue {
 }
 
 func (p relationalProjection) resolveName(columns []relationColumn) relationalProjection {
-	if p.scalar || p.computed {
+	if p.scalar || p.computed || p.subquery != "" {
 		return p
 	}
 	column := columns[p.column]
@@ -185,18 +218,7 @@ func (p *relationalSelectPlan) projectValues(row relationRow, result *relational
 	for index, projection := range p.projection {
 		projection = projection.resolveName(p.source.columns)
 		p.projection[index] = projection
-		var value exprValue
-		var err error
-		if projection.scalar {
-			value = projection.value
-		} else if projection.computed {
-			value, err = evaluateRelationExpression(projection.expression, p.source.columns, row)
-		} else {
-			if projection.column < 0 || projection.column >= len(row.values) {
-				return sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
-			}
-			value, err = relationColumnValue(p.source.columns, projection.column, row)
-		}
+		value, err := p.projectionValue(projection, row)
 		if err != nil {
 			return err
 		}
@@ -210,12 +232,29 @@ func (p *relationalSelectPlan) projectValues(row relationRow, result *relational
 	return nil
 }
 
+func (p *relationalSelectPlan) projectionValue(projection relationalProjection, row relationRow) (exprValue, error) {
+	if projection.subquery != "" && !projection.scalar {
+		value, _, err := executeScalarSubquery(projection.context, projection.subquery, &outerRelationScope{columns: p.source.columns, row: row, parent: p.outer})
+		return value, err
+	}
+	if projection.scalar {
+		return projection.value, nil
+	}
+	if projection.computed {
+		return evaluateRelationExpressionContext(projection.expression, p.source.columns, row, projection.outer)
+	}
+	if projection.column < 0 || projection.column >= len(row.values) {
+		return exprValue{}, sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
+	}
+	return relationColumnValue(p.source.columns, projection.column, row)
+}
+
 func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relationalResultRow) error {
 	for index, order := range p.order {
 		if !order.computed {
 			continue
 		}
-		value, err := evaluateRelationExpression(order.expression, p.source.columns, row)
+		value, err := evaluateRelationExpressionContext(order.expression, p.source.columns, row, p.outer)
 		if err != nil {
 			return err
 		}
@@ -225,7 +264,11 @@ func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relat
 }
 
 func relationExpressionMetadata(expression string, columns []relationColumn) (columnMetadata, error) {
-	value, err := representativeExpressionValue(expression, columns)
+	return relationExpressionMetadataContext(expression, columns, nil)
+}
+
+func relationExpressionMetadataContext(expression string, columns []relationColumn, outer *outerRelationScope) (columnMetadata, error) {
+	value, err := representativeExpressionValueContext(expression, columns, outer)
 	if err != nil {
 		return columnMetadata{}, err
 	}
@@ -240,17 +283,46 @@ func relationExpressionMetadata(expression string, columns []relationColumn) (co
 		metadata.length = 22
 	case valueString:
 		metadata.length = relationStringExpressionLength(expression, columns, value.render())
+		metadata.characterSet, metadata.coercibility = relationExpressionCharacterMetadata(expression, columns)
 	}
 	return metadata, nil
 }
 
+func relationExpressionCharacterMetadata(expression string, columns []relationColumn) (uint16, byte) {
+	characterSet := mysqlCharsetUTF8MB40900AICI
+	coercibility := byte(4)
+	tokens, _ := tokenizeExpression(expression)
+	for _, token := range tokens {
+		if token.kind != tokenIdent {
+			continue
+		}
+		index, err := resolveRelationColumn(token.text, columns)
+		if err != nil {
+			continue
+		}
+		candidate := columns[index].metadata.characterSet
+		coercibility = min(coercibility, byte(2))
+		if candidate == mysqlCharsetBinary {
+			return candidate, coercibility
+		}
+		if candidate == mysqlCharsetUTF8MB4Bin {
+			characterSet = candidate
+		}
+	}
+	return characterSet, coercibility
+}
+
 func representativeExpressionValue(expression string, columns []relationColumn) (exprValue, error) {
+	return representativeExpressionValueContext(expression, columns, nil)
+}
+
+func representativeExpressionValueContext(expression string, columns []relationColumn, outer *outerRelationScope) (exprValue, error) {
 	var firstError error
 	for _, sample := range []int64{1, 2, 10, 1000, 0, -1} {
 		value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
 			index, err := resolveRelationColumn(name, columns)
 			if err != nil {
-				return exprValue{}, err
+				return outerRelationValue(name, outer)
 			}
 			return relationMetadataValue(columns[index], sample), nil
 		})

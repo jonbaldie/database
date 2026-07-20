@@ -64,7 +64,7 @@ func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation
 	relations := relationExecutor{session: s.session}
 	lower := strings.ToLower(inner)
 	switch {
-	case strings.HasPrefix(lower, "select "):
+	case isComposedSelectStatement(inner):
 		return s.explainSelect(&relations, inner)
 	case strings.HasPrefix(lower, "insert into "):
 		return s.explainInsert(&relations, inner)
@@ -78,16 +78,7 @@ func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation
 }
 
 func (s *textStatementExecutor) explainSelect(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
-	expression := strings.TrimSpace(inner[len("select "):])
-	from := keywordAt(expression, "from")
-	if from < 0 {
-		return s.explainScalarSelect(inner, expression)
-	}
-	plan, err := parseRelationalSelect(relations, inner)
-	if err != nil {
-		return nil, err
-	}
-	return plan.explanation(s.server.config.Version, s.database, inner), nil
+	return s.explainComposedSelect(relations, inner)
 }
 
 func (s *textStatementExecutor) explainScalarSelect(inner, expression string) (*queryexplanation.Document, error) {

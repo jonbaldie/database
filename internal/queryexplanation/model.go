@@ -159,6 +159,15 @@ type distinctOperation struct {
 	Scope string `json:"scope"`
 }
 
+type setOperation struct {
+	SetOperation string `json:"set_operation"`
+	All          bool   `json:"all"`
+}
+
+type materializeOperation struct {
+	Reason string `json:"reason"`
+}
+
 // Table is the neutral relation description a planner needs.
 type Table struct {
 	Database string

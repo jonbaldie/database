@@ -94,6 +94,9 @@ func (source *relationalSource) appendTable(table relationalTableSource, using [
 }
 
 func parseRelationalTableSource(s *relationExecutor, text string) (relationalTableSource, string, error) {
+	if strings.HasPrefix(strings.TrimSpace(text), "(") {
+		return parseDerivedTableSource(s, text)
+	}
 	token, remainder, ok := relationToken(text)
 	if !ok {
 		return relationalTableSource{}, "", sqlFailure{1064, "42000", "invalid table name"}
@@ -102,6 +105,45 @@ func parseRelationalTableSource(s *relationExecutor, text string) (relationalTab
 	if !valid || len(parts) == 0 || len(parts) > 2 {
 		return relationalTableSource{}, "", sqlFailure{1064, "42000", "invalid table name"}
 	}
+	if source, tail, found, err := parseCTETableSource(s, parts, remainder); found {
+		return source, tail, err
+	}
+	return parseCatalogTableSource(s, parts, remainder)
+}
+
+func parseCTETableSource(s *relationExecutor, parts []string, remainder string) (relationalTableSource, string, bool, error) {
+	if len(parts) != 1 || s.composed == nil {
+		return relationalTableSource{}, "", false, nil
+	}
+	key := catalog.Key(parts[0])
+	relation, found := s.composed.ctes[key]
+	if !found {
+		return relationalTableSource{}, "", false, nil
+	}
+	relation, err := materializeCTE(s.composed, key, relation)
+	if err != nil {
+		return relationalTableSource{}, "", true, err
+	}
+	alias, tail, err := relationAlias(remainder, relation.name)
+	if err != nil {
+		return relationalTableSource{}, "", true, err
+	}
+	table, err := queryResultTable(relation.name, relation.result)
+	if err != nil {
+		return relationalTableSource{}, "", true, err
+	}
+	columns := relationalResultColumns(relation.name, alias, table, relation.result)
+	reason := relation.reason
+	if relation.references > 0 {
+		reason = "reuse"
+	}
+	relation.references++
+	s.composed.ctes[key] = relation
+	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason}
+	return source, tail, true, nil
+}
+
+func parseCatalogTableSource(s *relationExecutor, parts []string, remainder string) (relationalTableSource, string, error) {
 	namespace, name, err := tableTarget(s, parts)
 	if err != nil {
 		return relationalTableSource{}, "", err
@@ -116,6 +158,75 @@ func parseRelationalTableSource(s *relationExecutor, text string) (relationalTab
 	}
 	columns := relationalTableColumns(namespace, name, alias, table)
 	return relationalTableSource{namespace: namespace, name: name, alias: alias, table: table, columns: columns}, remainder, nil
+}
+
+func parseDerivedTableSource(s *relationExecutor, text string) (relationalTableSource, string, error) {
+	text = strings.TrimSpace(text)
+	close, ok := matchingParenthesis(text, 0)
+	if !ok {
+		return relationalTableSource{}, "", sqlFailure{1064, "42000", "unterminated derived table"}
+	}
+	query := strings.TrimSpace(text[1:close])
+	if query == "" {
+		return relationalTableSource{}, "", sqlFailure{1064, "42000", "empty derived table"}
+	}
+	alias, remainder, err := requiredDerivedAlias(text[close+1:])
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
+	if s.composed == nil {
+		return relationalTableSource{}, "", sqlFailure{1064, "42000", "derived table context is unavailable"}
+	}
+	child, err := s.composed.child()
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
+	result, err := composedSourceResult(s.composed, child, query)
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
+	table, err := queryResultTable(alias, result)
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
+	columns := relationalResultColumns(alias, alias, table, result)
+	return relationalTableSource{name: alias, alias: alias, table: table, columns: columns, query: query, reason: "derived_table"}, remainder, nil
+}
+
+func composedSourceResult(context, child *composedQueryContext, query string) (*queryResult, error) {
+	if context.planning {
+		return describeComposedSelect(child, query, nil)
+	}
+	return executeComposedSelect(child, query, nil)
+}
+
+func relationalResultColumns(tableName, alias string, table catalog.Table, result *queryResult) []relationColumn {
+	columns := relationalTableColumns("", tableName, alias, table)
+	for index := range columns {
+		metadata := resultColumnDefinition(columns[index].name, index, result.metadata)
+		metadata.schema, metadata.table = "", alias
+		columns[index].metadata = metadata
+	}
+	return columns
+}
+
+func requiredDerivedAlias(text string) (string, string, error) {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(strings.ToLower(text), "as ") {
+		text = strings.TrimSpace(text[len("AS "):])
+	}
+	aliasToken, remainder, ok := relationToken(text)
+	if !ok || isJoinWord(aliasToken) {
+		return "", "", sqlFailure{1248, "42000", "every derived table must have its own alias"}
+	}
+	alias, valid := singleIdentifier(aliasToken)
+	if !valid {
+		return "", "", sqlFailure{1064, "42000", "invalid derived table alias"}
+	}
+	if err := validateIdentifierLength(alias); err != nil {
+		return "", "", err
+	}
+	return alias, remainder, nil
 }
 
 func relationToken(text string) (string, string, bool) {

@@ -405,6 +405,7 @@ type databaseSelector struct{ *session }
 type relationExecutor struct {
 	*session
 	streamRows bool
+	composed   *composedQueryContext
 }
 
 type informationSchemaExecutor struct{ *session }
@@ -571,6 +572,7 @@ type columnMetadata struct {
 	typ                                                       byte
 	flags                                                     uint16
 	decimals                                                  byte
+	coercibility                                              byte
 }
 
 const informationSchemaName = "information_schema"
@@ -890,7 +892,7 @@ func (s *textStatementExecutor) relationStatement(query, lower string) (*queryRe
 	case strings.HasPrefix(lower, "delete from "):
 		affected, err := deleteRows(&relations, query)
 		return &queryResult{affected: affected}, true, err
-	case strings.HasPrefix(lower, "select "):
+	case isComposedSelectStatement(query):
 		result, err := selectQuery(&relations, query)
 		return result, true, err
 	default:
@@ -2671,10 +2673,10 @@ func preparedParameterMetadata(index int) columnMetadata {
 func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
 	lower := strings.ToLower(query)
-	if !strings.HasPrefix(lower, "select ") && !strings.HasPrefix(lower, "insert into ") && !strings.HasPrefix(lower, "update ") && !strings.HasPrefix(lower, "delete from ") {
+	if !isPreparedStatement(lower) {
 		return nil, sqlFailure{1064, "42000", "unsupported prepared statement"}
 	}
-	if !strings.HasPrefix(lower, "select ") {
+	if !isPreparedRead(lower) {
 		return nil, nil
 	}
 	parameters := nullPreparedParameters(parameterCount(query))
@@ -2689,6 +2691,22 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 		return []columnMetadata{literal.metadata}, nil
 	}
 	return s.queryColumns(validated, true)
+}
+
+func isPreparedStatement(lower string) bool {
+	if isComposedSelectStatement(lower) {
+		return true
+	}
+	for _, prefix := range []string{"select ", "with ", "insert into ", "update ", "delete from "} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPreparedRead(lower string) bool {
+	return isComposedSelectStatement(lower)
 }
 
 func (s *preparedPreparation) parameterizedColumns(query, validated string, parameters int) ([]columnMetadata, error) {
@@ -2827,6 +2845,18 @@ func nullPreparedParameters(count int) []string {
 }
 
 func (s *preparedPreparation) queryColumns(query string, preserveMetadata bool) ([]columnMetadata, error) {
+	if isComposedSelectStatement(query) {
+		relations := &relationExecutor{session: s.session}
+		result, err := describeComposedSelect(newComposedQueryContext(relations), query, nil)
+		if err != nil {
+			return nil, err
+		}
+		metadata := make([]columnMetadata, len(result.columns))
+		for index, name := range result.columns {
+			metadata[index] = resultColumnDefinition(name, index, result.metadata)
+		}
+		return metadata, nil
+	}
 	result, err := newQueryExecutor(s.session).execute(query)
 	if err != nil {
 		return nil, err

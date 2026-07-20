@@ -9,32 +9,42 @@ type relationPredicate func(relationRow) (exprValue, error)
 type relationOperand struct {
 	column     int
 	isColumn   bool
+	bound      bool
 	computed   bool
 	raw        string
 	value      exprValue
 	definition relationColumn
 	columns    []relationColumn
+	outer      *outerRelationScope
 }
 
 func compileRelationPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
+	return compileRelationPredicateContext(text, columns, session, nil, nil)
+}
+
+func compileRelationPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, error) {
 	text = stripRelationParentheses(strings.TrimSpace(text))
 	if text == "" {
 		return nil, unsupportedExpression()
 	}
 	if parts := splitRelationKeyword(text, "OR"); len(parts) > 1 {
-		return combineRelationPredicates(parts, columns, session, logicalOr)
+		return combineRelationPredicatesContext(parts, columns, session, context, outer, logicalOr)
 	}
 	if parts := splitRelationKeyword(text, "AND"); len(parts) > 1 {
-		return combineRelationPredicates(parts, columns, session, logicalAnd)
+		return combineRelationPredicatesContext(parts, columns, session, context, outer, logicalAnd)
 	}
 	if strings.HasPrefix(strings.ToLower(text), "not ") {
-		return compileNegatedPredicate(text, columns, session)
+		return compileNegatedPredicateContext(text, columns, session, context, outer)
 	}
-	return compileSimpleRelationPredicate(text, columns, session)
+	return compileSimpleRelationPredicateContext(text, columns, session, context, outer)
 }
 
 func compileNegatedPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
-	inner, err := compileRelationPredicate(strings.TrimSpace(text[len("not "):]), columns, session)
+	return compileNegatedPredicateContext(text, columns, session, nil, nil)
+}
+
+func compileNegatedPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, error) {
+	inner, err := compileRelationPredicateContext(strings.TrimSpace(text[len("not "):]), columns, session, context, outer)
 	if err != nil {
 		return nil, err
 	}
@@ -48,13 +58,23 @@ func compileNegatedPredicate(text string, columns []relationColumn, session *ses
 }
 
 func compileSimpleRelationPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
+	return compileSimpleRelationPredicateContext(text, columns, session, nil, nil)
+}
+
+func compileSimpleRelationPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, error) {
+	if predicate, found, err := compileExistsSubquery(text, columns, context, outer); found {
+		return predicate, err
+	}
+	if predicate, found, err := compileInSubquery(text, columns, session, context, outer); found {
+		return predicate, err
+	}
 	if operator, left, right, ok := findRelationComparison(text); ok {
-		return compileRelationComparison(operator, left, right, columns, session)
+		return compileRelationComparisonContext(operator, left, right, columns, session, outer)
 	}
 	if isPosition, left, right := splitRelationKeywordOnce(text, "IS"); isPosition {
 		return compileIsPredicate(left, right, columns, session)
 	}
-	operand, err := compileRelationOperand(text, columns, session)
+	operand, err := compileRelationOperandContext(text, columns, session, outer)
 	if err != nil {
 		return nil, err
 	}
@@ -104,9 +124,13 @@ func relationTruthPredicate(operand relationOperand, wantTrue, negate bool) rela
 }
 
 func combineRelationPredicates(parts []string, columns []relationColumn, session *session, combine func(exprValue, exprValue) (exprValue, error)) (relationPredicate, error) {
+	return combineRelationPredicatesContext(parts, columns, session, nil, nil, combine)
+}
+
+func combineRelationPredicatesContext(parts []string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope, combine func(exprValue, exprValue) (exprValue, error)) (relationPredicate, error) {
 	predicates := make([]relationPredicate, len(parts))
 	for index, part := range parts {
-		predicate, err := compileRelationPredicate(part, columns, session)
+		predicate, err := compileRelationPredicateContext(part, columns, session, context, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -132,11 +156,15 @@ func combineRelationPredicates(parts []string, columns []relationColumn, session
 }
 
 func compileRelationComparison(operator, left, right string, columns []relationColumn, session *session) (relationPredicate, error) {
-	leftOperand, err := compileRelationOperand(left, columns, session)
+	return compileRelationComparisonContext(operator, left, right, columns, session, nil)
+}
+
+func compileRelationComparisonContext(operator, left, right string, columns []relationColumn, session *session, outer *outerRelationScope) (relationPredicate, error) {
+	leftOperand, err := compileRelationOperandContext(left, columns, session, outer)
 	if err != nil {
 		return nil, err
 	}
-	rightOperand, err := compileRelationOperand(right, columns, session)
+	rightOperand, err := compileRelationOperandContext(right, columns, session, outer)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +269,10 @@ func relationCharacterComparisonType(left, right relationOperand) (characterType
 }
 
 func compileRelationOperand(text string, columns []relationColumn, session *session) (relationOperand, error) {
+	return compileRelationOperandContext(text, columns, session, nil)
+}
+
+func compileRelationOperandContext(text string, columns []relationColumn, session *session, outer *outerRelationScope) (relationOperand, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return relationOperand{}, unsupportedExpression()
@@ -252,21 +284,26 @@ func compileRelationOperand(text string, columns []relationColumn, session *sess
 	if err == nil {
 		return relationOperand{column: column, isColumn: true, raw: text, definition: columns[column]}, nil
 	}
-	if _, expressionErr := evaluateRelationExpression(text, columns, sampleRelationRow(columns)); expressionErr != nil {
+	if outer != nil {
+		if value, outerErr := outerRelationValue(text, outer); outerErr == nil {
+			return relationOperand{raw: text, value: value, bound: true}, nil
+		}
+	}
+	if _, expressionErr := evaluateRelationExpressionContext(text, columns, sampleRelationRow(columns), outer); expressionErr != nil {
 		return relationOperand{}, expressionErr
 	}
-	return relationOperand{computed: true, raw: text, columns: columns}, nil
+	return relationOperand{computed: true, raw: text, columns: columns, outer: outer}, nil
 }
 
 func coerceRelationLiterals(left, right relationOperand, columns []relationColumn, session *session) (relationOperand, relationOperand, error) {
 	switch {
-	case left.isColumn && !right.isColumn:
+	case left.isColumn && !right.isColumn && !right.bound:
 		value, err := typedRelationLiteral(right, left.definition, session)
 		if err != nil {
 			return relationOperand{}, relationOperand{}, err
 		}
 		right.value = value
-	case right.isColumn && !left.isColumn:
+	case right.isColumn && !left.isColumn && !left.bound:
 		value, err := typedRelationLiteral(left, right.definition, session)
 		if err != nil {
 			return relationOperand{}, relationOperand{}, err
@@ -296,7 +333,7 @@ func typedRelationLiteral(operand relationOperand, column relationColumn, sessio
 
 func relationOperandValue(operand relationOperand, row relationRow) (exprValue, error) {
 	if operand.computed {
-		return evaluateRelationExpression(operand.raw, operand.columns, row)
+		return evaluateRelationExpressionContext(operand.raw, operand.columns, row, operand.outer)
 	}
 	if !operand.isColumn {
 		return operand.value, nil
@@ -312,10 +349,14 @@ func relationOperandValue(operand relationOperand, row relationRow) (exprValue, 
 }
 
 func evaluateRelationExpression(text string, columns []relationColumn, row relationRow) (exprValue, error) {
+	return evaluateRelationExpressionContext(text, columns, row, nil)
+}
+
+func evaluateRelationExpressionContext(text string, columns []relationColumn, row relationRow, outer *outerRelationScope) (exprValue, error) {
 	return evaluateScalarWithResolver(text, func(name string) (exprValue, error) {
 		column, err := resolveRelationColumn(name, columns)
 		if err != nil {
-			return exprValue{}, err
+			return outerRelationValue(name, outer)
 		}
 		return relationColumnValue(columns, column, row)
 	})
