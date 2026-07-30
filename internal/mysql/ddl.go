@@ -438,7 +438,7 @@ func applyTableDefinitionAction(table *catalog.Table, action ddlAction) error {
 }
 
 func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) error {
-	candidates := append(cloneCatalogConstraints(table.Constraints), constraint)
+	candidates := append(catalog.CloneConstraints(table.Constraints), constraint)
 	named, err := namedTableConstraints(table.Name, candidates)
 	if err != nil {
 		return err
@@ -450,17 +450,7 @@ func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) err
 		}
 	}
 	table.Constraints = append(table.Constraints, constraint)
-	if constraint.Type == "primary" {
-		ensureColumnAttributes(table)
-		indexes, err := tableColumnIndexes(*table)
-		if err != nil {
-			return err
-		}
-		for _, column := range constraint.Columns {
-			table.ColumnAttributes[indexes[catalog.Key(column)]].Nullable = false
-		}
-	}
-	return nil
+	return applyPrimaryColumnRules(table)
 }
 
 func addTableColumn(table *catalog.Table, action ddlAction) error {
@@ -570,7 +560,7 @@ func cloneCatalogTable(table catalog.Table) catalog.Table {
 		Columns:          append([]string(nil), table.Columns...),
 		ColumnTypes:      append([]string(nil), table.ColumnTypes...),
 		ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.ColumnAttributes...),
-		Constraints:      cloneCatalogConstraints(table.Constraints),
+		Constraints:      catalog.CloneConstraints(table.Constraints),
 		Rows:             cloneRows(table.Rows),
 	}
 }

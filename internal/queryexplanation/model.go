@@ -183,8 +183,9 @@ type Table struct {
 
 // Constraint is a public constraint check in a write plan.
 type Constraint struct {
-	Type string
-	Name string
+	Type  string
+	Name  string
+	Table Table
 }
 
 func emptyOutput() Output {

@@ -284,7 +284,7 @@ func constraintChecks(write Write, child *Operator) *Operator {
 		child = &Operator{
 			Kind: "constraint_check", Summary: "Check the " + constraint.Name + " constraint.",
 			Operation: constraintCheckOperation{ConstraintType: constraint.Type, ConstraintName: constraint.Name},
-			Objects:   []ObjectReference{{Type: "constraint", Database: write.Table.Database, Table: write.Table.Name, Name: constraint.Name}},
+			Objects:   []ObjectReference{{Type: "constraint", Database: constraint.Table.Database, Table: constraint.Table.Name, Name: constraint.Name}},
 			Estimates: child.Estimates, Output: child.Output, Warnings: []Warning{}, Children: []*Operator{child},
 		}
 	}

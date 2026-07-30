@@ -1010,7 +1010,7 @@ func createTableInDefinition(definition *catalog.Definition, namespace, name str
 }
 
 func builtCatalogTable(name string, table tableDefinition) (catalog.Table, error) {
-	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...), ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.attributes...), Constraints: cloneCatalogConstraints(table.constraints)}
+	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...), ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.attributes...), Constraints: catalog.CloneConstraints(table.constraints)}
 	if len(table.types) > 0 {
 		tableDefinition.ColumnTypes = append([]string(nil), table.types...)
 	}
@@ -1024,12 +1024,13 @@ func builtCatalogTable(name string, table tableDefinition) (catalog.Table, error
 }
 
 func applyPrimaryColumnRules(table *catalog.Table) error {
+	ensureColumnAttributes(table)
 	indexes, err := tableColumnIndexes(*table)
 	if err != nil {
 		return err
 	}
 	for _, constraint := range table.Constraints {
-		if constraint.Type != "primary" {
+		if constraint.Type != catalog.ConstraintTypePrimary {
 			continue
 		}
 		for _, column := range constraint.Columns {
@@ -1065,6 +1066,13 @@ type tableDefinition struct {
 	ifNotExists bool
 }
 
+type parsedTableColumns struct {
+	columns     []string
+	types       []string
+	attributes  []catalog.ColumnAttribute
+	constraints []catalog.Constraint
+}
+
 func parseCreateTable(query string) (tableDefinition, error) {
 	head, body, err := createTableParts(query)
 	if err != nil {
@@ -1079,18 +1087,18 @@ func parseCreateTable(query string) (tableDefinition, error) {
 	if err != nil {
 		return tableDefinition{}, err
 	}
-	columns, types, attributes, constraints, err := parseTableColumns(body)
+	columns, err := parseTableColumns(body)
 	if err != nil {
 		return tableDefinition{}, err
 	}
-	if err := validateTableColumns(columns); err != nil {
+	if err := validateTableColumns(columns.columns); err != nil {
 		return tableDefinition{}, err
 	}
-	constraints, err = namedTableConstraints(target[len(target)-1], constraints)
+	constraints, err := namedTableConstraints(target[len(target)-1], columns.constraints)
 	if err != nil {
 		return tableDefinition{}, err
 	}
-	return tableDefinition{target: target, columns: columns, types: types, attributes: attributes, constraints: constraints, ifNotExists: ifNotExists}, nil
+	return tableDefinition{target: target, columns: columns.columns, types: columns.types, attributes: columns.attributes, constraints: constraints, ifNotExists: ifNotExists}, nil
 }
 
 func createTableTarget(head string) ([]string, error) {
@@ -1134,29 +1142,33 @@ func createTableParts(query string) (string, string, error) {
 	return head, query[open+1 : close], nil
 }
 
-func parseTableColumns(body string) ([]string, []string, []catalog.ColumnAttribute, []catalog.Constraint, error) {
+func parseTableColumns(body string) (parsedTableColumns, error) {
 	parts := splitCSV(body)
-	columns := make([]string, 0, len(parts))
-	types := make([]string, 0, len(parts))
-	attributes := make([]catalog.ColumnAttribute, 0, len(parts))
-	constraints := make([]catalog.Constraint, 0, len(parts))
+	parsed := parsedTableColumns{
+		columns:     make([]string, 0, len(parts)),
+		types:       make([]string, 0, len(parts)),
+		attributes:  make([]catalog.ColumnAttribute, 0, len(parts)),
+		constraints: make([]catalog.Constraint, 0, len(parts)),
+	}
 	for _, part := range parts {
 		if isTableConstraintDefinition(part) {
 			constraint, err := parseTableConstraint(part)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return parsedTableColumns{}, err
 			}
-			constraints = append(constraints, constraint)
+			parsed.constraints = append(parsed.constraints, constraint)
 			continue
 		}
 		column, typeName, attribute, columnConstraints, err := parseTableColumn(part)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return parsedTableColumns{}, err
 		}
-		columns, types, attributes = append(columns, column), append(types, typeName), append(attributes, attribute)
-		constraints = append(constraints, columnConstraints...)
+		parsed.columns = append(parsed.columns, column)
+		parsed.types = append(parsed.types, typeName)
+		parsed.attributes = append(parsed.attributes, attribute)
+		parsed.constraints = append(parsed.constraints, columnConstraints...)
 	}
-	return columns, types, attributes, constraints, nil
+	return parsed, nil
 }
 
 func parseTableColumn(part string) (string, string, catalog.ColumnAttribute, []catalog.Constraint, error) {
@@ -1339,17 +1351,17 @@ func canonicalDefaultValue(typeName, value string) string {
 func canonicalConstraintDefinition(constraint catalog.Constraint) string {
 	columns := canonicalConstraintColumns(constraint.Columns)
 	switch constraint.Type {
-	case "primary":
+	case catalog.ConstraintTypePrimary:
 		return "PRIMARY KEY " + columns
-	case "unique":
+	case catalog.ConstraintTypeUnique:
 		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " UNIQUE " + columns
-	case "foreign_key":
+	case catalog.ConstraintTypeForeignKey:
 		target := quoteIdentifier(constraint.ReferencedTable)
 		if constraint.ReferencedNamespace != "" {
 			target = quoteIdentifier(constraint.ReferencedNamespace) + "." + target
 		}
 		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " FOREIGN KEY " + columns + " REFERENCES " + target + " " + canonicalConstraintColumns(constraint.ReferencedColumns)
-	case "check":
+	case catalog.ConstraintTypeCheck:
 		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " CHECK (" + constraint.Check + ")"
 	default:
 		return "CONSTRAINT " + quoteIdentifier(constraint.Name)
@@ -2427,28 +2439,6 @@ func tableTarget(s *relationExecutor, parts []string) (string, string, error) {
 		return "", "", err
 	}
 	return namespace, table, nil
-}
-
-func isUnsupportedTableDefinition(value string) bool {
-	switch strings.ToLower(value) {
-	case "primary", "unique", "foreign", "check", "constraint", "key", "index", "fulltext", "spatial":
-		return true
-	default:
-		return false
-	}
-}
-
-func hasUnsupportedColumnModifier(fields []string) bool {
-	if len(fields) < 2 {
-		return false
-	}
-	for _, field := range fields[1:] {
-		switch strings.ToLower(strings.Trim(field, "(),")) {
-		case "not", "null", "default", "primary", "unique", "references", "check", "constraint", "auto_increment", "generated", "comment":
-			return true
-		}
-	}
-	return false
 }
 
 type literalQueryResult struct {

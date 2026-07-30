@@ -10,7 +10,7 @@ import (
 // validateConstraintDefinition validates both the schema and every durable row
 // image. mutateCatalog calls it before a transaction snapshot or catalog file
 // becomes visible, so a failed write or DDL change is atomic.
-func validateConstraintDefinition(definition catalog.Definition) error {
+func validateConstraintDefinition(previous, definition catalog.Definition) error {
 	for namespaceKey, namespace := range definition.Namespaces {
 		namespaceName := namespace.Name
 		if namespaceName == "" {
@@ -21,7 +21,7 @@ func validateConstraintDefinition(definition catalog.Definition) error {
 			if tableName == "" {
 				tableName = tableKey
 			}
-			if err := validateTableConstraints(definition, namespaceName, tableName, table); err != nil {
+			if err := validateTableConstraints(previous, definition, namespaceName, tableName, table); err != nil {
 				return err
 			}
 		}
@@ -29,28 +29,28 @@ func validateConstraintDefinition(definition catalog.Definition) error {
 	return nil
 }
 
-func validateTableConstraints(definition catalog.Definition, namespaceName, tableName string, table catalog.Table) error {
+func validateTableConstraints(previous, definition catalog.Definition, namespaceName, tableName string, table catalog.Table) error {
 	indexes, err := tableColumnIndexes(table)
 	if err != nil {
 		return err
 	}
-	if err := validateConstraintDeclarations(definition, namespaceName, tableName, table, indexes); err != nil {
+	if err := validateConstraintDeclarations(previous, definition, namespaceName, tableName, table, indexes); err != nil {
 		return err
 	}
 	return validateNotNullColumns(table, indexes)
 }
 
-func validateConstraintDeclarations(definition catalog.Definition, namespaceName, tableName string, table catalog.Table, indexes map[string]int) error {
+func validateConstraintDeclarations(previous, definition catalog.Definition, namespaceName, tableName string, table catalog.Table, indexes map[string]int) error {
 	seen := map[string]bool{}
 	for _, constraint := range table.Constraints {
-		if err := validateConstraintDeclaration(seen, definition, namespaceName, tableName, table, constraint, indexes); err != nil {
+		if err := validateConstraintDeclaration(seen, previous, definition, namespaceName, tableName, table, constraint, indexes); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateConstraintDeclaration(seen map[string]bool, definition catalog.Definition, namespaceName, tableName string, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
+func validateConstraintDeclaration(seen map[string]bool, previous, definition catalog.Definition, namespaceName, tableName string, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
 	if constraint.Name == "" || constraint.Type == "" {
 		return errorsConstraintDefinition("constraint requires a name and type")
 	}
@@ -61,17 +61,17 @@ func validateConstraintDeclaration(seen map[string]bool, definition catalog.Defi
 	if err := validateConstraintColumns(constraint, indexes); err != nil {
 		return err
 	}
-	return validateConstraintRows(definition, namespaceName, tableName, table, constraint, indexes)
+	return validateConstraintRows(previous, definition, namespaceName, tableName, table, constraint, indexes)
 }
 
-func validateConstraintRows(definition catalog.Definition, namespaceName, tableName string, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
+func validateConstraintRows(previous, definition catalog.Definition, namespaceName, tableName string, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
 	switch constraint.Type {
-	case "primary", "unique":
+	case catalog.ConstraintTypePrimary, catalog.ConstraintTypeUnique:
 		return validateUniqueConstraint(table, constraint, indexes)
-	case "check":
+	case catalog.ConstraintTypeCheck:
 		return validateCheckConstraint(namespaceName, tableName, table, constraint)
-	case "foreign_key":
-		return validateForeignKeyConstraint(definition, namespaceName, table, constraint, indexes)
+	case catalog.ConstraintTypeForeignKey:
+		return validateForeignKeyConstraint(previous, definition, namespaceName, tableName, table, constraint, indexes)
 	default:
 		return errorsConstraintDefinition("unknown constraint type '" + constraint.Type + "'")
 	}
@@ -80,7 +80,7 @@ func validateConstraintRows(definition catalog.Definition, namespaceName, tableN
 func errorsConstraintDefinition(message string) error { return sqlFailure{3813, "HY000", message} }
 
 func validateConstraintColumns(constraint catalog.Constraint, indexes map[string]int) error {
-	if constraint.Type == "check" {
+	if constraint.Type == catalog.ConstraintTypeCheck {
 		if strings.TrimSpace(constraint.Check) == "" {
 			return errorsConstraintDefinition("CHECK constraint '" + constraint.Name + "' has no expression")
 		}
@@ -100,7 +100,7 @@ func validateConstraintColumns(constraint catalog.Constraint, indexes map[string
 func validateNotNullColumns(table catalog.Table, indexes map[string]int) error {
 	primary := map[int]bool{}
 	for _, constraint := range table.Constraints {
-		if constraint.Type != "primary" {
+		if constraint.Type != catalog.ConstraintTypePrimary {
 			continue
 		}
 		for _, column := range constraint.Columns {
@@ -123,7 +123,7 @@ func validateUniqueConstraint(table catalog.Table, constraint catalog.Constraint
 	seen := map[string]bool{}
 	for _, row := range table.Rows {
 		key, nullable := constraintRowKey(table, row, columns)
-		if nullable && constraint.Type == "unique" {
+		if nullable && constraint.Type == catalog.ConstraintTypeUnique {
 			continue
 		}
 		if seen[key] {
@@ -186,7 +186,7 @@ func validateCheckConstraint(namespaceName, tableName string, table catalog.Tabl
 	return nil
 }
 
-func validateForeignKeyConstraint(definition catalog.Definition, namespaceName string, child catalog.Table, constraint catalog.Constraint, childIndexes map[string]int) error {
+func validateForeignKeyConstraint(previous, definition catalog.Definition, namespaceName, tableName string, child catalog.Table, constraint catalog.Constraint, childIndexes map[string]int) error {
 	if len(constraint.Columns) != len(constraint.ReferencedColumns) || len(constraint.ReferencedColumns) == 0 {
 		return errorsConstraintDefinition("foreign key '" + constraint.Name + "' has incompatible columns")
 	}
@@ -195,7 +195,7 @@ func validateForeignKeyConstraint(definition catalog.Definition, namespaceName s
 		return err
 	}
 	childColumns, parentColumns := constraintIndexes(constraint.Columns, childIndexes), constraintIndexes(constraint.ReferencedColumns, parentIndexes)
-	return validateForeignKeyRows(child, parent, constraint, childColumns, parentColumns)
+	return validateForeignKeyRows(previous, namespaceName, tableName, child, parent, constraint, childColumns, parentColumns)
 }
 
 func foreignKeyParent(definition catalog.Definition, namespaceName string, constraint catalog.Constraint) (catalog.Table, map[string]int, error) {
@@ -226,7 +226,7 @@ func foreignKeyParent(definition catalog.Definition, namespaceName string, const
 	return parent, parentIndexes, nil
 }
 
-func validateForeignKeyRows(child, parent catalog.Table, constraint catalog.Constraint, childColumns, parentColumns []int) error {
+func validateForeignKeyRows(previous catalog.Definition, namespaceName, tableName string, child, parent catalog.Table, constraint catalog.Constraint, childColumns, parentColumns []int) error {
 	for _, row := range child.Rows {
 		key, nullable := constraintRowKey(child, row, childColumns)
 		if nullable {
@@ -241,15 +241,69 @@ func validateForeignKeyRows(child, parent catalog.Table, constraint catalog.Cons
 			}
 		}
 		if !matched {
-			return sqlFailure{1452, "23000", "Cannot add or update a child row: a foreign key constraint fails ('" + constraint.Name + "')"}
+			return foreignKeyViolation(previous, namespaceName, tableName, parent, constraint)
 		}
 	}
 	return nil
 }
 
+func foreignKeyViolation(previous catalog.Definition, namespaceName, tableName string, parent catalog.Table, constraint catalog.Constraint) error {
+	if foreignKeyParentRowsChanged(previous, namespaceName, tableName, parent, constraint) {
+		return sqlFailure{1451, "23000", "Cannot delete or update a parent row: a foreign key constraint fails ('" + constraint.Name + "')"}
+	}
+	return sqlFailure{1452, "23000", "Cannot add or update a child row: a foreign key constraint fails ('" + constraint.Name + "')"}
+}
+
+func foreignKeyParentRowsChanged(previous catalog.Definition, namespaceName, tableName string, parent catalog.Table, constraint catalog.Constraint) bool {
+	previousNamespace, found := previous.Namespaces[catalog.Key(namespaceName)]
+	if !found {
+		return false
+	}
+	previousChild, found := previousNamespace.Tables[catalog.Key(tableName)]
+	if !found || !hasForeignKeyConstraint(previousChild, constraint) {
+		return false
+	}
+	parentNamespace := constraint.ReferencedNamespace
+	if parentNamespace == "" {
+		parentNamespace = namespaceName
+	}
+	previousParentNamespace, found := previous.Namespaces[catalog.Key(parentNamespace)]
+	if !found {
+		return false
+	}
+	previousParent, found := previousParentNamespace.Tables[catalog.Key(constraint.ReferencedTable)]
+	return found && !equalConstraintRows(previousParent.Rows, parent.Rows)
+}
+
+func hasForeignKeyConstraint(table catalog.Table, wanted catalog.Constraint) bool {
+	for _, constraint := range table.Constraints {
+		if constraint.Type == catalog.ConstraintTypeForeignKey && catalog.Key(constraint.Name) == catalog.Key(wanted.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+func equalConstraintRows(left, right [][]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for rowIndex := range left {
+		if len(left[rowIndex]) != len(right[rowIndex]) {
+			return false
+		}
+		for columnIndex := range left[rowIndex] {
+			if left[rowIndex][columnIndex] != right[rowIndex][columnIndex] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func tableHasReferencedKey(table catalog.Table, columns []string) bool {
 	for _, constraint := range table.Constraints {
-		if constraint.Type != "primary" && constraint.Type != "unique" {
+		if constraint.Type != catalog.ConstraintTypePrimary && constraint.Type != catalog.ConstraintTypeUnique {
 			continue
 		}
 		if len(constraint.Columns) != len(columns) {

@@ -491,7 +491,7 @@ func (s *session) mutateTransactionCatalog(action func(*catalog.Definition) erro
 	if err != nil {
 		return err
 	}
-	if err := validateConstraintDefinition(staged); err != nil {
+	if err := validateConstraintDefinition(s.transactionSnapshot, staged); err != nil {
 		return err
 	}
 	s.transactionSnapshot = staged
@@ -506,7 +506,7 @@ func (s *session) mutateDurableCatalog(action func(*catalog.Definition) error) e
 	if err != nil {
 		return err
 	}
-	if err := validateConstraintDefinition(staged); err != nil {
+	if err := validateConstraintDefinition(definition, staged); err != nil {
 		return err
 	}
 	if err := s.server.config.Catalog.ReplaceIfRevision(revision, staged); err != nil {

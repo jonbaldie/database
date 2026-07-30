@@ -35,6 +35,13 @@ type ColumnAttribute struct {
 	Default    string `json:"default,omitempty"`
 }
 
+const (
+	ConstraintTypePrimary    = "primary"
+	ConstraintTypeUnique     = "unique"
+	ConstraintTypeCheck      = "check"
+	ConstraintTypeForeignKey = "foreign_key"
+)
+
 // Constraint records a durable table constraint. Values are SQL identifiers or
 // canonical SQL values; enforcement belongs to the SQL server layer.
 type Constraint struct {
@@ -304,7 +311,7 @@ func cloneDefinition(source Definition) Definition {
 				Columns:          append([]string(nil), definition.Columns...),
 				ColumnTypes:      append([]string(nil), definition.ColumnTypes...),
 				ColumnAttributes: append([]ColumnAttribute(nil), definition.ColumnAttributes...),
-				Constraints:      cloneConstraints(definition.Constraints),
+				Constraints:      CloneConstraints(definition.Constraints),
 				Rows:             cloneRows(definition.Rows),
 			}
 		}
@@ -313,7 +320,8 @@ func cloneDefinition(source Definition) Definition {
 	return copy
 }
 
-func cloneConstraints(constraints []Constraint) []Constraint {
+// CloneConstraints returns a copy that owns its column lists.
+func CloneConstraints(constraints []Constraint) []Constraint {
 	copy := make([]Constraint, len(constraints))
 	for index, constraint := range constraints {
 		copy[index] = constraint

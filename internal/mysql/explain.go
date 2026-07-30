@@ -172,17 +172,18 @@ func (s *textStatementExecutor) explainDelete(relations *relationExecutor, inner
 
 func explanationConstraints(definition catalog.Definition, namespaceName, tableName string, table catalog.Table) []queryexplanation.Constraint {
 	constraints := make([]queryexplanation.Constraint, 0, len(table.Constraints)+len(table.Columns))
+	owner := relationInfo(namespaceName, tableName, table)
 	for index, column := range table.Columns {
 		if !catalog.ColumnAttributeAt(table, index).Nullable {
-			constraints = append(constraints, queryexplanation.Constraint{Type: "not_null", Name: table.Name + "_" + column + "_not_null"})
+			constraints = append(constraints, queryexplanation.Constraint{Type: "not_null", Name: table.Name + "_" + column + "_not_null", Table: owner})
 		}
 	}
 	for _, constraint := range table.Constraints {
 		kind := constraint.Type
-		if kind == "primary" {
-			kind = "unique"
+		if kind == catalog.ConstraintTypePrimary {
+			kind = catalog.ConstraintTypeUnique
 		}
-		constraints = append(constraints, queryexplanation.Constraint{Type: kind, Name: constraint.Name})
+		constraints = append(constraints, queryexplanation.Constraint{Type: kind, Name: constraint.Name, Table: owner})
 	}
 	return append(constraints, inboundForeignKeyConstraints(definition, namespaceName, tableName)...)
 }
@@ -194,12 +195,16 @@ func inboundForeignKeyConstraints(definition catalog.Definition, namespaceName, 
 		if ownerName == "" {
 			ownerName = ownerKey
 		}
-		for _, table := range namespace.Tables {
+		for tableKey, table := range namespace.Tables {
+			ownerTableName := table.Name
+			if ownerTableName == "" {
+				ownerTableName = tableKey
+			}
 			for _, constraint := range table.Constraints {
-				if constraint.Type != "foreign_key" || !foreignKeyTargets(constraint, ownerName, namespaceName, tableName) {
+				if constraint.Type != catalog.ConstraintTypeForeignKey || !foreignKeyTargets(constraint, ownerName, namespaceName, tableName) {
 					continue
 				}
-				constraints = append(constraints, queryexplanation.Constraint{Type: "foreign_key", Name: constraint.Name})
+				constraints = append(constraints, queryexplanation.Constraint{Type: catalog.ConstraintTypeForeignKey, Name: constraint.Name, Table: relationInfo(ownerName, ownerTableName, table)})
 			}
 		}
 	}

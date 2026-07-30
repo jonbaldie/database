@@ -73,7 +73,7 @@ func parseColumnModifier(column, value string, attribute catalog.ColumnAttribute
 	for _, parser := range []func(string, catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error){notNullModifier, nullModifier, defaultModifier, primaryModifier, uniqueModifier, checkModifier} {
 		next, update, constraint, matched, err := parser(value, attribute)
 		if matched || err != nil {
-			if constraint.Type == "primary" || constraint.Type == "unique" {
+			if constraint.Type == catalog.ConstraintTypePrimary || constraint.Type == catalog.ConstraintTypeUnique {
 				constraint.Columns = []string{column}
 			}
 			return next, update, constraint, matched, err
@@ -112,24 +112,42 @@ func defaultModifier(value string, attribute catalog.ColumnAttribute) (string, *
 }
 
 func validDefaultLiteral(value string) bool {
-	if isSQLNullLiteral(value) {
-		return true
+	tokens, err := tokenizeExpression(value)
+	if err != nil {
+		return false
 	}
-	_, err := evaluateScalar(value)
-	return err == nil
+	return validDefaultLiteralTokens(tokens)
+}
+
+func validDefaultLiteralTokens(tokens []exprToken) bool {
+	if len(tokens) == 1 {
+		return validBareDefaultLiteral(tokens[0])
+	}
+	return len(tokens) == 2 && (tokens[0].text == "+" || tokens[0].text == "-") && tokens[1].kind == tokenNumber
+}
+
+func validBareDefaultLiteral(token exprToken) bool {
+	switch token.kind {
+	case tokenNumber, tokenString:
+		return true
+	case tokenIdent:
+		return isSQLNullLiteral(token.text) || strings.EqualFold(token.text, "true") || strings.EqualFold(token.text, "false")
+	default:
+		return false
+	}
 }
 func primaryModifier(value string, attribute catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error) {
 	if !strings.HasPrefix(strings.ToLower(value), "primary key") || !wordEnd(value, len("primary key")) {
 		return "", nil, catalog.Constraint{}, false, nil
 	}
 	attribute.Nullable = false
-	return value[len("PRIMARY KEY"):], &attribute, catalog.Constraint{Type: "primary"}, true, nil
+	return value[len("PRIMARY KEY"):], &attribute, catalog.Constraint{Type: catalog.ConstraintTypePrimary}, true, nil
 }
 func uniqueModifier(value string, attribute catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error) {
 	if !strings.HasPrefix(strings.ToLower(value), "unique") || !wordEnd(value, len("unique")) {
 		return "", nil, catalog.Constraint{}, false, nil
 	}
-	return value[len("UNIQUE"):], nil, catalog.Constraint{Type: "unique"}, true, nil
+	return value[len("UNIQUE"):], nil, catalog.Constraint{Type: catalog.ConstraintTypeUnique}, true, nil
 }
 func checkModifier(value string, attribute catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error) {
 	if !strings.HasPrefix(strings.ToLower(value), "check") || !wordEnd(value, len("check")) {
@@ -139,7 +157,7 @@ func checkModifier(value string, attribute catalog.ColumnAttribute) (string, *ca
 	if !ok || strings.TrimSpace(expression) == "" {
 		return "", nil, catalog.Constraint{}, true, sqlFailure{1064, "42000", "invalid CHECK constraint"}
 	}
-	return remainder, nil, catalog.Constraint{Type: "check", Check: expression}, true, nil
+	return remainder, nil, catalog.Constraint{Type: catalog.ConstraintTypeCheck, Check: expression}, true, nil
 }
 
 func consumeConstraintValue(value string) (string, string, bool) {
@@ -199,7 +217,7 @@ func parsePrimaryConstraint(constraint catalog.Constraint, value string) (catalo
 	if !ok || strings.TrimSpace(remainder) != "" {
 		return catalog.Constraint{}, sqlFailure{1064, "42000", "invalid PRIMARY KEY constraint"}
 	}
-	constraint.Type, constraint.Columns = "primary", columns
+	constraint.Type, constraint.Columns = catalog.ConstraintTypePrimary, columns
 	return constraint, nil
 }
 func parseUniqueConstraint(constraint catalog.Constraint, value string) (catalog.Constraint, error) {
@@ -218,7 +236,7 @@ func parseUniqueConstraint(constraint catalog.Constraint, value string) (catalog
 	if !ok || strings.TrimSpace(remainder) != "" {
 		return catalog.Constraint{}, sqlFailure{1064, "42000", "invalid UNIQUE constraint"}
 	}
-	constraint.Type, constraint.Columns = "unique", columns
+	constraint.Type, constraint.Columns = catalog.ConstraintTypeUnique, columns
 	return constraint, nil
 }
 func parseForeignConstraint(constraint catalog.Constraint, value string) (catalog.Constraint, error) {
@@ -230,7 +248,7 @@ func parseForeignConstraint(constraint catalog.Constraint, value string) (catalo
 	if err != nil {
 		return catalog.Constraint{}, err
 	}
-	constraint.Type, constraint.Columns, constraint.ReferencedColumns = "foreign_key", columns, referenced
+	constraint.Type, constraint.Columns, constraint.ReferencedColumns = catalog.ConstraintTypeForeignKey, columns, referenced
 	if len(target) == 2 {
 		constraint.ReferencedNamespace, constraint.ReferencedTable = target[0], target[1]
 	} else {
@@ -259,7 +277,7 @@ func parseCheckConstraint(constraint catalog.Constraint, value string) (catalog.
 	if !ok || strings.TrimSpace(expression) == "" || strings.TrimSpace(remainder) != "" {
 		return catalog.Constraint{}, sqlFailure{1064, "42000", "invalid CHECK constraint"}
 	}
-	constraint.Type, constraint.Check = "check", expression
+	constraint.Type, constraint.Check = catalog.ConstraintTypeCheck, expression
 	return constraint, nil
 }
 
@@ -313,7 +331,7 @@ func namedTableConstraints(table string, constraints []catalog.Constraint) ([]ca
 	checkNumber, foreignNumber := 0, 0
 	for index := range constraints {
 		constraint := &constraints[index]
-		if len(constraint.Columns) == 0 && constraint.Type != "check" {
+		if len(constraint.Columns) == 0 && constraint.Type != catalog.ConstraintTypeCheck {
 			return nil, sqlFailure{1064, "42000", "constraint requires columns"}
 		}
 		checkNumber, foreignNumber = assignConstraintName(table, constraint, checkNumber, foreignNumber)
@@ -325,7 +343,7 @@ func namedTableConstraints(table string, constraints []catalog.Constraint) ([]ca
 	}
 	primary := 0
 	for _, constraint := range constraints {
-		if constraint.Type == "primary" {
+		if constraint.Type == catalog.ConstraintTypePrimary {
 			primary++
 		}
 	}
@@ -336,29 +354,19 @@ func namedTableConstraints(table string, constraints []catalog.Constraint) ([]ca
 }
 
 func assignConstraintName(table string, constraint *catalog.Constraint, checkNumber, foreignNumber int) (int, int) {
-	if constraint.Type == "primary" {
+	if constraint.Type == catalog.ConstraintTypePrimary {
 		constraint.Name = "PRIMARY"
 	}
-	if constraint.Type == "unique" && constraint.Name == "" {
+	if constraint.Type == catalog.ConstraintTypeUnique && constraint.Name == "" {
 		constraint.Name = table + "_" + constraint.Columns[0] + "_unique"
 	}
-	if constraint.Type == "check" && constraint.Name == "" {
+	if constraint.Type == catalog.ConstraintTypeCheck && constraint.Name == "" {
 		checkNumber++
 		constraint.Name = fmt.Sprintf("%s_chk_%d", table, checkNumber)
 	}
-	if constraint.Type == "foreign_key" && constraint.Name == "" {
+	if constraint.Type == catalog.ConstraintTypeForeignKey && constraint.Name == "" {
 		foreignNumber++
 		constraint.Name = fmt.Sprintf("%s_ibfk_%d", table, foreignNumber)
 	}
 	return checkNumber, foreignNumber
-}
-
-func cloneCatalogConstraints(source []catalog.Constraint) []catalog.Constraint {
-	copy := make([]catalog.Constraint, len(source))
-	for index, constraint := range source {
-		copy[index] = constraint
-		copy[index].Columns = append([]string(nil), constraint.Columns...)
-		copy[index].ReferencedColumns = append([]string(nil), constraint.ReferencedColumns...)
-	}
-	return copy
 }
