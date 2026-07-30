@@ -213,6 +213,11 @@ type constraintCheckOperation struct {
 	ConstraintName string `json:"constraint_name"`
 }
 
+type lockOperation struct {
+	Mode       string `json:"mode"`
+	WaitPolicy string `json:"wait_policy"`
+}
+
 // Table is the neutral relation description a planner needs.
 type Table struct {
 	Database string

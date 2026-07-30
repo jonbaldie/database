@@ -89,6 +89,9 @@ type Config struct {
 	MaxPreparedStmtCount int
 	MaxConnections       int
 	MaxAllowedPacket     int64
+	// LockWaitTimeout bounds the time a statement waits for a conflicting row
+	// lock. It defaults to five seconds.
+	LockWaitTimeout time.Duration
 	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
 	// current-time functions render through. It defaults to UTC and accepts UTC
 	// or a ±HH:MM offset within ±14:00.
@@ -103,6 +106,7 @@ type Server struct {
 	config      Config
 	connections *connectionRegistry
 	auth        authenticator
+	locks       *lockManager
 }
 
 // connectionRegistry owns admission and graceful-drain accounting. It is kept
@@ -149,7 +153,7 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 		sessionMax:    config.MaxConnections,
 		preparedLimit: config.MaxPreparedStmtCount,
 	}
-	return &Server{Listener: listener, config: config, connections: registry, auth: auth}, nil
+	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout)}, nil
 }
 
 func normalizedConfig(config Config) Config {
@@ -164,6 +168,9 @@ func normalizedConfig(config Config) Config {
 	}
 	if config.MaxAllowedPacket == 0 {
 		config.MaxAllowedPacket = 64 * 1024 * 1024
+	}
+	if config.LockWaitTimeout <= 0 {
+		config.LockWaitTimeout = 5 * time.Second
 	}
 	if config.TimeZone == "" {
 		config.TimeZone = "UTC"
@@ -332,6 +339,7 @@ type session struct {
 	statements      map[uint32]*preparedStatement
 	nextStmtID      uint32
 	longDataBytes   int
+	statementCancel <-chan struct{}
 	transactionState
 }
 
@@ -2411,6 +2419,9 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := s.acquireWriteLocks(matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)); err != nil {
+		return 0, err
+	}
 	_, affected, err := applyUpdatePlan(plan)
 	if err != nil {
 		return 0, err
@@ -2553,6 +2564,9 @@ func canonicalUpdates(plan updatePlan) (map[int]string, error) {
 func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	plan, err := makeDeletePlan(s, query)
 	if err != nil {
+		return 0, err
+	}
+	if err := s.acquireWriteLocks(matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)); err != nil {
 		return 0, err
 	}
 	_, affected := applyDeletePlan(plan)

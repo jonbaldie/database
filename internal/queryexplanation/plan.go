@@ -16,6 +16,9 @@ type Select struct {
 	Distinct              bool
 	Orders                []Order
 	Limit                 Limit
+	LockingRead           bool
+	LockMode              string
+	LockWaitPolicy        string
 }
 
 // Join records one source relation and its SQL join predicate.
@@ -56,8 +59,8 @@ func PlanSelect(serverVersion, sql, currentDatabase string, read Select) *Docume
 	statement := Statement{
 		Kind:        "select",
 		SQL:         sql,
-		ReadOnly:    true,
-		LockingRead: false,
+		ReadOnly:    !read.LockingRead,
+		LockingRead: read.LockingRead,
 	}
 	return newDocument(serverVersion, currentDatabase, statement, selectPlan(read))
 }
@@ -135,6 +138,9 @@ func selectPlan(read Select) *Operator {
 	}
 	if read.Limit.Present {
 		root = limitOperator(read.Limit, root)
+	}
+	if read.LockingRead {
+		root = lockInput(root, read.LockMode, read.LockWaitPolicy)
 	}
 	return root
 }
@@ -232,6 +238,18 @@ func limitOperator(limit Limit, child *Operator) *Operator {
 		Operation: limitOperation{OffsetPresent: limit.Offset > 0},
 		Estimates: Estimates{Rows: rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost, PeakMemoryBytes: child.Estimates.PeakMemoryBytes},
 		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
+}
+
+func lockInput(child *Operator, mode, waitPolicy string) *Operator {
+	return &Operator{
+		Kind:      "lock",
+		Summary:   "Take row locks for the returned rows.",
+		Operation: lockOperation{Mode: mode, WaitPolicy: waitPolicy},
+		Estimates: child.Estimates,
+		Output:    child.Output,
+		Warnings:  []Warning{},
+		Children:  []*Operator{child},
 	}
 }
 

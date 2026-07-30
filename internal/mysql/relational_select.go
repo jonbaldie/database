@@ -30,6 +30,7 @@ type relationalSource struct {
 	tables  []relationalTableSource
 	joins   []relationalJoin
 	columns []relationColumn
+	locking *lockingRead
 }
 
 type relationalTableSource struct {
@@ -103,7 +104,10 @@ type relationalLimit struct {
 	count   int
 }
 
-type relationRow struct{ values []string }
+type relationRow struct {
+	values   []string
+	lockKeys []string
+}
 
 type relationalResultRow struct {
 	values      []string
@@ -130,14 +134,30 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 	if err != nil {
 		return nil, err
 	}
-	if s.streamRows && !plan.hasRuntimeSubqueries() {
+	if s.streamRows && plan.source.locking == nil && !plan.hasRuntimeSubqueries() {
 		return plan.streamingResult(), nil
+	}
+	if plan.source.locking != nil {
+		return executeLockingRelationalSelect(plan)
 	}
 	resultRows, err := collectRelationalResultRows(plan)
 	if err != nil {
 		return nil, err
 	}
 	return plan.result(plan.shapeRows(resultRows)), nil
+}
+
+func executeLockingRelationalSelect(plan *relationalSelectPlan) (*queryResult, error) {
+	locks := plan.session.server.locks.snapshot(plan.session)
+	resultRows, err := collectRelationalResultRows(plan)
+	if err == nil {
+		resultRows, err = lockRelationalResultRows(plan, resultRows)
+	}
+	if err != nil {
+		plan.session.server.locks.restore(plan.session, locks)
+		return nil, err
+	}
+	return plan.result(resultRows), nil
 }
 
 func (p *relationalSelectPlan) hasRuntimeSubqueries() bool {
@@ -177,6 +197,69 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 		return nil
 	})
 	return resultRows, err
+}
+
+func lockRelationalResultRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	if plan.source.locking.policy == lockSkip {
+		rows = distinctRelationalRows(rows, plan.distinct, plan.projection, plan.source.columns)
+		return lockSkippedRelationalRows(plan, sortRelationalRows(rows, plan.order, plan.source.columns))
+	}
+	return lockReturnedRelationalRows(plan, plan.shapeRows(rows))
+}
+
+func lockReturnedRelationalRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	for _, row := range rows {
+		if _, err := plan.source.locking.acquire(plan, row.source); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
+}
+
+func lockSkippedRelationalRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	rows, err := skipLockedOffsetRows(plan, rows)
+	if err != nil {
+		return nil, err
+	}
+	return lockSkippedReturnedRows(plan, rows)
+}
+
+func skipLockedOffsetRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	offset := plan.limit.offset
+	for index, row := range rows {
+		if offset == 0 {
+			return rows[index:], nil
+		}
+		available, err := plan.source.locking.available(plan, row.source)
+		if err != nil {
+			return nil, err
+		}
+		if available {
+			offset--
+		}
+	}
+	return rows[len(rows):], nil
+}
+
+func lockSkippedReturnedRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	count := len(rows)
+	if plan.limit.present && plan.limit.count < count {
+		count = plan.limit.count
+	}
+	locked := make([]relationalResultRow, 0, count)
+	for _, row := range rows {
+		if len(locked) == count {
+			break
+		}
+		acquired, err := plan.source.locking.acquire(plan, row.source)
+		if err != nil {
+			return nil, err
+		}
+		if acquired {
+			locked = append(locked, row)
+		}
+	}
+	return locked, nil
 }
 
 var errStopRelationStream = errors.New("relational row stream complete")
@@ -271,6 +354,10 @@ func parseRelationalSelect(s *relationExecutor, query string) (*relationalSelect
 }
 
 func parseRelationalSelectContext(s *relationExecutor, query string, outer *outerRelationScope) (*relationalSelectPlan, error) {
+	query, locking, err := splitLockingRead(query)
+	if err != nil {
+		return nil, err
+	}
 	expression, err := selectExpression(query)
 	if err != nil {
 		return nil, err
@@ -287,6 +374,7 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err != nil {
 		return nil, err
 	}
+	source.locking = locking
 	plan := &relationalSelectPlan{session: s.session, composed: s.composed, outer: outer, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
 	if err := finishRelationalSelectPlan(plan, projectionText, orderText, limitText); err != nil {
 		return nil, err
@@ -736,6 +824,11 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		Distinct:              p.distinct,
 		Orders:                explanationOrders(p.order),
 		Limit:                 queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
+		LockingRead:           p.source.locking != nil,
+	}
+	if p.source.locking != nil {
+		read.LockMode = p.source.locking.explanationMode()
+		read.LockWaitPolicy = p.source.locking.explanationWaitPolicy()
 	}
 	for _, table := range p.source.tables {
 		read.Tables = append(read.Tables, relationSourceInfo(table))
