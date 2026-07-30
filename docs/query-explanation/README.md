@@ -22,6 +22,8 @@ The closed v0.1 operator kinds are:
 
 An operator kind names developer-recognizable work. Its `operation` block records SQL-visible distinctions. Its optional `strategy` block names the documented execution tactic. New strategies may be added compatibly, but an existing strategy name cannot silently change meaning.
 
+`full_table_scan` reads stored table rows in sequence. `btree_index_scan` traverses one selected logical B-tree index in key order. `btree_covering_index_scan` records that the selected index contains every projected value. The index strategies can be selected by a supported predicate or ordering, or required by a valid MySQL index hint.
+
 All observable write work appears in the tree. Constraint checks, referential actions, and mutations are explicit; `REPLACE` exposes its delete-and-insert behaviour, and cascades are not hidden inside a generic mutation summary.
 
 ## JSON document

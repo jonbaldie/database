@@ -24,7 +24,26 @@ type Table struct {
 	ColumnTypes      []string          `json:"column_types,omitempty"`
 	ColumnAttributes []ColumnAttribute `json:"column_attributes,omitempty"`
 	Constraints      []Constraint      `json:"constraints,omitempty"`
+	Indexes          []Index           `json:"indexes,omitempty"`
 	Rows             [][]string        `json:"rows,omitempty"`
+}
+
+// Index is one declared B-tree access path. Primary and unique constraints
+// remain constraints and are exposed as effective indexes by the SQL layer.
+type Index struct {
+	Name      string      `json:"name"`
+	Unique    bool        `json:"unique,omitempty"`
+	Parts     []IndexPart `json:"parts"`
+	Invisible bool        `json:"invisible,omitempty"`
+	Comment   string      `json:"comment,omitempty"`
+}
+
+// IndexPart is one ordered column or expression in an index definition.
+type IndexPart struct {
+	Column       string `json:"column,omitempty"`
+	Expression   string `json:"expression,omitempty"`
+	PrefixLength int    `json:"prefix_length,omitempty"`
+	Descending   bool   `json:"descending,omitempty"`
 }
 
 // ColumnAttribute records rules that belong to one column. An absent attribute
@@ -312,6 +331,7 @@ func cloneDefinition(source Definition) Definition {
 				ColumnTypes:      append([]string(nil), definition.ColumnTypes...),
 				ColumnAttributes: append([]ColumnAttribute(nil), definition.ColumnAttributes...),
 				Constraints:      CloneConstraints(definition.Constraints),
+				Indexes:          CloneIndexes(definition.Indexes),
 				Rows:             cloneRows(definition.Rows),
 			}
 		}
@@ -327,6 +347,16 @@ func CloneConstraints(constraints []Constraint) []Constraint {
 		copy[index] = constraint
 		copy[index].Columns = append([]string(nil), constraint.Columns...)
 		copy[index].ReferencedColumns = append([]string(nil), constraint.ReferencedColumns...)
+	}
+	return copy
+}
+
+// CloneIndexes returns a copy that owns every index part list.
+func CloneIndexes(indexes []Index) []Index {
+	copy := make([]Index, len(indexes))
+	for index, definition := range indexes {
+		copy[index] = definition
+		copy[index].Parts = append([]IndexPart(nil), definition.Parts...)
 	}
 	return copy
 }

@@ -803,7 +803,7 @@ func (s *textStatementExecutor) transactionStatement(query, lower string) (*quer
 
 func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryResult, bool, error) {
 	catalogQueries := catalogExecutor{s.session}
-	if result, handled, err := catalogQueries.show(query, lower); handled {
+	if result, handled, err := showCatalog(&catalogQueries, query, lower); handled {
 		return result, true, err
 	}
 	if strings.HasPrefix(lower, "use ") {
@@ -816,7 +816,7 @@ func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryRes
 	return nil, false, nil
 }
 
-func (s *catalogExecutor) show(query, lower string) (*queryResult, bool, error) {
+func showCatalog(s *catalogExecutor, query, lower string) (*queryResult, bool, error) {
 	switch {
 	case lower == "show databases":
 		return s.showDatabases(), true, nil
@@ -825,6 +825,9 @@ func (s *catalogExecutor) show(query, lower string) (*queryResult, bool, error) 
 		return result, true, err
 	case strings.HasPrefix(lower, "show create table "):
 		result, err := s.showCreateTable(query)
+		return result, true, err
+	case showIndexTarget(query) != "":
+		result, err := s.showIndexes(query)
 		return result, true, err
 	case lower == "show tables":
 		result, err := s.showTables()
@@ -1010,7 +1013,11 @@ func createTableInDefinition(definition *catalog.Definition, namespace, name str
 }
 
 func builtCatalogTable(name string, table tableDefinition) (catalog.Table, error) {
-	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...), ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.attributes...), Constraints: catalog.CloneConstraints(table.constraints)}
+	indexes, err := namedTableIndexes(name, table.indexes, table.constraints)
+	if err != nil {
+		return catalog.Table{}, err
+	}
+	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...), ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.attributes...), Constraints: catalog.CloneConstraints(table.constraints), Indexes: indexes}
 	if len(table.types) > 0 {
 		tableDefinition.ColumnTypes = append([]string(nil), table.types...)
 	}
@@ -1018,6 +1025,9 @@ func builtCatalogTable(name string, table tableDefinition) (catalog.Table, error
 		return catalog.Table{}, err
 	}
 	if err := canonicalizeTableDefaults(&tableDefinition); err != nil {
+		return catalog.Table{}, err
+	}
+	if err := validateTableIndexes(tableDefinition); err != nil {
 		return catalog.Table{}, err
 	}
 	return tableDefinition, nil
@@ -1063,6 +1073,7 @@ type tableDefinition struct {
 	types       []string
 	attributes  []catalog.ColumnAttribute
 	constraints []catalog.Constraint
+	indexes     []catalog.Index
 	ifNotExists bool
 }
 
@@ -1071,6 +1082,7 @@ type parsedTableColumns struct {
 	types       []string
 	attributes  []catalog.ColumnAttribute
 	constraints []catalog.Constraint
+	indexes     []catalog.Index
 }
 
 func parseCreateTable(query string) (tableDefinition, error) {
@@ -1098,7 +1110,7 @@ func parseCreateTable(query string) (tableDefinition, error) {
 	if err != nil {
 		return tableDefinition{}, err
 	}
-	return tableDefinition{target: target, columns: columns.columns, types: columns.types, attributes: columns.attributes, constraints: constraints, ifNotExists: ifNotExists}, nil
+	return tableDefinition{target: target, columns: columns.columns, types: columns.types, attributes: columns.attributes, constraints: constraints, indexes: columns.indexes, ifNotExists: ifNotExists}, nil
 }
 
 func createTableTarget(head string) ([]string, error) {
@@ -1149,8 +1161,17 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 		types:       make([]string, 0, len(parts)),
 		attributes:  make([]catalog.ColumnAttribute, 0, len(parts)),
 		constraints: make([]catalog.Constraint, 0, len(parts)),
+		indexes:     make([]catalog.Index, 0, len(parts)),
 	}
 	for _, part := range parts {
+		if isTableIndexDefinition(part) {
+			index, err := parseTableIndexDefinition(part)
+			if err != nil {
+				return parsedTableColumns{}, err
+			}
+			parsed.indexes = append(parsed.indexes, index)
+			continue
+		}
 		if isTableConstraintDefinition(part) {
 			constraint, err := parseTableConstraint(part)
 			if err != nil {
@@ -1277,6 +1298,103 @@ func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 	return &queryResult{columns: []string{"Table", "Create Table"}, rows: [][]string{{table.Name, definition}}}, nil
 }
 
+func (s *catalogExecutor) showIndexes(query string) (*queryResult, error) {
+	target := showIndexTarget(query)
+	parts, valid := splitQualifiedIdentifier(target)
+	if !valid || len(parts) > 2 {
+		return nil, sqlFailure{1064, "42000", "invalid table name"}
+	}
+	namespaceName, tableName, err := s.qualifiedShowTableTarget(target, parts)
+	if err != nil {
+		return nil, err
+	}
+	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
+	if !ok {
+		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
+	}
+	table, ok := namespace.Tables[catalog.Key(tableName)]
+	if !ok {
+		return nil, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
+	}
+	if table.Name == "" {
+		table.Name = strings.ToLower(tableName)
+	}
+	return showTableIndexes(table), nil
+}
+
+func showIndexTarget(query string) string {
+	value := strings.TrimSpace(query)
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{"show index from ", "show index in ", "show indexes from ", "show indexes in ", "show keys from ", "show keys in "} {
+		if strings.HasPrefix(lower, prefix) {
+			return strings.TrimSpace(value[len(prefix):])
+		}
+	}
+	return ""
+}
+
+func showTableIndexes(table catalog.Table) *queryResult {
+	columns := []string{"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality", "Sub_part", "Packed", "Null", "Index_type", "Comment", "Index_comment", "Visible", "Expression"}
+	rows := [][]string{}
+	nulls := [][]bool{}
+	for _, index := range effectiveTableIndexes(table) {
+		for number, part := range index.Parts {
+			row, null := showIndexRow(table, index, part, number)
+			rows = append(rows, row)
+			nulls = append(nulls, null)
+		}
+	}
+	return &queryResult{columns: columns, rows: rows, nulls: nulls}
+}
+
+func showIndexRow(table catalog.Table, index catalog.Index, part catalog.IndexPart, number int) ([]string, []bool) {
+	column, expression := part.Column, part.Expression
+	nullable := false
+	if column != "" {
+		columnIndex := tableColumnIndex(table.Columns, column)
+		nullable = columnIndex >= 0 && catalog.ColumnAttributeAt(table, columnIndex).Nullable
+	}
+	null := []bool{false, false, false, false, column == "", false, false, part.PrefixLength == 0, true, !nullable, false, false, false, false, expression == ""}
+	return []string{
+		table.Name,
+		strconv.Itoa(boolToInt(!index.Unique)),
+		index.Name,
+		strconv.Itoa(number + 1),
+		column,
+		indexPartCollation(part),
+		strconv.Itoa(len(table.Rows)),
+		strconv.Itoa(part.PrefixLength),
+		"",
+		"YES",
+		"BTREE",
+		"",
+		index.Comment,
+		indexVisibility(index),
+		expression,
+	}, null
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func indexPartCollation(part catalog.IndexPart) string {
+	if part.Descending {
+		return "D"
+	}
+	return "A"
+}
+
+func indexVisibility(index catalog.Index) string {
+	if index.Invisible {
+		return "NO"
+	}
+	return "YES"
+}
+
 func (s *catalogExecutor) showTableTarget(query string) (string, string, error) {
 	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
 	parts, valid := splitQualifiedIdentifier(target)
@@ -1334,8 +1452,45 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 		definition.WriteString(",\n  ")
 		definition.WriteString(canonicalConstraintDefinition(constraint))
 	}
+	for _, index := range table.Indexes {
+		definition.WriteString(",\n  ")
+		definition.WriteString(canonicalIndexDefinition(index))
+	}
 	definition.WriteString("\n)")
 	return definition.String(), nil
+}
+
+func canonicalIndexDefinition(index catalog.Index) string {
+	prefix := "INDEX "
+	if index.Unique {
+		prefix = "UNIQUE INDEX "
+	}
+	definition := prefix + quoteIdentifier(index.Name) + " " + canonicalIndexParts(index.Parts)
+	if index.Invisible {
+		definition += " INVISIBLE"
+	}
+	if index.Comment != "" {
+		definition += " COMMENT '" + strings.ReplaceAll(index.Comment, "'", "''") + "'"
+	}
+	return definition
+}
+
+func canonicalIndexParts(parts []catalog.IndexPart) string {
+	values := make([]string, len(parts))
+	for number, part := range parts {
+		value := quoteIdentifier(part.Column)
+		if part.Expression != "" {
+			value = "(" + part.Expression + ")"
+		}
+		if part.PrefixLength > 0 {
+			value += "(" + strconv.Itoa(part.PrefixLength) + ")"
+		}
+		if part.Descending {
+			value += " DESC"
+		}
+		values[number] = value
+	}
+	return "(" + strings.Join(values, ", ") + ")"
 }
 
 func canonicalDefaultValue(typeName, value string) string {

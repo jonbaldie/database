@@ -292,6 +292,9 @@ func constraintChecks(write Write, child *Operator) *Operator {
 }
 
 func tableScan(table Table) *Operator {
+	if table.Access != nil {
+		return btreeIndexScan(table)
+	}
 	rows := float64(table.RowCount)
 	return &Operator{
 		Kind:      "scan",
@@ -300,6 +303,45 @@ func tableScan(table Table) *Operator {
 		Strategy:  &Strategy{Name: "full_table_scan", Summary: "Sequentially read all stored rows."},
 		Objects:   []ObjectReference{tableObject(table)},
 		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 1, PeakMemoryBytes: 0},
+		Output:    columnOutput(table, table.Columns),
+		Warnings:  []Warning{},
+		Children:  []*Operator{},
+	}
+}
+
+func btreeIndexScan(table Table) *Operator {
+	rows := float64(table.RowCount)
+	access := table.Access
+	objects := []ObjectReference{tableObject(table), {Type: "index", Database: table.Database, Table: table.Name, Name: access.Name}}
+	reason := CodeSummary{Code: "INDEX_SUPPORTS_QUERY", Summary: "The index supports the query filter or ordering."}
+	if access.Forced {
+		reason = CodeSummary{Code: "INDEX_HINT", Summary: "The statement requires this index through an index hint."}
+	}
+	strategy := &Strategy{Name: "btree_index_scan", Summary: "Traverse the selected B-tree index in key order."}
+	summary := "Read rows through the selected B-tree index."
+	if access.Covering {
+		strategy = &Strategy{Name: "btree_covering_index_scan", Summary: "Traverse a B-tree index that contains every projected value."}
+		summary = "Read the projected values through the selected covering B-tree index."
+	}
+	return &Operator{
+		Kind:      "scan",
+		Summary:   summary,
+		Operation: scanOperation{Source: "index", Direction: "forward"},
+		Strategy:  strategy,
+		Objects:   objects,
+		Choice: &Choice{Selected: access.Name, Reason: reason, Alternatives: []Alternative{{
+			Name: "full_table_scan", EstimatedCost: rows + 1,
+			Reason: CodeSummary{Code: "INDEX_NOT_SELECTED", Summary: "The alternative reads rows in stored table order."},
+		}}},
+		Statistics: []Statistic{{
+			Object: tableObject(table), Kind: "catalog_row_count", CollectedAt: access.CollectedAt,
+			ObservedRows: table.RowCount, Stale: false, Limitations: []string{"The statistic records the current catalog snapshot only."},
+		}},
+		Opportunities: []Opportunity{{
+			Code: "INDEX_COVERAGE", Summary: "A covering index can reduce table-row reads.",
+			Evidence: []string{"The selected path returns rows from the table after the index traversal."},
+		}},
+		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 2, PeakMemoryBytes: 0},
 		Output:    columnOutput(table, table.Columns),
 		Warnings:  []Warning{},
 		Children:  []*Operator{},

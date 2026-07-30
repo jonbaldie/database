@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/jonbaldie/database/internal/catalog"
@@ -30,11 +31,17 @@ func validateConstraintDefinition(previous, definition catalog.Definition) error
 }
 
 func validateTableConstraints(previous, definition catalog.Definition, namespaceName, tableName string, table catalog.Table) error {
+	if err := validateTableIndexes(table); err != nil {
+		return err
+	}
 	indexes, err := tableColumnIndexes(table)
 	if err != nil {
 		return err
 	}
 	if err := validateConstraintDeclarations(previous, definition, namespaceName, tableName, table, indexes); err != nil {
+		return err
+	}
+	if err := validateUniqueIndexes(table, indexes); err != nil {
 		return err
 	}
 	return validateNotNullColumns(table, indexes)
@@ -132,6 +139,75 @@ func validateUniqueConstraint(table catalog.Table, constraint catalog.Constraint
 		seen[key] = true
 	}
 	return nil
+}
+
+func validateUniqueIndexes(table catalog.Table, columns map[string]int) error {
+	for _, index := range table.Indexes {
+		if !index.Unique {
+			continue
+		}
+		if err := validateUniqueIndex(table, index, columns); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateUniqueIndex(table catalog.Table, index catalog.Index, columns map[string]int) error {
+	seen := map[string]bool{}
+	for _, row := range table.Rows {
+		key, nullable, err := uniqueIndexRowKey(table, index, columns, row)
+		if err != nil {
+			return err
+		}
+		if nullable {
+			continue
+		}
+		if seen[key] {
+			return sqlFailure{1062, "23000", "Duplicate entry for key '" + index.Name + "'"}
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func uniqueIndexRowKey(table catalog.Table, index catalog.Index, columnIndexes map[string]int, row []string) (string, bool, error) {
+	parts := make([]string, len(index.Parts))
+	columns := relationalTableColumns("", table.Name, table.Name, table)
+	for number, part := range index.Parts {
+		key, nullable, err := uniqueIndexPartKey(table, part, columnIndexes, columns, row)
+		if err != nil || nullable {
+			return "", nullable, err
+		}
+		parts[number] = strconv.Itoa(len(key)) + ":" + key
+	}
+	return strings.Join(parts, ""), false, nil
+}
+
+func uniqueIndexPartKey(table catalog.Table, part catalog.IndexPart, columnIndexes map[string]int, columns []relationColumn, row []string) (string, bool, error) {
+	if part.Expression != "" {
+		value, err := evaluateRelationExpression(part.Expression, columns, relationRow{values: row})
+		if err != nil || value.isNull() {
+			return "", value.isNull(), err
+		}
+		return indexPrefixKey(value.render(), part.PrefixLength), false, nil
+	}
+	column := columnIndexes[catalog.Key(part.Column)]
+	if row[column] == storedSQLNullValue {
+		return "", true, nil
+	}
+	return indexPrefixKey(constraintColumnKey(table, column, row[column]), part.PrefixLength), false, nil
+}
+
+func indexPrefixKey(value string, length int) string {
+	if length == 0 {
+		return value
+	}
+	runes := []rune(value)
+	if length >= len(runes) {
+		return value
+	}
+	return string(runes[:length])
 }
 
 func constraintIndexes(columns []string, indexes map[string]int) []int {

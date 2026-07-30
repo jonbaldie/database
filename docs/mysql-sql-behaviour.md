@@ -152,3 +152,21 @@ follow the baseline. Packet, execution-resource, storage-capacity, session, and
 prepared-statement-count limits are governed by their own public contracts.
 This contract does not prescribe value representations, arithmetic libraries,
 parser organization, collation machinery, or storage layout.
+
+## B-tree indexes
+
+The server supports B-tree primary, unique, secondary, composite, prefix, and
+functional indexes. A key part is ascending by default and can be descending.
+Indexes are visible by default; an invisible secondary index is maintained but
+is not chosen automatically. A primary index cannot be invisible.
+
+`CREATE INDEX`, `CREATE UNIQUE INDEX`, `DROP INDEX`, and the corresponding
+`ALTER TABLE` index actions are supported. `SHOW INDEX` and `SHOW CREATE TABLE`
+expose the durable index definition. A unique index rejects duplicate non-NULL
+key values. Functional and prefix key values use the same rule.
+
+`USE INDEX`, `FORCE INDEX`, and `IGNORE INDEX` support `FOR JOIN`, `FOR ORDER
+BY`, and `FOR GROUP BY` scopes. A hint can name an unambiguous index-name
+prefix. Unknown, ambiguous, invisible, or otherwise invalid hint names fail
+explicitly. A valid hint limits or requires the logical access-path selection;
+it does not override semantic query checks.

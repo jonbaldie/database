@@ -40,6 +40,16 @@ type relationalTableSource struct {
 	columns   []relationColumn
 	query     string
 	reason    string
+	hints     []relationalIndexHint
+	access    *catalog.Index
+	forced    bool
+	covering  bool
+}
+
+type relationalIndexHint struct {
+	kind    string
+	scope   string
+	indexes []string
 }
 
 type relationalJoin struct {
@@ -303,7 +313,196 @@ func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, order, l
 		return err
 	}
 	plan.order, plan.limit = parsedOrder, parsedLimit
+	return plan.chooseIndexAccesses()
+}
+
+func (p *relationalSelectPlan) chooseIndexAccesses() error {
+	for number := range p.source.tables {
+		access, forced, covering, err := chooseTableIndexAccess(p.source.tables[number], p.whereText, p.order, p.projection, p.allColumns, p.source.columns)
+		if err != nil {
+			return err
+		}
+		p.source.tables[number].access, p.source.tables[number].forced, p.source.tables[number].covering = access, forced, covering
+	}
+	for number := range p.source.joins {
+		for _, table := range p.source.tables {
+			if identifiersEqual(table.alias, p.source.joins[number].right.alias) {
+				p.source.joins[number].right.access = table.access
+				p.source.joins[number].right.forced = table.forced
+				p.source.joins[number].right.covering = table.covering
+				break
+			}
+		}
+	}
 	return nil
+}
+
+func chooseTableIndexAccess(table relationalTableSource, where string, orders []relationalOrder, projections []relationalProjection, allColumns bool, columns []relationColumn) (*catalog.Index, bool, bool, error) {
+	indexes := effectiveTableIndexes(table.table)
+	allowed, forced, err := indexHintCandidates(table, indexes, indexSelectionScope(where, orders))
+	if err != nil {
+		return nil, false, false, err
+	}
+	if forced && len(allowed) > 0 {
+		index := allowed[0]
+		return cloneIndexPointer(index), true, indexCoversProjection(index, table, projections, allColumns, columns), nil
+	}
+	for _, index := range allowed {
+		if indexSupportsSelect(index, table, where, orders) {
+			return cloneIndexPointer(index), false, indexCoversProjection(index, table, projections, allColumns, columns), nil
+		}
+	}
+	return nil, false, false, nil
+}
+
+func indexSelectionScope(where string, orders []relationalOrder) string {
+	if strings.TrimSpace(where) != "" || len(orders) == 0 {
+		return "join"
+	}
+	return "order_by"
+}
+
+func indexCoversProjection(index catalog.Index, table relationalTableSource, projections []relationalProjection, allColumns bool, columns []relationColumn) bool {
+	if allColumns {
+		return false
+	}
+	parts := indexProjectionParts(index)
+	for _, projection := range projections {
+		if !indexCoversProjectionItem(parts, table, projection, columns) {
+			return false
+		}
+	}
+	return true
+}
+
+func indexProjectionParts(index catalog.Index) map[string]bool {
+	parts := map[string]bool{}
+	for _, part := range index.Parts {
+		addIndexProjectionPart(parts, part)
+	}
+	return parts
+}
+
+func addIndexProjectionPart(parts map[string]bool, part catalog.IndexPart) {
+	if part.Column != "" {
+		parts["column:"+catalog.Key(part.Column)] = true
+	}
+	if part.Expression != "" {
+		parts["expression:"+normalizedIndexExpression(part.Expression)] = true
+	}
+}
+
+func indexCoversProjectionItem(parts map[string]bool, table relationalTableSource, projection relationalProjection, columns []relationColumn) bool {
+	if projection.scalar || projection.subquery != "" {
+		return true
+	}
+	if projection.computed {
+		return parts["expression:"+normalizedIndexExpression(projection.expression)]
+	}
+	return indexCoversColumnProjection(parts, table, projection.column, columns)
+}
+
+func indexCoversColumnProjection(parts map[string]bool, table relationalTableSource, position int, columns []relationColumn) bool {
+	if position < 0 || position >= len(columns) {
+		return false
+	}
+	column := columns[position]
+	return identifiersEqual(column.qualifier, table.alias) && parts["column:"+catalog.Key(column.name)]
+}
+
+func normalizedIndexExpression(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
+func indexHintCandidates(table relationalTableSource, indexes []catalog.Index, scope string) ([]catalog.Index, bool, error) {
+	allowed := visibleTableIndexes(indexes)
+	var use, force []string
+	ignored := map[string]bool{}
+	for _, hint := range table.hints {
+		if hint.scope != scope {
+			continue
+		}
+		switch hint.kind {
+		case "use":
+			use = hint.indexes
+		case "force":
+			force = hint.indexes
+		case "ignore":
+			for _, name := range hint.indexes {
+				ignored[catalog.Key(name)] = true
+			}
+		}
+	}
+	if len(force) > 0 {
+		return namedIndexCandidates(indexes, force, ignored), true, nil
+	}
+	if use != nil {
+		return namedIndexCandidates(indexes, use, ignored), false, nil
+	}
+	return withoutIgnoredIndexes(allowed, ignored), false, nil
+}
+
+func visibleTableIndexes(indexes []catalog.Index) []catalog.Index {
+	visible := make([]catalog.Index, 0, len(indexes))
+	for _, index := range indexes {
+		if !index.Invisible {
+			visible = append(visible, index)
+		}
+	}
+	return visible
+}
+
+func namedIndexCandidates(indexes []catalog.Index, names []string, ignored map[string]bool) []catalog.Index {
+	result := make([]catalog.Index, 0, len(names))
+	for _, name := range names {
+		for _, index := range indexes {
+			if catalog.Key(index.Name) == catalog.Key(name) && !ignored[catalog.Key(index.Name)] {
+				result = append(result, index)
+				break
+			}
+		}
+	}
+	return result
+}
+
+func withoutIgnoredIndexes(indexes []catalog.Index, ignored map[string]bool) []catalog.Index {
+	result := make([]catalog.Index, 0, len(indexes))
+	for _, index := range indexes {
+		if !ignored[catalog.Key(index.Name)] {
+			result = append(result, index)
+		}
+	}
+	return result
+}
+
+func indexSupportsSelect(index catalog.Index, table relationalTableSource, where string, orders []relationalOrder) bool {
+	if len(index.Parts) == 0 {
+		return false
+	}
+	part := index.Parts[0]
+	if indexTextContains(where, table, part) {
+		return true
+	}
+	for _, order := range orders {
+		if indexTextContains(order.expression, table, part) {
+			return true
+		}
+	}
+	return false
+}
+
+func indexTextContains(text string, table relationalTableSource, part catalog.IndexPart) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if part.Expression != "" {
+		return strings.Contains(text, strings.ToLower(strings.TrimSpace(part.Expression)))
+	}
+	column := strings.ToLower(part.Column)
+	return strings.Contains(text, column) && (strings.Contains(text, strings.ToLower(table.alias)+"."+column) || strings.Contains(text, column))
+}
+
+func cloneIndexPointer(index catalog.Index) *catalog.Index {
+	copy := catalog.CloneIndexes([]catalog.Index{index})
+	return &copy[0]
 }
 
 func validateDistinctOrder(distinct bool, orders []relationalOrder, projections []relationalProjection) error {
@@ -419,7 +618,7 @@ func selectClauses(tail string) []struct {
 		at   int
 	}, 0, 3)
 	for _, candidate := range []string{"where", "order", "limit"} {
-		if at := keywordAt(tail, candidate); at >= 0 {
+		if at := selectClauseAt(tail, candidate); at >= 0 {
 			clauses = append(clauses, struct {
 				name string
 				at   int
@@ -427,6 +626,28 @@ func selectClauses(tail string) []struct {
 		}
 	}
 	return clauses
+}
+
+func selectClauseAt(text, keyword string) int {
+	start := 0
+	length := len(text)
+	for start < length {
+		at := keywordAt(text[start:], keyword)
+		if at < 0 {
+			return -1
+		}
+		at += start
+		if keyword != "order" || !indexHintOrderKeyword(text, at) {
+			return at
+		}
+		start = at + len(keyword)
+	}
+	return -1
+}
+
+func indexHintOrderKeyword(text string, at int) bool {
+	before := strings.Fields(strings.ToLower(strings.TrimSpace(text[:at])))
+	return len(before) > 0 && before[len(before)-1] == "for"
 }
 
 func selectClauseValue(tail, name string, start, end int) (string, error) {
@@ -517,7 +738,7 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		Limit:                 queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
 	}
 	for _, table := range p.source.tables {
-		read.Tables = append(read.Tables, relationInfo(table.namespace, table.name, table.table))
+		read.Tables = append(read.Tables, relationSourceInfo(table))
 	}
 	if len(read.Tables) > 0 {
 		read.Table = read.Tables[0]
@@ -528,7 +749,7 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 			clause, fragment = "using", "("+strings.Join(join.using, ", ")+")"
 		}
 		read.Joins = append(read.Joins, queryexplanation.Join{
-			Type: join.kind, Table: relationInfo(join.right.namespace, join.right.name, join.right.table), Condition: join.condition,
+			Type: join.kind, Table: relationSourceInfo(join.right), Condition: join.condition,
 			SourceClause: clause, SourceFragment: fragment,
 		})
 	}

@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/queryexplanation"
@@ -238,6 +239,17 @@ func relationInfo(namespace, tableName string, table catalog.Table) queryexplana
 		Columns:  append([]string(nil), table.Columns...),
 		RowCount: len(table.Rows),
 	}
+}
+
+func relationSourceInfo(source relationalTableSource) queryexplanation.Table {
+	info := relationInfo(source.namespace, source.name, source.table)
+	if source.access != nil {
+		info.Access = &queryexplanation.IndexAccess{
+			Name: source.access.Name, Unique: source.access.Unique, Forced: source.forced, Covering: source.covering,
+			CollectedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+	}
+	return info
 }
 
 func renderExplanation(format string, document *queryexplanation.Document) (*queryResult, error) {
