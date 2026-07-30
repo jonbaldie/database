@@ -363,10 +363,16 @@ type transactionWork struct {
 }
 
 type savepointState struct {
-	savepoints         map[string]catalog.Definition
-	savepointDirty     map[string]bool
-	savepointMutations map[string]int
-	savepointRead      map[string]bool
+	savepoints []savepoint
+}
+
+type savepoint struct {
+	name          string
+	snapshot      catalog.Definition
+	revision      uint64
+	dirty         bool
+	mutationCount int
+	read          bool
 }
 
 type statementState struct {

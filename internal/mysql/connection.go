@@ -3,8 +3,6 @@ package mysql
 import (
 	"encoding/binary"
 	"net"
-
-	"github.com/jonbaldie/database/internal/catalog"
 )
 
 // conversation owns one accepted connection from greeting through cleanup.
@@ -90,14 +88,7 @@ func newSession(server *Server, authentication authenticationResult) *session {
 		server: server, username: authentication.accountName, database: authentication.database,
 		initialDB: authentication.database, timeZone: server.config.TimeZone, initialTimeZone: server.config.TimeZone,
 		statements: map[uint32]*preparedStatement{}, nextStmtID: 1,
-		transactionState: transactionState{
-			savepointState: savepointState{
-				savepoints:         map[string]catalog.Definition{},
-				savepointDirty:     map[string]bool{},
-				savepointMutations: map[string]int{},
-				savepointRead:      map[string]bool{},
-			},
-		},
+		transactionState: transactionState{},
 	}
 }
 

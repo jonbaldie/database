@@ -18,6 +18,29 @@ them. The documented v0.1 relational, session, account, catalog, and protocol
 contracts define what is supported. A more specific v0.1 contract takes
 precedence where it intentionally differs from this one.
 
+## Transactions, savepoints, and failure boundaries
+
+The server supports `BEGIN`, `START TRANSACTION`, `COMMIT [WORK]`, `ROLLBACK
+[WORK]`, `SAVEPOINT identifier`, `ROLLBACK [WORK] TO [SAVEPOINT] identifier`,
+and `RELEASE SAVEPOINT identifier`. A savepoint needs an active transaction.
+Its name is one SQL identifier and follows the identifier comparison rule.
+
+`SAVEPOINT` records the current transaction state. A savepoint with an existing
+name deletes the old savepoint, then records a new one at the current point.
+`ROLLBACK TO` restores the named point without ending the transaction. It keeps
+the named savepoint and deletes each savepoint recorded after it. `RELEASE
+SAVEPOINT` deletes only its named savepoint. An unknown or released savepoint
+fails with MySQL error `1305` and SQLSTATE `42000`. A full `COMMIT` or
+`ROLLBACK` deletes all savepoints.
+
+An ordinary failed statement, including a duplicate-key error or a lock-wait
+timeout, has no partial effect and leaves an explicit transaction and its
+available savepoints open. The application can correct the error and continue,
+or roll back to a savepoint. A deadlock or another whole-transaction failure
+discards all work since the transaction started. Its retryable identity is
+MySQL error `1213` and SQLSTATE `40001`; the application must retry the whole
+transaction. A lock-wait timeout uses MySQL error `1205` and SQLSTATE `HY000`.
+
 ## Values, parameters, and predicates
 
 Implicit conversion is permitted only when it is lossless and stays in a
