@@ -69,12 +69,14 @@ func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation
 		return s.explainSelect(&relations, inner)
 	case strings.HasPrefix(lower, "insert into "):
 		return s.explainInsert(&relations, inner)
+	case strings.HasPrefix(lower, "replace "):
+		return s.explainReplace(&relations, inner)
 	case strings.HasPrefix(lower, "update "):
 		return s.explainUpdate(&relations, inner)
 	case strings.HasPrefix(lower, "delete from "):
 		return s.explainDelete(&relations, inner)
 	default:
-		return nil, sqlFailure{1064, "42000", "EXPLAIN supports SELECT, INSERT, UPDATE, and DELETE statements"}
+		return nil, sqlFailure{1064, "42000", "EXPLAIN supports SELECT, INSERT, REPLACE, UPDATE, and DELETE statements"}
 	}
 }
 
@@ -137,12 +139,53 @@ func validateExplainPredicate(relations *relationExecutor, where string, table c
 // explainInsert, explainUpdate, and explainDelete reuse the executor's own plan
 // builders so a plan is only produced for a statement the executor would run.
 func (s *textStatementExecutor) explainInsert(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
-	plan, err := makeInsertPlan(relations, inner)
+	input, assignments, upsert, err := splitInsertOnDuplicate(inner)
 	if err != nil {
 		return nil, err
 	}
-	write := queryexplanation.Write{Kind: "insert", Table: relationInfo(plan.namespace, plan.name, plan.table), ValueRows: len(plan.groups), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table)}
+	plan, err := makeInsertionExplanationPlan(relations, input)
+	if err != nil {
+		return nil, err
+	}
+	if upsert {
+		indexes, err := tableColumnIndexes(plan.table)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := parseUpsertAssignments(assignments, indexes); err != nil {
+			return nil, err
+		}
+	}
+	source, err := s.explanationInsertSource(relations, plan)
+	if err != nil {
+		return nil, err
+	}
+	write := queryexplanation.Write{Kind: "insert", Table: relationInfo(plan.namespace, plan.name, plan.table), ValueRows: len(plan.groups), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table), Source: source, Upsert: upsert}
 	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
+}
+
+func (s *textStatementExecutor) explainReplace(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
+	plan, err := makeReplaceExplanationPlan(relations, inner)
+	if err != nil {
+		return nil, err
+	}
+	source, err := s.explanationInsertSource(relations, plan)
+	if err != nil {
+		return nil, err
+	}
+	write := queryexplanation.Write{Kind: "replace", Table: relationInfo(plan.namespace, plan.name, plan.table), ValueRows: len(plan.groups), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table), Source: source}
+	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
+}
+
+func (s *textStatementExecutor) explanationInsertSource(relations *relationExecutor, plan insertPlan) (*queryexplanation.Operator, error) {
+	if plan.sourceSQL == "" {
+		return nil, nil
+	}
+	document, err := s.explainComposedSelect(relations, plan.sourceSQL)
+	if err != nil {
+		return nil, err
+	}
+	return document.Plan, nil
 }
 
 func (s *textStatementExecutor) explainUpdate(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {

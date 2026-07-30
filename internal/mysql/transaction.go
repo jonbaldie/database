@@ -177,7 +177,7 @@ func isDataDefinition(lower string) bool {
 }
 
 func isMutationStatement(lower string) bool {
-	return strings.HasPrefix(lower, "insert into ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete from ") || isDataDefinition(lower)
+	return strings.HasPrefix(lower, "insert into ") || strings.HasPrefix(lower, "replace ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete from ") || isDataDefinition(lower)
 }
 
 func isTransactionalStatement(lower string) bool {

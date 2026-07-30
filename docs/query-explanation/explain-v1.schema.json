@@ -596,7 +596,7 @@
       "required": ["mutation_type"],
       "properties": {
         "mutation_type": {
-          "enum": ["insert", "update", "delete", "replace", "cascade_update", "cascade_delete"]
+          "enum": ["insert", "update", "delete", "replace", "upsert", "cascade_update", "cascade_delete"]
         }
       }
     },

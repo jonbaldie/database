@@ -77,6 +77,39 @@ unique referenced key. No foreign-key action clause is supported. A write that
 would remove or change a referenced value fails. `SHOW CREATE TABLE` shows the
 saved column rules and constraints.
 
+## Mutation forms
+
+`INSERT` supports `INSERT INTO table [(column, ...)] VALUES (...) [, ...]`,
+the singular `VALUE` spelling, `INSERT INTO table SET column = value [, ...]`,
+and `INSERT INTO table [(column, ...)] SELECT ... FROM ...`. The select source
+uses the supported direct relational `SELECT` form. The server materializes its
+source rows from the statement snapshot before it changes the target; this also
+makes a same-table insert-select finite and deterministic.
+
+`REPLACE [INTO]` supports the same `VALUES`, `VALUE`, `SET`, and direct
+`SELECT` source forms. For each submitted row, it removes every stored row that
+conflicts on a primary key, a `UNIQUE` constraint, or a unique index, then
+inserts the submitted row. Its affected-row count is one for the inserted row
+plus one for each removed row.
+
+`INSERT` sources can end with `ON DUPLICATE KEY UPDATE`. An inserted row counts
+as one affected row. A conflicting row is updated once; a changed update counts
+as two affected rows and an unchanged update counts as zero. Each update right
+side is either a scalar literal or `VALUES(column)`, which means the submitted
+candidate value. The server does not negotiate `CLIENT_FOUND_ROWS`, so an
+unchanged update remains zero through both text and prepared execution.
+
+The server canonicalizes all submitted rows and then validates the final table
+and database namespace state before it publishes the statement. A type error,
+duplicate, check, not-null, or foreign-key error has no partial effect. This
+rule applies to multi-row values, select sources, replacement deletes, and
+duplicate-key updates. There are no trigger effects in v0.1.
+
+`INSERT IGNORE`, priority modifiers, `DELAYED`, `RETURNING`, row constructors,
+`REPLACE ... TABLE`, insert-source aliases, and duplicate-key update
+expressions other than scalar literals or `VALUES(column)` are outside v0.1.
+They fail before durable effects.
+
 ## Composed relational queries
 
 The v0.1 relational surface supports scalar subqueries in projections,

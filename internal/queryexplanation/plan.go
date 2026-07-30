@@ -40,13 +40,15 @@ type Limit struct {
 	Count   int
 }
 
-// Write describes a supported insert, update, or delete to be explained.
+// Write describes a supported mutation to be explained.
 type Write struct {
-	Kind        string // insert, update, or delete
+	Kind        string // insert, replace, update, or delete
 	Table       Table
 	ValueRows   int    // number of literal rows, for insert
 	Where       string // predicate fragment without the WHERE keyword, for update and delete
 	Constraints []Constraint
+	Source      *Operator // planned INSERT ... SELECT input, when present
+	Upsert      bool
 }
 
 // PlanSelect returns the plan-only explanation document for a supported read.
@@ -236,7 +238,12 @@ func limitOperator(limit Limit, child *Operator) *Operator {
 func writePlan(write Write) *Operator {
 	switch write.Kind {
 	case "insert":
+		if write.Upsert {
+			return upsertPlan(write)
+		}
 		return insertPlan(write)
+	case "replace":
+		return replacePlan(write)
 	case "delete":
 		return mutationOverScan(write, "delete", "Delete the matching rows from the table.")
 	default:
@@ -245,7 +252,7 @@ func writePlan(write Write) *Operator {
 }
 
 func insertPlan(write Write) *Operator {
-	source := literalRows(write.Table, write.ValueRows)
+	source := writeSource(write)
 	source = constraintChecks(write, source)
 	root := &Operator{
 		Kind:      "mutation",
@@ -258,6 +265,45 @@ func insertPlan(write Write) *Operator {
 		Children:  []*Operator{source},
 	}
 	return root
+}
+
+func upsertPlan(write Write) *Operator {
+	source := constraintChecks(write, writeSource(write))
+	return &Operator{
+		Kind:      "mutation",
+		Summary:   "Insert each submitted row or update its conflicting unique-key row.",
+		Operation: mutationOperation{MutationType: "upsert"},
+		Objects:   []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, source.Estimates.Rows, source.Estimates.Cost),
+		Output:    emptyOutput(), Warnings: []Warning{}, Children: []*Operator{source},
+	}
+}
+
+func replacePlan(write Write) *Operator {
+	source := constraintChecks(write, writeSource(write))
+	rows, cost := source.Estimates.Rows, source.Estimates.Cost
+	deleteRows := &Operator{
+		Kind: "mutation", Summary: "Delete rows that conflict with a primary or unique key.",
+		Operation: mutationOperation{MutationType: "delete"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{},
+	}
+	insertRows := &Operator{
+		Kind: "mutation", Summary: "Insert the replacement rows after conflict deletion.",
+		Operation: mutationOperation{MutationType: "insert"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{},
+	}
+	return &Operator{
+		Kind: "mutation", Summary: "Replace rows with delete-and-insert semantics for conflicting keys.",
+		Operation: mutationOperation{MutationType: "replace"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{source, deleteRows, insertRows},
+	}
+}
+
+func writeSource(write Write) *Operator {
+	if write.Source != nil {
+		return write.Source
+	}
+	return literalRows(write.Table, write.ValueRows)
 }
 
 func mutationOverScan(write Write, mutationType, summary string) *Operator {
