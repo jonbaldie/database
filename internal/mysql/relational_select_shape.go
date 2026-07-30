@@ -48,6 +48,12 @@ func parseProjectionItem(item string, columns []relationColumn, context *compose
 	if query, ok := scalarSubquerySQL(expression); ok {
 		return subqueryProjection(query, expression, alias, columns, context, outer)
 	}
+	if projection, found, err := parseWindowProjection(expression, alias, columns); found {
+		return projection, err
+	}
+	if projection, found, err := parseAggregateProjection(expression, alias, columns); found {
+		return projection, err
+	}
 	if column, resolveErr := resolveRelationColumn(expression, columns); resolveErr == nil {
 		projection := relationProjection(column, alias)
 		projection.expression = expression
@@ -186,7 +192,7 @@ func literalExprValue(value literalQueryResult) exprValue {
 }
 
 func (p relationalProjection) resolveName(columns []relationColumn) relationalProjection {
-	if p.scalar || p.computed || p.subquery != "" {
+	if p.scalar || p.computed || p.subquery != "" || p.aggregate != nil || p.window != nil {
 		return p
 	}
 	column := columns[p.column]

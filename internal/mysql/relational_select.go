@@ -13,17 +13,22 @@ import (
 // execution and EXPLAIN. Tables are resolved from the session definition once;
 // all later operators consume that same immutable relation image.
 type relationalSelectPlan struct {
-	session    *session
-	composed   *composedQueryContext
-	outer      *outerRelationScope
-	projection []relationalProjection
-	allColumns bool
-	distinct   bool
-	source     relationalSource
-	where      relationPredicate
-	whereText  string
-	order      []relationalOrder
-	limit      relationalLimit
+	relationalSelectEnvironment
+	projection  []relationalProjection
+	allColumns  bool
+	distinct    bool
+	source      relationalSource
+	where       relationPredicate
+	whereText   string
+	aggregation relationalAggregation
+	order       []relationalOrder
+	limit       relationalLimit
+}
+
+type relationalSelectEnvironment struct {
+	session  *session
+	composed *composedQueryContext
+	outer    *outerRelationScope
 }
 
 type relationalSource struct {
@@ -76,6 +81,8 @@ type relationalProjection struct {
 	value      exprValue
 	metadata   columnMetadata
 	outer      *outerRelationScope
+	aggregate  *relationalAggregate
+	window     *relationalWindowFunction
 }
 
 type relationalOrder struct {
@@ -99,6 +106,7 @@ type relationalResultRow struct {
 	values      []string
 	nulls       []bool
 	source      relationRow
+	group       []relationRow
 	projections []exprValue
 	orders      []exprValue
 }
@@ -120,7 +128,7 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 	if err != nil {
 		return nil, err
 	}
-	if s.streamRows && !plan.hasRuntimeSubqueries() {
+	if s.streamRows && !plan.requiresMaterialization() {
 		return plan.streamingResult(), nil
 	}
 	resultRows, err := collectRelationalResultRows(plan)
@@ -147,7 +155,14 @@ func (p *relationalSelectPlan) hasRuntimeSubqueries() bool {
 	return false
 }
 
+func (p *relationalSelectPlan) requiresMaterialization() bool {
+	return p.hasRuntimeSubqueries() || p.hasAggregateOrWindow()
+}
+
 func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResultRow, error) {
+	if plan.hasAggregateOrWindow() {
+		return collectAggregateOrWindowRows(plan)
+	}
 	resultRows := make([]relationalResultRow, 0)
 	err := plan.forEachSourceRow(func(row relationRow) error {
 		if plan.where != nil {
@@ -269,7 +284,7 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err != nil {
 		return nil, err
 	}
-	sourceText, whereText, orderText, limitText, err := splitSelectTail(tail)
+	sourceText, whereText, groupText, havingText, windowText, orderText, limitText, err := splitSelectTail(tail)
 	if err != nil {
 		return nil, err
 	}
@@ -277,22 +292,28 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err != nil {
 		return nil, err
 	}
-	plan := &relationalSelectPlan{session: s.session, composed: s.composed, outer: outer, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
-	if err := finishRelationalSelectPlan(plan, projectionText, orderText, limitText); err != nil {
+	plan := &relationalSelectPlan{relationalSelectEnvironment: relationalSelectEnvironment{session: s.session, composed: s.composed, outer: outer}, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
+	if err := finishRelationalSelectPlan(plan, projectionText, groupText, havingText, windowText, orderText, limitText); err != nil {
 		return nil, err
 	}
 	return plan, nil
 }
 
-func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, order, limit string) error {
+func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, group, having, windows, order, limit string) error {
 	if err := plan.compileProjection(projection); err != nil {
 		return err
 	}
 	if err := plan.compilePredicates(); err != nil {
 		return err
 	}
+	if err := plan.compileAggregation(group, having, windows); err != nil {
+		return err
+	}
 	parsedOrder, err := parseRelationalOrder(order, plan.projection, plan.source.columns)
 	if err != nil {
+		return err
+	}
+	if err := plan.validateGroupedOrders(parsedOrder); err != nil {
 		return err
 	}
 	if err := validateDistinctOrder(plan.distinct, parsedOrder, plan.projection); err != nil {
@@ -386,14 +407,14 @@ func parseDistinctProjection(expression string) (bool, string) {
 	return true, strings.TrimSpace(expression[len("distinct "):])
 }
 
-func splitSelectTail(tail string) (string, string, string, string, error) {
+func splitSelectTail(tail string) (string, string, string, string, string, string, string, error) {
 	clauses := selectClauses(tail)
 	sort.Slice(clauses, func(i, j int) bool { return clauses[i].at < clauses[j].at })
 	if len(clauses) == 0 {
-		return strings.TrimSpace(tail), "", "", "", nil
+		return strings.TrimSpace(tail), "", "", "", "", "", "", nil
 	}
 	if clauses[0].at == 0 {
-		return "", "", "", "", sqlFailure{1064, "42000", "malformed SELECT source"}
+		return "", "", "", "", "", "", "", sqlFailure{1064, "42000", "malformed SELECT source"}
 	}
 	values := map[string]string{}
 	for index, current := range clauses {
@@ -403,11 +424,11 @@ func splitSelectTail(tail string) (string, string, string, string, error) {
 		}
 		value, err := selectClauseValue(tail, current.name, current.at, end)
 		if err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", "", "", err
 		}
 		values[current.name] = value
 	}
-	return strings.TrimSpace(tail[:clauses[0].at]), values["where"], values["order"], values["limit"], nil
+	return strings.TrimSpace(tail[:clauses[0].at]), values["where"], values["group"], values["having"], values["window"], values["order"], values["limit"], nil
 }
 
 func selectClauses(tail string) []struct {
@@ -417,8 +438,8 @@ func selectClauses(tail string) []struct {
 	clauses := make([]struct {
 		name string
 		at   int
-	}, 0, 3)
-	for _, candidate := range []string{"where", "order", "limit"} {
+	}, 0, 6)
+	for _, candidate := range []string{"where", "group", "having", "window", "order", "limit"} {
 		if at := keywordAt(tail, candidate); at >= 0 {
 			clauses = append(clauses, struct {
 				name string
@@ -431,9 +452,9 @@ func selectClauses(tail string) []struct {
 
 func selectClauseValue(tail, name string, start, end int) (string, error) {
 	value := strings.TrimSpace(tail[start+len(name) : end])
-	if name == "order" {
+	if name == "order" || name == "group" {
 		if !strings.HasPrefix(strings.ToLower(value), "by ") {
-			return "", sqlFailure{1064, "42000", "ORDER requires BY"}
+			return "", sqlFailure{1064, "42000", strings.ToUpper(name) + " requires BY"}
 		}
 		value = strings.TrimSpace(value[len("by "):])
 	}
@@ -485,7 +506,7 @@ func (p *relationalSelectPlan) renderTemporalResults(rows [][]string, nulls [][]
 		return
 	}
 	for index, projection := range p.projection {
-		if projection.scalar || projection.computed || projection.subquery != "" {
+		if !projectionNeedsTemporalRendering(projection) {
 			continue
 		}
 		column := p.source.columns[projection.column]
@@ -495,6 +516,10 @@ func (p *relationalSelectPlan) renderTemporalResults(rows [][]string, nulls [][]
 		}
 		renderTemporalColumn(rows, nulls, index, offset, typ.precision)
 	}
+}
+
+func projectionNeedsTemporalRendering(projection relationalProjection) bool {
+	return !projection.scalar && !projection.computed && projection.subquery == "" && projection.aggregate == nil && projection.window == nil
 }
 
 func renderTemporalColumn(rows [][]string, nulls [][]bool, column, offset, precision int) {
@@ -512,6 +537,10 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		ProjectionExpressions: projectionExpressions(p.projection, p.source.columns),
 		AllColumns:            p.allColumns,
 		Where:                 p.whereText,
+		GroupExpressions:      groupExpressions(p.aggregation.groups),
+		Having:                p.aggregation.having,
+		AggregateCount:        aggregateProjectionCount(p.projection),
+		Window:                queryexplanation.WindowDetails{Count: windowDefinitionCount(p.projection), FunctionCount: windowProjectionCount(p.projection), Definitions: windowExplanationDefinitions(p.projection)},
 		Distinct:              p.distinct,
 		Orders:                explanationOrders(p.order),
 		Limit:                 queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
@@ -533,6 +562,34 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		})
 	}
 	return queryexplanation.PlanSelect(serverVersion, sql, currentDatabase, read)
+}
+
+func groupExpressions(groups []relationalGroup) []string {
+	expressions := make([]string, len(groups))
+	for index, group := range groups {
+		expressions[index] = group.expression
+	}
+	return expressions
+}
+
+func aggregateProjectionCount(projections []relationalProjection) int {
+	count := 0
+	for _, projection := range projections {
+		if projection.aggregate != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func windowProjectionCount(projections []relationalProjection) int {
+	count := 0
+	for _, projection := range projections {
+		if projection.window != nil {
+			count++
+		}
+	}
+	return count
 }
 
 func projectionNames(projection []relationalProjection) []string {
