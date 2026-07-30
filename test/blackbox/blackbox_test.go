@@ -621,14 +621,13 @@ func TestMySQLNamespacesAndBasicTablesSurviveRestartAndSupportQualifiedAccess(t 
 		t.Fatalf("qualified cross-namespace read: %#v", result)
 	}
 	for _, query := range []string{
-		"CREATE TABLE rejected_constraint (id INT, PRIMARY KEY (id))",
 		"CREATE TABLE rejected_option (id INT) ENGINE=InnoDB",
 	} {
 		if result := client.query(query); result.err == "" {
 			t.Fatalf("recognized unsupported table definition succeeded: query=%q result=%#v", query, result)
 		}
 	}
-	for _, table := range []string{"rejected_constraint", "rejected_option"} {
+	for _, table := range []string{"rejected_option"} {
 		if result := client.query("SELECT * FROM " + table); result.err == "" {
 			t.Fatalf("unsupported definition left a durable table: table=%q result=%#v", table, result)
 		}

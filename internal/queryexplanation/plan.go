@@ -42,10 +42,11 @@ type Limit struct {
 
 // Write describes a supported insert, update, or delete to be explained.
 type Write struct {
-	Kind      string // insert, update, or delete
-	Table     Table
-	ValueRows int    // number of literal rows, for insert
-	Where     string // predicate fragment without the WHERE keyword, for update and delete
+	Kind        string // insert, update, or delete
+	Table       Table
+	ValueRows   int    // number of literal rows, for insert
+	Where       string // predicate fragment without the WHERE keyword, for update and delete
+	Constraints []Constraint
 }
 
 // PlanSelect returns the plan-only explanation document for a supported read.
@@ -245,6 +246,7 @@ func writePlan(write Write) *Operator {
 
 func insertPlan(write Write) *Operator {
 	source := literalRows(write.Table, write.ValueRows)
+	source = constraintChecks(write, source)
 	root := &Operator{
 		Kind:      "mutation",
 		Summary:   "Insert the submitted rows into the table.",
@@ -263,6 +265,7 @@ func mutationOverScan(write Write, mutationType, summary string) *Operator {
 	if write.Where != "" {
 		source = whereFilter(write.Where, source)
 	}
+	source = constraintChecks(write, source)
 	return &Operator{
 		Kind:      "mutation",
 		Summary:   summary,
@@ -273,6 +276,19 @@ func mutationOverScan(write Write, mutationType, summary string) *Operator {
 		Warnings:  []Warning{},
 		Children:  []*Operator{source},
 	}
+}
+
+func constraintChecks(write Write, child *Operator) *Operator {
+	for index := len(write.Constraints) - 1; index >= 0; index-- {
+		constraint := write.Constraints[index]
+		child = &Operator{
+			Kind: "constraint_check", Summary: "Check the " + constraint.Name + " constraint.",
+			Operation: constraintCheckOperation{ConstraintType: constraint.Type, ConstraintName: constraint.Name},
+			Objects:   []ObjectReference{{Type: "constraint", Database: write.Table.Database, Table: write.Table.Name, Name: constraint.Name}},
+			Estimates: child.Estimates, Output: child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+		}
+	}
+	return child
 }
 
 func tableScan(table Table) *Operator {

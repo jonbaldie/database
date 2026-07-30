@@ -15,6 +15,7 @@ const (
 	ddlDropColumn
 	ddlRenameColumn
 	ddlModifyColumn
+	ddlAddConstraint
 )
 
 type ddlAction struct {
@@ -22,8 +23,10 @@ type ddlAction struct {
 	name        string
 	newName     string
 	typeName    string
+	attribute   catalog.ColumnAttribute
 	ifExists    bool
 	ifNotExists bool
+	constraint  catalog.Constraint
 }
 
 const maxTableColumns = 1024
@@ -293,7 +296,7 @@ func parseAlterTableAction(value string) (ddlAction, error) {
 	lower := strings.ToLower(value)
 	switch {
 	case strings.HasPrefix(lower, "add "):
-		return parseAddColumnAction(strings.TrimSpace(value[len("ADD "):]))
+		return parseAddTableAction(strings.TrimSpace(value[len("ADD "):]))
 	case strings.HasPrefix(lower, "drop "):
 		return parseDropColumnAction(strings.TrimSpace(value[len("DROP "):]))
 	case strings.HasPrefix(lower, "rename "):
@@ -307,6 +310,17 @@ func parseAlterTableAction(value string) (ddlAction, error) {
 	}
 }
 
+func parseAddTableAction(value string) (ddlAction, error) {
+	if isTableConstraintDefinition(value) {
+		constraint, err := parseTableConstraint(value)
+		if err != nil {
+			return ddlAction{}, err
+		}
+		return ddlAction{kind: ddlAddConstraint, constraint: constraint}, nil
+	}
+	return parseAddColumnAction(value)
+}
+
 func parseAddColumnAction(value string) (ddlAction, error) {
 	value = stripOptionalKeyword(value, "column")
 	ifNotExists := false
@@ -314,11 +328,11 @@ func parseAddColumnAction(value string) (ddlAction, error) {
 		ifNotExists = true
 		value = strings.TrimSpace(value[len("IF NOT EXISTS "):])
 	}
-	column, typeName, err := parseAlterColumnDefinition(value)
+	column, typeName, attribute, err := parseAlterColumnDefinition(value)
 	if err != nil {
 		return ddlAction{}, err
 	}
-	return ddlAction{kind: ddlAddColumn, name: column, typeName: typeName, ifNotExists: ifNotExists}, nil
+	return ddlAction{kind: ddlAddColumn, name: column, typeName: typeName, attribute: attribute, ifNotExists: ifNotExists}, nil
 }
 
 func parseDropColumnAction(value string) (ddlAction, error) {
@@ -358,20 +372,20 @@ func parseChangeColumnAction(value string) (ddlAction, error) {
 	if !ok {
 		return ddlAction{}, sqlFailure{1064, "42000", "invalid column name"}
 	}
-	newName, typeName, err := parseAlterColumnDefinition(remainder)
+	newName, typeName, attribute, err := parseAlterColumnDefinition(remainder)
 	if err != nil {
 		return ddlAction{}, err
 	}
-	return ddlAction{kind: ddlModifyColumn, name: oldName, newName: newName, typeName: typeName}, nil
+	return ddlAction{kind: ddlModifyColumn, name: oldName, newName: newName, typeName: typeName, attribute: attribute}, nil
 }
 
 func parseModifyColumnAction(value string) (ddlAction, error) {
 	value = stripOptionalKeyword(value, "column")
-	name, typeName, err := parseAlterColumnDefinition(value)
+	name, typeName, attribute, err := parseAlterColumnDefinition(value)
 	if err != nil {
 		return ddlAction{}, err
 	}
-	return ddlAction{kind: ddlModifyColumn, name: name, typeName: typeName}, nil
+	return ddlAction{kind: ddlModifyColumn, name: name, typeName: typeName, attribute: attribute}, nil
 }
 
 func stripOptionalKeyword(value, keyword string) string {
@@ -382,15 +396,18 @@ func stripOptionalKeyword(value, keyword string) string {
 	return strings.TrimSpace(value)
 }
 
-func parseAlterColumnDefinition(value string) (string, string, error) {
-	column, typeName, err := parseTableColumn(value)
+func parseAlterColumnDefinition(value string) (string, string, catalog.ColumnAttribute, error) {
+	column, typeName, attribute, constraints, err := parseTableColumn(value)
 	if err != nil {
-		return "", "", err
+		return "", "", catalog.ColumnAttribute{}, err
+	}
+	if len(constraints) != 0 {
+		return "", "", catalog.ColumnAttribute{}, sqlFailure{1235, "42000", "column constraints require ADD CONSTRAINT"}
 	}
 	if typeName == "" {
-		return "", "", sqlFailure{1064, "42000", "column type is required"}
+		return "", "", catalog.ColumnAttribute{}, sqlFailure{1064, "42000", "column type is required"}
 	}
-	return column, typeName, nil
+	return column, typeName, attribute, nil
 }
 
 func applyTableDefinitionActions(table catalog.Table, actions []ddlAction) (catalog.Table, error) {
@@ -413,9 +430,37 @@ func applyTableDefinitionAction(table *catalog.Table, action ddlAction) error {
 		return renameTableColumn(table, action)
 	case ddlModifyColumn:
 		return modifyTableColumn(table, action)
+	case ddlAddConstraint:
+		return addTableConstraint(table, action.constraint)
 	default:
 		return errors.New("unsupported DDL action")
 	}
+}
+
+func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) error {
+	candidates := append(cloneCatalogConstraints(table.Constraints), constraint)
+	named, err := namedTableConstraints(table.Name, candidates)
+	if err != nil {
+		return err
+	}
+	constraint = named[len(named)-1]
+	for _, existing := range table.Constraints {
+		if catalog.Key(existing.Name) == catalog.Key(constraint.Name) {
+			return errors.New("constraint already exists")
+		}
+	}
+	table.Constraints = append(table.Constraints, constraint)
+	if constraint.Type == "primary" {
+		ensureColumnAttributes(table)
+		indexes, err := tableColumnIndexes(*table)
+		if err != nil {
+			return err
+		}
+		for _, column := range constraint.Columns {
+			table.ColumnAttributes[indexes[catalog.Key(column)]].Nullable = false
+		}
+	}
+	return nil
 }
 
 func addTableColumn(table *catalog.Table, action ddlAction) error {
@@ -429,10 +474,23 @@ func addTableColumn(table *catalog.Table, action ddlAction) error {
 		return sqlFailure{1117, "HY000", "too many columns"}
 	}
 	ensureColumnTypes(table)
+	ensureColumnAttributes(table)
 	table.Columns = append(table.Columns, action.name)
 	table.ColumnTypes = append(table.ColumnTypes, action.typeName)
+	table.ColumnAttributes = append(table.ColumnAttributes, action.attribute)
+	if action.attribute.HasDefault {
+		canonical, err := canonicalColumnValue(*table, len(table.Columns)-1, action.attribute.Default, 1)
+		if err != nil {
+			return err
+		}
+		table.ColumnAttributes[len(table.ColumnAttributes)-1].Default = canonical
+	}
 	for rowIndex := range table.Rows {
-		table.Rows[rowIndex] = append(table.Rows[rowIndex], storedSQLNullValue)
+		value := storedSQLNullValue
+		if table.ColumnAttributes[len(table.ColumnAttributes)-1].HasDefault {
+			value = table.ColumnAttributes[len(table.ColumnAttributes)-1].Default
+		}
+		table.Rows[rowIndex] = append(table.Rows[rowIndex], value)
 	}
 	return nil
 }
@@ -478,6 +536,15 @@ func modifyTableColumn(table *catalog.Table, action ddlAction) error {
 	if action.newName != "" {
 		table.Columns[index] = action.newName
 	}
+	ensureColumnAttributes(table)
+	if action.attribute.HasDefault {
+		canonical, err := canonicalColumnValue(*table, index, action.attribute.Default, 1)
+		if err != nil {
+			return err
+		}
+		action.attribute.Default = canonical
+	}
+	table.ColumnAttributes[index] = action.attribute
 	return nil
 }
 
@@ -499,16 +566,27 @@ func convertTableColumn(table *catalog.Table, index int, typeName string) error 
 
 func cloneCatalogTable(table catalog.Table) catalog.Table {
 	return catalog.Table{
-		Name:        table.Name,
-		Columns:     append([]string(nil), table.Columns...),
-		ColumnTypes: append([]string(nil), table.ColumnTypes...),
-		Rows:        cloneRows(table.Rows),
+		Name:             table.Name,
+		Columns:          append([]string(nil), table.Columns...),
+		ColumnTypes:      append([]string(nil), table.ColumnTypes...),
+		ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.ColumnAttributes...),
+		Constraints:      cloneCatalogConstraints(table.Constraints),
+		Rows:             cloneRows(table.Rows),
 	}
 }
 
 func ensureColumnTypes(table *catalog.Table) {
 	if len(table.ColumnTypes) == 0 {
 		table.ColumnTypes = make([]string, len(table.Columns))
+	}
+}
+
+func ensureColumnAttributes(table *catalog.Table) {
+	if len(table.ColumnAttributes) == 0 {
+		table.ColumnAttributes = make([]catalog.ColumnAttribute, len(table.Columns))
+		for index := range table.ColumnAttributes {
+			table.ColumnAttributes[index].Nullable = true
+		}
 	}
 }
 
@@ -526,6 +604,9 @@ func removeTableColumn(table *catalog.Table, index int) {
 	table.Columns = append(table.Columns[:index], table.Columns[index+1:]...)
 	if len(table.ColumnTypes) > index {
 		table.ColumnTypes = append(table.ColumnTypes[:index], table.ColumnTypes[index+1:]...)
+	}
+	if len(table.ColumnAttributes) > index {
+		table.ColumnAttributes = append(table.ColumnAttributes[:index], table.ColumnAttributes[index+1:]...)
 	}
 	for rowIndex, row := range table.Rows {
 		table.Rows[rowIndex] = append(row[:index], row[index+1:]...)

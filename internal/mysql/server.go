@@ -1000,12 +1000,59 @@ func createTableInDefinition(definition *catalog.Definition, namespace, name str
 		}
 		return errors.New("table already exists")
 	}
-	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...)}
-	if len(table.types) > 0 {
-		tableDefinition.ColumnTypes = append([]string(nil), table.types...)
+	tableDefinition, err := builtCatalogTable(name, table)
+	if err != nil {
+		return err
 	}
 	namespaceDefinition.Tables[key] = tableDefinition
 	definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
+	return nil
+}
+
+func builtCatalogTable(name string, table tableDefinition) (catalog.Table, error) {
+	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...), ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.attributes...), Constraints: cloneCatalogConstraints(table.constraints)}
+	if len(table.types) > 0 {
+		tableDefinition.ColumnTypes = append([]string(nil), table.types...)
+	}
+	if err := applyPrimaryColumnRules(&tableDefinition); err != nil {
+		return catalog.Table{}, err
+	}
+	if err := canonicalizeTableDefaults(&tableDefinition); err != nil {
+		return catalog.Table{}, err
+	}
+	return tableDefinition, nil
+}
+
+func applyPrimaryColumnRules(table *catalog.Table) error {
+	indexes, err := tableColumnIndexes(*table)
+	if err != nil {
+		return err
+	}
+	for _, constraint := range table.Constraints {
+		if constraint.Type != "primary" {
+			continue
+		}
+		for _, column := range constraint.Columns {
+			index, found := indexes[catalog.Key(column)]
+			if found {
+				table.ColumnAttributes[index].Nullable = false
+			}
+		}
+	}
+	return nil
+}
+
+func canonicalizeTableDefaults(table *catalog.Table) error {
+	for index, attribute := range table.ColumnAttributes {
+		if !attribute.HasDefault {
+			continue
+		}
+		canonical, err := canonicalColumnValue(*table, index, attribute.Default, 1)
+		if err != nil {
+			return err
+		}
+		table.ColumnAttributes[index].Default = canonical
+	}
 	return nil
 }
 
@@ -1013,6 +1060,8 @@ type tableDefinition struct {
 	target      []string
 	columns     []string
 	types       []string
+	attributes  []catalog.ColumnAttribute
+	constraints []catalog.Constraint
 	ifNotExists bool
 }
 
@@ -1026,20 +1075,35 @@ func parseCreateTable(query string) (tableDefinition, error) {
 		ifNotExists = true
 		head = strings.TrimSpace(head[len("IF NOT EXISTS "):])
 	}
+	target, err := createTableTarget(head)
+	if err != nil {
+		return tableDefinition{}, err
+	}
+	columns, types, attributes, constraints, err := parseTableColumns(body)
+	if err != nil {
+		return tableDefinition{}, err
+	}
+	if err := validateTableColumns(columns); err != nil {
+		return tableDefinition{}, err
+	}
+	constraints, err = namedTableConstraints(target[len(target)-1], constraints)
+	if err != nil {
+		return tableDefinition{}, err
+	}
+	return tableDefinition{target: target, columns: columns, types: types, attributes: attributes, constraints: constraints, ifNotExists: ifNotExists}, nil
+}
+
+func createTableTarget(head string) ([]string, error) {
 	target, ok := splitQualifiedIdentifier(head)
 	if !ok || len(target) == 0 || len(target) > 2 {
-		return tableDefinition{}, sqlFailure{1064, "42000", "invalid table name"}
+		return nil, sqlFailure{1064, "42000", "invalid table name"}
 	}
 	for _, part := range target {
 		if err := validateIdentifierLength(part); err != nil {
-			return tableDefinition{}, err
+			return nil, err
 		}
 	}
-	columns, types, err := parseTableColumns(body)
-	if err == nil {
-		err = validateTableColumns(columns)
-	}
-	return tableDefinition{target: target, columns: columns, types: types, ifNotExists: ifNotExists}, err
+	return target, nil
 }
 
 func validateTableColumns(columns []string) error {
@@ -1070,40 +1134,56 @@ func createTableParts(query string) (string, string, error) {
 	return head, query[open+1 : close], nil
 }
 
-func parseTableColumns(body string) ([]string, []string, error) {
+func parseTableColumns(body string) ([]string, []string, []catalog.ColumnAttribute, []catalog.Constraint, error) {
 	parts := splitCSV(body)
 	columns := make([]string, 0, len(parts))
 	types := make([]string, 0, len(parts))
+	attributes := make([]catalog.ColumnAttribute, 0, len(parts))
+	constraints := make([]catalog.Constraint, 0, len(parts))
 	for _, part := range parts {
-		column, typeName, err := parseTableColumn(part)
-		if err != nil {
-			return nil, nil, err
+		if isTableConstraintDefinition(part) {
+			constraint, err := parseTableConstraint(part)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			constraints = append(constraints, constraint)
+			continue
 		}
-		columns, types = append(columns, column), append(types, typeName)
+		column, typeName, attribute, columnConstraints, err := parseTableColumn(part)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		columns, types, attributes = append(columns, column), append(types, typeName), append(attributes, attribute)
+		constraints = append(constraints, columnConstraints...)
 	}
-	return columns, types, nil
+	return columns, types, attributes, constraints, nil
 }
 
-func parseTableColumn(part string) (string, string, error) {
+func parseTableColumn(part string) (string, string, catalog.ColumnAttribute, []catalog.Constraint, error) {
 	column, remainder, valid := consumeIdentifier(part)
 	if !valid {
-		return "", "", sqlFailure{1064, "42000", "invalid column definition"}
+		return "", "", catalog.ColumnAttribute{}, nil, sqlFailure{1064, "42000", "invalid column definition"}
 	}
 	if err := validateIdentifierLength(column); err != nil {
-		return "", "", err
+		return "", "", catalog.ColumnAttribute{}, nil, err
 	}
-	fields := strings.Fields(remainder)
-	if isUnsupportedTableDefinition(column) || hasUnsupportedColumnModifier(fields) {
-		return "", "", sqlFailure{1235, "42000", "unsupported table definition"}
-	}
+	typePart, modifiers := splitColumnTypeAndModifiers(remainder)
+	fields := strings.Fields(typePart)
 	if len(fields) == 0 {
-		return column, "", nil
+		if strings.TrimSpace(modifiers) != "" {
+			return "", "", catalog.ColumnAttribute{}, nil, sqlFailure{1064, "42000", "column type is required"}
+		}
+		return column, "", catalog.ColumnAttribute{Nullable: true}, nil, nil
 	}
 	typeName, err := columnTypeName(fields)
 	if err != nil {
-		return "", "", err
+		return "", "", catalog.ColumnAttribute{}, nil, err
 	}
-	return column, typeName, nil
+	attribute, constraints, err := parseColumnModifiers(column, modifiers)
+	if err != nil {
+		return "", "", catalog.ColumnAttribute{}, nil, err
+	}
+	return column, typeName, attribute, constraints, nil
 }
 
 // columnTypeName folds a trailing UNSIGNED modifier into the declared type and
@@ -1229,9 +1309,59 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 			return "", fmt.Errorf("canonical DDL unavailable: type for column %q is unknown", column)
 		}
 		definition.WriteString(columnType)
+		attribute := catalog.ColumnAttributeAt(table, index)
+		if !attribute.Nullable {
+			definition.WriteString(" NOT NULL")
+		}
+		if attribute.HasDefault {
+			definition.WriteString(" DEFAULT ")
+			definition.WriteString(canonicalDefaultValue(columnType, attribute.Default))
+		}
+	}
+	for _, constraint := range table.Constraints {
+		definition.WriteString(",\n  ")
+		definition.WriteString(canonicalConstraintDefinition(constraint))
 	}
 	definition.WriteString("\n)")
 	return definition.String(), nil
+}
+
+func canonicalDefaultValue(typeName, value string) string {
+	if value == storedSQLNullValue {
+		return "NULL"
+	}
+	if character, err := parseCharacterType(typeName); err == nil && character.kind == characterText {
+		return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	}
+	return value
+}
+
+func canonicalConstraintDefinition(constraint catalog.Constraint) string {
+	columns := canonicalConstraintColumns(constraint.Columns)
+	switch constraint.Type {
+	case "primary":
+		return "PRIMARY KEY " + columns
+	case "unique":
+		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " UNIQUE " + columns
+	case "foreign_key":
+		target := quoteIdentifier(constraint.ReferencedTable)
+		if constraint.ReferencedNamespace != "" {
+			target = quoteIdentifier(constraint.ReferencedNamespace) + "." + target
+		}
+		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " FOREIGN KEY " + columns + " REFERENCES " + target + " " + canonicalConstraintColumns(constraint.ReferencedColumns)
+	case "check":
+		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " CHECK (" + constraint.Check + ")"
+	default:
+		return "CONSTRAINT " + quoteIdentifier(constraint.Name)
+	}
+}
+
+func canonicalConstraintColumns(columns []string) string {
+	quoted := make([]string, len(columns))
+	for index, column := range columns {
+		quoted[index] = quoteIdentifier(column)
+	}
+	return "(" + strings.Join(quoted, ", ") + ")"
 }
 
 func quoteIdentifier(value string) string {
@@ -1355,7 +1485,7 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		if len(group) != len(plan.columns) {
 			return nil, 0, sqlFailure{1136, "21S01", "column count does not match value count"}
 		}
-		row := make([]string, len(plan.table.Columns))
+		row := defaultTableRow(plan.table)
 		for valueIndex, value := range group {
 			columnIndex := plan.columns[valueIndex]
 			canonical, err := canonicalColumnValueAtOffset(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
@@ -1368,6 +1498,19 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		rowNumber++
 	}
 	return rows, uint64(len(plan.groups)), nil
+}
+
+func defaultTableRow(table catalog.Table) []string {
+	row := make([]string, len(table.Columns))
+	for index := range row {
+		attribute := catalog.ColumnAttributeAt(table, index)
+		if attribute.HasDefault {
+			row[index] = attribute.Default
+		} else {
+			row[index] = storedSQLNullValue
+		}
+	}
+	return row
 }
 
 // canonicalColumnValue enforces the strict value contract for a written column.
@@ -2217,6 +2360,9 @@ func tableMetadata(namespace, tableName string, table catalog.Table, selected []
 			if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(typeName)), " UNSIGNED") {
 				definition.flags |= mysqlUnsignedFlag
 			}
+		}
+		if !catalog.ColumnAttributeAt(table, columnIndex).Nullable {
+			definition.flags |= mysqlNotNullFlag
 		}
 		metadata[resultIndex] = definition
 	}

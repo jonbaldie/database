@@ -19,10 +19,32 @@ type Namespace struct {
 	Tables map[string]Table `json:"tables"`
 }
 type Table struct {
-	Name        string     `json:"name,omitempty"`
-	Columns     []string   `json:"columns"`
-	ColumnTypes []string   `json:"column_types,omitempty"`
-	Rows        [][]string `json:"rows,omitempty"`
+	Name             string            `json:"name,omitempty"`
+	Columns          []string          `json:"columns"`
+	ColumnTypes      []string          `json:"column_types,omitempty"`
+	ColumnAttributes []ColumnAttribute `json:"column_attributes,omitempty"`
+	Constraints      []Constraint      `json:"constraints,omitempty"`
+	Rows             [][]string        `json:"rows,omitempty"`
+}
+
+// ColumnAttribute records rules that belong to one column. An absent attribute
+// list is compatible with catalogs written before column rules were supported.
+type ColumnAttribute struct {
+	Nullable   bool   `json:"nullable"`
+	HasDefault bool   `json:"has_default,omitempty"`
+	Default    string `json:"default,omitempty"`
+}
+
+// Constraint records a durable table constraint. Values are SQL identifiers or
+// canonical SQL values; enforcement belongs to the SQL server layer.
+type Constraint struct {
+	Name                string   `json:"name"`
+	Type                string   `json:"type"`
+	Columns             []string `json:"columns,omitempty"`
+	Check               string   `json:"check,omitempty"`
+	ReferencedNamespace string   `json:"referenced_namespace,omitempty"`
+	ReferencedTable     string   `json:"referenced_table,omitempty"`
+	ReferencedColumns   []string `json:"referenced_columns,omitempty"`
 }
 
 // ErrRevisionConflict reports that a concurrent catalog commit superseded the
@@ -36,6 +58,15 @@ func (t Table) ColumnType(index int) (string, bool) {
 		return "", false
 	}
 	return t.ColumnTypes[index], true
+}
+
+// ColumnAttributeAt reports the recorded column rule. Older tables have
+// nullable columns and no default value.
+func ColumnAttributeAt(t Table, index int) ColumnAttribute {
+	if index < 0 || index >= len(t.ColumnAttributes) {
+		return ColumnAttribute{Nullable: true}
+	}
+	return t.ColumnAttributes[index]
 }
 
 type Store struct {
@@ -99,17 +130,31 @@ func validateDefinition(definition Definition) error {
 			return fmt.Errorf("namespace %q has no table registry", namespaceName)
 		}
 		for tableName, table := range namespace.Tables {
-			if table.Columns == nil {
-				return fmt.Errorf("table %q has no columns", tableName)
+			if err := validateTableDefinition(tableName, table); err != nil {
+				return err
 			}
-			if len(table.ColumnTypes) != 0 && len(table.ColumnTypes) != len(table.Columns) {
-				return fmt.Errorf("table %q has an invalid column type count", tableName)
-			}
-			for rowIndex, row := range table.Rows {
-				if len(row) != len(table.Columns) {
-					return fmt.Errorf("table %q row %d has an invalid column count", tableName, rowIndex)
-				}
-			}
+		}
+	}
+	return nil
+}
+
+func validateTableDefinition(tableName string, table Table) error {
+	if table.Columns == nil {
+		return fmt.Errorf("table %q has no columns", tableName)
+	}
+	if len(table.ColumnTypes) != 0 && len(table.ColumnTypes) != len(table.Columns) {
+		return fmt.Errorf("table %q has an invalid column type count", tableName)
+	}
+	if len(table.ColumnAttributes) != 0 && len(table.ColumnAttributes) != len(table.Columns) {
+		return fmt.Errorf("table %q has an invalid column attribute count", tableName)
+	}
+	return validateTableRows(tableName, table)
+}
+
+func validateTableRows(tableName string, table Table) error {
+	for rowIndex, row := range table.Rows {
+		if len(row) != len(table.Columns) {
+			return fmt.Errorf("table %q row %d has an invalid column count", tableName, rowIndex)
 		}
 	}
 	return nil
@@ -255,13 +300,25 @@ func cloneDefinition(source Definition) Definition {
 		cloned := Namespace{Name: value.Name, Tables: make(map[string]Table, len(value.Tables))}
 		for table, definition := range value.Tables {
 			cloned.Tables[table] = Table{
-				Name:        definition.Name,
-				Columns:     append([]string(nil), definition.Columns...),
-				ColumnTypes: append([]string(nil), definition.ColumnTypes...),
-				Rows:        cloneRows(definition.Rows),
+				Name:             definition.Name,
+				Columns:          append([]string(nil), definition.Columns...),
+				ColumnTypes:      append([]string(nil), definition.ColumnTypes...),
+				ColumnAttributes: append([]ColumnAttribute(nil), definition.ColumnAttributes...),
+				Constraints:      cloneConstraints(definition.Constraints),
+				Rows:             cloneRows(definition.Rows),
 			}
 		}
 		copy.Namespaces[namespace] = cloned
+	}
+	return copy
+}
+
+func cloneConstraints(constraints []Constraint) []Constraint {
+	copy := make([]Constraint, len(constraints))
+	for index, constraint := range constraints {
+		copy[index] = constraint
+		copy[index].Columns = append([]string(nil), constraint.Columns...)
+		copy[index].ReferencedColumns = append([]string(nil), constraint.ReferencedColumns...)
 	}
 	return copy
 }

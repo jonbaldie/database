@@ -63,6 +63,20 @@ In particular, multiple `NULL`-containing keys may exist under `UNIQUE`, and a
 order is unspecified, including with `LIMIT`; reproducible plan choice does not
 promise row-order stability.
 
+### Constraints
+
+`CREATE TABLE` supports `NOT NULL`, literal `DEFAULT`, `PRIMARY KEY`, `UNIQUE`,
+`FOREIGN KEY ... REFERENCES`, and `CHECK` constraints. Constraints can be named
+with `CONSTRAINT name`. `ALTER TABLE ... ADD CONSTRAINT` supports the same table
+constraints. A new constraint checks all existing rows before the schema
+changes. If a check fails, the previous schema definition remains in use.
+
+Each insert, update, delete, and schema change checks the complete affected
+constraint surface before it becomes durable. Foreign keys require a primary or
+unique referenced key. No foreign-key action clause is supported. A write that
+would remove or change a referenced value fails. `SHOW CREATE TABLE` shows the
+saved column rules and constraints.
+
 ## Composed relational queries
 
 The v0.1 relational surface supports scalar subqueries in projections,

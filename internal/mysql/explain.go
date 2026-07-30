@@ -140,7 +140,7 @@ func (s *textStatementExecutor) explainInsert(relations *relationExecutor, inner
 	if err != nil {
 		return nil, err
 	}
-	write := queryexplanation.Write{Kind: "insert", Table: relationInfo(plan.namespace, plan.name, plan.table), ValueRows: len(plan.groups)}
+	write := queryexplanation.Write{Kind: "insert", Table: relationInfo(plan.namespace, plan.name, plan.table), ValueRows: len(plan.groups), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table)}
 	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
 }
 
@@ -153,7 +153,7 @@ func (s *textStatementExecutor) explainUpdate(relations *relationExecutor, inner
 	if err != nil {
 		return nil, err
 	}
-	write := queryexplanation.Write{Kind: "update", Table: relationInfo(plan.namespace, plan.name, plan.table), Where: strings.TrimSpace(where)}
+	write := queryexplanation.Write{Kind: "update", Table: relationInfo(plan.namespace, plan.name, plan.table), Where: strings.TrimSpace(where), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table)}
 	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
 }
 
@@ -166,8 +166,52 @@ func (s *textStatementExecutor) explainDelete(relations *relationExecutor, inner
 	if err != nil {
 		return nil, err
 	}
-	write := queryexplanation.Write{Kind: "delete", Table: relationInfo(plan.namespace, plan.name, plan.table), Where: strings.TrimSpace(where)}
+	write := queryexplanation.Write{Kind: "delete", Table: relationInfo(plan.namespace, plan.name, plan.table), Where: strings.TrimSpace(where), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table)}
 	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
+}
+
+func explanationConstraints(definition catalog.Definition, namespaceName, tableName string, table catalog.Table) []queryexplanation.Constraint {
+	constraints := make([]queryexplanation.Constraint, 0, len(table.Constraints)+len(table.Columns))
+	for index, column := range table.Columns {
+		if !catalog.ColumnAttributeAt(table, index).Nullable {
+			constraints = append(constraints, queryexplanation.Constraint{Type: "not_null", Name: table.Name + "_" + column + "_not_null"})
+		}
+	}
+	for _, constraint := range table.Constraints {
+		kind := constraint.Type
+		if kind == "primary" {
+			kind = "unique"
+		}
+		constraints = append(constraints, queryexplanation.Constraint{Type: kind, Name: constraint.Name})
+	}
+	return append(constraints, inboundForeignKeyConstraints(definition, namespaceName, tableName)...)
+}
+
+func inboundForeignKeyConstraints(definition catalog.Definition, namespaceName, tableName string) []queryexplanation.Constraint {
+	constraints := []queryexplanation.Constraint{}
+	for ownerKey, namespace := range definition.Namespaces {
+		ownerName := namespace.Name
+		if ownerName == "" {
+			ownerName = ownerKey
+		}
+		for _, table := range namespace.Tables {
+			for _, constraint := range table.Constraints {
+				if constraint.Type != "foreign_key" || !foreignKeyTargets(constraint, ownerName, namespaceName, tableName) {
+					continue
+				}
+				constraints = append(constraints, queryexplanation.Constraint{Type: "foreign_key", Name: constraint.Name})
+			}
+		}
+	}
+	return constraints
+}
+
+func foreignKeyTargets(constraint catalog.Constraint, ownerNamespace, namespaceName, tableName string) bool {
+	targetNamespace := constraint.ReferencedNamespace
+	if targetNamespace == "" {
+		targetNamespace = ownerNamespace
+	}
+	return catalog.Key(targetNamespace) == catalog.Key(namespaceName) && catalog.Key(constraint.ReferencedTable) == catalog.Key(tableName)
 }
 
 func explainTable(relations *relationExecutor, parts []string) (string, string, catalog.Table, error) {

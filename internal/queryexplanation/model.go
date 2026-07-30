@@ -168,12 +168,23 @@ type materializeOperation struct {
 	Reason string `json:"reason"`
 }
 
+type constraintCheckOperation struct {
+	ConstraintType string `json:"constraint_type"`
+	ConstraintName string `json:"constraint_name"`
+}
+
 // Table is the neutral relation description a planner needs.
 type Table struct {
 	Database string
 	Name     string
 	Columns  []string
 	RowCount int
+}
+
+// Constraint is a public constraint check in a write plan.
+type Constraint struct {
+	Type string
+	Name string
 }
 
 func emptyOutput() Output {

@@ -478,21 +478,35 @@ func (s *session) mutateCatalog(action func(*catalog.Definition) error) error {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
 	if s.transaction {
-		if err := s.ensureWorkingDefinition(); err != nil {
-			return err
-		}
-		staged, err := catalog.Apply(s.transactionSnapshot, action)
-		if err != nil {
-			return err
-		}
-		s.transactionSnapshot = staged
-		s.transactionDirty = true
-		s.transactionMutations = append(s.transactionMutations, action)
-		return nil
+		return s.mutateTransactionCatalog(action)
 	}
+	return s.mutateDurableCatalog(action)
+}
+
+func (s *session) mutateTransactionCatalog(action func(*catalog.Definition) error) error {
+	if err := s.ensureWorkingDefinition(); err != nil {
+		return err
+	}
+	staged, err := catalog.Apply(s.transactionSnapshot, action)
+	if err != nil {
+		return err
+	}
+	if err := validateConstraintDefinition(staged); err != nil {
+		return err
+	}
+	s.transactionSnapshot = staged
+	s.transactionDirty = true
+	s.transactionMutations = append(s.transactionMutations, action)
+	return nil
+}
+
+func (s *session) mutateDurableCatalog(action func(*catalog.Definition) error) error {
 	definition, revision := s.server.config.Catalog.SnapshotWithRevision()
 	staged, err := catalog.Apply(definition, action)
 	if err != nil {
+		return err
+	}
+	if err := validateConstraintDefinition(staged); err != nil {
 		return err
 	}
 	if err := s.server.config.Catalog.ReplaceIfRevision(revision, staged); err != nil {
