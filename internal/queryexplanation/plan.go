@@ -168,7 +168,17 @@ func selectGrouping(read Select, root *Operator) *Operator {
 		root = havingFilter(read.Having, root)
 	}
 	if read.Window.FunctionCount > 0 {
+		root = windowSortOperators(read.Window.Definitions, root)
 		root = windowOperator(read, root)
+	}
+	return root
+}
+
+func windowSortOperators(windows []Window, root *Operator) *Operator {
+	for _, window := range windows {
+		if len(window.Orders) > 0 {
+			root = windowSortOperator(window.Orders, root)
+		}
 	}
 	return root
 }
@@ -304,6 +314,14 @@ func sortOperator(orders []Order, child *Operator) *Operator {
 		Estimates: Estimates{Rows: child.Estimates.Rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: child.Estimates.RowWidthBytes * int(child.Estimates.Rows)},
 		Output:    output, Warnings: []Warning{}, Children: []*Operator{child},
 	}
+}
+
+func windowSortOperator(orders []Order, child *Operator) *Operator {
+	operator := sortOperator(orders, child)
+	operator.Summary = "Order rows inside each window partition."
+	operator.Operation = sortOperation{Purpose: "window"}
+	operator.Output = child.Output
+	return operator
 }
 
 func limitOperator(limit Limit, child *Operator) *Operator {

@@ -70,19 +70,29 @@ type relationColumn struct {
 }
 
 type relationalProjection struct {
-	expression string
-	name       string
-	alias      string
-	column     int
-	scalar     bool
-	computed   bool
-	subquery   string
-	context    *composedQueryContext
-	value      exprValue
-	metadata   columnMetadata
-	outer      *outerRelationScope
-	aggregate  *relationalAggregate
-	window     *relationalWindowFunction
+	expression  string
+	name        string
+	alias       string
+	column      int
+	scalar      bool
+	computed    bool
+	subquery    string
+	context     *composedQueryContext
+	value       exprValue
+	metadata    columnMetadata
+	outer       *outerRelationScope
+	aggregate   *relationalAggregate
+	window      *relationalWindowFunction
+	windowExpr  string
+	windowParts []relationalComposedWindow
+}
+
+// relationalComposedWindow is one window result that a scalar projection uses.
+// The placeholder is a private identifier in the scalar expression.
+type relationalComposedWindow struct {
+	function    relationalWindowFunction
+	placeholder string
+	metadata    columnMetadata
 }
 
 type relationalOrder struct {
@@ -567,7 +577,7 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 func groupExpressions(groups []relationalGroup) []string {
 	expressions := make([]string, len(groups))
 	for index, group := range groups {
-		expressions[index] = group.expression
+		expressions[index] = group.source
 	}
 	return expressions
 }
@@ -585,9 +595,7 @@ func aggregateProjectionCount(projections []relationalProjection) int {
 func windowProjectionCount(projections []relationalProjection) int {
 	count := 0
 	for _, projection := range projections {
-		if projection.window != nil {
-			count++
-		}
+		count += len(projectionWindowFunctions(projection))
 	}
 	return count
 }

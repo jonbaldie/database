@@ -91,8 +91,20 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 		"CREATE TABLE measurements (category VARCHAR(16), value INT)",
 		"CREATE TABLE labels (value VARCHAR(8))",
 		"CREATE TABLE required_values (value INT)",
+		"CREATE TABLE approximate_values (value DOUBLE)",
+		"CREATE TABLE large_values (value BIGINT)",
+		"CREATE TABLE overflow_order (value BIGINT)",
+		"CREATE TABLE ambiguous_groups (a INT, b INT)",
+		"CREATE TABLE pairs (a INT, b INT)",
+		"CREATE TABLE numbers (n INT)",
 		"INSERT INTO measurements VALUES ('a', 5), ('a', 20), ('a', 20), ('b', 15), ('b', NULL)",
 		"INSERT INTO labels VALUES ('a'), ('A')",
+		"INSERT INTO approximate_values VALUES (1.5), (2.5)",
+		"INSERT INTO large_values VALUES (9223372036854775807), (1)",
+		"INSERT INTO overflow_order VALUES (9223372036854775807), (1)",
+		"INSERT INTO ambiguous_groups VALUES (1, 7), (1, 8), (2, 7)",
+		"INSERT INTO pairs VALUES (1, 1), (1, 1), (1, 2), (NULL, 1)",
+		"INSERT INTO numbers VALUES (1), (2), (3)",
 	} {
 		if result := client.query(query); result.err != "" {
 			t.Fatalf("%s: %#v", query, result)
@@ -103,6 +115,18 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	wantGrouped := [][]string{{"a", "3", "3", "2", "45", "15.0000", "5", "20"}, {"b", "2", "1", "1", "15", "15.0000", "15", "15"}}
 	if grouped.err != "" || !reflect.DeepEqual(grouped.rows, wantGrouped) {
 		t.Fatalf("grouped aggregates: %#v", grouped)
+	}
+	groupedAlias := client.query("SELECT category AS c, SUM(value) AS total FROM measurements GROUP BY c ORDER BY c")
+	if groupedAlias.err != "" || !reflect.DeepEqual(groupedAlias.rows, [][]string{{"a", "45"}, {"b", "15"}}) {
+		t.Fatalf("GROUP BY projection alias: %#v", groupedAlias)
+	}
+	groupedOrdinal := client.query("SELECT category, SUM(value) AS total FROM measurements GROUP BY 1 ORDER BY 1")
+	if groupedOrdinal.err != "" || !reflect.DeepEqual(groupedOrdinal.rows, [][]string{{"a", "45"}, {"b", "15"}}) {
+		t.Fatalf("GROUP BY projection ordinal: %#v", groupedOrdinal)
+	}
+	ambiguousGroup := client.query("SELECT COUNT(*) AS a FROM ambiguous_groups GROUP BY a ORDER BY 1")
+	if ambiguousGroup.err != "" || !reflect.DeepEqual(ambiguousGroup.rows, [][]string{{"1"}, {"2"}}) {
+		t.Fatalf("GROUP BY source column before alias: %#v", ambiguousGroup)
 	}
 	if invalidDistinct := client.query("SELECT COUNT(DISTINCT *) FROM measurements"); !strings.HasPrefix(invalidDistinct.err, "42000") {
 		t.Fatalf("COUNT(DISTINCT *): %#v", invalidDistinct)
@@ -117,9 +141,25 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	if labels.err != "" || !reflect.DeepEqual(labels.rows, [][]string{{"a", "2", "1"}}) {
 		t.Fatalf("aggregate collation: %#v", labels)
 	}
+	pairCount := client.query("SELECT COUNT(DISTINCT a, b) FROM pairs")
+	if pairCount.err != "" || !reflect.DeepEqual(pairCount.rows, [][]string{{"2"}}) {
+		t.Fatalf("multi-column COUNT DISTINCT: %#v", pairCount)
+	}
 	emptyAverage := client.query("SELECT AVG(value) FROM required_values")
 	if emptyAverage.err != "" || !reflect.DeepEqual(emptyAverage.rows, [][]string{{""}}) || len(emptyAverage.metadata) != 1 || emptyAverage.metadata[0].flags&0x0001 != 0 {
 		t.Fatalf("empty AVG metadata: %#v", emptyAverage)
+	}
+	aggregateMetadata := client.query("SELECT COUNT(*), SUM(value), AVG(value) FROM measurements")
+	if aggregateMetadata.err != "" || len(aggregateMetadata.metadata) != 3 || aggregateMetadata.metadata[0].typ != 0x08 || aggregateMetadata.metadata[0].length != 21 || aggregateMetadata.metadata[0].flags&0x0020 == 0 || aggregateMetadata.metadata[1].typ != 0xf6 || aggregateMetadata.metadata[1].length != 30 || aggregateMetadata.metadata[1].decimals != 0 || aggregateMetadata.metadata[1].flags&0x0001 != 0 || aggregateMetadata.metadata[2].typ != 0xf6 || aggregateMetadata.metadata[2].length != 16 || aggregateMetadata.metadata[2].decimals != 4 || aggregateMetadata.metadata[2].flags&0x0001 != 0 {
+		t.Fatalf("aggregate result metadata: %#v", aggregateMetadata)
+	}
+	approximateMetadata := client.query("SELECT SUM(value), AVG(value) FROM approximate_values")
+	if approximateMetadata.err != "" || len(approximateMetadata.metadata) != 2 || approximateMetadata.metadata[0].typ != 0x05 || approximateMetadata.metadata[0].decimals != 31 || approximateMetadata.metadata[1].typ != 0x05 || approximateMetadata.metadata[1].decimals != 31 {
+		t.Fatalf("approximate aggregate metadata: %#v", approximateMetadata)
+	}
+	largeSum := client.query("SELECT SUM(value) FROM large_values")
+	if largeSum.err != "" || !reflect.DeepEqual(largeSum.rows, [][]string{{"9223372036854775808"}}) || len(largeSum.metadata) != 1 || largeSum.metadata[0].typ != 0xf6 {
+		t.Fatalf("large exact SUM: %#v", largeSum)
 	}
 	preparedText := client.query("SELECT category, COUNT(*) AS rows, SUM(value) AS total FROM measurements GROUP BY category ORDER BY category")
 	prepared := client.prepare("SELECT category, COUNT(*) AS rows, SUM(value) AS total FROM measurements GROUP BY category ORDER BY category")
@@ -139,11 +179,44 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	if groupedWindowAggregate.err != "" || !reflect.DeepEqual(groupedWindowAggregate.rows, [][]string{{"a", "45", "60"}, {"b", "15", "60"}}) {
 		t.Fatalf("grouped aggregate window: %#v", groupedWindowAggregate)
 	}
+	lowercaseGroupedWindowAggregate := client.query("SELECT category, SUM(value) AS total, SUM(sum(value)) OVER () AS all_total FROM measurements GROUP BY category ORDER BY category")
+	if lowercaseGroupedWindowAggregate.err != "" || !reflect.DeepEqual(lowercaseGroupedWindowAggregate.rows, [][]string{{"a", "45", "60"}, {"b", "15", "60"}}) {
+		t.Fatalf("lowercase grouped aggregate window: %#v", lowercaseGroupedWindowAggregate)
+	}
+	composedWindow := client.query("SELECT n + LAG(n, 1, 0) OVER (ORDER BY n) AS total FROM numbers ORDER BY n")
+	if composedWindow.err != "" || !reflect.DeepEqual(composedWindow.rows, [][]string{{"1"}, {"3"}, {"5"}}) {
+		t.Fatalf("composed window expression: %#v", composedWindow)
+	}
+	multipleComposedWindows := client.query("SELECT LAG(n, 1, 0) OVER ordered + LEAD(n, 1, 0) OVER ordered AS total FROM numbers WINDOW ordered AS (ORDER BY n) ORDER BY n")
+	if multipleComposedWindows.err != "" || !reflect.DeepEqual(multipleComposedWindows.rows, [][]string{{"2"}, {"4"}, {"2"}}) {
+		t.Fatalf("multiple composed window expressions: %#v", multipleComposedWindows)
+	}
+	composedAggregateWindow := client.query("SELECT n + SUM(n) OVER ordered AS total FROM numbers WINDOW ordered AS (ORDER BY n) ORDER BY n")
+	if composedAggregateWindow.err != "" || !reflect.DeepEqual(composedAggregateWindow.rows, [][]string{{"2"}, {"5"}, {"9"}}) {
+		t.Fatalf("composed aggregate window expression: %#v", composedAggregateWindow)
+	}
 
 	windowed := client.query("SELECT category, value, ROW_NUMBER() OVER ranked AS sequence, RANK() OVER ranked AS rank_value, DENSE_RANK() OVER ranked AS dense_rank_value, LAG(value, 1, 0) OVER ranked AS previous, LEAD(value, 1, 0) OVER ranked AS following, SUM(value) OVER ranked AS running_total FROM measurements WINDOW RANKED AS (PARTITION BY category ORDER BY value DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) ORDER BY category, sequence")
 	wantWindowed := [][]string{{"a", "20", "1", "1", "1", "0", "20", "45"}, {"a", "20", "2", "1", "1", "20", "5", "45"}, {"a", "5", "3", "3", "2", "20", "0", "45"}, {"b", "15", "1", "1", "1", "0", "", "15"}, {"b", "", "2", "2", "2", "15", "0", "15"}}
 	if windowed.err != "" || !reflect.DeepEqual(windowed.rows, wantWindowed) {
 		t.Fatalf("window functions: %#v", windowed)
+	}
+	for _, index := range []int{2, 3, 4} {
+		if len(windowed.metadata) <= index || windowed.metadata[index].typ != 0x08 || windowed.metadata[index].length != 21 || windowed.metadata[index].flags&0x0020 == 0 {
+			t.Fatalf("window integer metadata: %#v", windowed)
+		}
+	}
+	textDefault := client.query("SELECT LAG(value, 1, 'missing') OVER (ORDER BY value) FROM measurements ORDER BY value")
+	if textDefault.err != "" || !reflect.DeepEqual(textDefault.rows, [][]string{{"missing"}, {""}, {"5"}, {"15"}, {"20"}}) || len(textDefault.metadata) != 1 || textDefault.metadata[0].typ != 0xfd {
+		t.Fatalf("window text default: %#v", textDefault)
+	}
+	decimalDefault := client.query("SELECT LAG(value, 1, 0.5) OVER (ORDER BY value) FROM measurements")
+	if decimalDefault.err != "" || len(decimalDefault.metadata) != 1 || decimalDefault.metadata[0].typ != 0xf6 {
+		t.Fatalf("window decimal default: %#v", decimalDefault)
+	}
+	doubleDefault := client.query("SELECT LAG(value, 1, 0e0) OVER (ORDER BY value) FROM measurements")
+	if doubleDefault.err != "" || len(doubleDefault.metadata) != 1 || doubleDefault.metadata[0].typ != 0x05 || doubleDefault.metadata[0].decimals != 31 {
+		t.Fatalf("window double default: %#v", doubleDefault)
 	}
 
 	framed := client.query("SELECT value, SUM(value) OVER (ORDER BY value ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS rows_frame, SUM(value) OVER (ORDER BY value RANGE BETWEEN CURRENT ROW AND CURRENT ROW) AS range_frame FROM measurements ORDER BY value")
@@ -155,6 +228,10 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	if ranged.err != "" || !reflect.DeepEqual(ranged.rows, [][]string{{"5", "5"}, {"15", "20"}, {"20", "55"}, {"20", "55"}}) {
 		t.Fatalf("numeric RANGE frame: %#v", ranged)
 	}
+	rangedNull := client.query("SELECT value, SUM(value) OVER (ORDER BY value RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM measurements ORDER BY value")
+	if rangedNull.err != "" || !reflect.DeepEqual(rangedNull.rows, [][]string{{"", ""}, {"5", "5"}, {"15", "20"}, {"20", "55"}, {"20", "55"}}) {
+		t.Fatalf("numeric RANGE frame with NULL order value: %#v", rangedNull)
+	}
 	descendingRange := client.query("SELECT value, SUM(value) OVER (ORDER BY value DESC RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM measurements WHERE value IS NOT NULL ORDER BY value DESC")
 	if descendingRange.err != "" || !reflect.DeepEqual(descendingRange.rows, [][]string{{"20", "40"}, {"20", "40"}, {"15", "55"}, {"5", "20"}}) {
 		t.Fatalf("descending numeric RANGE frame: %#v", descendingRange)
@@ -163,10 +240,65 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	if partitioned.err != "" || !reflect.DeepEqual(partitioned.rows, [][]string{{"a", "1"}, {"A", "2"}}) {
 		t.Fatalf("window partition collation: %#v", partitioned)
 	}
+	largeOffset := client.query("SELECT LAG(value, 9223372036854775808, 0) OVER (ORDER BY value) FROM measurements ORDER BY value")
+	if largeOffset.err != "" || !reflect.DeepEqual(largeOffset.rows, [][]string{{"0"}, {"0"}, {"0"}, {"0"}, {"0"}}) {
+		t.Fatalf("large window offset: %#v", largeOffset)
+	}
+	for _, invalid := range []struct {
+		query string
+		code  uint16
+		state string
+	}{
+		{"SELECT SUM(value) OVER (ORDER BY value ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) FROM measurements", 1064, "42000"},
+		{"SELECT SUM(value) OVER (RANGE 1 PRECEDING) FROM measurements", 3587, "HY000"},
+		{"SELECT SUM(DISTINCT value) OVER () FROM measurements", 1235, "42000"},
+		{"SELECT value + SUM(DISTINCT value) OVER () FROM measurements", 1235, "42000"},
+		{"SELECT ROW_NUMBER() OVER (ORDER BY value + 1) FROM overflow_order", 1690, "22003"},
+		{"SELECT FIRST_VALUE(value, 9) OVER () FROM measurements", 1064, "42000"},
+		{"SELECT LAST_VALUE(value, 9) OVER () FROM measurements", 1064, "42000"},
+		{"SELECT NTH_VALUE(value, 0) OVER () FROM measurements", 1210, "HY000"},
+		{"SELECT LAG(value, 1 + 1) OVER () FROM measurements", 1210, "HY000"},
+		{"SELECT LEAD(value, 1 + 1) OVER () FROM measurements", 1210, "HY000"},
+		{"SELECT NTH_VALUE(value, 1 + 1) OVER () FROM measurements", 1210, "HY000"},
+	} {
+		if result := client.query(invalid.query); result.errCode != invalid.code || result.errState != invalid.state {
+			t.Fatalf("invalid window query %q: %#v", invalid.query, result)
+		}
+	}
 
-	explained := client.query("EXPLAIN FORMAT=JSON SELECT category, SUM(value) AS total, ROW_NUMBER() OVER (PARTITION BY category ORDER BY value) AS sequence FROM measurements GROUP BY category")
-	if explained.err != "" || len(explained.rows) != 1 || !strings.Contains(explained.rows[0][0], `"kind":"aggregate"`) || !strings.Contains(explained.rows[0][0], `"kind":"window"`) || !strings.Contains(explained.rows[0][0], `"grouping_expressions":["category"]`) || !strings.Contains(explained.rows[0][0], `"window_count":1`) || !strings.Contains(explained.rows[0][0], `"partition_expressions":["category"]`) || !strings.Contains(explained.rows[0][0], `"expression":"value"`) {
+	explained := client.query("EXPLAIN FORMAT=JSON SELECT category, SUM(value) AS total, ROW_NUMBER() OVER ranked + RANK() OVER ranked AS sequence FROM measurements GROUP BY category WINDOW ranked AS (ORDER BY SUM(value))")
+	if explained.err != "" || len(explained.rows) != 1 {
 		t.Fatalf("aggregate/window explanation: %#v", explained)
+	}
+	var document struct {
+		Plan struct {
+			Kind     string `json:"kind"`
+			Children []struct {
+				Kind      string `json:"kind"`
+				Operation struct {
+					WindowCount   int `json:"window_count"`
+					FunctionCount int `json:"function_count"`
+				} `json:"operation"`
+				Children []struct {
+					Kind      string `json:"kind"`
+					Operation struct {
+						Purpose string `json:"purpose"`
+					} `json:"operation"`
+					Children []struct {
+						Kind      string `json:"kind"`
+						Operation struct {
+							GroupingExpressions []string `json:"grouping_expressions"`
+						} `json:"operation"`
+					} `json:"children"`
+				} `json:"children"`
+			} `json:"children"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal([]byte(explained.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode aggregate/window explanation: %v", err)
+	}
+	if document.Plan.Kind != "project" || len(document.Plan.Children) != 1 || document.Plan.Children[0].Kind != "window" || document.Plan.Children[0].Operation.WindowCount != 1 || document.Plan.Children[0].Operation.FunctionCount != 2 || len(document.Plan.Children[0].Children) != 1 || document.Plan.Children[0].Children[0].Kind != "sort" || document.Plan.Children[0].Children[0].Operation.Purpose != "window" || len(document.Plan.Children[0].Children[0].Children) != 1 || document.Plan.Children[0].Children[0].Children[0].Kind != "aggregate" || !reflect.DeepEqual(document.Plan.Children[0].Children[0].Children[0].Operation.GroupingExpressions, []string{"category"}) {
+		t.Fatalf("aggregate/window explanation chain: %#v", document)
 	}
 }
 

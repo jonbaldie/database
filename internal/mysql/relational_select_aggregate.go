@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -9,7 +10,10 @@ import (
 	"github.com/jonbaldie/database/internal/queryexplanation"
 )
 
-type relationalGroup struct{ expression string }
+type relationalGroup struct {
+	expression string
+	source     string
+}
 
 type relationalAggregation struct {
 	groups  []relationalGroup
@@ -51,8 +55,19 @@ type relationalWindowBound struct {
 	offset int
 }
 
+const mysqlDecimalsNotSpecified byte = 31
+
+var composedWindowScalarTypes = map[byte]string{
+	mysqlTypeTiny:   "TINYINT",
+	mysqlTypeShort:  "SMALLINT",
+	mysqlTypeInt24:  "MEDIUMINT",
+	mysqlTypeLong:   "INT",
+	mysqlTypeFloat:  "FLOAT",
+	mysqlTypeDouble: "DOUBLE",
+}
+
 func (p *relationalSelectPlan) compileAggregation(group, having, windows string) error {
-	parsedGroup, err := parseRelationalGroups(group, p.source.columns, p.outer)
+	parsedGroup, err := parseRelationalGroups(group, p.source.columns, p.projection, p.outer)
 	if err != nil {
 		return err
 	}
@@ -62,12 +77,8 @@ func (p *relationalSelectPlan) compileAggregation(group, having, windows string)
 	}
 	p.aggregation = relationalAggregation{groups: parsedGroup, having: strings.TrimSpace(having), windows: parsedWindows}
 	for index := range p.projection {
-		if p.projection[index].window != nil {
-			spec, err := resolveRelationalWindow(p.projection[index].window.spec, p.aggregation.windows)
-			if err != nil {
-				return err
-			}
-			p.projection[index].window.spec = spec
+		if err := p.resolveProjectionWindows(&p.projection[index]); err != nil {
+			return err
 		}
 	}
 	if err := p.validateAggregateProjection(); err != nil {
@@ -76,19 +87,69 @@ func (p *relationalSelectPlan) compileAggregation(group, having, windows string)
 	return p.validateGroupedExpression(p.aggregation.having)
 }
 
-func parseRelationalGroups(text string, columns []relationColumn, outer *outerRelationScope) ([]relationalGroup, error) {
+func (p *relationalSelectPlan) resolveProjectionWindows(projection *relationalProjection) error {
+	if len(projection.windowParts) > 0 {
+		for index := range projection.windowParts {
+			spec, err := resolveRelationalWindow(projection.windowParts[index].function.spec, p.aggregation.windows)
+			if err != nil {
+				return err
+			}
+			projection.windowParts[index].function.spec = spec
+		}
+		projection.window = &projection.windowParts[0].function
+		return nil
+	}
+	if projection.window == nil {
+		return nil
+	}
+	spec, err := resolveRelationalWindow(projection.window.spec, p.aggregation.windows)
+	if err != nil {
+		return err
+	}
+	projection.window.spec = spec
+	return nil
+}
+
+func parseRelationalGroups(text string, columns []relationColumn, projections []relationalProjection, outer *outerRelationScope) ([]relationalGroup, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, nil
 	}
 	groups := make([]relationalGroup, 0, len(splitCSV(text)))
-	for _, expression := range splitCSV(text) {
-		expression = strings.TrimSpace(expression)
-		if _, err := evaluateRelationExpressionContext(expression, columns, sampleRelationRow(columns), outer); err != nil {
-			return nil, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'group statement'"}
+	for _, source := range splitCSV(text) {
+		source = strings.TrimSpace(source)
+		expression, err := resolveRelationalGroupExpression(source, columns, projections)
+		if err != nil {
+			return nil, err
 		}
-		groups = append(groups, relationalGroup{expression: expression})
+		if _, err := evaluateRelationExpressionContext(expression, columns, sampleRelationRow(columns), outer); err != nil {
+			return nil, sqlFailure{1054, "42S22", "Unknown column '" + source + "' in 'group statement'"}
+		}
+		groups = append(groups, relationalGroup{expression: expression, source: source})
 	}
 	return groups, nil
+}
+
+func resolveRelationalGroupExpression(expression string, columns []relationColumn, projections []relationalProjection) (string, error) {
+	if ordinal, err := strconv.Atoi(expression); err == nil {
+		if ordinal < 1 || ordinal > len(projections) {
+			return "", sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'group statement'"}
+		}
+		return groupProjectionExpression(projections[ordinal-1])
+	}
+	if _, err := resolveRelationColumn(expression, columns); err == nil {
+		return expression, nil
+	}
+	if index, found := projectionIndex(projections, expression); found {
+		return groupProjectionExpression(projections[index])
+	}
+	return expression, nil
+}
+
+func groupProjectionExpression(projection relationalProjection) (string, error) {
+	if projection.aggregate != nil || projection.window != nil {
+		return "", sqlFailure{1055, "42000", "Cannot group on an aggregate or window expression"}
+	}
+	return projection.expression, nil
 }
 
 func parseRelationalWindows(text string, columns []relationColumn, outer *outerRelationScope) (map[string]relationalWindowSpec, error) {
@@ -160,6 +221,9 @@ func parseRelationalWindowClauses(body string, sections relationalWindowSections
 	frame, err := parseRelationalWindowFrameClause(body, sections)
 	if err != nil {
 		return relationalWindowSpec{}, err
+	}
+	if frame.mode == "range" && rangeFrameHasOffset(frame) && len(order) == 0 {
+		return relationalWindowSpec{}, sqlFailure{3587, "HY000", "RANGE frame with value offset requires one ORDER BY expression"}
 	}
 	return relationalWindowSpec{partition: partition, order: order, frame: frame}, nil
 }
@@ -277,7 +341,39 @@ func parseRelationalWindowFrame(text, mode string) (relationalWindowFrame, error
 	if start.kind == "unbounded_following" || end.kind == "unbounded_preceding" {
 		return relationalWindowFrame{}, sqlFailure{1064, "42000", "invalid window frame"}
 	}
+	if !windowFrameBoundsInOrder(start, end) {
+		return relationalWindowFrame{}, sqlFailure{1064, "42000", "invalid window frame"}
+	}
 	return relationalWindowFrame{present: true, mode: mode, start: start, end: end}, nil
+}
+
+func windowFrameBoundsInOrder(start, end relationalWindowBound) bool {
+	startClass, startOffset := windowFrameBoundOrder(start)
+	endClass, endOffset := windowFrameBoundOrder(end)
+	if startClass != endClass {
+		return startClass < endClass
+	}
+	if startClass == 1 {
+		return startOffset >= endOffset
+	}
+	return startOffset <= endOffset
+}
+
+func windowFrameBoundOrder(bound relationalWindowBound) (int, int) {
+	switch bound.kind {
+	case "unbounded_preceding":
+		return 0, 0
+	case "preceding":
+		return 1, bound.offset
+	case "current_row":
+		return 2, 0
+	case "following":
+		return 3, bound.offset
+	case "unbounded_following":
+		return 4, 0
+	default:
+		return 5, 0
+	}
 }
 
 func parseRelationalWindowBound(text string) (relationalWindowBound, error) {
@@ -449,6 +545,9 @@ func projectAggregateWindow(projection relationalProjection, tail string, column
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(tail)), "over ") {
 		return nil, true, unsupportedExpression()
 	}
+	if projection.aggregate.distinct {
+		return nil, true, sqlFailure{1235, "42000", "DISTINCT is not supported for window functions"}
+	}
 	specification := strings.TrimSpace(strings.TrimSpace(tail)[len("over "):])
 	spec, err := parseWindowReference(specification, columns)
 	if err != nil {
@@ -459,15 +558,12 @@ func projectAggregateWindow(projection relationalProjection, tail string, column
 }
 
 func parseWindowProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
-	function, tail, found := relationalFunction(expression)
-	if !found || strings.TrimSpace(tail) == "" || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(tail)), "over ") {
-		return nil, false, nil
-	}
+	function, specification, found := directWindowFunction(expression)
 	name := strings.ToUpper(function.name)
-	if !isWindowName(name) {
+	if !found || !isWindowName(name) {
 		return nil, false, nil
 	}
-	spec, err := parseWindowReference(strings.TrimSpace(strings.TrimSpace(tail)[len("over "):]), columns)
+	spec, err := parseWindowReference(specification, columns)
 	if err != nil {
 		return nil, true, err
 	}
@@ -485,6 +581,253 @@ func parseWindowProjection(expression, alias string, columns []relationColumn) (
 	}
 	metadata.name = projectionName
 	return []relationalProjection{{expression: expression, name: projectionName, alias: alias, column: -1, metadata: metadata, window: &relationalWindowFunction{relationalAggregate: aggregate, spec: spec}}}, true, nil
+}
+
+func directWindowFunction(expression string) (relationalFunctionCall, string, bool) {
+	function, tail, found := relationalFunction(expression)
+	if !found {
+		return relationalFunctionCall{}, "", false
+	}
+	specification, found := directWindowSpecificationTail(tail)
+	return function, specification, found
+}
+
+func directWindowSpecificationTail(tail string) (string, bool) {
+	tail = strings.TrimSpace(tail)
+	if !strings.HasPrefix(strings.ToLower(tail), "over ") {
+		return "", false
+	}
+	specification := strings.TrimSpace(tail[len("over "):])
+	return specification, directWindowSpecification(specification)
+}
+
+func directWindowSpecification(specification string) bool {
+	if specification == "" {
+		return false
+	}
+	if specification[0] != '(' {
+		_, remainder, valid := consumeIdentifier(specification)
+		return valid && strings.TrimSpace(remainder) == ""
+	}
+	end, found := matchingParenthesis(specification, 0)
+	return found && end == len(specification)-1
+}
+
+func parseComposedWindowProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
+	if composedWindowIsWholeExpression(expression) {
+		return nil, false, nil
+	}
+	windowExpression, windows, found, err := composedWindowParts(expression, columns)
+	if !found {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, true, err
+	}
+	metadata, err := composedWindowMetadata(windowExpression, windows, columns)
+	if err != nil {
+		return nil, true, err
+	}
+	projectionName := expression
+	if alias != "" {
+		projectionName = alias
+	}
+	metadata.name = projectionName
+	window := &windows[0].function
+	return []relationalProjection{{
+		expression: expression, name: projectionName, alias: alias, column: -1, computed: true,
+		metadata: metadata, window: window, windowExpr: windowExpression, windowParts: windows,
+	}}, true, nil
+}
+
+func composedWindowIsWholeExpression(expression string) bool {
+	start, end, _, _, found := composedWindowFunction(expression, 0)
+	return found && start == 0 && end == len(expression)
+}
+
+func composedWindowParts(expression string, columns []relationColumn) (string, []relationalComposedWindow, bool, error) {
+	var builder strings.Builder
+	windows := make([]relationalComposedWindow, 0)
+	used := make(map[string]struct{})
+	length, start, copied := len(expression), 0, 0
+	for start < length {
+		callStart, callEnd, function, specification, found := composedWindowFunction(expression, start)
+		if !found {
+			break
+		}
+		window, err := composedWindowPart(function, specification, columns, used)
+		if err != nil {
+			return "", nil, true, err
+		}
+		builder.WriteString(expression[copied:callStart])
+		builder.WriteString(window.placeholder)
+		windows = append(windows, window)
+		start, copied = callEnd, callEnd
+	}
+	if len(windows) == 0 {
+		return "", nil, false, nil
+	}
+	builder.WriteString(expression[copied:])
+	return builder.String(), windows, true, nil
+}
+
+func composedWindowPart(function relationalFunctionCall, specification string, columns []relationColumn, used map[string]struct{}) (relationalComposedWindow, error) {
+	spec, err := parseWindowReference(specification, columns)
+	if err != nil {
+		return relationalComposedWindow{}, err
+	}
+	aggregate, err := parseRelationalAggregate(strings.ToUpper(function.name), function.arguments)
+	if err != nil {
+		return relationalComposedWindow{}, err
+	}
+	if aggregate.distinct {
+		return relationalComposedWindow{}, sqlFailure{1235, "42000", "DISTINCT is not supported for window functions"}
+	}
+	metadata, err := aggregateMetadata(aggregate, columns)
+	if err != nil {
+		return relationalComposedWindow{}, err
+	}
+	placeholder := composedWindowPlaceholder(columns, used)
+	used[placeholder] = struct{}{}
+	return relationalComposedWindow{function: relationalWindowFunction{relationalAggregate: aggregate, spec: spec}, placeholder: placeholder, metadata: metadata}, nil
+}
+
+func composedWindowFunction(expression string, start int) (int, int, relationalFunctionCall, string, bool) {
+	length := len(expression)
+	for start < length {
+		candidate, found := nextComposedWindowCandidate(expression, start)
+		if !found {
+			break
+		}
+		function, callEnd, valid := composedWindowCall(expression, candidate)
+		if valid {
+			specificationEnd, specification, hasSpecification := composedWindowSpecification(expression, callEnd)
+			if hasSpecification {
+				return candidate, specificationEnd, function, specification, true
+			}
+		}
+		start = candidate + 1
+	}
+	return 0, 0, relationalFunctionCall{}, "", false
+}
+
+func nextComposedWindowCandidate(expression string, start int) (int, bool) {
+	length := len(expression)
+	for start < length {
+		if !isAggregateIdentifierByte(expression[start]) {
+			start++
+			continue
+		}
+		end := composedWindowIdentifierEnd(expression, start)
+		name := strings.ToUpper(expression[start:end])
+		if isWindowName(name) || isAggregateName(name) {
+			return start, true
+		}
+		start = end
+	}
+	return 0, false
+}
+
+func composedWindowCall(expression string, start int) (relationalFunctionCall, int, bool) {
+	identifierEnd := composedWindowIdentifierEnd(expression, start)
+	open := composedWindowSpaceEnd(expression, identifierEnd)
+	if open >= len(expression) || expression[open] != '(' {
+		return relationalFunctionCall{}, 0, false
+	}
+	close, found := matchingParenthesis(expression, open)
+	if !found {
+		return relationalFunctionCall{}, 0, false
+	}
+	function, _, found := relationalFunction(expression[start : close+1])
+	return function, close + 1, found
+}
+
+func composedWindowSpecification(expression string, start int) (int, string, bool) {
+	over := composedWindowSpaceEnd(expression, start)
+	if !composedWindowOverAt(expression, over) {
+		return 0, "", false
+	}
+	start = composedWindowSpaceEnd(expression, over+4)
+	if start >= len(expression) {
+		return 0, "", false
+	}
+	if expression[start] == '(' {
+		end, found := matchingParenthesis(expression, start)
+		if !found {
+			return 0, "", false
+		}
+		return end + 1, expression[start : end+1], true
+	}
+	end := composedWindowIdentifierEnd(expression, start)
+	if end == start {
+		return 0, "", false
+	}
+	return end, expression[start:end], true
+}
+
+func composedWindowIdentifierEnd(expression string, start int) int {
+	length := len(expression)
+	for start < length && isAggregateIdentifierByte(expression[start]) {
+		start++
+	}
+	return start
+}
+
+func composedWindowSpaceEnd(expression string, start int) int {
+	length := len(expression)
+	for start < length && (expression[start] == ' ' || expression[start] == '\t' || expression[start] == '\n') {
+		start++
+	}
+	return start
+}
+
+func composedWindowOverAt(expression string, start int) bool {
+	end := start + len("over")
+	return end <= len(expression) && strings.EqualFold(expression[start:end], "over") && (end == len(expression) || !isAggregateIdentifierByte(expression[end]))
+}
+
+func composedWindowPlaceholder(columns []relationColumn, used map[string]struct{}) string {
+	for index := 0; ; index++ {
+		placeholder := "__database_window_value_" + strconv.Itoa(index)
+		if _, found := used[placeholder]; found {
+			continue
+		}
+		if _, err := resolveRelationColumn(placeholder, columns); err != nil {
+			return placeholder
+		}
+	}
+}
+
+func composedWindowMetadata(expression string, windows []relationalComposedWindow, columns []relationColumn) (columnMetadata, error) {
+	columns = append([]relationColumn(nil), columns...)
+	for _, window := range windows {
+		columns = append(columns, relationColumn{name: window.placeholder, qualifier: window.placeholder, index: len(columns), typeName: composedWindowTypeName(window.metadata), metadata: window.metadata})
+	}
+	return relationExpressionMetadata(expression, columns)
+}
+
+func composedWindowTypeName(metadata columnMetadata) string {
+	if typeName, found := composedWindowScalarTypes[metadata.typ]; found {
+		return typeName
+	}
+	if metadata.typ == mysqlTypeLongLong {
+		return composedWindowBigIntTypeName(metadata)
+	}
+	if metadata.typ == mysqlTypeNewDecimal {
+		precision := int(metadata.length) - 1
+		if metadata.decimals > 0 {
+			precision--
+		}
+		return "DECIMAL(" + strconv.Itoa(precision) + "," + strconv.Itoa(int(metadata.decimals)) + ")"
+	}
+	return "VARCHAR(1)"
+}
+
+func composedWindowBigIntTypeName(metadata columnMetadata) string {
+	if metadata.flags&mysqlUnsignedFlag != 0 {
+		return "BIGINT UNSIGNED"
+	}
+	return "BIGINT"
 }
 
 type relationalFunctionCall struct {
@@ -544,31 +887,51 @@ func parseWindowFunction(name, arguments string) (relationalAggregate, error) {
 }
 
 func parseAggregateFunction(name, arguments string) (relationalAggregate, error) {
-	distinct := false
-	if strings.HasPrefix(strings.ToLower(arguments), "distinct ") {
-		distinct, arguments = true, strings.TrimSpace(arguments[len("distinct "):])
-	}
+	distinct, arguments := splitAggregateDistinct(arguments)
 	if name == "COUNT" && arguments == "*" {
 		if distinct {
 			return relationalAggregate{}, sqlFailure{1064, "42000", "invalid aggregate arguments"}
 		}
 		return relationalAggregate{name: name, argument: "*", distinct: distinct}, nil
 	}
-	if arguments == "" || (name != "COUNT" && arguments == "*") {
+	if aggregateArgumentsInvalid(name, arguments, distinct) {
 		return relationalAggregate{}, sqlFailure{1064, "42000", "invalid aggregate arguments"}
 	}
 	return relationalAggregate{name: name, argument: arguments, distinct: distinct}, nil
 }
 
+func splitAggregateDistinct(arguments string) (bool, string) {
+	if strings.HasPrefix(strings.ToLower(arguments), "distinct ") {
+		return true, strings.TrimSpace(arguments[len("distinct "):])
+	}
+	return false, arguments
+}
+
+func aggregateArgumentsInvalid(name, arguments string, distinct bool) bool {
+	if arguments == "" || (name != "COUNT" && arguments == "*") {
+		return true
+	}
+	if name != "COUNT" {
+		return len(splitCSV(arguments)) != 1
+	}
+	return distinct && aggregateDistinctHasEmptyArgument(arguments)
+}
+
+func aggregateDistinctHasEmptyArgument(arguments string) bool {
+	for _, argument := range splitCSV(arguments) {
+		if strings.TrimSpace(argument) == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func aggregateMetadata(aggregate relationalAggregate, columns []relationColumn) (columnMetadata, error) {
 	switch aggregate.name {
 	case "COUNT", "ROW_NUMBER", "RANK", "DENSE_RANK":
-		return scalarMetadata("", "0", intValue(0)), nil
-	case "AVG":
-		value, _ := parseDecimalText("0.0000")
-		metadata := scalarMetadata("", value.renderDecimal(), decimalValueOf(value))
-		metadata.flags &^= mysqlNotNullFlag
-		return metadata, nil
+		return aggregateUnsignedIntegerMetadata(), nil
+	case "SUM", "AVG":
+		return aggregateNumericMetadata(aggregate, columns)
 	default:
 		if aggregate.argument == "*" {
 			return scalarMetadata("", "0", intValue(0)), nil
@@ -577,13 +940,194 @@ func aggregateMetadata(aggregate relationalAggregate, columns []relationColumn) 
 		if isWindowName(aggregate.name) {
 			argument = splitCSV(argument)[0]
 		}
-		return aggregateArgumentMetadata(argument, columns)
+		metadata, err := aggregateArgumentMetadata(argument, columns)
+		if err != nil {
+			return columnMetadata{}, err
+		}
+		return aggregateWindowOffsetMetadata(aggregate, metadata, columns)
 	}
 }
 
+func aggregateWindowOffsetMetadata(aggregate relationalAggregate, metadata columnMetadata, columns []relationColumn) (columnMetadata, error) {
+	if aggregate.name != "LAG" && aggregate.name != "LEAD" {
+		return metadata, nil
+	}
+	arguments := splitCSV(aggregate.argument)
+	if len(arguments) != 3 {
+		return metadata, nil
+	}
+	valueMetadata, err := aggregateWindowArgumentMetadata(arguments[0], columns)
+	if err != nil {
+		return columnMetadata{}, err
+	}
+	defaultMetadata, err := aggregateWindowArgumentMetadata(arguments[2], columns)
+	if err != nil {
+		return columnMetadata{}, err
+	}
+	return aggregateOffsetMetadata(valueMetadata, defaultMetadata), nil
+}
+
+func aggregateWindowArgumentMetadata(argument string, columns []relationColumn) (columnMetadata, error) {
+	metadata, err := aggregateArgumentMetadata(argument, columns)
+	if err != nil {
+		return columnMetadata{}, err
+	}
+	if value, valueErr := evaluateScalar(argument); valueErr == nil && !value.isNull() {
+		metadata.flags |= mysqlNotNullFlag
+	}
+	return metadata, nil
+}
+
+func aggregateOffsetMetadata(value, fallback columnMetadata) columnMetadata {
+	if isNumericWireType(value.typ) && isNumericWireType(fallback.typ) {
+		return aggregateOffsetNumericMetadata(value, fallback)
+	}
+	if isCharacterWireType(value.typ) || isCharacterWireType(fallback.typ) {
+		return aggregateOffsetCharacterMetadata(value, fallback)
+	}
+	return value
+}
+
+func aggregateOffsetNumericMetadata(value, fallback columnMetadata) columnMetadata {
+	result := value
+	result.length, result.decimals = max(value.length, fallback.length), max(value.decimals, fallback.decimals)
+	result.flags &^= mysqlUnsignedFlag
+	if isApproximateWireType(value.typ) || isApproximateWireType(fallback.typ) {
+		result.typ, result.length, result.decimals = mysqlTypeDouble, 22, mysqlDecimalsNotSpecified
+		return result
+	}
+	if value.typ == mysqlTypeNewDecimal || fallback.typ == mysqlTypeNewDecimal {
+		result.typ = mysqlTypeNewDecimal
+		return result
+	}
+	result.typ, result.length, result.decimals = mysqlTypeLongLong, 21, 0
+	return result
+}
+
+func aggregateOffsetCharacterMetadata(value, fallback columnMetadata) columnMetadata {
+	if isCharacterWireType(fallback.typ) {
+		value = fallback
+	}
+	value.length = max(value.length, fallback.length)
+	if value.flags&mysqlNotNullFlag == 0 || fallback.flags&mysqlNotNullFlag == 0 {
+		value.flags &^= mysqlNotNullFlag
+	}
+	return value
+}
+
+func aggregateUnsignedIntegerMetadata() columnMetadata {
+	metadata := scalarMetadata("", "0", uintValue(0))
+	metadata.length = 21
+	return metadata
+}
+
+func aggregateNumericMetadata(aggregate relationalAggregate, columns []relationColumn) (columnMetadata, error) {
+	argument := aggregate.argument
+	if isWindowName(aggregate.name) {
+		argument = splitCSV(argument)[0]
+	}
+	metadata, err := aggregateArgumentMetadata(argument, columns)
+	if err != nil {
+		return columnMetadata{}, err
+	}
+	metadata.flags &^= mysqlNotNullFlag | mysqlUnsignedFlag
+	if metadata.typ == mysqlTypeFloat || metadata.typ == mysqlTypeDouble {
+		metadata.typ, metadata.length, metadata.decimals = mysqlTypeDouble, 22, mysqlDecimalsNotSpecified
+		return metadata, nil
+	}
+	precision, scale := aggregateDecimalPrecision(argument, columns, metadata)
+	if aggregate.name == "SUM" {
+		precision = min(decimalPrecisionCeiling, precision+19)
+	}
+	if aggregate.name == "AVG" {
+		precision, scale = min(decimalPrecisionCeiling, precision+4), min(30, scale+4)
+	}
+	metadata.typ, metadata.length, metadata.decimals = mysqlTypeNewDecimal, aggregateDecimalLength(precision, scale), byte(scale)
+	return metadata, nil
+}
+
+func aggregateDecimalPrecision(argument string, columns []relationColumn, metadata columnMetadata) (int, int) {
+	if precision, scale, found := aggregateColumnPrecision(argument, columns); found {
+		return precision, scale
+	}
+	return aggregateMetadataDecimalPrecision(metadata)
+}
+
+func aggregateColumnPrecision(argument string, columns []relationColumn) (int, int, bool) {
+	index, err := resolveRelationColumn(argument, columns)
+	if err != nil {
+		return 0, 0, false
+	}
+	numeric, err := parseNumericType(columns[index].typeName)
+	if err != nil {
+		return 0, 0, false
+	}
+	switch numeric.kind {
+	case numericDecimal:
+		return numeric.precision, numeric.scale, true
+	case numericInteger:
+		return aggregateIntegerPrecision(numeric), 0, true
+	case numericBoolean:
+		return 1, 0, true
+	case numericBit:
+		return numeric.width, 0, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func aggregateMetadataDecimalPrecision(metadata columnMetadata) (int, int) {
+	if metadata.typ == mysqlTypeNewDecimal {
+		precision := int(metadata.length) - 1
+		if metadata.decimals > 0 {
+			precision--
+		}
+		if precision < 1 {
+			precision = 1
+		}
+		return precision, int(metadata.decimals)
+	}
+	return aggregateMetadataPrecision(metadata), int(metadata.decimals)
+}
+
+func aggregateIntegerPrecision(numeric numericType) int {
+	if numeric.unsigned {
+		return len(strconv.FormatUint(numeric.umax, 10))
+	}
+	return len(strconv.FormatInt(numeric.smax, 10))
+}
+
+func aggregateMetadataPrecision(metadata columnMetadata) int {
+	switch metadata.typ {
+	case mysqlTypeTiny:
+		return 3
+	case mysqlTypeShort:
+		return 5
+	case mysqlTypeInt24:
+		return 8
+	case mysqlTypeLong:
+		return 10
+	case mysqlTypeLongLong:
+		if metadata.flags&mysqlUnsignedFlag != 0 {
+			return 20
+		}
+		return 19
+	default:
+		return min(decimalPrecisionCeiling, max(1, int(metadata.length)))
+	}
+}
+
+func aggregateDecimalLength(precision, scale int) uint32 {
+	length := precision + 1
+	if scale > 0 {
+		length++
+	}
+	return uint32(length)
+}
+
 func aggregateArgumentMetadata(argument string, columns []relationColumn) (columnMetadata, error) {
-	if function, tail, found := relationalFunction(argument); found && tail == "" && isAggregateName(function.name) {
-		nested, err := parseAggregateFunction(function.name, function.arguments)
+	if function, tail, found := relationalFunction(argument); found && tail == "" && isAggregateName(strings.ToUpper(function.name)) {
+		nested, err := parseAggregateFunction(strings.ToUpper(function.name), function.arguments)
 		if err != nil {
 			return columnMetadata{}, err
 		}
@@ -638,20 +1182,32 @@ func windowExplanationDefinitions(projections []relationalProjection) []queryexp
 	definitions := make([]queryexplanation.Window, 0)
 	index := make(map[string]int)
 	for _, projection := range projections {
-		if projection.window == nil {
-			continue
+		for _, window := range projectionWindowFunctions(projection) {
+			definition := queryexplanation.Window{PartitionExpressions: append([]string(nil), window.spec.partition...), Orders: explanationWindowOrders(window.spec.order), Frame: explanationWindowFrame(window.spec.frame), Functions: []string{window.name}}
+			key := windowExplanationKey(definition)
+			if existing, found := index[key]; found {
+				definitions[existing].Functions = append(definitions[existing].Functions, window.name)
+				continue
+			}
+			index[key] = len(definitions)
+			definitions = append(definitions, definition)
 		}
-		window := projection.window
-		definition := queryexplanation.Window{PartitionExpressions: append([]string(nil), window.spec.partition...), Orders: explanationWindowOrders(window.spec.order), Frame: explanationWindowFrame(window.spec.frame), Functions: []string{window.name}}
-		key := windowExplanationKey(definition)
-		if existing, found := index[key]; found {
-			definitions[existing].Functions = append(definitions[existing].Functions, window.name)
-			continue
-		}
-		index[key] = len(definitions)
-		definitions = append(definitions, definition)
 	}
 	return definitions
+}
+
+func projectionWindowFunctions(projection relationalProjection) []relationalWindowFunction {
+	if len(projection.windowParts) == 0 {
+		if projection.window == nil {
+			return nil
+		}
+		return []relationalWindowFunction{*projection.window}
+	}
+	functions := make([]relationalWindowFunction, len(projection.windowParts))
+	for index, part := range projection.windowParts {
+		functions[index] = part.function
+	}
+	return functions
 }
 
 func explanationWindowOrders(orders []relationalWindowOrder) []queryexplanation.Order {
@@ -695,13 +1251,8 @@ func windowOrderKey(orders []queryexplanation.Order) string {
 }
 
 func (p *relationalSelectPlan) applyWindowsToGroupedRows(rows []relationalResultRow) ([]relationalResultRow, error) {
-	for index, projection := range p.projection {
-		if projection.window == nil {
-			continue
-		}
-		if err := p.applyWindow(rows, index, *projection.window); err != nil {
-			return nil, err
-		}
+	if err := p.applyWindows(rows); err != nil {
+		return nil, err
 	}
 	for index := range rows {
 		if err := p.projectAggregateOrderValues(rows[index].group, &rows[index]); err != nil {
@@ -802,12 +1353,7 @@ func (p *relationalSelectPlan) projectAggregateGroup(group []relationRow) (relat
 		if err != nil {
 			return relationalResultRow{}, err
 		}
-		result.projections[index] = value
-		if value.isNull() {
-			result.values[index], result.nulls[index] = storedSQLNullValue, true
-		} else {
-			result.values[index] = value.render()
-		}
+		setRelationalResultValue(&result, index, value)
 	}
 	return result, p.projectAggregateOrderValues(group, &result)
 }
@@ -839,35 +1385,88 @@ func (p *relationalSelectPlan) evaluateAggregate(aggregate relationalAggregate, 
 func (p *relationalSelectPlan) aggregateValues(aggregate relationalAggregate, rows []relationRow) ([]exprValue, error) {
 	values := make([]exprValue, 0, len(rows))
 	seen := make(map[string]struct{})
+	arguments := aggregateArguments(aggregate)
 	for _, row := range rows {
-		if aggregate.argument == "*" {
-			values = append(values, intValue(1))
-			continue
-		}
-		value, err := evaluateRelationExpressionContext(aggregate.argument, p.source.columns, row, p.outer)
+		value, included, err := p.aggregateRowValue(aggregate, arguments, row, seen)
 		if err != nil {
 			return nil, err
 		}
-		if value.isNull() {
-			continue
+		if included {
+			values = append(values, value)
 		}
-		key := relationalValueKey(aggregate.argument, value, p.source.columns)
-		if aggregate.distinct {
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-		}
-		values = append(values, value)
 	}
 	return values, nil
+}
+
+func (p *relationalSelectPlan) aggregateRowValue(aggregate relationalAggregate, arguments []string, row relationRow, seen map[string]struct{}) (exprValue, bool, error) {
+	if aggregate.argument == "*" {
+		return intValue(1), true, nil
+	}
+	if len(arguments) > 1 {
+		return p.aggregateTupleValue(arguments, row, seen)
+	}
+	return p.aggregateSingleValue(aggregate, row, seen)
+}
+
+func (p *relationalSelectPlan) aggregateTupleValue(arguments []string, row relationRow, seen map[string]struct{}) (exprValue, bool, error) {
+	key, valid, err := p.aggregateTupleKey(arguments, row)
+	if err != nil || !valid {
+		return exprValue{}, false, err
+	}
+	if _, exists := seen[key]; exists {
+		return exprValue{}, false, nil
+	}
+	seen[key] = struct{}{}
+	return intValue(1), true, nil
+}
+
+func (p *relationalSelectPlan) aggregateSingleValue(aggregate relationalAggregate, row relationRow, seen map[string]struct{}) (exprValue, bool, error) {
+	value, err := evaluateRelationExpressionContext(aggregate.argument, p.source.columns, row, p.outer)
+	if err != nil || value.isNull() {
+		return value, false, err
+	}
+	if aggregate.distinct && !aggregateValueNew(aggregate, value, seen, p.source.columns) {
+		return value, false, nil
+	}
+	return value, true, nil
+}
+
+func aggregateValueNew(aggregate relationalAggregate, value exprValue, seen map[string]struct{}, columns []relationColumn) bool {
+	key := relationalValueKey(aggregate.argument, value, columns)
+	if _, exists := seen[key]; exists {
+		return false
+	}
+	seen[key] = struct{}{}
+	return true
+}
+
+func aggregateArguments(aggregate relationalAggregate) []string {
+	if aggregate.name == "COUNT" && aggregate.distinct {
+		return splitCSV(aggregate.argument)
+	}
+	return []string{aggregate.argument}
+}
+
+func (p *relationalSelectPlan) aggregateTupleKey(arguments []string, row relationRow) (string, bool, error) {
+	var builder strings.Builder
+	for _, argument := range arguments {
+		value, err := evaluateRelationExpressionContext(argument, p.source.columns, row, p.outer)
+		if err != nil {
+			return "", false, err
+		}
+		if value.isNull() {
+			return "", false, nil
+		}
+		writeRelationalValueKey(&builder, argument, value, p.source.columns)
+	}
+	return builder.String(), true, nil
 }
 
 func aggregateResult(name string, values []exprValue) (exprValue, error) {
 	if name == "MIN" || name == "MAX" {
 		return aggregateExtreme(name, values)
 	}
-	total := values[0]
+	total := aggregateTotalStart(name, values[0])
 	for _, value := range values[1:] {
 		var err error
 		total, err = arithmetic("+", total, value)
@@ -879,6 +1478,13 @@ func aggregateResult(name string, values []exprValue) (exprValue, error) {
 		return divideArithmetic(total, intValue(int64(len(values))))
 	}
 	return total, nil
+}
+
+func aggregateTotalStart(name string, value exprValue) exprValue {
+	if (name == "SUM" || name == "AVG") && (value.kind == valueInt || value.kind == valueUint) {
+		return decimalValueOf(toDecimal(value))
+	}
+	return value
 }
 
 func aggregateExtreme(name string, values []exprValue) (exprValue, error) {
@@ -1023,13 +1629,8 @@ func collectWindowRows(plan *relationalSelectPlan, sourceRows []relationRow) ([]
 		}
 		rows[index] = row
 	}
-	for projectionIndex, projection := range plan.projection {
-		if projection.window == nil {
-			continue
-		}
-		if err := plan.applyWindow(rows, projectionIndex, *projection.window); err != nil {
-			return nil, err
-		}
+	if err := plan.applyWindows(rows); err != nil {
+		return nil, err
 	}
 	return rows, nil
 }
@@ -1058,17 +1659,106 @@ func setRelationalResultValue(row *relationalResultRow, index int, value exprVal
 	row.values[index], row.nulls[index] = value.render(), false
 }
 
-func (p *relationalSelectPlan) applyWindow(rows []relationalResultRow, projectionIndex int, function relationalWindowFunction) error {
-	partitions, err := p.windowPartitions(rows, function.spec)
+func (p *relationalSelectPlan) applyWindows(rows []relationalResultRow) error {
+	partitionsByWindow := make(map[string][][]int)
+	for projectionIndex, projection := range p.projection {
+		if projection.window == nil {
+			continue
+		}
+		values, err := p.projectionWindowValues(rows, projection, partitionsByWindow)
+		if err != nil {
+			return err
+		}
+		for index, value := range values {
+			setRelationalResultValue(&rows[index], projectionIndex, value)
+		}
+	}
+	return nil
+}
+
+func (p *relationalSelectPlan) projectionWindowValues(rows []relationalResultRow, projection relationalProjection, cache map[string][][]int) ([]exprValue, error) {
+	valuesByPlaceholder := make(map[string][]exprValue)
+	for _, part := range projection.windowParts {
+		values, err := p.windowFunctionValues(rows, part.function, cache)
+		if err != nil {
+			return nil, err
+		}
+		valuesByPlaceholder[part.placeholder] = values
+	}
+	if len(projection.windowParts) == 0 {
+		return p.windowFunctionValues(rows, *projection.window, cache)
+	}
+	return p.composedWindowValues(rows, projection, valuesByPlaceholder)
+}
+
+func (p *relationalSelectPlan) windowFunctionValues(rows []relationalResultRow, function relationalWindowFunction, cache map[string][][]int) ([]exprValue, error) {
+	values := make([]exprValue, len(rows))
+	partitions, err := p.windowFunctionPartitions(rows, function, cache)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, partition := range partitions {
-		if err := p.applyWindowPartition(rows, partition, projectionIndex, function); err != nil {
+		for position, rowIndex := range partition {
+			value, err := p.windowValue(rows, partition, position, function)
+			if err != nil {
+				return nil, err
+			}
+			values[rowIndex] = value
+		}
+	}
+	return values, nil
+}
+
+func (p *relationalSelectPlan) composedWindowValues(rows []relationalResultRow, projection relationalProjection, values map[string][]exprValue) ([]exprValue, error) {
+	result := make([]exprValue, len(rows))
+	for index, row := range rows {
+		windowValues := make(map[string]exprValue, len(values))
+		for placeholder, functionValues := range values {
+			windowValues[placeholder] = functionValues[index]
+		}
+		value, err := p.evaluateComposedWindowExpression(row.source, projection, windowValues)
+		if err != nil {
+			return nil, err
+		}
+		result[index] = value
+	}
+	return result, nil
+}
+
+func (p *relationalSelectPlan) windowFunctionPartitions(rows []relationalResultRow, function relationalWindowFunction, cached map[string][][]int) ([][]int, error) {
+	key := relationalWindowSpecKey(function.spec)
+	if partitions, found := cached[key]; found {
+		return partitions, nil
+	}
+	partitions, err := p.windowPartitions(rows, function.spec)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.sortWindowPartitions(rows, partitions, function.spec); err != nil {
+		return nil, err
+	}
+	cached[key] = partitions
+	return partitions, nil
+}
+
+func (p *relationalSelectPlan) sortWindowPartitions(rows []relationalResultRow, partitions [][]int, spec relationalWindowSpec) error {
+	if len(spec.order) == 0 {
+		return nil
+	}
+	for _, partition := range partitions {
+		if err := p.sortWindowPartition(rows, partition, spec); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func relationalWindowSpecKey(spec relationalWindowSpec) string {
+	orders := make([]string, len(spec.order))
+	for index, order := range spec.order {
+		orders[index] = order.expression + "\x00" + order.direction
+	}
+	return strings.Join(spec.partition, "\x00") + "\x01" + explanationWindowFrame(spec.frame) + "\x01" + strings.Join(orders, "\x01")
 }
 
 func (p *relationalSelectPlan) windowPartitions(rows []relationalResultRow, spec relationalWindowSpec) ([][]int, error) {
@@ -1151,34 +1841,44 @@ func relationalStringKey(expression, value string, columns []relationColumn) str
 	return characterComparisonKey(typ, value)
 }
 
-func (p *relationalSelectPlan) applyWindowPartition(rows []relationalResultRow, partition []int, projectionIndex int, function relationalWindowFunction) error {
-	sort.SliceStable(partition, func(left, right int) bool {
-		return p.windowRowBefore(rows[partition[left]], rows[partition[right]], function.spec)
-	})
-	for position, rowIndex := range partition {
-		value, err := p.windowValue(rows, partition, position, function)
-		if err != nil {
-			return err
+func (p *relationalSelectPlan) evaluateComposedWindowExpression(row relationRow, projection relationalProjection, windowValues map[string]exprValue) (exprValue, error) {
+	return evaluateScalarWithResolver(projection.windowExpr, func(name string) (exprValue, error) {
+		for placeholder, value := range windowValues {
+			if identifiersEqual(name, placeholder) {
+				return value, nil
+			}
 		}
-		setRelationalResultValue(&rows[rowIndex], projectionIndex, value)
-	}
-	return nil
+		column, err := resolveRelationColumn(name, p.source.columns)
+		if err != nil {
+			return outerRelationValue(name, p.outer)
+		}
+		return relationColumnValue(p.source.columns, column, row)
+	})
 }
 
-func (p *relationalSelectPlan) windowRowBefore(left, right relationalResultRow, spec relationalWindowSpec) bool {
-	for _, order := range spec.order {
-		leftValue, leftErr := p.windowExpressionValue(left, order.expression)
-		rightValue, rightErr := p.windowExpressionValue(right, order.expression)
-		if leftErr != nil || rightErr != nil {
-			return false
+func (p *relationalSelectPlan) sortWindowPartition(rows []relationalResultRow, partition []int, spec relationalWindowSpec) error {
+	orderValues := make(map[int][]exprValue, len(partition))
+	for _, rowIndex := range partition {
+		values := make([]exprValue, len(spec.order))
+		for index, order := range spec.order {
+			value, err := p.windowExpressionValue(rows[rowIndex], order.expression)
+			if err != nil {
+				return err
+			}
+			values[index] = value
 		}
-		comparison := p.compareWindowOrderValues(order, leftValue, rightValue)
-		if comparison == 0 {
-			continue
-		}
-		return orderedBefore(comparison, order.direction)
+		orderValues[rowIndex] = values
 	}
-	return false
+	sort.SliceStable(partition, func(left, right int) bool {
+		for index, order := range spec.order {
+			comparison := p.compareWindowOrderValues(order, orderValues[partition[left]][index], orderValues[partition[right]][index])
+			if comparison != 0 {
+				return orderedBefore(comparison, order.direction)
+			}
+		}
+		return false
+	})
+	return nil
 }
 
 func (p *relationalSelectPlan) windowValue(rows []relationalResultRow, partition []int, position int, function relationalWindowFunction) (exprValue, error) {
@@ -1199,7 +1899,11 @@ func (p *relationalSelectPlan) windowValue(rows []relationalResultRow, partition
 
 func (p *relationalSelectPlan) windowRankValue(rows []relationalResultRow, partition []int, position int, function relationalWindowFunction) (exprValue, error) {
 	dense := function.name == "DENSE_RANK"
-	return intValue(p.windowRank(rows, partition, position, function.spec, dense)), nil
+	rank, err := p.windowRank(rows, partition, position, function.spec, dense)
+	if err != nil {
+		return exprValue{}, err
+	}
+	return intValue(rank), nil
 }
 
 func (p *relationalSelectPlan) windowAggregateValue(rows []relationalResultRow, partition []int, position int, function relationalWindowFunction) (exprValue, error) {
@@ -1300,7 +2004,10 @@ func (p *relationalSelectPlan) rangeFrameIndexes(rows []relationalResultRow, par
 		return partition, nil
 	}
 	if !rangeFrameHasOffset(frame) {
-		start, end = p.expandCurrentRangePeers(rows, partition, position, spec, frame, start, end)
+		start, end, peerErr := p.expandCurrentRangePeers(rows, partition, position, spec, frame, start, end)
+		if peerErr != nil {
+			return nil, peerErr
+		}
 		return partition[start : end+1], nil
 	}
 	if len(spec.order) != 1 {
@@ -1313,25 +2020,42 @@ func rangeFrameHasOffset(frame relationalWindowFrame) bool {
 	return frame.start.kind == "preceding" || frame.start.kind == "following" || frame.end.kind == "preceding" || frame.end.kind == "following"
 }
 
-func (p *relationalSelectPlan) expandCurrentRangePeers(rows []relationalResultRow, partition []int, position int, spec relationalWindowSpec, frame relationalWindowFrame, start, end int) (int, int) {
+func (p *relationalSelectPlan) expandCurrentRangePeers(rows []relationalResultRow, partition []int, position int, spec relationalWindowSpec, frame relationalWindowFrame, start, end int) (int, int, error) {
 	partitionLength := len(partition)
 	if frame.start.kind == "current_row" {
-		for start > 0 && p.windowResultRowsTie(rows[partition[start-1]], rows[partition[position]], spec) {
+		for start > 0 {
+			tied, err := p.windowResultRowsTie(rows[partition[start-1]], rows[partition[position]], spec)
+			if err != nil {
+				return 0, 0, err
+			}
+			if !tied {
+				break
+			}
 			start--
 		}
 	}
 	if frame.end.kind == "current_row" {
-		for end+1 < partitionLength && p.windowResultRowsTie(rows[partition[end+1]], rows[partition[position]], spec) {
+		for end+1 < partitionLength {
+			tied, err := p.windowResultRowsTie(rows[partition[end+1]], rows[partition[position]], spec)
+			if err != nil {
+				return 0, 0, err
+			}
+			if !tied {
+				break
+			}
 			end++
 		}
 	}
-	return start, end
+	return start, end, nil
 }
 
 func (p *relationalSelectPlan) numericRangeFrame(rows []relationalResultRow, partition []int, position int, order relationalWindowOrder, frame relationalWindowFrame) ([]int, error) {
 	current, err := p.windowExpressionValue(rows[partition[position]], order.expression)
-	if err != nil || current.isNull() {
+	if err != nil {
 		return nil, sqlFailure{3587, "HY000", "RANGE frame with value offset requires numeric ORDER BY values"}
+	}
+	if current.isNull() {
+		return p.nullNumericRangeFrame(rows, partition, position, order)
 	}
 	lower, lowerOpen, err := rangeFrameBoundary(current, frame.start, order.direction, true)
 	if err != nil {
@@ -1344,12 +2068,24 @@ func (p *relationalSelectPlan) numericRangeFrame(rows []relationalResultRow, par
 	result := make([]int, 0, len(partition))
 	for _, rowIndex := range partition {
 		value, valueErr := p.windowExpressionValue(rows[rowIndex], order.expression)
-		if valueErr != nil || value.isNull() || !rangeValueIncluded(value, lower, lowerOpen, upper, upperOpen, order.direction) {
+		if valueErr != nil {
+			return nil, valueErr
+		}
+		if value.isNull() || !rangeValueIncluded(value, lower, lowerOpen, upper, upperOpen, order.direction) {
 			continue
 		}
 		result = append(result, rowIndex)
 	}
 	return result, nil
+}
+
+func (p *relationalSelectPlan) nullNumericRangeFrame(rows []relationalResultRow, partition []int, position int, order relationalWindowOrder) ([]int, error) {
+	frame := relationalWindowFrame{start: relationalWindowBound{kind: "current_row"}, end: relationalWindowBound{kind: "current_row"}}
+	start, end, err := p.expandCurrentRangePeers(rows, partition, position, relationalWindowSpec{order: []relationalWindowOrder{order}}, frame, position, position)
+	if err != nil {
+		return nil, err
+	}
+	return partition[start : end+1], nil
 }
 
 func rangeFrameBoundary(current exprValue, bound relationalWindowBound, direction string, start bool) (exprValue, bool, error) {
@@ -1405,10 +2141,14 @@ func compareWindowRangeValue(value, boundary exprValue, direction string) (int, 
 	return -comparison, nil
 }
 
-func (p *relationalSelectPlan) windowRank(rows []relationalResultRow, partition []int, position int, spec relationalWindowSpec, dense bool) int64 {
+func (p *relationalSelectPlan) windowRank(rows []relationalResultRow, partition []int, position int, spec relationalWindowSpec, dense bool) (int64, error) {
 	rank := int64(1)
 	for index := 1; index <= position; index++ {
-		if p.windowResultRowsTie(rows[partition[index-1]], rows[partition[index]], spec) {
+		tied, err := p.windowResultRowsTie(rows[partition[index-1]], rows[partition[index]], spec)
+		if err != nil {
+			return 0, err
+		}
+		if tied {
 			continue
 		}
 		if dense {
@@ -1417,26 +2157,25 @@ func (p *relationalSelectPlan) windowRank(rows []relationalResultRow, partition 
 			rank = int64(index + 1)
 		}
 	}
-	return rank
+	return rank, nil
 }
 
-func (p *relationalSelectPlan) windowRowsTie(left, right relationRow, spec relationalWindowSpec) bool {
-	return p.windowResultRowsTie(relationalResultRow{source: left}, relationalResultRow{source: right}, spec)
-}
-
-func (p *relationalSelectPlan) windowResultRowsTie(left, right relationalResultRow, spec relationalWindowSpec) bool {
+func (p *relationalSelectPlan) windowResultRowsTie(left, right relationalResultRow, spec relationalWindowSpec) (bool, error) {
 	for _, order := range spec.order {
 		leftValue, leftErr := p.windowExpressionValue(left, order.expression)
 		rightValue, rightErr := p.windowExpressionValue(right, order.expression)
-		if leftErr != nil || rightErr != nil {
-			return false
+		if leftErr != nil {
+			return false, leftErr
+		}
+		if rightErr != nil {
+			return false, rightErr
 		}
 		comparison := p.compareWindowOrderValues(order, leftValue, rightValue)
 		if comparison != 0 {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func (p *relationalSelectPlan) compareWindowOrderValues(order relationalWindowOrder, left, right exprValue) int {
@@ -1473,29 +2212,50 @@ func (p *relationalSelectPlan) windowOffsetValue(rows []relationalResultRow, par
 	if err != nil {
 		return exprValue{}, err
 	}
-	target := windowOffsetTarget(position, offset, function.name)
-	if target >= 0 && target < len(partition) {
+	target, found := windowOffsetTarget(position, offset, function.name)
+	if found && target < len(partition) {
 		return p.windowExpressionValue(rows[partition[target]], arguments[0])
 	}
 	return p.windowOffsetDefault(arguments, rows[partition[position]].source)
 }
 
-func windowOffset(arguments []string) (int, error) {
+func windowOffset(arguments []string) (uint64, error) {
 	if len(arguments) == 1 {
 		return 1, nil
 	}
-	value, err := evaluateScalar(arguments[1])
-	if err != nil || value.kind != valueInt || value.i < 0 {
-		return 0, sqlFailure{1064, "42000", "invalid window offset"}
+	offset, valid := windowUnsignedIntegerLiteral(arguments[1])
+	if !valid {
+		return 0, sqlFailure{1210, "HY000", "Incorrect arguments to " + "LAG or LEAD"}
 	}
-	return int(value.i), nil
+	return offset, nil
 }
 
-func windowOffsetTarget(position, offset int, name string) int {
-	if name == "LEAD" {
-		return position + offset
+func windowUnsignedIntegerLiteral(expression string) (uint64, bool) {
+	value := strings.TrimSpace(expression)
+	if value == "" {
+		return 0, false
 	}
-	return position - offset
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	return parsed, err == nil && parsed <= uint64(math.MaxInt64)+1
+}
+
+func windowOffsetTarget(position int, offset uint64, name string) (int, bool) {
+	if name == "LEAD" {
+		target := uint64(position) + offset
+		if target > uint64(maxIntValue()) {
+			return 0, false
+		}
+		return int(target), true
+	}
+	if offset > uint64(position) {
+		return 0, false
+	}
+	return position - int(offset), true
 }
 
 func (p *relationalSelectPlan) windowOffsetDefault(arguments []string, row relationRow) (exprValue, error) {
@@ -1507,7 +2267,7 @@ func (p *relationalSelectPlan) windowOffsetDefault(arguments []string, row relat
 
 func (p *relationalSelectPlan) windowPositionalValue(rows []relationalResultRow, partition []int, position int, function relationalWindowFunction) (exprValue, error) {
 	arguments := splitCSV(function.argument)
-	if len(arguments) == 0 || len(arguments) > 2 {
+	if len(arguments) == 0 || len(arguments) > 2 || (function.name != "NTH_VALUE" && len(arguments) != 1) {
 		return exprValue{}, sqlFailure{1064, "42000", "invalid window arguments"}
 	}
 	frame, err := p.windowFrameIndexes(rows, partition, position, function.spec)
@@ -1542,9 +2302,12 @@ func nthWindowTarget(arguments []string, frameLength int) (int, bool, error) {
 	if len(arguments) != 2 {
 		return 0, false, sqlFailure{1064, "42000", "invalid NTH_VALUE arguments"}
 	}
-	value, err := evaluateScalar(arguments[1])
-	if err != nil || value.kind != valueInt || value.i < 1 || value.i > int64(frameLength) {
+	value, valid := windowUnsignedIntegerLiteral(arguments[1])
+	if !valid || value == 0 {
+		return 0, false, sqlFailure{1210, "HY000", "incorrect arguments to NTH_VALUE"}
+	}
+	if value > uint64(frameLength) {
 		return 0, false, nil
 	}
-	return int(value.i - 1), true, nil
+	return int(value - 1), true, nil
 }

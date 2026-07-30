@@ -48,7 +48,7 @@ func parseProjectionItem(item string, columns []relationColumn, context *compose
 	if query, ok := scalarSubquerySQL(expression); ok {
 		return subqueryProjection(query, expression, alias, columns, context, outer)
 	}
-	if projection, found, err := parseWindowProjection(expression, alias, columns); found {
+	if projection, found, err := parseAnyWindowProjection(expression, alias, columns); found {
 		return projection, err
 	}
 	if projection, found, err := parseAggregateProjection(expression, alias, columns); found {
@@ -63,6 +63,13 @@ func parseProjectionItem(item string, columns []relationColumn, context *compose
 		return projection, nil
 	}
 	return computedProjection(expression, alias, columns, outer)
+}
+
+func parseAnyWindowProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
+	if projection, found, err := parseWindowProjection(expression, alias, columns); found {
+		return projection, true, err
+	}
+	return parseComposedWindowProjection(expression, alias, columns)
 }
 
 func subqueryProjection(query, expression, alias string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, error) {
