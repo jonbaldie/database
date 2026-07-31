@@ -20,6 +20,9 @@ type Select struct {
 	Distinct              bool
 	Orders                []Order
 	Limit                 Limit
+	LockingRead           bool
+	LockMode              string
+	LockWaitPolicy        string
 }
 
 // Join records one source relation and its SQL join predicate.
@@ -59,12 +62,15 @@ type Limit struct {
 	Count   int
 }
 
-// Write describes a supported insert, update, or delete to be explained.
+// Write describes a supported mutation to be explained.
 type Write struct {
-	Kind      string // insert, update, or delete
-	Table     Table
-	ValueRows int    // number of literal rows, for insert
-	Where     string // predicate fragment without the WHERE keyword, for update and delete
+	Kind        string // insert, replace, update, or delete
+	Table       Table
+	ValueRows   int    // number of literal rows, for insert
+	Where       string // predicate fragment without the WHERE keyword, for update and delete
+	Constraints []Constraint
+	Source      *Operator // planned INSERT ... SELECT input, when present
+	Upsert      bool
 }
 
 // PlanSelect returns the plan-only explanation document for a supported read.
@@ -72,8 +78,8 @@ func PlanSelect(serverVersion, sql, currentDatabase string, read Select) *Docume
 	statement := Statement{
 		Kind:        "select",
 		SQL:         sql,
-		ReadOnly:    true,
-		LockingRead: false,
+		ReadOnly:    !read.LockingRead,
+		LockingRead: read.LockingRead,
 	}
 	return newDocument(serverVersion, currentDatabase, statement, selectPlan(read))
 }
@@ -193,6 +199,9 @@ func selectOutput(read Select, tables []Table, root *Operator) *Operator {
 	}
 	if read.Limit.Present {
 		root = limitOperator(read.Limit, root)
+	}
+	if read.LockingRead {
+		root = lockInput(root, read.LockMode, read.LockWaitPolicy)
 	}
 	return root
 }
@@ -337,10 +346,27 @@ func limitOperator(limit Limit, child *Operator) *Operator {
 	}
 }
 
+func lockInput(child *Operator, mode, waitPolicy string) *Operator {
+	return &Operator{
+		Kind:      "lock",
+		Summary:   "Take row locks for the returned rows.",
+		Operation: lockOperation{Mode: mode, WaitPolicy: waitPolicy},
+		Estimates: child.Estimates,
+		Output:    child.Output,
+		Warnings:  []Warning{},
+		Children:  []*Operator{child},
+	}
+}
+
 func writePlan(write Write) *Operator {
 	switch write.Kind {
 	case "insert":
+		if write.Upsert {
+			return upsertPlan(write)
+		}
 		return insertPlan(write)
+	case "replace":
+		return replacePlan(write)
 	case "delete":
 		return mutationOverScan(write, "delete", "Delete the matching rows from the table.")
 	default:
@@ -349,7 +375,8 @@ func writePlan(write Write) *Operator {
 }
 
 func insertPlan(write Write) *Operator {
-	source := literalRows(write.Table, write.ValueRows)
+	source := writeSource(write)
+	source = constraintChecks(write, source)
 	root := &Operator{
 		Kind:      "mutation",
 		Summary:   "Insert the submitted rows into the table.",
@@ -363,11 +390,51 @@ func insertPlan(write Write) *Operator {
 	return root
 }
 
+func upsertPlan(write Write) *Operator {
+	source := constraintChecks(write, writeSource(write))
+	return &Operator{
+		Kind:      "mutation",
+		Summary:   "Insert each submitted row or update its conflicting unique-key row.",
+		Operation: mutationOperation{MutationType: "upsert"},
+		Objects:   []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, source.Estimates.Rows, source.Estimates.Cost),
+		Output:    emptyOutput(), Warnings: []Warning{}, Children: []*Operator{source},
+	}
+}
+
+func replacePlan(write Write) *Operator {
+	source := constraintChecks(write, writeSource(write))
+	rows, cost := source.Estimates.Rows, source.Estimates.Cost
+	deleteRows := &Operator{
+		Kind: "mutation", Summary: "Delete rows that conflict with a primary or unique key.",
+		Operation: mutationOperation{MutationType: "delete"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{},
+	}
+	insertRows := &Operator{
+		Kind: "mutation", Summary: "Insert the replacement rows after conflict deletion.",
+		Operation: mutationOperation{MutationType: "insert"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{},
+	}
+	return &Operator{
+		Kind: "mutation", Summary: "Replace rows with delete-and-insert semantics for conflicting keys.",
+		Operation: mutationOperation{MutationType: "replace"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{source, deleteRows, insertRows},
+	}
+}
+
+func writeSource(write Write) *Operator {
+	if write.Source != nil {
+		return write.Source
+	}
+	return literalRows(write.Table, write.ValueRows)
+}
+
 func mutationOverScan(write Write, mutationType, summary string) *Operator {
 	source := tableScan(write.Table)
 	if write.Where != "" {
 		source = whereFilter(write.Where, source)
 	}
+	source = constraintChecks(write, source)
 	return &Operator{
 		Kind:      "mutation",
 		Summary:   summary,
@@ -380,7 +447,23 @@ func mutationOverScan(write Write, mutationType, summary string) *Operator {
 	}
 }
 
+func constraintChecks(write Write, child *Operator) *Operator {
+	for index := len(write.Constraints) - 1; index >= 0; index-- {
+		constraint := write.Constraints[index]
+		child = &Operator{
+			Kind: "constraint_check", Summary: "Check the " + constraint.Name + " constraint.",
+			Operation: constraintCheckOperation{ConstraintType: constraint.Type, ConstraintName: constraint.Name},
+			Objects:   []ObjectReference{{Type: "constraint", Database: constraint.Table.Database, Table: constraint.Table.Name, Name: constraint.Name}},
+			Estimates: child.Estimates, Output: child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+		}
+	}
+	return child
+}
+
 func tableScan(table Table) *Operator {
+	if table.Access != nil {
+		return btreeIndexScan(table)
+	}
 	rows := float64(table.RowCount)
 	return &Operator{
 		Kind:      "scan",
@@ -389,6 +472,45 @@ func tableScan(table Table) *Operator {
 		Strategy:  &Strategy{Name: "full_table_scan", Summary: "Sequentially read all stored rows."},
 		Objects:   []ObjectReference{tableObject(table)},
 		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 1, PeakMemoryBytes: 0},
+		Output:    columnOutput(table, table.Columns),
+		Warnings:  []Warning{},
+		Children:  []*Operator{},
+	}
+}
+
+func btreeIndexScan(table Table) *Operator {
+	rows := float64(table.RowCount)
+	access := table.Access
+	objects := []ObjectReference{tableObject(table), {Type: "index", Database: table.Database, Table: table.Name, Name: access.Name}}
+	reason := CodeSummary{Code: "INDEX_SUPPORTS_QUERY", Summary: "The index supports the query filter or ordering."}
+	if access.Forced {
+		reason = CodeSummary{Code: "INDEX_HINT", Summary: "The statement requires this index through an index hint."}
+	}
+	strategy := &Strategy{Name: "btree_index_scan", Summary: "Traverse the selected B-tree index in key order."}
+	summary := "Read rows through the selected B-tree index."
+	if access.Covering {
+		strategy = &Strategy{Name: "btree_covering_index_scan", Summary: "Traverse a B-tree index that contains every projected value."}
+		summary = "Read the projected values through the selected covering B-tree index."
+	}
+	return &Operator{
+		Kind:      "scan",
+		Summary:   summary,
+		Operation: scanOperation{Source: "index", Direction: "forward"},
+		Strategy:  strategy,
+		Objects:   objects,
+		Choice: &Choice{Selected: access.Name, Reason: reason, Alternatives: []Alternative{{
+			Name: "full_table_scan", EstimatedCost: rows + 1,
+			Reason: CodeSummary{Code: "INDEX_NOT_SELECTED", Summary: "The alternative reads rows in stored table order."},
+		}}},
+		Statistics: []Statistic{{
+			Object: tableObject(table), Kind: "catalog_row_count", CollectedAt: access.CollectedAt,
+			ObservedRows: table.RowCount, Stale: false, Limitations: []string{"The statistic records the current catalog snapshot only."},
+		}},
+		Opportunities: []Opportunity{{
+			Code: "INDEX_COVERAGE", Summary: "A covering index can reduce table-row reads.",
+			Evidence: []string{"The selected path returns rows from the table after the index traversal."},
+		}},
+		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 2, PeakMemoryBytes: 0},
 		Output:    columnOutput(table, table.Columns),
 		Warnings:  []Warning{},
 		Children:  []*Operator{},
