@@ -41,7 +41,7 @@ func initializeCommand(invocation commandInvocation) int {
 }
 
 func operatorCommandHandler(invocation commandInvocation) int {
-	return operatorCommand(invocation.args, invocation.stdout)
+	return operatorCommand(invocation.args, invocation.stdout, invocation.stderr)
 }
 
 func configCommandHandler(invocation commandInvocation) int {

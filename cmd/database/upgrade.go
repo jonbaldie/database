@@ -44,16 +44,28 @@ type dataVersion struct {
 
 var upgradeAvailableSpace = availableUpgradeSpace
 
-func upgradeCommand(args []string, stdout io.Writer) int {
-	request, err := parseUpgradeRequest(args)
+func upgradeCommand(args []string, stdout, stderr io.Writer) int {
+	output, filtered, err := parseCommandOutput(args, true)
 	if err != nil {
-		return writeOperatorFailure(stdout, "upgrade", newOperationID(), "invalid_input", 2, err.Error())
+		return newOperationReporter("upgrade", commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", err.Error(), nil)
 	}
+	if !containsOutputControl(args) {
+		output.result = "json"
+		output.legacy = true
+	}
+	reporter := newOperationReporter("upgrade", output, stdout, stderr)
+	reporter.progress("preflight")
+	request, err := parseUpgradeRequest(filtered)
+	if err != nil {
+		return reporter.failure("invalid_input", "", err.Error(), nil)
+	}
+	reporter.progress("upgrading")
 	err, exitClass := executeUpgrade(request)
 	if err != nil {
-		return writeOperatorFailure(stdout, "upgrade", newOperationID(), exitClass, operatorExitCode(exitClass), err.Error())
+		return reporter.failure(exitClass, "", err.Error(), nil)
 	}
-	return writeOperatorResult(stdout, "upgrade", newOperationID(), true, "success", "")
+	reporter.progress("validating")
+	return reporter.success(nil)
 }
 
 func parseUpgradeRequest(args []string) (upgradeRequest, error) {

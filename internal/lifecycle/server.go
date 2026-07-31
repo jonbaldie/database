@@ -169,13 +169,8 @@ func unsafeListenerWarning(opts Options) (Warning, bool) {
 	if !opts.MySQLEnabled || opts.MySQLAddress == "" || opts.TLSCertFile != "" || opts.TLSKeyFile != "" {
 		return Warning{}, false
 	}
-	host, _, err := net.SplitHostPort(opts.MySQLAddress)
-	if err == nil {
-		if ip := net.ParseIP(host); ip != nil {
-			if ip.IsLoopback() || (ip.To4() != nil && ip.To4().IsLoopback()) {
-				return Warning{}, false
-			}
-		}
+	if listenerIsLoopback(opts.MySQLAddress) {
+		return Warning{}, false
 	}
 	return Warning{
 		Code:     "UNSAFE_NON_TLS_LISTENER",
@@ -183,6 +178,15 @@ func unsafeListenerWarning(opts Options) (Warning, bool) {
 		Summary:  "MySQL listener is reachable beyond loopback without TLS",
 		Context:  map[string]string{"address": opts.MySQLAddress, "tls": "disabled"},
 	}, true
+}
+
+func listenerIsLoopback(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.To4() != nil && ip.To4().IsLoopback())
 }
 
 func (s *server) awaitStop(ctx context.Context) {

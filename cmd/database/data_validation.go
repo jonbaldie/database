@@ -34,21 +34,32 @@ type dataValidationReport struct {
 	Directory string
 }
 
-func dataCommand(args []string, stdout io.Writer) int {
+func dataCommand(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		return writeOperatorFailure(stdout, "data", newOperationID(), "invalid_input", 2, "data requires validate or inspect")
+		return newOperationReporter("data", commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", "data requires validate or inspect", nil)
 	}
-	request, err := parseDataRequest(args[1:])
+	operation := "data " + args[0]
+	output, filtered, err := parseCommandOutput(args[1:], true)
 	if err != nil {
-		return writeOperatorFailure(stdout, "data "+args[0], newOperationID(), "invalid_input", 2, err.Error())
+		return newOperationReporter(operation, commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", err.Error(), nil)
+	}
+	if !containsOutputControl(args) {
+		output.result = "json"
+		output.legacy = true
+	}
+	reporter := newOperationReporter(operation, output, stdout, stderr)
+	reporter.progress("reading")
+	request, err := parseDataRequest(filtered)
+	if err != nil {
+		return reporter.failure("invalid_input", "", err.Error(), nil)
 	}
 	switch args[0] {
 	case "validate":
-		return runDataValidation(request, stdout)
+		return runDataValidation(request, reporter)
 	case "inspect":
-		return runDataInspection(request, stdout)
+		return runDataInspection(request, reporter)
 	default:
-		return writeOperatorFailure(stdout, "data "+args[0], newOperationID(), "invalid_input", 2, fmt.Sprintf("unsupported data operation %q", args[0]))
+		return reporter.failure("invalid_input", "", fmt.Sprintf("unsupported data operation %q", args[0]), nil)
 	}
 }
 
@@ -67,24 +78,24 @@ func parseDataRequest(args []string) (dataRequest, error) {
 	return dataRequest{directory: directory}, nil
 }
 
-func runDataValidation(request dataRequest, stdout io.Writer) int {
+func runDataValidation(request dataRequest, reporter *operationReporter) int {
 	report, err := validateDataDirectory(request.directory)
 	if err != nil {
-		return writeDataResult(stdout, "data validate", false, "precondition", err.Error(), nil)
+		return reporter.failure("precondition", "", err.Error(), nil)
 	}
 	details := dataValidationDetails(report)
 	if len(report.Findings) != 0 {
-		return writeDataResult(stdout, "data validate", false, "invalid_artifact", "durable data validation found damage", details)
+		return reporter.failure("invalid_artifact", "", "durable data validation found damage", details)
 	}
-	return writeDataResult(stdout, "data validate", true, "success", "", details)
+	return reporter.success(details)
 }
 
-func runDataInspection(request dataRequest, stdout io.Writer) int {
+func runDataInspection(request dataRequest, reporter *operationReporter) int {
 	details, err := inspectDataDirectory(request.directory)
 	if err != nil {
-		return writeDataResult(stdout, "data inspect", false, "precondition", err.Error(), nil)
+		return reporter.failure("precondition", "", err.Error(), nil)
 	}
-	return writeDataResult(stdout, "data inspect", true, "success", "", details)
+	return reporter.success(details)
 }
 
 func writeDataResult(stdout io.Writer, operation string, success bool, exitClass, diagnostic string, details map[string]any) int {

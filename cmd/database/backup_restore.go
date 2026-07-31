@@ -46,24 +46,53 @@ type backupArchive struct {
 	files    map[string][]byte
 }
 
-func backupRestoreCommand(args []string, stdout io.Writer) int {
+func backupRestoreCommand(args []string, stdout, stderr io.Writer) int {
 	operation := operatorName(args)
-	operationID := newOperationID()
-	err, exitClass := executeBackupRestore(args)
+	output, filtered, err := parseCommandOutput(args, true)
 	if err != nil {
-		return writeOperatorFailure(stdout, operation, operationID, exitClass, operatorExitCode(exitClass), err.Error())
+		return newOperationReporter(operation, commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", err.Error(), nil)
 	}
-	return writeOperatorResult(stdout, operation, operationID, true, "success", "")
+	// Keep the original machine-readable output for callers that did not opt
+	// into the v1 human default. Explicit --result always wins.
+	if !containsOutputControl(args) {
+		output.result = "json"
+		output.legacy = true
+	}
+	reporter := newOperationReporter(operation, output, stdout, stderr)
+	reportBackupRestoreProgress(reporter, operation)
+	err, exitClass := executeBackupRestore(filtered, reporter)
+	if err != nil {
+		if reporter.output.legacy && strings.HasPrefix(operation, "backup inspect") && exitClass == "invalid_artifact" {
+			exitClass = "operation_failed"
+		}
+		return reporter.failure(exitClass, "", err.Error(), nil)
+	}
+	return reporter.success(nil)
 }
 
-func executeBackupRestore(args []string) (error, string) {
+func reportBackupRestoreProgress(reporter *operationReporter, operation string) {
+	progress := map[string][]string{
+		"backup inspect": {"reading"},
+		"backup create":  {"preflight", "capturing"},
+		"restore":        {"preflight", "restoring"},
+	}[operation]
+	for _, phase := range progress {
+		reporter.progress(phase)
+	}
+}
+
+func executeBackupRestore(args []string, reporter *operationReporter) (error, string) {
 	if len(args) == 0 {
 		return errors.New("backup or restore requires an operation"), "invalid_input"
 	}
 	if args[0] == "restore" {
 		return restoreCommand(args[1:])
 	}
-	return backupCommand(args[1:])
+	err, exitClass := backupCommand(args[1:])
+	if err != nil && len(args) > 1 && args[1] == "inspect" && exitClass == "operation_failed" {
+		exitClass = "invalid_artifact"
+	}
+	return err, exitClass
 }
 
 func backupCommand(args []string) (error, string) {
@@ -102,14 +131,33 @@ func backupInspectCommand(args []string) (error, string) {
 }
 
 func restoreCommand(args []string) (error, string) {
-	options, err := operatorOptions(args, "--input", "--data-dir")
+	options, err := operatorOptions(args, "--input", "--backup", "--data-dir", "--data-directory")
 	if err != nil {
 		return err, "invalid_input"
 	}
-	if options["--input"] == "" || options["--data-dir"] == "" {
-		return errors.New("restore requires --input and --data-dir"), "invalid_input"
+	if err := normalizeRestoreOptions(options); err != nil {
+		return err, "invalid_input"
 	}
 	return restoreBackup(options["--input"], options["--data-dir"]), "operation_failed"
+}
+
+func normalizeRestoreOptions(options map[string]string) error {
+	if options["--input"] != "" && options["--backup"] != "" {
+		return errors.New("restore backup may be specified once")
+	}
+	if options["--data-dir"] != "" && options["--data-directory"] != "" {
+		return errors.New("restore data directory may be specified once")
+	}
+	if options["--input"] == "" {
+		options["--input"] = options["--backup"]
+	}
+	if options["--data-dir"] == "" {
+		options["--data-dir"] = options["--data-directory"]
+	}
+	if options["--input"] == "" || options["--data-dir"] == "" {
+		return errors.New("restore requires --input and --data-dir")
+	}
+	return nil
 }
 
 func createBackup(directory, output string) error {
