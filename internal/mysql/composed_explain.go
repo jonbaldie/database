@@ -96,9 +96,14 @@ func (s *textStatementExecutor) explainSelectTerm(context *composedQueryContext,
 	}
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	if keywordAt(expression, "from") < 0 {
+		wasRendering := context.rendering
+		context.rendering = true
+		defer func() { context.rendering = wasRendering }()
+		termKey := context.selectRuntimeKey(query)
 		items := splitCSV(expression)
 		root := queryexplanation.PlanScalarSelect(s.server.config.Version, query, s.database, items).Plan
-		return s.decorateSubqueryText(context, root, expression, outer, "derived")
+		root.RuntimeKey = queryexplanation.RuntimeOperatorKey(termKey, "values", 0)
+		return s.decorateSubqueryText(context, root, expression, outer, "derived", termKey)
 	}
 	executor := *context.executor
 	executor.composed = context
@@ -169,27 +174,28 @@ func (s *textStatementExecutor) decorateProjectionSubqueries(context *composedQu
 		if projection.subquery == "" {
 			continue
 		}
-		input, err := s.explainComposedBody(context, projection.subquery, outer)
+		input, err := s.explainComposedBody(context.withRuntimePrefix(projection.runtimeKey), projection.subquery, outer)
 		if err != nil {
 			return nil, err
 		}
-		root = s.composedInputOperator(context, root, input, projection.subquery, outer, "derived", projection.expression)
+		root = s.composedInputOperator(context, root, input, projection.subquery, outer, "derived", projection.expression, projection.runtimeKey)
 	}
 	return root, nil
 }
 
-func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryContext, root *queryexplanation.Operator, text string, outer *outerRelationScope, clause string) (*queryexplanation.Operator, error) {
-	for _, query := range parenthesizedSelectQueries(text) {
+func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryContext, root *queryexplanation.Operator, text string, outer *outerRelationScope, clause string, runtimeBases ...string) (*queryexplanation.Operator, error) {
+	for index, query := range parenthesizedSelectQueries(text) {
 		plannedQuery := query
 		if containsExistsSubquery(text, query) {
 			plannedQuery = existsProjectionQuery(query)
 		}
-		input, err := s.explainComposedBody(context, plannedQuery, outer)
+		runtimeKey := subqueryRuntimePrefix(runtimeBases, index)
+		input, err := s.explainComposedBody(context.withRuntimePrefix(runtimeKey), plannedQuery, outer)
 		if err != nil {
 			return nil, err
 		}
 		fragment := "(" + query + ")"
-		root = s.composedInputOperator(context, root, input, plannedQuery, outer, clause, fragment)
+		root = s.composedInputOperator(context, root, input, plannedQuery, outer, clause, fragment, runtimeKey)
 	}
 	return root, nil
 }
@@ -200,11 +206,18 @@ func containsExistsSubquery(text, query string) bool {
 	return strings.Contains(normalized, "exists ("+candidate+")")
 }
 
-func (s *textStatementExecutor) composedInputOperator(context *composedQueryContext, root, input *queryexplanation.Operator, query string, outer *outerRelationScope, clause, fragment string) *queryexplanation.Operator {
+func (s *textStatementExecutor) composedInputOperator(context *composedQueryContext, root, input *queryexplanation.Operator, query string, outer *outerRelationScope, clause, fragment string, runtimePrefix string) *queryexplanation.Operator {
 	if subqueryIsCorrelated(context, query, outer) {
-		return queryexplanation.DependentInput(root, input, clause, fragment, composedSubqueryRuntimeKey(query, true))
+		return queryexplanation.DependentInput(root, input, clause, fragment, scalarSubqueryRuntimeKey(query, true, []string{runtimePrefix}))
 	}
-	return queryexplanation.MaterializedInput(root, input, "subquery", clause, fragment, composedSubqueryRuntimeKey(query, false))
+	return queryexplanation.MaterializedInput(root, input, "subquery", clause, fragment, scalarSubqueryRuntimeKey(query, false, []string{runtimePrefix}))
+}
+
+func subqueryRuntimePrefix(bases []string, index int) string {
+	if len(bases) == 0 || bases[0] == "" {
+		return ""
+	}
+	return queryexplanation.RuntimeOperatorKey(bases[0], "subquery", index)
 }
 
 func subqueryIsCorrelated(context *composedQueryContext, query string, outer *outerRelationScope) bool {

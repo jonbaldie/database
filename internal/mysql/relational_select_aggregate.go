@@ -637,7 +637,8 @@ func parseComposedWindowProjection(expression, alias string, columns []relationC
 	window := &windows[0].function
 	return []relationalProjection{{
 		expression: expression, name: projectionName, alias: alias, column: -1, computed: true,
-		metadata: metadata, window: window, windowExpr: windowExpression, windowParts: windows,
+		metadata: metadata, window: window,
+		relationalProjectionWindow: relationalProjectionWindow{windowExpr: windowExpression, windowParts: windows},
 	}}, true, nil
 }
 
@@ -1776,7 +1777,7 @@ func (p *relationalSelectPlan) sortWindowPartitions(rows []relationalResultRow, 
 		}
 	}
 	if p.runtime != nil {
-		p.runtime.record(lastOperatorID(p.runtime.sorts), len(rows), len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
+		p.runtime.record(p.runtime.windowSortID(spec), len(rows), len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
 	}
 	return nil
 }

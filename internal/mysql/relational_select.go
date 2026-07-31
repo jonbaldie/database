@@ -56,6 +56,7 @@ type selectRuntimeBinding struct {
 	window       int
 	distinct     int
 	sorts        []int
+	windowSorts  map[string]int
 	limit        int
 }
 
@@ -92,25 +93,39 @@ func (b *selectRuntimeBinding) bindFilters(plan *relationalSelectPlan) {
 }
 
 func (b *selectRuntimeBinding) bindSorts(plan *relationalSelectPlan) {
-	for index := 0; index < runtimeSortCount(plan); index++ {
-		id := runtimeOperatorID(b.metrics, plan.runtimeKey, "sort", index)
-		if id != 0 {
-			b.sorts = append(b.sorts, id)
-		}
+	index := 0
+	if len(plan.order) > 0 {
+		b.sorts = append(b.sorts, runtimeOperatorID(b.metrics, plan.runtimeKey, "sort", index))
+		index++
+	}
+	windowSorts := runtimeWindowSorts(plan)
+	if len(windowSorts) == 0 {
+		return
+	}
+	b.windowSorts = make(map[string]int, len(windowSorts))
+	for window := len(windowSorts) - 1; window >= 0; window-- {
+		b.windowSorts[relationalWindowSpecKey(windowSorts[window])] = runtimeOperatorID(b.metrics, plan.runtimeKey, "sort", index)
+		index++
 	}
 }
 
-func runtimeSortCount(plan *relationalSelectPlan) int {
-	count := 0
-	if len(plan.order) > 0 {
-		count++
-	}
-	for _, definition := range windowExplanationDefinitions(plan.projection) {
-		if len(definition.Orders) > 0 {
-			count++
+func runtimeWindowSorts(plan *relationalSelectPlan) []relationalWindowSpec {
+	keys := make(map[string]bool)
+	result := make([]relationalWindowSpec, 0)
+	for _, projection := range plan.projection {
+		for _, function := range projectionWindowFunctions(projection) {
+			if len(function.spec.order) == 0 {
+				continue
+			}
+			key := relationalWindowSpecKey(function.spec)
+			if keys[key] {
+				continue
+			}
+			keys[key] = true
+			result = append(result, function.spec)
 		}
 	}
-	return count
+	return result
 }
 
 func runtimeOperatorID(metrics *queryexplanation.RuntimeMetrics, termKey, kind string, index int) int {
@@ -160,6 +175,13 @@ func (b *selectRuntimeBinding) recordMaterialize(key string, rows, bytes int, el
 	b.record(b.metrics.OperatorID(key), 0, rows, 0, 0, 0, bytes, elapsed)
 }
 
+func (b *selectRuntimeBinding) windowSortID(spec relationalWindowSpec) int {
+	if b == nil {
+		return 0
+	}
+	return b.windowSorts[relationalWindowSpecKey(spec)]
+}
+
 type relationalTableSource struct {
 	namespace      string
 	name           string
@@ -204,19 +226,29 @@ type relationColumn struct {
 }
 
 type relationalProjection struct {
-	expression  string
-	name        string
-	alias       string
-	column      int
-	scalar      bool
-	computed    bool
-	subquery    string
-	context     *composedQueryContext
-	value       exprValue
-	metadata    columnMetadata
-	outer       *outerRelationScope
-	aggregate   *relationalAggregate
-	window      *relationalWindowFunction
+	relationalProjectionRuntime
+	relationalProjectionWindow
+	expression string
+	name       string
+	alias      string
+	column     int
+	scalar     bool
+	computed   bool
+	subquery   string
+	context    *composedQueryContext
+	value      exprValue
+	metadata   columnMetadata
+	outer      *outerRelationScope
+	aggregate  *relationalAggregate
+	window     *relationalWindowFunction
+}
+
+type relationalProjectionRuntime struct {
+	runtimeKey  string
+	subquerySet bool
+}
+
+type relationalProjectionWindow struct {
 	windowExpr  string
 	windowParts []relationalComposedWindow
 }
@@ -456,9 +488,12 @@ func lockSkippedReturnedRows(plan *relationalSelectPlan, rows []relationalResult
 var errStopRelationStream = errors.New("relational row stream complete")
 
 type relationalResultStream struct {
-	plan    *relationalSelectPlan
-	skipped int
-	emitted int
+	plan          *relationalSelectPlan
+	skipped       int
+	emitted       int
+	sourceRows    int
+	matchedRows   int
+	projectMemory int
 }
 
 func (p *relationalSelectPlan) streamingResult() *queryResult {
@@ -475,7 +510,21 @@ func (s *relationalResultStream) rows(yield func([]string, []bool) error) error 
 		}
 		return s.yieldRows(s.plan.shapeRows(rows), yield)
 	}
+	started := time.Now()
+	defer func() { s.recordRuntime(time.Since(started)) }()
 	return s.incrementalRows(yield)
+}
+
+func (s *relationalResultStream) recordRuntime(elapsed time.Duration) {
+	if s.plan.runtime == nil {
+		return
+	}
+	if s.plan.where != nil {
+		s.plan.runtime.record(s.plan.runtime.whereFilter, s.sourceRows, s.matchedRows, s.sourceRows-s.matchedRows, 0, 0, 0, elapsed)
+	}
+	if !s.plan.allColumns {
+		s.plan.runtime.record(s.plan.runtime.project, s.matchedRows, s.emitted, 0, 0, 0, s.projectMemory, elapsed)
+	}
 }
 
 func (s *relationalResultStream) incrementalRows(yield func([]string, []bool) error) error {
@@ -492,10 +541,12 @@ func (s *relationalResultStream) incrementalRows(yield func([]string, []bool) er
 }
 
 func (s *relationalResultStream) yieldSourceRow(row relationRow, yield func([]string, []bool) error) error {
+	s.sourceRows++
 	matched, err := relationalRowMatches(s.plan.where, row)
 	if err != nil || !matched {
 		return err
 	}
+	s.matchedRows++
 	if s.plan.limit.present && s.skipped < s.plan.limit.offset {
 		s.skipped++
 		return nil
@@ -505,10 +556,11 @@ func (s *relationalResultStream) yieldSourceRow(row relationRow, yield func([]st
 		return err
 	}
 	values, nulls := s.outputRow(result)
+	s.emitted++
+	s.projectMemory += resultMemory([]relationalResultRow{result})
 	if err := yield(values, nulls); err != nil {
 		return err
 	}
-	s.emitted++
 	if s.plan.limit.present && s.emitted >= s.plan.limit.count {
 		return errStopRelationStream
 	}
@@ -567,13 +619,44 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	}
 	source.locking = locking
 	plan := &relationalSelectPlan{relationalSelectEnvironment: relationalSelectEnvironment{session: s.session, composed: s.composed, outer: outer}, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
+	plan.runtimeKey = s.composed.selectRuntimeKey(query)
 	if err := finishRelationalSelectPlan(plan, projectionText, groupText, havingText, windowText, orderText, limitText); err != nil {
 		return nil, err
 	}
-	plan.runtimeKey = s.composed.selectRuntimeKey(query)
+	assignSubqueryRuntimeKeys(plan)
+	if err := prepareScalarSubqueries(plan); err != nil {
+		return nil, err
+	}
 	plan.runtime = newSelectRuntimeBinding(plan.session.runtimeMetrics, plan)
 	plan.source.runtime = plan.runtime
 	return plan, nil
+}
+
+func assignSubqueryRuntimeKeys(plan *relationalSelectPlan) {
+	for index := range plan.projection {
+		if plan.projection[index].subquery == "" {
+			continue
+		}
+		plan.projection[index].runtimeKey = queryexplanation.RuntimeOperatorKey(plan.runtimeKey, "subquery", index)
+	}
+}
+
+func prepareScalarSubqueries(plan *relationalSelectPlan) error {
+	if plan.composed == nil || plan.composed.planning {
+		return nil
+	}
+	for index := range plan.projection {
+		projection := &plan.projection[index]
+		if projection.subquery == "" || !projection.scalar {
+			continue
+		}
+		value, _, err := executeScalarSubquery(projection.context, projection.subquery, nil, projection.runtimeKey)
+		if err != nil {
+			return err
+		}
+		projection.value, projection.subquerySet = value, true
+	}
+	return nil
 }
 
 func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, group, having, windows, order, limit string) error {

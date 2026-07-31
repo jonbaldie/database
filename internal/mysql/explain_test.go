@@ -132,6 +132,7 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 	executor := explainExecutor(t)
 	for _, statement := range []string{
 		"CREATE TABLE customers (id BIGINT, name VARCHAR(20))",
+		"CREATE TABLE empty_left (id BIGINT)",
 		"INSERT INTO customers (id, name) VALUES (7, 'Ada')",
 		"INSERT INTO orders (id, customer_id, total) VALUES (2, 7, 20)",
 	} {
@@ -140,13 +141,17 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 		}
 	}
 	queries := map[string]string{
-		"join":      "SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id",
-		"aggregate": "SELECT customer_id, COUNT(*) AS order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 0",
-		"window":    "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS ordinal FROM orders",
-		"cte":       "WITH order_ids AS (SELECT id FROM orders) SELECT id FROM order_ids UNION SELECT id FROM orders",
-		"derived":   "SELECT id FROM (SELECT id FROM orders) AS nested UNION SELECT id FROM orders",
-		"subquery":  "SELECT id, (SELECT id FROM orders LIMIT 1) AS other_id FROM orders UNION SELECT id, id FROM orders",
-		"set":       "SELECT id FROM orders UNION SELECT id FROM orders UNION SELECT id FROM orders ORDER BY id DESC LIMIT 2",
+		"join":       "SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id",
+		"aggregate":  "SELECT customer_id, COUNT(*) AS order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 0",
+		"window":     "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS by_id, ROW_NUMBER() OVER (ORDER BY total DESC) AS by_total FROM orders",
+		"cte":        "WITH order_ids AS (SELECT id FROM orders) SELECT id FROM order_ids UNION SELECT id FROM orders",
+		"derived":    "SELECT id FROM (SELECT id FROM orders) AS nested UNION SELECT id FROM orders",
+		"subquery":   "SELECT id, (SELECT id FROM orders LIMIT 1) AS first_id, (SELECT id FROM orders LIMIT 1) AS second_id FROM orders UNION SELECT id, id, id FROM orders",
+		"correlated": "SELECT outer_orders.id, (SELECT inner_orders.total FROM orders AS inner_orders WHERE inner_orders.id = outer_orders.id) AS matching_total FROM orders AS outer_orders",
+		"exists":     "SELECT id FROM orders WHERE EXISTS (SELECT id FROM orders)",
+		"scalar_set": "SELECT 1 UNION SELECT 2",
+		"right_join": "SELECT left_orders.id FROM empty_left AS left_orders RIGHT JOIN orders ON left_orders.id = orders.id",
+		"set":        "SELECT id FROM orders UNION SELECT id FROM orders UNION SELECT id FROM orders ORDER BY id DESC LIMIT 2",
 	}
 	for name, query := range queries {
 		t.Run(name, func(t *testing.T) {

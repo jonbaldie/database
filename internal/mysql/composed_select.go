@@ -15,13 +15,15 @@ import (
 const maximumComposedQueryDepth = 64
 
 type composedQueryContext struct {
-	executor    *relationExecutor
-	ctes        map[string]composedRelation
-	runtimeKeys map[string]int
-	depth       int
-	planning    bool
-	rendering   bool
-	strictScope bool
+	executor      *relationExecutor
+	ctes          map[string]composedRelation
+	runtimeKeys   map[string]int
+	runtimePrefix string
+	runtimeNext   int
+	depth         int
+	planning      bool
+	rendering     bool
+	strictScope   bool
 }
 
 type composedRelation struct {
@@ -75,7 +77,7 @@ func (context *composedQueryContext) child() (*composedQueryContext, error) {
 	}
 	executor := *context.executor
 	executor.streamRows = false
-	return &composedQueryContext{executor: &executor, ctes: context.ctes, runtimeKeys: context.runtimeKeys, depth: context.depth + 1, planning: context.planning, strictScope: context.strictScope}, nil
+	return &composedQueryContext{executor: &executor, ctes: context.ctes, runtimeKeys: context.runtimeKeys, runtimePrefix: context.runtimePrefix, runtimeNext: context.runtimeNext, depth: context.depth + 1, planning: context.planning, strictScope: context.strictScope}, nil
 }
 
 func (context *composedQueryContext) selectRuntimeKey(query string) string {
@@ -86,12 +88,35 @@ func (context *composedQueryContext) selectRuntimeKey(query string) string {
 	if context.planning && !context.rendering {
 		return base
 	}
+	if context.runtimePrefix != "" {
+		key := context.runtimePrefix + "/term/" + strconv.Itoa(context.runtimeNext)
+		context.runtimeNext++
+		return key
+	}
 	if context.runtimeKeys == nil {
 		context.runtimeKeys = make(map[string]int)
 	}
 	index := context.runtimeKeys[base]
 	context.runtimeKeys[base] = index + 1
 	return base + "/term/" + strconv.Itoa(index)
+}
+
+func cloneRuntimeKeys(source map[string]int) map[string]int {
+	copy := make(map[string]int, len(source))
+	for key, value := range source {
+		copy[key] = value
+	}
+	return copy
+}
+
+func (context *composedQueryContext) withRuntimePrefix(prefix string) *composedQueryContext {
+	if context == nil || prefix == "" {
+		return context
+	}
+	copy := *context
+	copy.runtimeKeys = cloneRuntimeKeys(context.runtimeKeys)
+	copy.runtimePrefix, copy.runtimeNext = prefix, 0
+	return &copy
 }
 
 func executeComposedSelect(context *composedQueryContext, query string, outer *outerRelationScope) (*queryResult, error) {
@@ -255,10 +280,12 @@ func executeSelectTerm(context *composedQueryContext, query string, outer *outer
 		}
 		return executeRelationalSelectContext(&executor, query, outer)
 	}
-	return executeScalarSelectContext(context, expression, outer)
+	return executeScalarSelectContext(context, query, expression, outer)
 }
 
-func executeScalarSelectContext(context *composedQueryContext, expression string, outer *outerRelationScope) (*queryResult, error) {
+func executeScalarSelectContext(context *composedQueryContext, query, expression string, outer *outerRelationScope) (*queryResult, error) {
+	started := time.Now()
+	termKey := context.selectRuntimeKey(query)
 	items := splitCSV(expression)
 	columns := make([]string, len(items))
 	row := make([]string, len(items))
@@ -269,7 +296,7 @@ func executeScalarSelectContext(context *composedQueryContext, expression string
 		if err != nil {
 			return nil, err
 		}
-		value, definition, err := evaluateComposedScalar(context, expression, outer)
+		value, definition, err := evaluateComposedScalar(context, expression, outer, queryexplanation.RuntimeOperatorKey(termKey, "subquery", index))
 		if err != nil {
 			return nil, err
 		}
@@ -285,12 +312,14 @@ func executeScalarSelectContext(context *composedQueryContext, expression string
 			row[index] = value.render()
 		}
 	}
-	return &queryResult{columns: columns, rows: [][]string{row}, nulls: [][]bool{nulls}, metadata: metadata}, nil
+	result := &queryResult{columns: columns, rows: [][]string{row}, nulls: [][]bool{nulls}, metadata: metadata}
+	recordScalarSelect(context, termKey, result, time.Since(started))
+	return result, nil
 }
 
-func evaluateComposedScalar(context *composedQueryContext, expression string, outer *outerRelationScope) (exprValue, columnMetadata, error) {
+func evaluateComposedScalar(context *composedQueryContext, expression string, outer *outerRelationScope, runtimePrefixes ...string) (exprValue, columnMetadata, error) {
 	if query, ok := scalarSubquerySQL(expression); ok {
-		return executeScalarSubquery(context, query, outer)
+		return executeScalarSubquery(context, query, outer, runtimePrefixes...)
 	}
 	value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
 		return outerRelationValue(name, outer)
@@ -301,24 +330,44 @@ func evaluateComposedScalar(context *composedQueryContext, expression string, ou
 	return value, scalarMetadata(expression, value.render(), value), nil
 }
 
-func executeScalarSubquery(context *composedQueryContext, query string, outer *outerRelationScope) (exprValue, columnMetadata, error) {
+func executeScalarSubquery(context *composedQueryContext, query string, outer *outerRelationScope, runtimePrefixes ...string) (exprValue, columnMetadata, error) {
 	if context == nil {
 		return exprValue{}, columnMetadata{}, unsupportedExpression()
 	}
+	result, runtimeKey, elapsed, err := runScalarSubquery(context, query, outer, runtimePrefixes)
+	if err != nil {
+		return exprValue{}, columnMetadata{}, err
+	}
+	recordScalarSubquery(context, runtimeKey, outer != nil, result, elapsed)
+	return scalarSubqueryValue(result)
+}
+
+func runScalarSubquery(context *composedQueryContext, query string, outer *outerRelationScope, runtimePrefixes []string) (*queryResult, string, time.Duration, error) {
 	started := time.Now()
 	child, err := context.child()
 	if err != nil {
-		return exprValue{}, columnMetadata{}, err
+		return nil, "", 0, err
+	}
+	runtimeKey := scalarSubqueryRuntimeKey(query, outer != nil, runtimePrefixes)
+	if len(runtimePrefixes) > 0 && runtimePrefixes[0] != "" {
+		child = child.withRuntimePrefix(runtimePrefixes[0])
 	}
 	result, err := executeComposedSelect(child, query, outer)
 	if err != nil {
-		return exprValue{}, columnMetadata{}, err
+		return nil, "", 0, err
 	}
-	if outer == nil {
-		recordMaterializedResult(context, composedSubqueryRuntimeKey(query, false), result, time.Since(started))
-	} else {
-		recordDependentSubquery(context, composedSubqueryRuntimeKey(query, true), result, time.Since(started))
+	return result, runtimeKey, time.Since(started), nil
+}
+
+func recordScalarSubquery(context *composedQueryContext, runtimeKey string, dependent bool, result *queryResult, elapsed time.Duration) {
+	if dependent {
+		recordDependentSubquery(context, runtimeKey, result, elapsed)
+		return
 	}
+	recordMaterializedResult(context, runtimeKey, result, elapsed)
+}
+
+func scalarSubqueryValue(result *queryResult) (exprValue, columnMetadata, error) {
 	if len(result.columns) != 1 {
 		return exprValue{}, columnMetadata{}, sqlFailure{1241, "21000", "operand should contain 1 column"}
 	}
@@ -332,6 +381,25 @@ func executeScalarSubquery(context *composedQueryContext, query string, outer *o
 	}
 	value, err := expressionValueFromMetadata(result.rows[0][0], definition)
 	return value, definition, err
+}
+
+func scalarSubqueryRuntimeKey(query string, dependent bool, runtimePrefixes []string) string {
+	if len(runtimePrefixes) > 0 && runtimePrefixes[0] != "" {
+		kind := "materialize"
+		if dependent {
+			kind = "dependent"
+		}
+		return runtimePrefixes[0] + "/" + kind
+	}
+	return composedSubqueryRuntimeKey(query, dependent)
+}
+
+func recordScalarSelect(context *composedQueryContext, termKey string, result *queryResult, elapsed time.Duration) {
+	if context == nil || context.executor == nil || context.executor.session == nil || result == nil {
+		return
+	}
+	metrics := context.executor.session.runtimeMetrics
+	metrics.RecordOperator(metrics.OperatorID(queryexplanation.RuntimeOperatorKey(termKey, "values", 0)), 0, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
 }
 
 func composedSubqueryRuntimeKey(query string, dependent bool) string {
@@ -418,6 +486,7 @@ func validateSubqueryScope(context *composedQueryContext, query string, outer *o
 var errExistsRow = errors.New("EXISTS found a row")
 
 func executeExistsSubquery(context *composedQueryContext, query string, outer *outerRelationScope) (bool, error) {
+	started := time.Now()
 	local, body, err := parseAndMaterializeCTEs(context, strings.TrimSpace(query), outer)
 	if err != nil {
 		return false, err
@@ -429,13 +498,35 @@ func executeExistsSubquery(context *composedQueryContext, query string, outer *o
 		return false, err
 	}
 	if result.stream == nil {
-		return len(result.rows) > 0, nil
+		found := len(result.rows) > 0
+		recordExistsSubquery(context, existsProjectionQuery(query), outer != nil, found, time.Since(started))
+		return found, nil
 	}
 	err = result.stream(func([]string, []bool) error { return errExistsRow })
 	if errors.Is(err, errExistsRow) {
+		recordExistsSubquery(context, existsProjectionQuery(query), outer != nil, true, time.Since(started))
 		return true, nil
 	}
+	if err == nil {
+		recordExistsSubquery(context, existsProjectionQuery(query), outer != nil, false, time.Since(started))
+	}
 	return false, err
+}
+
+func recordExistsSubquery(context *composedQueryContext, query string, dependent, found bool, elapsed time.Duration) {
+	if context == nil || context.executor == nil || context.executor.session == nil {
+		return
+	}
+	inputRows := 0
+	if dependent {
+		inputRows = 1
+	}
+	outputRows := 0
+	if found {
+		outputRows = 1
+	}
+	metrics := context.executor.session.runtimeMetrics
+	metrics.RecordOperator(metrics.OperatorID(composedSubqueryRuntimeKey(query, dependent)), inputRows, outputRows, 0, 0, 0, 0, elapsed)
 }
 
 func existsProjectionQuery(query string) string {

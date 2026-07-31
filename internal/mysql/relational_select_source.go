@@ -731,6 +731,9 @@ func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth,
 			runtime.recordJoin(leftTables-1, inputRows, outputRows, outputBytes, time.Since(started))
 			return nil
 		}
+		if inputRows == 0 {
+			runtime.recordScan(leftTables, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(started))
+		}
 		err := yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, leftTables, func(row relationRow) error {
 			outputRows++
 			outputBytes += relationRowMemory(row)

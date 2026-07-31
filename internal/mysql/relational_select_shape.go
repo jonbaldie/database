@@ -84,13 +84,6 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 	}
 	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
 	correlated := composedQueryIsCorrelated(context, query, scope)
-	value := exprValue{}
-	if !correlated && !context.planning {
-		value, metadata, err = executeScalarSubquery(context, query, nil)
-		if err != nil {
-			return nil, err
-		}
-	}
 	name := expression
 	if alias != "" {
 		name = alias
@@ -99,7 +92,7 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 	metadata.flags &^= mysqlNotNullFlag
 	return []relationalProjection{{
 		expression: expression, name: name, alias: alias, column: -1,
-		subquery: query, context: context, metadata: metadata, scalar: !correlated, value: value,
+		subquery: query, context: context, metadata: metadata, scalar: !correlated,
 	}}, nil
 }
 
@@ -248,10 +241,14 @@ func (p *relationalSelectPlan) projectValues(row relationRow, result *relational
 
 func (p *relationalSelectPlan) projectionValue(projection relationalProjection, row relationRow) (exprValue, error) {
 	if projection.subquery != "" && !projection.scalar {
-		value, _, err := executeScalarSubquery(projection.context, projection.subquery, &outerRelationScope{columns: p.source.columns, row: row, parent: p.outer})
+		value, _, err := executeScalarSubquery(projection.context, projection.subquery, &outerRelationScope{columns: p.source.columns, row: row, parent: p.outer}, projection.runtimeKey)
 		return value, err
 	}
 	if projection.scalar {
+		if projection.subquery != "" && !projection.subquerySet {
+			value, _, err := executeScalarSubquery(projection.context, projection.subquery, nil, projection.runtimeKey)
+			return value, err
+		}
 		return projection.value, nil
 	}
 	if projection.computed {
