@@ -63,6 +63,36 @@ and returns MySQL error `1213` and SQLSTATE `40001`. Connection cancellation
 rolls back its active transaction and releases its locks before later work can
 acquire them.
 
+## Execution resources and statement outcomes
+
+A statement starts with the server's `statement_timeout_ms`,
+`execution_memory_limit_bytes`, and `temporary_storage_limit_bytes` ceilings;
+the aggregate memory and temporary-storage ceilings bound all active statements
+together. The executor checks that context at command admission, catalog
+mutation publication and commit, row scans, lock waits, ordered-sort spill and
+result delivery. An ordinary ordered read may write sorted runs to private
+temporary storage when its incremental working set reaches the statement memory
+ceiling. This spill is an execution tactic only: it preserves the supported
+query's values, ordering, and metadata. The temporary budget is charged from
+the encoded bytes actually written, and a multi-pass bounded-fan-in merge keeps
+open runs and decoded rows bounded. If the temporary-storage ceiling is
+reached, the statement fails rather than using unbounded disk.
+
+A statement deadline returns MySQL error `3024` and SQLSTATE `HY000`. Client
+cancellation returns MySQL error `1317` and SQLSTATE `70100`, rolls back an
+active transaction, and releases its locks. Execution-memory exhaustion and
+temporary-storage exhaustion return MySQL error `1114` and SQLSTATE `HY000`.
+Deadline and resource failures reject the current statement; work completed by
+earlier statements in an explicit transaction remains available to that
+transaction. A failed bounded read has no durable effect, and its session stays
+usable for a later statement. The diagnostics surface exposes aggregate counts
+and current and peak reservations. `EXPLAIN ANALYZE` exposes a completed
+statement's peak and spill evidence, while a live explanation snapshot exposes
+the evidence observed through capture time, without revealing temporary-file
+paths. A failed or cancelled `EXPLAIN ANALYZE` returns its ordinary SQL error;
+its final resource outcome remains visible through the aggregate diagnostics
+counters.
+
 ## Values, parameters, and predicates
 
 Implicit conversion is permitted only when it is lossless and stays in a

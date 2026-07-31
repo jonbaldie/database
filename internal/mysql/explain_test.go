@@ -128,6 +128,38 @@ func TestExplainAnalyzeReportsCompletedRuntimeEvidence(t *testing.T) {
 	}
 }
 
+func TestExplainAnalyzeReportsSpillEvidence(t *testing.T) {
+	executor := explainExecutor(t)
+	for _, values := range [][]string{{"2", "8", "20"}, {"3", "9", "30"}, {"4", "10", "40"}, {"5", "11", "60"}} {
+		if err := executor.server.config.Catalog.Insert("app", "orders", values); err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+	}
+	config := Config{ResourceLimits: ResourceLimits{
+		ExecutionMemoryLimitBytes: 50, AggregateExecutionMemoryLimitBytes: 50,
+		TemporaryStorageLimitBytes: 1024, AggregateTemporaryStorageLimitBytes: 1024,
+	}}
+	resources := newStatementResources(newResourceManager(config), config, nil)
+	executor.session.resources = resources
+	defer func() {
+		closeStatementResources(resources)
+		executor.session.resources = nil
+	}()
+
+	result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON SELECT total FROM orders ORDER BY total DESC")
+	if err != nil {
+		t.Fatalf("analyze spill: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode analysis: %v", err)
+	}
+	actual := document["plan"].(map[string]any)["actual"].(map[string]any)
+	if actual["spill_count"] == float64(0) || actual["temporary_storage_bytes"] == float64(0) {
+		t.Fatalf("spill evidence = %#v", actual)
+	}
+}
+
 func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testing.T) {
 	executor := explainExecutor(t)
 	for _, statement := range []string{

@@ -139,6 +139,7 @@ func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*query
 		return nil, err
 	}
 	elapsed := time.Since(started)
+	recordRuntimeResources(metrics, runner.session.resourceSnapshot())
 	metrics.SetRoot(rows, memory, elapsed, 0, true)
 	return renderExplanation(format, queryexplanation.AnalyzeWithMetrics(document, elapsed, metrics))
 }

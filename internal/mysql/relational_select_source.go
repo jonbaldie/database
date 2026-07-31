@@ -610,7 +610,12 @@ type relationRowYield func(relationRow) error
 type relationRowIterator func(relationRowYield) error
 
 func (p *relationalSelectPlan) forEachSourceRow(yield relationRowYield) error {
-	return p.source.rowIterator()(yield)
+	return p.source.rowIterator()(func(row relationRow) error {
+		if err := p.session.checkStatementResources(); err != nil {
+			return err
+		}
+		return yield(row)
+	})
 }
 
 func (source relationalSource) rowIterator() relationRowIterator {

@@ -75,7 +75,7 @@ server configuration registry. Sessions may tighten them but cannot exceed or
 disable them. Idle timeouts, connection count, packet size, aggregate budgets,
 and prepared-statement count are read-only to sessions. The server applies
 `lock_wait_timeout_ms` to conflicting row-lock waits. The remaining runtime
-and session enforcement belongs to #58 and #59.
+and session enforcement is defined by the SQL and session-settings contracts.
 
 ## Network, TLS, logging, and secrets
 
@@ -97,6 +97,11 @@ Leaving `diagnostics_listen_address` unset disables diagnostics. Setting it
 enables the documented non-sensitive liveness, readiness, and Prometheus metric
 surface; diagnostics has no TLS, authentication, path, or metric-selection
 settings. The diagnostics and MySQL settings cannot select the same listener.
+Alongside readiness, the metrics surface reports current and peak execution
+memory and temporary-storage reservations, plus cumulative spill, cancellation,
+timeout, execution-memory-exhaustion, and temporary-storage-exhaustion counts.
+It contains no SQL text, bound values, session identifiers, or temporary-file
+paths.
 
 The v0.1 logging contract sends logs to standard error. `json` is the default
 structured presentation; `text` is the equivalent human presentation. There is

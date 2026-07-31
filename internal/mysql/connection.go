@@ -179,8 +179,17 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	defer finishExplanation()
 	watch := c.watchStatement()
 	c.session.statementCancel = watch.cancelled
+	resources := newStatementResources(c.server.resources, c.server.config, watch.cancelled)
+	c.session.resources = resources
+	defer func() {
+		recordRuntimeResources(c.session.runtimeMetrics, statementResourceSnapshot(resources))
+		closeStatementResources(resources)
+		if c.session.resources == resources {
+			c.session.resources = nil
+		}
+		c.session.statementCancel = nil
+	}()
 	err := run()
-	c.session.statementCancel = nil
 	c.watch = watch
 	c.server.connections.endStatement()
 	return err == nil

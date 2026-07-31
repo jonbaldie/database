@@ -376,8 +376,12 @@ func executeScalarSubquery(context *composedQueryContext, query string, outer *o
 	if err != nil {
 		return exprValue{}, columnMetadata{}, err
 	}
+	value, definition, err := scalarSubqueryValue(result)
+	if err != nil {
+		return exprValue{}, columnMetadata{}, err
+	}
 	recordScalarSubquery(context, runtimeKey, outer != nil, result, elapsed)
-	return scalarSubqueryValue(result)
+	return value, definition, nil
 }
 
 func runScalarSubquery(context *composedQueryContext, query string, outer *outerRelationScope, runtimePrefixes []string) (*queryResult, string, time.Duration, error) {
@@ -410,6 +414,9 @@ func scalarSubqueryValue(result *queryResult) (exprValue, columnMetadata, error)
 		return exprValue{}, columnMetadata{}, sqlFailure{1241, "21000", "operand should contain 1 column"}
 	}
 	definition := resultColumnDefinition(result.columns[0], 0, result.metadata)
+	if result.stream != nil {
+		return scalarStreamValue(result, definition)
+	}
 	if len(result.rows) > 1 {
 		return exprValue{}, columnMetadata{}, sqlFailure{1242, "21000", "subquery returns more than 1 row"}
 	}
@@ -420,6 +427,34 @@ func scalarSubqueryValue(result *queryResult) (exprValue, columnMetadata, error)
 	value, err := expressionValueFromMetadata(result.rows[0][0], definition)
 	return value, definition, err
 }
+
+func scalarStreamValue(result *queryResult, definition columnMetadata) (exprValue, columnMetadata, error) {
+	var rows [][]string
+	var nulls [][]bool
+	err := result.stream(func(row []string, rowNulls []bool) error {
+		if len(rows) == 1 {
+			return errScalarSubqueryMultipleRows
+		}
+		rows = append(rows, append([]string(nil), row...))
+		nulls = append(nulls, append([]bool(nil), rowNulls...))
+		return nil
+	})
+	if errors.Is(err, errScalarSubqueryMultipleRows) {
+		return exprValue{}, columnMetadata{}, sqlFailure{1242, "21000", "subquery returns more than 1 row"}
+	}
+	if err != nil {
+		return exprValue{}, columnMetadata{}, err
+	}
+	result.rows, result.nulls, result.stream = rows, nulls, nil
+	if len(rows) == 0 || resultValueIsNull(0, 0, nulls) {
+		definition.flags &^= mysqlNotNullFlag
+		return nullValue(), definition, nil
+	}
+	value, err := expressionValueFromMetadata(rows[0][0], definition)
+	return value, definition, err
+}
+
+var errScalarSubqueryMultipleRows = errors.New("scalar subquery returned multiple rows")
 
 func scalarSubqueryRuntimeKey(query string, dependent bool, runtimePrefixes []string) string {
 	if len(runtimePrefixes) > 0 && runtimePrefixes[0] != "" {
@@ -885,7 +920,7 @@ func materializeCTE(context *composedQueryContext, key string, relation composed
 	if err != nil {
 		return composedRelation{}, err
 	}
-	result, err = materializeQueryResult(result)
+	result, err = boundedMaterializedQueryResult(context, result)
 	if err != nil {
 		return composedRelation{}, err
 	}
@@ -937,6 +972,24 @@ func materializeQueryResult(result *queryResult) (*queryResult, error) {
 		return nil, err
 	}
 	return &queryResult{columns: result.columns, rows: rows, nulls: nulls, metadata: result.metadata}, nil
+}
+
+func boundedMaterializedQueryResult(context *composedQueryContext, result *queryResult) (*queryResult, error) {
+	result, err := materializeQueryResult(result)
+	if err != nil {
+		return nil, err
+	}
+	if err := observeQueryResultMemory(context, result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func observeQueryResultMemory(context *composedQueryContext, result *queryResult) error {
+	if context == nil || context.executor == nil || result == nil {
+		return nil
+	}
+	return context.executor.session.observeBufferedMemory(queryResultMemory(result.rows, result.nulls))
 }
 
 func parseSetQuery(context *composedQueryContext, query string) (setQuery, bool, error) {
@@ -1143,6 +1196,13 @@ func executeSetQuery(context *composedQueryContext, query setQuery, outer *outer
 	applySetLimit(result, limit)
 	if limit.present {
 		recordSetStage(context, query.runtimeKey, "limit", inputRows, len(result.rows), queryResultMemory(result.rows, result.nulls), time.Since(started))
+	}
+	return boundedQueryResult(context, result)
+}
+
+func boundedQueryResult(context *composedQueryContext, result *queryResult) (*queryResult, error) {
+	if err := observeQueryResultMemory(context, result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }

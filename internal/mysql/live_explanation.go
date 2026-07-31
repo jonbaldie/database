@@ -63,6 +63,11 @@ func (r *activeExplanationRegistry) snapshot(connectionID uint32) (*queryexplana
 	lockWait := time.Duration(0)
 	if entry.session != nil {
 		lockWait = lockWaitDuration(entry.session.server.locks, entry.session, now)
+		recordRuntimeResources(entry.metrics, entry.session.resourceSnapshot())
 	}
 	return queryexplanation.SnapshotWithMetrics(entry.plan, connectionID, now, now.Sub(entry.started), lockWait, entry.metrics), true
+}
+
+func recordRuntimeResources(metrics *queryexplanation.RuntimeMetrics, usage resourceStateSnapshot) {
+	metrics.RecordRootResources(int(usage.peakMemory), int(usage.spillCount), int(usage.spillBytes), int(usage.temporary), usage.failure)
 }

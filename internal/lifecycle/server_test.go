@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jonbaldie/database/internal/instance"
+	"github.com/jonbaldie/database/internal/mysql"
 )
 
 func TestServeRejectsDamagedInitializedDirectory(t *testing.T) {
@@ -101,6 +102,13 @@ func TestDiagnosticsReadinessTracksStartupAndShutdown(t *testing.T) {
 		t.Fatalf("shutdown liveness = status %d body %#v", status, response)
 	}
 	_ = server.Shutdown(context.Background())
+}
+
+func TestDiagnosticResourceUsageHandlesDiagnosticsWithoutMySQL(t *testing.T) {
+	usage := diagnosticResourceUsage([]*mysql.Server{nil})
+	if usage != (mysql.ResourceUsage{}) {
+		t.Fatalf("diagnostics-only resource usage = %#v", usage)
+	}
 }
 
 func TestServeReportsReadinessAndWritesCleanStateOnShutdown(t *testing.T) {

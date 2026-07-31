@@ -140,6 +140,45 @@ func (m *RuntimeMetrics) SetRoot(outputRows, peakMemoryBytes int, elapsed, lockW
 	m.operators[m.rootID] = actual
 }
 
+// RecordRootResources records the statement-wide resource evidence captured by
+// the executor. Resource failures are warnings because the same collector is
+// also used for an active snapshot that can observe work before it finishes.
+func (m *RuntimeMetrics) RecordRootResources(peakMemoryBytes, spillCount, spillBytes, temporaryStorageBytes int, failure string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rootID == 0 {
+		return
+	}
+	actual := m.operators[m.rootID]
+	if peakMemoryBytes > actual.PeakMemoryBytes {
+		actual.PeakMemoryBytes = peakMemoryBytes
+	}
+	actual.SpillCount = spillCount
+	actual.SpillBytes = spillBytes
+	actual.TemporaryStorageBytes = temporaryStorageBytes
+	actual.Warnings = resourceWarnings(failure)
+	m.operators[m.rootID] = actual
+}
+
+// RecordSpill records temporary work written by one physical operator.
+func (m *RuntimeMetrics) RecordSpill(id, spillCount, spillBytes, temporaryStorageBytes int) {
+	if m == nil || id == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	actual := m.operators[id]
+	actual.SpillCount += spillCount
+	actual.SpillBytes += spillBytes
+	if temporaryStorageBytes > actual.TemporaryStorageBytes {
+		actual.TemporaryStorageBytes = temporaryStorageBytes
+	}
+	m.operators[id] = actual
+}
+
 func (m *RuntimeMetrics) copyOperators() map[int]Actual {
 	if m == nil {
 		return nil
@@ -294,6 +333,37 @@ func partialSnapshotWarning() Warning {
 		Code: "PARTIAL_SNAPSHOT", Severity: "info",
 		Summary: "Counters describe work observed through the capture time and are not final totals.",
 	}
+}
+
+func resourceWarnings(failure string) []Warning {
+	warning, found := resourceWarning(failure)
+	if !found {
+		return nil
+	}
+	return []Warning{warning}
+}
+
+func resourceWarning(failure string) (Warning, bool) {
+	byFailure := map[string]Warning{
+		"statement_cancelled": {
+			Code: "STATEMENT_CANCELLED", Severity: "warning",
+			Summary: "The client cancelled the statement before it completed.",
+		},
+		"statement_timeout": {
+			Code: "STATEMENT_TIMEOUT", Severity: "warning",
+			Summary: "The statement reached its configured execution deadline.",
+		},
+		"execution_memory_exhausted": {
+			Code: "EXECUTION_MEMORY_EXHAUSTED", Severity: "warning",
+			Summary: "The statement reached its execution-memory budget.",
+		},
+		"temporary_storage_exhausted": {
+			Code: "TEMPORARY_STORAGE_EXHAUSTED", Severity: "warning",
+			Summary: "The statement reached its temporary-storage budget.",
+		},
+	}
+	warning, found := byFailure[failure]
+	return warning, found
 }
 
 func milliseconds(duration time.Duration) float64 {

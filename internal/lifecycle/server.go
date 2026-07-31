@@ -174,13 +174,13 @@ func startRuntime(opts Options, health *health) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	diagnostics, diagnosticsAddress, err := startDiagnostics(opts.DiagnosticsAddress, health)
+	mysqlServer, err := startMySQL(opts, metadata, store)
 	if err != nil {
 		return runtime{}, err
 	}
-	mysqlServer, err := startMySQL(opts, metadata, store)
+	diagnostics, diagnosticsAddress, err := startDiagnostics(opts.DiagnosticsAddress, health, mysqlServer)
 	if err != nil {
-		_ = diagnostics.close()
+		_ = closeMySQL(mysqlServer)
 		return runtime{}, err
 	}
 	return runtime{diagnostics: diagnostics, diagnosticsAddress: diagnosticsAddress, mysql: mysqlServer}, nil
@@ -208,7 +208,7 @@ type diagnosticsServer struct {
 	server *http.Server
 }
 
-func startDiagnostics(address string, health *health) (diagnosticsServer, string, error) {
+func startDiagnostics(address string, health *health, mysqlServer *mysql.Server) (diagnosticsServer, string, error) {
 	if address == "" {
 		return diagnosticsServer{}, "", nil
 	}
@@ -216,7 +216,7 @@ func startDiagnostics(address string, health *health) (diagnosticsServer, string
 	if err != nil {
 		return diagnosticsServer{}, "", fmt.Errorf("listen for diagnostics: %w", err)
 	}
-	server := &http.Server{Handler: diagnosticsHandler(health)}
+	server := &http.Server{Handler: diagnosticsHandler(health, mysqlServer)}
 	go func() { _ = server.Serve(listener) }()
 	return diagnosticsServer{server: server}, listener.Addr().String(), nil
 }
@@ -232,7 +232,20 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 	if opts.MySQLAddress == "" || !opts.MySQLEnabled {
 		return nil, nil
 	}
-	config := mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile, MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount, MaxAllowedPacket: opts.MaxAllowedPacket, LockWaitTimeout: millisecondsDuration(opts.LockWaitTimeoutMilliseconds)}
+	config := mysql.Config{
+		Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash,
+		TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile,
+		MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount,
+		MaxAllowedPacket: opts.MaxAllowedPacket,
+		LockWaitTimeout:  millisecondsDuration(opts.LockWaitTimeoutMilliseconds),
+		ResourceLimits: mysql.ResourceLimits{
+			StatementTimeout:                    millisecondsDuration(opts.StatementTimeoutMilliseconds),
+			ExecutionMemoryLimitBytes:           opts.ExecutionMemoryLimitBytes,
+			AggregateExecutionMemoryLimitBytes:  opts.AggregateMemoryLimitBytes,
+			TemporaryStorageLimitBytes:          opts.TemporaryStorageLimitBytes,
+			AggregateTemporaryStorageLimitBytes: opts.AggregateTemporaryLimitBytes,
+		},
+	}
 	server, err := mysql.NewWithConfig(opts.MySQLAddress, config)
 	if err != nil {
 		return nil, fmt.Errorf("listen for mysql: %w", err)
@@ -443,7 +456,7 @@ func (h *health) current() string {
 	return h.state
 }
 
-func diagnosticsHandler(health *health) http.Handler {
+func diagnosticsHandler(health *health, mysqlServer ...*mysql.Server) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -465,9 +478,41 @@ func diagnosticsHandler(health *health) http.Handler {
 		if health.current() == "ready" {
 			ready = "1"
 		}
-		_, _ = w.Write([]byte("# TYPE database_process_ready gauge\ndatabase_process_ready " + ready + "\n"))
+		_, _ = w.Write([]byte(prometheusMetrics(ready, diagnosticResourceUsage(mysqlServer))))
 	})
 	return mux
+}
+
+func diagnosticResourceUsage(servers []*mysql.Server) mysql.ResourceUsage {
+	if len(servers) == 0 || servers[0] == nil {
+		return mysql.ResourceUsage{}
+	}
+	return servers[0].Diagnostics.Usage()
+}
+
+func prometheusMetrics(ready string, usage mysql.ResourceUsage) string {
+	return fmt.Sprintf(`# TYPE database_process_ready gauge
+database_process_ready %s
+# TYPE database_execution_memory_bytes gauge
+database_execution_memory_bytes %d
+# TYPE database_execution_memory_peak_bytes gauge
+database_execution_memory_peak_bytes %d
+# TYPE database_temporary_storage_bytes gauge
+database_temporary_storage_bytes %d
+# TYPE database_temporary_storage_peak_bytes gauge
+database_temporary_storage_peak_bytes %d
+# TYPE database_resource_spills_total counter
+database_resource_spills_total %d
+# TYPE database_resource_spill_bytes_total counter
+database_resource_spill_bytes_total %d
+# TYPE database_resource_cancellations_total counter
+database_resource_cancellations_total %d
+# TYPE database_resource_timeouts_total counter
+database_resource_timeouts_total %d
+# TYPE database_resource_exhaustions_total counter
+database_resource_exhaustions_total{resource="memory"} %d
+database_resource_exhaustions_total{resource="temporary_storage"} %d
+`, ready, usage.ExecutionMemoryBytes, usage.PeakExecutionMemoryBytes, usage.TemporaryStorageBytes, usage.PeakTemporaryStorageBytes, usage.SpillCount, usage.SpillBytes, usage.CancellationCount, usage.TimeoutCount, usage.MemoryExhaustionCount, usage.TemporaryExhaustionCount)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

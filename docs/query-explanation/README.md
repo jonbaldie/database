@@ -69,6 +69,8 @@ The JSON Schema defines the structural grammar. These semantic rules complete it
 - Planning opportunities contain a stable code, a concise summary, and evidence. They do not prescribe exact SQL or promise an improvement.
 - Runtime elapsed time is inclusive for an operator across all invocations. Parent and child timings may overlap and must not be summed.
 - Runtime memory is the peak bytes tracked by the executor for result or intermediate values. Logical reads and bytes read count catalog values visited by a scan. The v0.1 catalog is in memory, so physical reads are zero.
+- Root runtime evidence also records `peak_memory_bytes`, `spill_count`, `spill_bytes`, and `temporary_storage_bytes`. The last value is the peak reserved temporary-storage footprint, not a temporary-file path or a retained file size. A positive spill count means the executor externalized one or more intermediate runs while preserving SQL results.
+- Resource outcomes use the stable warning codes `STATEMENT_CANCELLED`, `STATEMENT_TIMEOUT`, `EXECUTION_MEMORY_EXHAUSTED`, and `TEMPORARY_STORAGE_EXHAUSTED`. A completed analysis has complete resource evidence; a live snapshot reports only evidence observed through capture time. A failed or cancelled analysis returns its SQL error rather than a partial document; its finalized outcome is available through the non-sensitive aggregate diagnostics counters.
 - Snapshot counters mean “observed through capture time.” A snapshot never fabricates complete values from partial evidence.
 
 ## Tabular projection

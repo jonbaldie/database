@@ -315,6 +315,9 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 	if err != nil {
 		return nil, err
 	}
+	if plan.supportsSpillSort() {
+		return plan.spilledSortResult()
+	}
 	if s.streamRows && plan.source.locking == nil && !plan.requiresMaterialization() {
 		return plan.streamingResult(), nil
 	}
@@ -369,6 +372,7 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 	started := time.Now()
 	sourceRows := 0
 	matchedRows := 0
+	resultMemoryBytes := 0
 	resultRows := make([]relationalResultRow, 0)
 	err := plan.forEachSourceRow(func(row relationRow) error {
 		sourceRows++
@@ -387,7 +391,8 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 			return err
 		}
 		resultRows = append(resultRows, result)
-		return nil
+		resultMemoryBytes += relationalResultRowMemory(result)
+		return plan.session.observeBufferedMemory(resultMemoryBytes)
 	})
 	if err == nil {
 		plan.recordReadPipeline(sourceRows, matchedRows, resultRows, time.Since(started))
@@ -396,6 +401,10 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 }
 
 func (p *relationalSelectPlan) recordReadPipeline(sourceRows, matchedRows int, resultRows []relationalResultRow, elapsed time.Duration) {
+	p.recordReadPipelineCounts(sourceRows, matchedRows, len(resultRows), resultMemory(resultRows), elapsed)
+}
+
+func (p *relationalSelectPlan) recordReadPipelineCounts(sourceRows, matchedRows, outputRows, peakMemoryBytes int, elapsed time.Duration) {
 	if p.runtime == nil {
 		return
 	}
@@ -403,7 +412,7 @@ func (p *relationalSelectPlan) recordReadPipeline(sourceRows, matchedRows int, r
 		p.runtime.record(p.runtime.whereFilter, sourceRows, matchedRows, sourceRows-matchedRows, 0, 0, 0, elapsed)
 	}
 	if !p.allColumns {
-		p.runtime.record(p.runtime.project, matchedRows, len(resultRows), 0, 0, 0, resultMemory(resultRows), elapsed)
+		p.runtime.record(p.runtime.project, matchedRows, outputRows, 0, 0, 0, peakMemoryBytes, elapsed)
 	}
 }
 
@@ -422,10 +431,15 @@ func sourceBytes(tables []relationalTableSource) int {
 func resultMemory(rows []relationalResultRow) int {
 	bytes := 0
 	for _, row := range rows {
-		bytes += len(row.nulls)
-		for _, value := range row.values {
-			bytes += len(value)
-		}
+		bytes += relationalResultRowMemory(row)
+	}
+	return bytes
+}
+
+func relationalResultRowMemory(row relationalResultRow) int {
+	bytes := len(row.nulls)
+	for _, value := range row.values {
+		bytes += len(value)
 	}
 	return bytes
 }
@@ -566,13 +580,22 @@ func (s *relationalResultStream) yieldSourceRow(row relationRow, yield func([]st
 	values, nulls := s.outputRow(result)
 	s.emitted++
 	s.projectMemory += resultMemory([]relationalResultRow{result})
-	if err := yield(values, nulls); err != nil {
+	if err := s.yieldDeliveredRow(values, nulls, yield); err != nil {
 		return err
 	}
 	if s.plan.limit.present && s.emitted >= s.plan.limit.count {
 		return errStopRelationStream
 	}
 	return nil
+}
+
+func (s *relationalResultStream) yieldDeliveredRow(values []string, nulls []bool, yield func([]string, []bool) error) error {
+	release, err := s.plan.session.reserveDeliveredRow(queryResultMemory([][]string{values}, [][]bool{nulls}))
+	if err != nil {
+		return err
+	}
+	defer release()
+	return yield(values, nulls)
 }
 
 func relationalRowMatches(predicate relationPredicate, row relationRow) (bool, error) {
@@ -1062,6 +1085,14 @@ func (p *relationalSelectPlan) result(rows []relationalResultRow) *queryResult {
 	p.renderTemporalResults(resultRows, nulls)
 	displayStoredNulls(resultRows)
 	return &queryResult{columns: columns, rows: resultRows, nulls: nulls, metadata: metadata}
+}
+
+func (p *relationalSelectPlan) renderResultRow(row relationalResultRow) ([]string, []bool) {
+	values := append([]string(nil), row.values...)
+	nulls := append([]bool(nil), row.nulls...)
+	p.renderTemporalResults([][]string{values}, [][]bool{nulls})
+	displayStoredNulls([][]string{values})
+	return values, nulls
 }
 
 func (p *relationalSelectPlan) resultColumns() ([]string, []columnMetadata) {

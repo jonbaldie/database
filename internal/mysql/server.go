@@ -93,6 +93,7 @@ type Config struct {
 	// LockWaitTimeout bounds the time a statement waits for a conflicting row
 	// lock. It defaults to five seconds.
 	LockWaitTimeout time.Duration
+	ResourceLimits  ResourceLimits
 	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
 	// current-time functions render through. It defaults to UTC and accepts UTC
 	// or a ±HH:MM offset within ±14:00.
@@ -102,13 +103,34 @@ type Config struct {
 	Clock func() time.Time
 }
 
+// ResourceLimits is the server resource policy that applies to every session.
+// Later session settings may tighten its statement-scoped values, but they may
+// never enlarge or disable these server ceilings.
+type ResourceLimits struct {
+	StatementTimeout                    time.Duration
+	ExecutionMemoryLimitBytes           int64
+	AggregateExecutionMemoryLimitBytes  int64
+	TemporaryStorageLimitBytes          int64
+	AggregateTemporaryStorageLimitBytes int64
+}
+
 type Server struct {
 	Listener     net.Listener
 	config       Config
 	connections  *connectionRegistry
 	auth         authenticator
 	locks        *lockManager
+	resources    *resourceManager
 	explanations *activeExplanationRegistry
+	Diagnostics  ResourceDiagnostics
+}
+
+// ResourceDiagnostics provides the non-sensitive server evidence that the
+// lifecycle diagnostics listener publishes.
+type ResourceDiagnostics struct{ manager *resourceManager }
+
+func (d ResourceDiagnostics) Usage() ResourceUsage {
+	return d.manager.usage()
 }
 
 // connectionRegistry owns admission and graceful-drain accounting. It is kept
@@ -156,7 +178,8 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 		sessionMax:    config.MaxConnections,
 		preparedLimit: config.MaxPreparedStmtCount,
 	}
-	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout), explanations: newActiveExplanationRegistry()}, nil
+	resources := newResourceManager(config)
+	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout), resources: resources, explanations: newActiveExplanationRegistry(), Diagnostics: ResourceDiagnostics{manager: resources}}, nil
 }
 
 func normalizedConfig(config Config) Config {
@@ -175,6 +198,7 @@ func normalizedConfig(config Config) Config {
 	if config.LockWaitTimeout <= 0 {
 		config.LockWaitTimeout = 5 * time.Second
 	}
+	config.ResourceLimits = normalizedResourceLimits(config.ResourceLimits)
 	if config.TimeZone == "" {
 		config.TimeZone = "UTC"
 	}
@@ -182,6 +206,25 @@ func normalizedConfig(config Config) Config {
 		config.Clock = time.Now
 	}
 	return config
+}
+
+func normalizedResourceLimits(limits ResourceLimits) ResourceLimits {
+	if limits.StatementTimeout <= 0 {
+		limits.StatementTimeout = 5 * time.Minute
+	}
+	if limits.ExecutionMemoryLimitBytes <= 0 {
+		limits.ExecutionMemoryLimitBytes = 64 * 1024 * 1024
+	}
+	if limits.AggregateExecutionMemoryLimitBytes <= 0 {
+		limits.AggregateExecutionMemoryLimitBytes = 2 * 1024 * 1024 * 1024
+	}
+	if limits.TemporaryStorageLimitBytes <= 0 {
+		limits.TemporaryStorageLimitBytes = 16 * 1024 * 1024 * 1024
+	}
+	if limits.AggregateTemporaryStorageLimitBytes <= 0 {
+		limits.AggregateTemporaryStorageLimitBytes = 32 * 1024 * 1024 * 1024
+	}
+	return limits
 }
 
 func validateTLSConfig(config Config) error {
@@ -354,6 +397,7 @@ type session struct {
 	nextStmtID      uint32
 	longDataBytes   int
 	statementCancel <-chan struct{}
+	resources       *statementResources
 	runtimeMetrics  *queryexplanation.RuntimeMetrics
 	transactionState
 }

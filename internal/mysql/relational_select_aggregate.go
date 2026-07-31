@@ -1280,16 +1280,20 @@ func (p *relationalSelectPlan) hasAggregate() bool {
 func collectFilteredSourceRows(plan *relationalSelectPlan) ([]relationRow, error) {
 	started := time.Now()
 	inputRows := 0
+	memoryBytes := 0
 	rows := make([]relationRow, 0)
 	err := plan.forEachSourceRow(func(row relationRow) error {
 		inputRows++
 		if plan.where == nil {
 			rows = append(rows, row)
-			return nil
+			memoryBytes += relationRowMemory(row)
+			return plan.session.observeBufferedMemory(memoryBytes)
 		}
 		matched, err := predicateMatches(plan.where, row)
 		if err == nil && matched {
 			rows = append(rows, row)
+			memoryBytes += relationRowMemory(row)
+			err = plan.session.observeBufferedMemory(memoryBytes)
 		}
 		return err
 	})

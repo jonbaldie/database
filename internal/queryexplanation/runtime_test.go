@@ -51,6 +51,25 @@ func TestTabularRuntimeProjectionIncludesAllRequiredEvidence(t *testing.T) {
 	}
 }
 
+func TestRuntimeResourceEvidenceRecordsSpillsAndExhaustion(t *testing.T) {
+	plan := PlanSelect("0.1.0", "SELECT id FROM orders", "app", Select{Table: ordersTable(), Columns: []string{"id"}})
+	metrics := NewRuntimeMetrics(plan)
+	metrics.RecordRootResources(8, 1, 12, 12, "temporary_storage_exhausted")
+	metrics.RecordSpill(metrics.OperatorIDs("scan")[0], 1, 12, 12)
+	document := AnalyzeWithMetrics(plan, time.Millisecond, metrics)
+
+	if document.Plan.Actual.PeakMemoryBytes != 8 || document.Plan.Actual.SpillCount != 1 || document.Plan.Actual.SpillBytes != 12 || document.Plan.Actual.TemporaryStorageBytes != 12 {
+		t.Fatalf("root resource evidence = %#v", document.Plan.Actual)
+	}
+	if len(document.Plan.Actual.Warnings) != 1 || document.Plan.Actual.Warnings[0].Code != "TEMPORARY_STORAGE_EXHAUSTED" {
+		t.Fatalf("root resource warning = %#v", document.Plan.Actual.Warnings)
+	}
+	project := document.Plan.Children[0]
+	if project.Actual.SpillCount != 1 || project.Actual.SpillBytes != 12 || project.Actual.TemporaryStorageBytes != 12 {
+		t.Fatalf("operator spill evidence = %#v", project.Actual)
+	}
+}
+
 func TestSnapshotAddsPartialRuntimeEvidence(t *testing.T) {
 	plan := PlanSelect("0.1.0", "SELECT id FROM orders", "app", Select{Table: ordersTable(), Columns: []string{"id"}})
 	document := Snapshot(plan, 42, time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC), 5*time.Millisecond)

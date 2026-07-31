@@ -306,6 +306,162 @@ func TestRelationalSelectStreamsFromStatementSnapshot(t *testing.T) {
 	}
 }
 
+func TestRelationalSelectMemoryLimitAbortsOnlyTheStatement(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	config := Config{ResourceLimits: ResourceLimits{
+		ExecutionMemoryLimitBytes:           7,
+		AggregateExecutionMemoryLimitBytes:  7,
+		TemporaryStorageLimitBytes:          1024,
+		AggregateTemporaryStorageLimitBytes: 1024,
+	}}
+	resources := newStatementResources(newResourceManager(config), config, nil)
+	executor.session.resources = resources
+	if _, err := executor.execute("SELECT name FROM authors"); !isFailureCode(err, 1114) {
+		t.Fatalf("memory-limited SELECT error = %v", err)
+	}
+	closeStatementResources(resources)
+	executor.session.resources = nil
+
+	result, err := executor.execute("SELECT name FROM authors LIMIT 1")
+	if err != nil {
+		t.Fatalf("session did not remain usable after memory exhaustion: %v", err)
+	}
+	if !reflect.DeepEqual(result.rows, [][]string{{"Ada"}}) {
+		t.Fatalf("post-exhaustion rows = %#v", result.rows)
+	}
+}
+
+func TestRelationalSelectSpillsOrderedRowsWithinTheTemporaryBudget(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	executor.streamRows = true
+	config := Config{ResourceLimits: ResourceLimits{
+		ExecutionMemoryLimitBytes:           50,
+		AggregateExecutionMemoryLimitBytes:  50,
+		TemporaryStorageLimitBytes:          1024,
+		AggregateTemporaryStorageLimitBytes: 1024,
+	}}
+	manager := newResourceManager(config)
+	resources := newStatementResources(manager, config, nil)
+	executor.session.resources = resources
+	defer func() {
+		closeStatementResources(resources)
+		executor.session.resources = nil
+	}()
+	result, err := executor.execute("SELECT name FROM authors ORDER BY name DESC")
+	if err != nil {
+		t.Fatalf("execute ordered SELECT: %v", err)
+	}
+	var rows [][]string
+	if err := result.stream(func(row []string, _ []bool) error {
+		rows = append(rows, append([]string(nil), row...))
+		return nil
+	}); err != nil {
+		t.Fatalf("stream spilled SELECT: %v", err)
+	}
+	if !reflect.DeepEqual(rows, [][]string{{"Linus"}, {"Grace"}, {"Ada"}}) {
+		t.Fatalf("spilled ordered rows = %#v", rows)
+	}
+	if usage := manager.usage(); usage.SpillCount == 0 || usage.PeakTemporaryStorageBytes == 0 {
+		t.Fatalf("spill usage = %#v", usage)
+	}
+}
+
+func TestRelationalSpillSortCoalescesRunsWithBoundedFanIn(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	executor.streamRows = true
+	for _, row := range [][]string{{"4", "same"}, {"5", "same"}, {"6", "same"}, {"7", "same"}, {"8", "same"}, {"9", "same"}, {"10", "same"}, {"11", "same"}, {"12", "same"}} {
+		if err := executor.server.config.Catalog.Insert("app", "authors", row); err != nil {
+			t.Fatalf("seed ordered row: %v", err)
+		}
+	}
+	config := Config{ResourceLimits: ResourceLimits{
+		ExecutionMemoryLimitBytes: 50, AggregateExecutionMemoryLimitBytes: 50,
+		TemporaryStorageLimitBytes: 4096, AggregateTemporaryStorageLimitBytes: 4096,
+	}}
+	manager := newResourceManager(config)
+	resources := newStatementResources(manager, config, nil)
+	executor.session.resources = resources
+	defer func() {
+		closeStatementResources(resources)
+		executor.session.resources = nil
+	}()
+
+	result, err := executor.execute("SELECT id FROM authors WHERE id >= 4 ORDER BY name, id")
+	if err != nil {
+		t.Fatalf("execute multi-run ordered SELECT: %v", err)
+	}
+	var rows [][]string
+	if err := result.stream(func(row []string, _ []bool) error {
+		rows = append(rows, append([]string(nil), row...))
+		return nil
+	}); err != nil {
+		t.Fatalf("stream multi-run ordered SELECT: %v", err)
+	}
+	want := [][]string{{"4"}, {"5"}, {"6"}, {"7"}, {"8"}, {"9"}, {"10"}, {"11"}, {"12"}}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("multi-run ordered rows = %#v, want %#v", rows, want)
+	}
+	if usage := manager.usage(); usage.SpillCount < 4 || usage.PeakExecutionMemoryBytes > 50 {
+		t.Fatalf("multi-pass spill usage = %#v", usage)
+	}
+}
+
+func TestRelationalSpillSortAppliesLimitWithoutAFlush(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	executor.streamRows = true
+	resources := newStatementResources(executor.server.resources, executor.server.config, nil)
+	executor.session.resources = resources
+	defer func() {
+		closeStatementResources(resources)
+		executor.session.resources = nil
+	}()
+	result, err := executor.execute("SELECT name FROM authors ORDER BY name DESC LIMIT 2")
+	if err != nil {
+		t.Fatalf("execute ordered LIMIT SELECT: %v", err)
+	}
+	var rows [][]string
+	if err := result.stream(func(row []string, _ []bool) error {
+		rows = append(rows, append([]string(nil), row...))
+		return nil
+	}); err != nil {
+		t.Fatalf("stream ordered LIMIT SELECT: %v", err)
+	}
+	if !reflect.DeepEqual(rows, [][]string{{"Linus"}, {"Grace"}}) {
+		t.Fatalf("ordered LIMIT rows = %#v", rows)
+	}
+}
+
+func TestRelationalSelectTemporaryStorageExhaustionLeavesTheSessionUsable(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	executor.streamRows = true
+	config := Config{ResourceLimits: ResourceLimits{
+		ExecutionMemoryLimitBytes: 7, AggregateExecutionMemoryLimitBytes: 7,
+		TemporaryStorageLimitBytes: 1, AggregateTemporaryStorageLimitBytes: 1,
+	}}
+	resources := newStatementResources(newResourceManager(config), config, nil)
+	executor.session.resources = resources
+	if _, err := executor.execute("SELECT name FROM authors ORDER BY name DESC"); !isFailureCode(err, 1114) {
+		t.Fatalf("temporary-storage failure = %v", err)
+	}
+	if snapshot := statementResourceSnapshot(resources); snapshot.failure != "temporary_storage_exhausted" {
+		t.Fatalf("resource failure evidence = %#v", snapshot)
+	}
+	closeStatementResources(resources)
+	executor.session.resources = nil
+
+	result, err := executor.execute("SELECT name FROM authors LIMIT 1")
+	if err != nil {
+		t.Fatalf("session did not remain usable after temporary exhaustion: %v", err)
+	}
+	result, err = materializeQueryResult(result)
+	if err != nil {
+		t.Fatalf("materialize post-exhaustion result: %v", err)
+	}
+	if !reflect.DeepEqual(result.rows, [][]string{{"Ada"}}) {
+		t.Fatalf("post-exhaustion rows = %#v", result.rows)
+	}
+}
+
 func TestRelationalSelectOuterJoinDistinctAndNulls(t *testing.T) {
 	executor := relationalSelectExecutor(t)
 	result, err := executor.execute("SELECT DISTINCT a.name, p.title FROM authors a LEFT JOIN posts p ON a.id = p.author_id ORDER BY a.name ASC, p.title ASC")

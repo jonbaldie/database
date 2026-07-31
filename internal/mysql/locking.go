@@ -110,7 +110,7 @@ func (m *lockManager) waitForLock(waiter *session, resources []rowLockResource, 
 		if acquired {
 			return true, nil
 		}
-		if err := waitForLockChange(changed, waiter.statementCancel, deadline); err != nil {
+		if err := waitForLockChange(changed, waiter.statementCancel, waiter.resources, deadline); err != nil {
 			m.stopWaiting(waiter)
 			return false, err
 		}
@@ -139,10 +139,14 @@ func (m *lockManager) waitAttempt(waiter *session, resources []rowLockResource, 
 	return m.changed, false, nil
 }
 
-func waitForLockChange(changed, cancelled <-chan struct{}, deadline time.Time) error {
+func waitForLockChange(changed, cancelled <-chan struct{}, resources *statementResources, lockDeadline time.Time) error {
+	if err := resources.check(); err != nil {
+		return err
+	}
+	deadline := earlierDeadline(lockDeadline, resources.deadlineAt())
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return lockWaitTimeoutFailure()
+		return lockWaitDeadlineFailure(resources)
 	}
 	timer := time.NewTimer(remaining)
 	defer timer.Stop()
@@ -150,10 +154,24 @@ func waitForLockChange(changed, cancelled <-chan struct{}, deadline time.Time) e
 	case <-changed:
 		return nil
 	case <-timer.C:
-		return lockWaitTimeoutFailure()
+		return lockWaitDeadlineFailure(resources)
 	case <-cancelled:
 		return queryCancelledFailure()
 	}
+}
+
+func earlierDeadline(left, right time.Time) time.Time {
+	if right.IsZero() || (!left.IsZero() && left.Before(right)) {
+		return left
+	}
+	return right
+}
+
+func lockWaitDeadlineFailure(resources *statementResources) error {
+	if err := resources.check(); err != nil {
+		return err
+	}
+	return lockWaitTimeoutFailure()
 }
 
 func (m *lockManager) stopWaiting(session *session) {
