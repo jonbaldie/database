@@ -161,10 +161,15 @@ func (e statementTransaction) finish(s *session, result *queryResult, err error)
 }
 
 func (e statementTransaction) abort(s *session, err error) (*queryResult, error) {
-	if e.autocommit {
+	if e.autocommit || isDeadlock(err) {
 		_ = rollbackTransaction(s)
 	}
 	return nil, err
+}
+
+func isDeadlock(err error) bool {
+	var failure sqlFailure
+	return errors.As(err, &failure) && failure.code == 1213 && failure.state == "40001"
 }
 
 func (s *textStatementExecutor) dispatchStatement(query, lower string) (*queryResult, error) {
@@ -568,6 +573,9 @@ func (s *transactionExecutor) commit() error {
 }
 
 func (s *session) finishTransaction() {
+	if s.server != nil && s.server.locks != nil {
+		s.server.locks.release(s)
+	}
 	s.transaction = false
 	s.transactionSnapshot = catalog.Definition{}
 	s.transactionRevision = 0

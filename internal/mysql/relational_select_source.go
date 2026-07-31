@@ -606,9 +606,11 @@ func (p *relationalSelectPlan) forEachSourceRow(yield relationRowYield) error {
 func (source relationalSource) rowIterator() relationRowIterator {
 	iterator := tableRowIterator(source.tables[0])
 	leftWidth := len(source.tables[0].columns)
+	leftTables := 1
 	for _, join := range source.joins {
-		iterator = joinedRowIterator(iterator, join, leftWidth)
+		iterator = joinedRowIterator(iterator, join, leftWidth, leftTables)
 		leftWidth += len(join.right.columns)
+		leftTables++
 	}
 	return iterator
 }
@@ -620,7 +622,7 @@ func tableRowIterator(table relationalTableSource) relationRowIterator {
 			return err
 		}
 		for _, row := range rows {
-			if err := yield(relationRow{values: append([]string(nil), row...)}); err != nil {
+			if err := yield(relationRow{values: append([]string(nil), row.values...), lockKeys: []string{rowLockKey(row.values)}}); err != nil {
 				return err
 			}
 		}
@@ -633,9 +635,13 @@ type indexedRelationRow struct {
 	keys   []string
 }
 
-func indexScanRows(table relationalTableSource) ([][]string, error) {
+func indexScanRows(table relationalTableSource) ([]indexedRelationRow, error) {
 	if table.access == nil {
-		return table.table.Rows, nil
+		rows := make([]indexedRelationRow, len(table.table.Rows))
+		for index, values := range table.table.Rows {
+			rows[index] = indexedRelationRow{values: values}
+		}
+		return rows, nil
 	}
 	rows := make([]indexedRelationRow, len(table.table.Rows))
 	for number, values := range table.table.Rows {
@@ -648,11 +654,7 @@ func indexScanRows(table relationalTableSource) ([][]string, error) {
 	sort.SliceStable(rows, func(left, right int) bool {
 		return orderedIndexRowBefore(rows[left], rows[right], *table.access)
 	})
-	ordered := make([][]string, len(rows))
-	for number := range rows {
-		ordered[number] = rows[number].values
-	}
-	return ordered, nil
+	return rows, nil
 }
 
 func indexScanKeys(table relationalTableSource, index catalog.Index, row []string) ([]string, error) {
@@ -695,7 +697,7 @@ func orderedIndexRowBefore(left, right indexedRelationRow, index catalog.Index) 
 	return false
 }
 
-func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth int) relationRowIterator {
+func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int) relationRowIterator {
 	return func(yield relationRowYield) error {
 		matchedRight := make([]bool, len(join.right.table.Rows))
 		if err := left(func(row relationRow) error {
@@ -706,14 +708,14 @@ func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth 
 		if join.kind != "right" {
 			return nil
 		}
-		return yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, yield)
+		return yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, leftTables, yield)
 	}
 }
 
 func yieldJoinedRows(left relationRow, join relationalJoin, matchedRight []bool, yield relationRowYield) error {
 	matched := false
 	for rightIndex, values := range join.right.table.Rows {
-		candidate := relationRow{values: append(append([]string(nil), left.values...), values...)}
+		candidate := relationRow{values: append(append([]string(nil), left.values...), values...), lockKeys: append(append([]string(nil), left.lockKeys...), rowLockKey(values))}
 		ok, err := joinCandidateMatches(join, candidate)
 		if err != nil {
 			return err
@@ -732,25 +734,27 @@ func yieldJoinedRows(left relationRow, join relationalJoin, matchedRight []bool,
 	return nil
 }
 
-func yieldUnmatchedRight(rows [][]string, matched []bool, leftWidth int, yield relationRowYield) error {
+func yieldUnmatchedRight(rows [][]string, matched []bool, leftWidth, leftTables int, yield relationRowYield) error {
 	for index, values := range rows {
 		if matched[index] {
 			continue
 		}
-		if err := yield(appendNullLeft(values, leftWidth)); err != nil {
+		if err := yield(appendNullLeft(values, leftWidth, leftTables)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func appendNullLeft(right []string, width int) relationRow {
+func appendNullLeft(right []string, width, leftTables int) relationRow {
 	values := make([]string, width, width+len(right))
 	for index := range values {
 		values[index] = storedSQLNullValue
 	}
 	values = append(values, right...)
-	return relationRow{values: values}
+	lockKeys := make([]string, leftTables, leftTables+1)
+	lockKeys = append(lockKeys, rowLockKey(right))
+	return relationRow{values: values, lockKeys: lockKeys}
 }
 
 func joinCandidateMatches(join relationalJoin, row relationRow) (bool, error) {
@@ -765,5 +769,6 @@ func appendNullRight(left relationRow, width int) relationRow {
 	for index := 0; index < width; index++ {
 		values = append(values, storedSQLNullValue)
 	}
-	return relationRow{values: values}
+	lockKeys := append(append([]string(nil), left.lockKeys...), "")
+	return relationRow{values: values, lockKeys: lockKeys}
 }

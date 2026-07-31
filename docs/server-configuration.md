@@ -73,9 +73,9 @@ and temporary-storage values become the running server defaults and ceilings
 exposed by the **session settings registry**, which is distinct from this
 server configuration registry. Sessions may tighten them but cannot exceed or
 disable them. Idle timeouts, connection count, packet size, aggregate budgets,
-and prepared-statement count are read-only to sessions. The current resolver
-validates and carries these values at the server-options boundary; their
-runtime and session enforcement belongs to #58 and #59.
+and prepared-statement count are read-only to sessions. The server applies
+`lock_wait_timeout_ms` to conflicting row-lock waits. The remaining runtime
+and session enforcement belongs to #58 and #59.
 
 ## Network, TLS, logging, and secrets
 

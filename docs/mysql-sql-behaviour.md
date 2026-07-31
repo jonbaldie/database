@@ -41,6 +41,28 @@ discards all work since the transaction started. Its retryable identity is
 MySQL error `1213` and SQLSTATE `40001`; the application must retry the whole
 transaction. A lock-wait timeout uses MySQL error `1205` and SQLSTATE `HY000`.
 
+### Concurrent row locks
+
+`UPDATE` and `DELETE` take exclusive locks on each matched direct table row.
+`SELECT ... FOR UPDATE` takes exclusive row locks and `SELECT ... FOR SHARE`
+or `LOCK IN SHARE MODE` takes shared row locks. A locking read supports the
+`NOWAIT` and `SKIP LOCKED` forms. A lock is kept until the full `COMMIT`,
+`ROLLBACK`, connection cancellation, or deadlock rollback; `ROLLBACK TO
+SAVEPOINT` does not release it. `INSERT`, `REPLACE`, and duplicate-key insert
+updates retain their established optimistic conflict handling.
+
+The lock scope is the returned rows of a direct table relational `SELECT`,
+after `DISTINCT`, `ORDER BY`, and `LIMIT` shape its result. Joins lock the
+returned rows from every direct source table. A conflicting ordinary lock
+request waits up to `lock_wait_timeout_ms`. `NOWAIT` returns MySQL error
+`3572` and SQLSTATE `HY000` without a statement effect. `SKIP LOCKED` omits
+conflicting rows and takes locks only on rows that it returns.
+Timeout and `NOWAIT` failures leave an explicit transaction open. A detected
+wait cycle rolls back the request that completes the cycle, releases its locks,
+and returns MySQL error `1213` and SQLSTATE `40001`. Connection cancellation
+rolls back its active transaction and releases its locks before later work can
+acquire them.
+
 ## Values, parameters, and predicates
 
 Implicit conversion is permitted only when it is lossless and stays in a
