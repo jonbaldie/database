@@ -175,6 +175,61 @@ func TestServeReportsReadinessAndWritesCleanStateOnShutdown(t *testing.T) {
 	}
 }
 
+func TestServeReportsStructuredWarningForNonLoopbackMySQLWithoutTLS(t *testing.T) {
+	directory := initializedDirectory(t)
+	ctx, stop := context.WithCancel(context.Background())
+	events := make(chan Event, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, Options{
+			DataDirectory: directory,
+			MySQLAddress:  "0.0.0.0:0",
+			MySQLEnabled:  true,
+		}, func(event Event) { events <- event })
+	}()
+	ready := receiveEvent(t, events, "ready")
+	if len(ready.Warnings) != 1 {
+		stop()
+		<-done
+		t.Fatalf("ready warnings = %#v, want one warning", ready.Warnings)
+	}
+	warning := ready.Warnings[0]
+	if warning.Code != "UNSAFE_NON_TLS_LISTENER" || warning.Severity != "warning" ||
+		warning.Context["address"] != "0.0.0.0:0" || warning.Context["tls"] != "disabled" {
+		stop()
+		<-done
+		t.Fatalf("warning = %#v", warning)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatalf("Serve shutdown: %v", err)
+	}
+}
+
+func TestServeDoesNotWarnForLoopbackMySQLWithoutTLS(t *testing.T) {
+	directory := initializedDirectory(t)
+	ctx, stop := context.WithCancel(context.Background())
+	events := make(chan Event, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, Options{
+			DataDirectory: directory,
+			MySQLAddress:  "127.0.0.1:0",
+			MySQLEnabled:  true,
+		}, func(event Event) { events <- event })
+	}()
+	ready := receiveEvent(t, events, "ready")
+	if len(ready.Warnings) != 0 {
+		stop()
+		<-done
+		t.Fatalf("loopback ready warnings = %#v, want none", ready.Warnings)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatalf("Serve shutdown: %v", err)
+	}
+}
+
 func TestServeReleasesDataDirectoryClaimWhenStateMarkerFails(t *testing.T) {
 	directory := initializedDirectory(t)
 	stateParent := filepath.Join(t.TempDir(), "not-a-directory")

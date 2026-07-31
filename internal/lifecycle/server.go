@@ -65,11 +65,21 @@ type ConnectionLimits struct {
 // Event is emitted once the process has reached a lifecycle state. Recovered
 // reports that the previous owner of the data directory did not stop cleanly.
 type Event struct {
-	Schema             string `json:"schema"`
-	State              string `json:"state"`
-	OperationID        string `json:"operation_id,omitempty"`
-	DiagnosticsAddress string `json:"diagnostics_address,omitempty"`
-	Recovered          bool   `json:"recovered,omitempty"`
+	Schema             string    `json:"schema"`
+	State              string    `json:"state"`
+	OperationID        string    `json:"operation_id,omitempty"`
+	DiagnosticsAddress string    `json:"diagnostics_address,omitempty"`
+	Recovered          bool      `json:"recovered,omitempty"`
+	Warnings           []Warning `json:"warnings,omitempty"`
+}
+
+// Warning is a stable, code-identified lifecycle warning. Context contains
+// only non-secret facts that help an operator correct the configuration.
+type Warning struct {
+	Code     string            `json:"code"`
+	Severity string            `json:"severity"`
+	Summary  string            `json:"summary"`
+	Context  map[string]string `json:"context,omitempty"`
 }
 
 // Serve runs until it receives SIGINT or SIGTERM. It returns only after the
@@ -149,7 +159,30 @@ func (s *server) reportReady(recovered bool, diagnosticsAddress string) {
 	s.health.set("ready")
 	event := Event{Schema: "database.lifecycle/v1", State: "ready", Recovered: recovered}
 	event.DiagnosticsAddress = diagnosticsAddress
+	if warning, found := unsafeListenerWarning(s.options); found {
+		event.Warnings = []Warning{warning}
+	}
 	s.emit(event)
+}
+
+func unsafeListenerWarning(opts Options) (Warning, bool) {
+	if !opts.MySQLEnabled || opts.MySQLAddress == "" || opts.TLSCertFile != "" || opts.TLSKeyFile != "" {
+		return Warning{}, false
+	}
+	host, _, err := net.SplitHostPort(opts.MySQLAddress)
+	if err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() || (ip.To4() != nil && ip.To4().IsLoopback()) {
+				return Warning{}, false
+			}
+		}
+	}
+	return Warning{
+		Code:     "UNSAFE_NON_TLS_LISTENER",
+		Severity: "warning",
+		Summary:  "MySQL listener is reachable beyond loopback without TLS",
+		Context:  map[string]string{"address": opts.MySQLAddress, "tls": "disabled"},
+	}, true
 }
 
 func (s *server) awaitStop(ctx context.Context) {

@@ -69,6 +69,9 @@ func serveEventWriter(format, operationID string, stdout io.Writer) func(lifecyc
 }
 
 func writeHumanServeEvent(stdout io.Writer, event lifecycle.Event) {
+	for _, warning := range event.Warnings {
+		fmt.Fprintf(stdout, "database: WARNING [%s] %s\n", warning.Code, warning.Summary)
+	}
 	if event.State != "ready" {
 		fmt.Fprintf(stdout, "database: %s\n", event.State)
 		return

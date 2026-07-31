@@ -90,8 +90,12 @@ or startup. TLS 1.2 and TLS 1.3 are supported. Cipher selection,
 client-certificate authentication, inline certificate or key material, and live
 reload are unsupported. A restart applies changed TLS files. The v0.1 contract
 requires a prominent structured warning for a non-loopback MySQL listener
-without TLS; that warning and its observability schema are delivered by #66 and
-#31, not by configuration validation.
+without TLS. The `ready` record in `database.lifecycle/v1` carries one warning
+with code `UNSAFE_NON_TLS_LISTENER`, severity `warning`, a stable summary, and
+the non-sensitive context fields `address` and `tls=disabled`. Human output
+prints the same warning prominently. Loopback listeners and TLS-enabled
+listeners do not emit it. Configuration validation remains read-only; the
+warning is emitted only when the service starts.
 
 Leaving `diagnostics_listen_address` unset disables diagnostics. Setting it
 enables the documented non-sensitive liveness, readiness, and Prometheus metric

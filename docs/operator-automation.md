@@ -100,8 +100,10 @@ set:
 `verify-full` validates trust and server identity. `--tls-ca-file` adds trust
 roots and `--tls-server-name` overrides the identity derived from the address.
 There is no skip-verification mode. A non-loopback connection with TLS disabled
-emits a prominent structured warning. The password source and TLS settings do
-not change the terminal result schema.
+emits a prominent structured warning. For `serve`, the `ready` lifecycle record
+uses code `UNSAFE_NON_TLS_LISTENER`, severity `warning`, and context fields
+`address` and `tls=disabled`. The password source and TLS settings do not
+change the terminal result schema.
 
 Ambient server configuration never redirects an offline workflow. In
 particular, `restore`, `upgrade`, `data validate`, and `data inspect` use only
