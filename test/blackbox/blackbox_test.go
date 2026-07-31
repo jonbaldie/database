@@ -893,6 +893,43 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	}
 }
 
+func TestMySQLPreparedCloseKeepsWireConnectionReady(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("prepared-close-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, mysqlAddress := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, mysqlAddress, "admin", "prepared-close-secret")
+	defer client.close()
+
+	if err := client.conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.conn.SetDeadline(time.Time{}) }()
+	for range 32 {
+		statement := client.prepare("SELECT 7")
+		if statement.err != "" {
+			t.Fatalf("prepare statement: %#v", statement)
+		}
+		if result := client.executePrepared(statement.id); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != "7" {
+			t.Fatalf("execute statement: %#v", result)
+		}
+		client.closePrepared(statement.id)
+
+		followUp := client.prepare("SELECT ?")
+		if followUp.err != "" {
+			t.Fatalf("prepare after close: %#v", followUp)
+		}
+		client.closePrepared(followUp.id)
+	}
+}
+
 func TestMySQLPreparedStatementCountIsBounded(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")

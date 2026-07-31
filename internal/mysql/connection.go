@@ -3,7 +3,6 @@ package mysql
 import (
 	"encoding/binary"
 	"net"
-	"time"
 )
 
 // conversation owns one accepted connection from greeting through cleanup.
@@ -18,7 +17,7 @@ type conversation struct {
 	execution         *preparedExecution
 	preparedLifecycle *preparedLifecycle
 	admitted          bool
-	pending           *pendingCommand
+	watch             *statementWatch
 }
 
 type pendingCommand struct {
@@ -27,7 +26,6 @@ type pendingCommand struct {
 }
 
 type statementWatch struct {
-	done      chan struct{}
 	finished  chan *pendingCommand
 	cancelled chan struct{}
 }
@@ -106,9 +104,13 @@ func newSession(server *Server, authentication authenticationResult) *session {
 }
 
 func (c *conversation) acceptCommand() bool {
-	if c.pending != nil {
-		pending := c.pending
-		c.pending = nil
+	if c.watch != nil {
+		watch := c.watch
+		c.watch = nil
+		pending := <-watch.finished
+		if pending == nil {
+			return false
+		}
 		return c.dispatch(pending.sequence, pending.payload)
 	}
 	sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
@@ -172,34 +174,24 @@ func (c *conversation) runStatement(run func() error) bool {
 	c.session.statementCancel = watch.cancelled
 	err := run()
 	c.session.statementCancel = nil
-	close(watch.done)
-	_ = c.connection.SetReadDeadline(time.Now())
-	if pending := <-watch.finished; pending != nil {
-		c.pending = pending
-	}
-	_ = c.connection.SetReadDeadline(time.Time{})
+	c.watch = watch
 	c.server.connections.endStatement()
 	return err == nil
 }
 
 func (c *conversation) watchStatement() *statementWatch {
 	watch := &statementWatch{
-		done:      make(chan struct{}),
 		finished:  make(chan *pendingCommand, 1),
 		cancelled: make(chan struct{}),
 	}
 	go func() {
 		sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
 		if err == nil && len(payload) > 0 {
+			close(watch.cancelled)
 			watch.finished <- &pendingCommand{sequence: sequence + 1, payload: payload}
 			return
 		}
-		select {
-		case <-watch.done:
-		case <-watch.cancelled:
-		default:
-			close(watch.cancelled)
-		}
+		close(watch.cancelled)
 		watch.finished <- nil
 	}()
 	return watch
