@@ -169,5 +169,9 @@ judgment is not accepted.
 
 For local troubleshooting, pass smaller values to `scripts/performance.sh`,
 such as `--logical-bytes`, `--warmup`, `--run`, or
-`--enforce-thresholds=false`. A reduced run records `diagnostic_only` evidence
-and cannot support a release decision.
+`--enforce-thresholds=false`. Use `--data-root` only when temporary data must
+be placed on a selected filesystem; a run on a different storage device is
+diagnostic evidence, not reference acceptance evidence. Each report records
+the OS, kernel, CPU, memory, driver, server identity, and data-root setting. A
+reduced run records `diagnostic_only` evidence and cannot support a release
+decision.

@@ -35,6 +35,7 @@ const (
 type config struct {
 	executable        string
 	output            string
+	dataRoot          string
 	logicalBytes      int64
 	narrowRows        int64
 	relatedRows       int64
@@ -212,7 +213,7 @@ func run(args []string) error {
 		return err
 	}
 	result := newEvidence(cfg)
-	dataDirectory, err := os.MkdirTemp("", "database-performance-")
+	dataDirectory, err := os.MkdirTemp(cfg.dataRoot, "database-performance-")
 	if err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
@@ -268,17 +269,21 @@ func finishEvidence(cfg config, directory string, result *evidence) error {
 	result.CleanStarts = clean
 	result.FinishedAt = time.Now().UTC()
 	result.Judgment = judge(*result)
-	if !cfg.enforceThreshold {
+	if !acceptanceEnabled(cfg) {
 		result.Judgment = "diagnostic_only"
 	}
 	if err := writeEvidence(cfg.output, *result); err != nil {
 		return err
 	}
 	fmt.Printf("performance evidence written to %s\n", cfg.output)
-	if cfg.enforceThreshold && result.Judgment != "accepted" {
+	if acceptanceEnabled(cfg) && result.Judgment != "accepted" {
 		return errors.New("performance acceptance thresholds were not met")
 	}
 	return nil
+}
+
+func acceptanceEnabled(cfg config) bool {
+	return cfg.enforceThreshold && cfg.dataRoot == ""
 }
 
 func newEvidence(cfg config) evidence {
@@ -287,13 +292,7 @@ func newEvidence(cfg config) evidence {
 		ScenarioVersion: scenarioVersion,
 		CorpusVersion:   corpusVersion,
 		StartedAt:       time.Now().UTC(),
-		Environment: map[string]string{
-			"goos":       runtime.GOOS,
-			"goarch":     runtime.GOARCH,
-			"go_version": runtime.Version(),
-			"driver":     "github.com/go-sql-driver/mysql v1.9.3",
-			"server":     versionInfo(cfg.executable),
-		},
+		Environment:     benchmarkEnvironment(cfg.executable),
 		Configuration: map[string]any{
 			"logical_bytes_target": cfg.logicalBytes,
 			"sessions":             cfg.sessions,
@@ -303,9 +302,49 @@ func newEvidence(cfg config) evidence {
 			"minimum_operations":   cfg.minimumOperations,
 			"clean_starts":         cfg.cleanStarts,
 			"seed":                 cfg.seed,
+			"data_root":            cfg.dataRoot,
 		},
-		AcceptanceEnabled: cfg.enforceThreshold,
+		AcceptanceEnabled: acceptanceEnabled(cfg),
 	}
+}
+
+type systemCommand struct {
+	key     string
+	command string
+	args    []string
+}
+
+func benchmarkEnvironment(executable string) map[string]string {
+	environment := map[string]string{
+		"goos":       runtime.GOOS,
+		"goarch":     runtime.GOARCH,
+		"go_version": runtime.Version(),
+		"driver":     "github.com/go-sql-driver/mysql v1.9.3",
+		"server":     versionInfo(executable),
+	}
+	osCommand := systemCommand{key: "os_version", command: "uname", args: []string{"-sr"}}
+	if runtime.GOOS == "darwin" {
+		osCommand = systemCommand{key: "os_version", command: "sw_vers", args: []string{"-productVersion"}}
+	}
+	commands := []systemCommand{
+		osCommand,
+		{key: "kernel", command: "uname", args: []string{"-r"}},
+		{key: "cpu_model", command: "sysctl", args: []string{"-n", "machdep.cpu.brand_string"}},
+		{key: "cpu_count", command: "sysctl", args: []string{"-n", "hw.ncpu"}},
+		{key: "memory_bytes", command: "sysctl", args: []string{"-n", "hw.memsize"}},
+	}
+	for _, command := range commands {
+		environment[command.key] = runSystemCommand(command.command, command.args...)
+	}
+	return environment
+}
+
+func runSystemCommand(command string, args ...string) string {
+	output, err := exec.Command(command, args...).Output()
+	if err != nil || strings.TrimSpace(string(output)) == "" {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func loadAndRestart(cfg config, directory string) (*runningServer, *sql.DB, corpus, error) {
@@ -398,6 +437,7 @@ func parseConfig(args []string) (config, error) {
 	flags.SetOutput(os.Stderr)
 	flags.StringVar(&cfg.executable, "executable", filepath.Join(root, "bin", "database"), "database executable")
 	flags.StringVar(&cfg.output, "output", filepath.Join(root, "dist", "performance-evidence.json"), "evidence JSON path")
+	flags.StringVar(&cfg.dataRoot, "data-root", "", "directory for temporary benchmark data")
 	flags.Int64Var(&cfg.logicalBytes, "logical-bytes", 10_000_000_000, "logical application bytes in the corpus")
 	flags.Int64Var(&cfg.narrowRows, "narrow-rows", 1_000_000, "narrow keyed record count")
 	flags.Int64Var(&cfg.relatedRows, "related-rows", 1_000_000, "larger related record count")
