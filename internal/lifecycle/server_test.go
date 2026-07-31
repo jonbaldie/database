@@ -44,6 +44,16 @@ func TestServeRejectsUpgradeIncompleteDirectory(t *testing.T) {
 	}
 }
 
+func TestServeRejectsIncompleteDurableRecoveryArtifacts(t *testing.T) {
+	directory := initializedDirectory(t)
+	if err := os.WriteFile(filepath.Join(directory, ".catalog-crash.tmp"), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Serve(context.Background(), Options{DataDirectory: directory}, func(Event) {}); err == nil {
+		t.Fatal("Serve accepted an incomplete catalog commit")
+	}
+}
+
 func TestServeRejectsConcurrentOwnerAndAllowsRestart(t *testing.T) {
 	directory := initializedDirectory(t)
 	contextOne, stopOne := context.WithCancel(context.Background())

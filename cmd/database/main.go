@@ -44,6 +44,12 @@ func operatorCommand(args []string, stdout io.Writer) int {
 		}
 		return upgradeCommand(args[1:], stdout)
 	}
+	if args[0] == "data" {
+		if len(args) == 2 {
+			return unsupportedDataCommand(args, stdout, operation, operationID)
+		}
+		return dataCommand(args[1:], stdout)
+	}
 	return unsupportedOperatorCommand(args, stdout, operation, operationID)
 }
 
@@ -139,6 +145,9 @@ func operatorExitCode(class string) int {
 	}
 	if class == "precondition" {
 		return 3
+	}
+	if class == "invalid_artifact" {
+		return 5
 	}
 	return 1
 }

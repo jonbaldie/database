@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -399,6 +400,9 @@ func validateInstanceMetadata(directory string) error {
 }
 
 func validateInstanceCatalog(directory string) error {
+	if err := rejectDurableRecoveryArtifacts(directory); err != nil {
+		return err
+	}
 	catalogPath := filepath.Join(directory, "catalog.json")
 	info, err := os.Stat(catalogPath)
 	if err != nil || !info.Mode().IsRegular() {
@@ -406,6 +410,22 @@ func validateInstanceCatalog(directory string) error {
 	}
 	if _, err := catalog.Open(directory); err != nil {
 		return errors.New("data directory has damaged catalog")
+	}
+	return nil
+}
+
+func rejectDurableRecoveryArtifacts(directory string) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return errors.New("data directory has unreadable durable state")
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".catalog-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			return errors.New("data directory has an incomplete catalog commit")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(directory, ".database-initializing")); err == nil {
+		return errors.New("data directory initialization is incomplete")
 	}
 	return nil
 }
