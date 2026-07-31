@@ -6,9 +6,9 @@ currently implemented evidence set. Run `scripts/build-release.sh` to produce
 the supported native release binaries and `scripts/performance.sh` for the
 repeatable verification record.
 
-[The v0.1 conformance evidence map](conformance-evidence.md) links every
-Issue #1 promise to its public contract and evidence. It also states the
-release evidence that is still pending.
+[The draft v0.1 conformance evidence map](conformance-evidence.md) links each
+Issue #1 story to its contract and current evidence. It states the remaining
+contract inventory and release evidence work.
 
 The public seams covered by the current evidence are version reporting,
 initialization, lifecycle and diagnostics, MySQL handshake and text/prepared
