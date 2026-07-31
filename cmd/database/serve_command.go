@@ -59,6 +59,7 @@ func runServeWithReporter(args []string, stdout, stderr io.Writer) int {
 func serveLifecycleWithReporter(opts lifecycle.Options, reporter *operationReporter) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	opts.OperationID = reporter.id
 	state := ""
 	recovered := false
 	details := map[string]any{}
@@ -102,6 +103,7 @@ func serveLifecycle(format string, opts lifecycle.Options, stdout, stderr io.Wri
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	operationID := newOperationID()
+	opts.OperationID = operationID
 	if err := lifecycle.Serve(ctx, opts, serveEventWriter(format, operationID, stdout)); err != nil {
 		return serveFailure(format, operationID, stdout, stderr, err)
 	}

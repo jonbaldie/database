@@ -33,6 +33,7 @@ type Options struct {
 	DiagnosticsAddress string
 	StateFile          string
 	Format             string
+	OperationID        string
 	Timeouts
 	ResourceLimits
 	ConnectionLimits
@@ -67,6 +68,9 @@ type ConnectionLimits struct {
 type Event struct {
 	Schema             string    `json:"schema"`
 	State              string    `json:"state"`
+	EventCode          string    `json:"event_code,omitempty"`
+	Severity           string    `json:"severity,omitempty"`
+	Message            string    `json:"message,omitempty"`
 	OperationID        string    `json:"operation_id,omitempty"`
 	DiagnosticsAddress string    `json:"diagnostics_address,omitempty"`
 	Recovered          bool      `json:"recovered,omitempty"`
@@ -139,30 +143,55 @@ func (s *server) serve(ctx context.Context) error {
 		state.finish(cleanStop)
 	}()
 	if state.recovered {
-		s.emit(Event{Schema: "database.lifecycle/v1", State: "recovering", Recovered: true})
+		s.health.set("recovering")
+		event := s.lifecycleEvent("recovering", "recovery.started", "info", "database recovery started")
+		event.Recovered = true
+		s.emit(event)
 	}
 	runtime, err := startRuntime(s.options, s.health)
 	if err != nil {
+		s.health.set(startFailureReason(err))
+		s.emit(s.lifecycleEvent("failed", startFailureCode(err), "critical", "database startup failed"))
 		return err
 	}
 	s.reportReady(state.recovered, runtime.diagnosticsAddress)
 	s.awaitStop(ctx)
 	if err := runtime.closeGracefully(); err != nil {
+		s.emit(s.lifecycleEvent("failed", "server.stop_failed", "error", "database shutdown failed"))
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
 	cleanStop = true
-	s.emit(Event{Schema: "database.lifecycle/v1", State: "stopped"})
+	s.emit(s.lifecycleEvent("stopped", "server.stopped", "info", "database stopped"))
 	return nil
 }
 
 func (s *server) reportReady(recovered bool, diagnosticsAddress string) {
 	s.health.set("ready")
-	event := Event{Schema: "database.lifecycle/v1", State: "ready", Recovered: recovered}
+	event := s.lifecycleEvent("ready", "server.ready", "info", "database ready")
 	event.DiagnosticsAddress = diagnosticsAddress
+	event.Recovered = recovered
 	if warning, found := unsafeListenerWarning(s.options); found {
 		event.Warnings = []Warning{warning}
 	}
 	s.emit(event)
+}
+
+func (s *server) lifecycleEvent(state, code, severity, message string) Event {
+	return Event{Schema: "database.lifecycle/v1", State: state, EventCode: code, Severity: severity, Message: message, OperationID: s.options.OperationID}
+}
+
+func startFailureReason(err error) string {
+	if strings.Contains(err.Error(), "recover catalog") || strings.Contains(err.Error(), "damaged") || strings.Contains(err.Error(), "corruption") {
+		return "corruption"
+	}
+	return "starting"
+}
+
+func startFailureCode(err error) string {
+	if startFailureReason(err) == "corruption" {
+		return "corruption.detected"
+	}
+	return "server.start_failed"
 }
 
 func unsafeListenerWarning(opts Options) (Warning, bool) {
@@ -197,8 +226,8 @@ func (s *server) awaitStop(ctx context.Context) {
 	case <-ctx.Done():
 	case <-signals:
 	}
-	s.health.set("stopping")
-	s.emit(Event{Schema: "database.lifecycle/v1", State: "stopping"})
+	s.health.set("shutting_down")
+	s.emit(s.lifecycleEvent("stopping", "server.stopping", "info", "database shutdown started"))
 }
 
 type runtime struct {
@@ -547,14 +576,22 @@ func diagnosticsHandler(health *health, mysqlServer ...*mysql.Server) http.Handl
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "live"})
 	})
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		if health.current() == "ready" {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 			return
 		}
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": health.current()})
 	})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		ready := "0"
 		if health.current() == "ready" {
@@ -575,6 +612,8 @@ func diagnosticResourceUsage(servers []*mysql.Server) mysql.ResourceUsage {
 func prometheusMetrics(ready string, usage mysql.ResourceUsage) string {
 	return fmt.Sprintf(`# TYPE database_process_ready gauge
 database_process_ready %s
+# TYPE database_server_ready gauge
+database_server_ready %s
 # TYPE database_execution_memory_bytes gauge
 database_execution_memory_bytes %d
 # TYPE database_execution_memory_peak_bytes gauge
@@ -594,7 +633,7 @@ database_resource_timeouts_total %d
 # TYPE database_resource_exhaustions_total counter
 database_resource_exhaustions_total{resource="memory"} %d
 database_resource_exhaustions_total{resource="temporary_storage"} %d
-`, ready, usage.ExecutionMemoryBytes, usage.PeakExecutionMemoryBytes, usage.TemporaryStorageBytes, usage.PeakTemporaryStorageBytes, usage.SpillCount, usage.SpillBytes, usage.CancellationCount, usage.TimeoutCount, usage.MemoryExhaustionCount, usage.TemporaryExhaustionCount)
+`, ready, ready, usage.ExecutionMemoryBytes, usage.PeakExecutionMemoryBytes, usage.TemporaryStorageBytes, usage.PeakTemporaryStorageBytes, usage.SpillCount, usage.SpillBytes, usage.CancellationCount, usage.TimeoutCount, usage.MemoryExhaustionCount, usage.TemporaryExhaustionCount)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

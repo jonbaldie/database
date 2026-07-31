@@ -3,10 +3,13 @@ package lifecycle
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,11 +120,109 @@ func TestDiagnosticsReadinessTracksStartupAndShutdown(t *testing.T) {
 	if status != http.StatusServiceUnavailable || response["reason"] != "stopping" {
 		t.Fatalf("shutdown readiness = status %d body %#v", status, response)
 	}
+	for _, reason := range []string{"recovering", "shutting_down", "corruption"} {
+		health.set(reason)
+		status, response = healthResponse(t, listener.Addr().String(), "/ready")
+		if status != http.StatusServiceUnavailable || response["reason"] != reason {
+			t.Fatalf("%s readiness = status %d body %#v", reason, status, response)
+		}
+	}
 	status, response = healthResponse(t, listener.Addr().String(), "/live")
 	if status != http.StatusOK || response["status"] != "live" {
 		t.Fatalf("shutdown liveness = status %d body %#v", status, response)
 	}
 	_ = server.Shutdown(context.Background())
+}
+
+func TestDiagnosticsMethodsAndMetricsAreBounded(t *testing.T) {
+	health := newHealth()
+	health.set("ready")
+	server := httptest.NewServer(diagnosticsHandler(health))
+	defer server.Close()
+	client := server.Client()
+
+	for _, path := range []string{"/live", "/ready", "/metrics"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			request, err := http.NewRequest(method, server.URL+path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("%s %s status=%d, want 200", method, path, response.StatusCode)
+			}
+		}
+		request, err := http.NewRequest(http.MethodPost, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("POST %s status=%d, want 405", path, response.StatusCode)
+		}
+	}
+
+	response, err := client.Get(server.URL + "/unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown path status=%d, want 404", response.StatusCode)
+	}
+
+	response, err = client.Get(server.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(metrics)
+	if response.Header.Get("Content-Type") != "text/plain; version=0.0.4" || !strings.Contains(text, "database_server_ready 1") {
+		t.Fatalf("metrics headers/body = %q / %q", response.Header.Get("Content-Type"), text)
+	}
+	for _, prohibited := range []string{"operation_id", "session_id", "account=", "query=", "namespace="} {
+		if strings.Contains(text, prohibited) {
+			t.Fatalf("metrics contain prohibited identifier %q: %q", prohibited, text)
+		}
+	}
+}
+
+func TestLifecycleEventsHaveStableCodesAndOperationIdentity(t *testing.T) {
+	directory := initializedDirectory(t)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	events := make(chan Event, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, Options{DataDirectory: directory, OperationID: "op-test"}, func(event Event) { events <- event })
+	}()
+	ready := receiveEvent(t, events, "ready")
+	if ready.EventCode != "server.ready" || ready.Severity != "info" || ready.OperationID != "op-test" {
+		stop()
+		<-done
+		t.Fatalf("ready event = %#v", ready)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	stopping := receiveEvent(t, events, "stopping")
+	stopped := receiveEvent(t, events, "stopped")
+	if stopping.EventCode != "server.stopping" || stopped.EventCode != "server.stopped" || stopping.OperationID != "op-test" || stopped.OperationID != "op-test" {
+		t.Fatalf("shutdown events = %#v / %#v", stopping, stopped)
+	}
 }
 
 func TestDiagnosticResourceUsageHandlesDiagnosticsWithoutMySQL(t *testing.T) {
