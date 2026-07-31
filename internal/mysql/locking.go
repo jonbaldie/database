@@ -35,21 +35,23 @@ type lockSnapshot map[rowLockResource]lockMode
 // lockManager owns all row locks for one server. It uses a wait graph to
 // detect cycles before a blocked statement starts to wait.
 type lockManager struct {
-	mu      sync.Mutex
-	timeout time.Duration
-	granted map[rowLockResource]map[*session]lockMode
-	held    map[*session]map[rowLockResource]lockMode
-	waiting map[*session]map[*session]struct{}
-	changed chan struct{}
+	mu           sync.Mutex
+	timeout      time.Duration
+	granted      map[rowLockResource]map[*session]lockMode
+	held         map[*session]map[rowLockResource]lockMode
+	waiting      map[*session]map[*session]struct{}
+	waitingSince map[*session]time.Time
+	changed      chan struct{}
 }
 
 func newLockManager(timeout time.Duration) *lockManager {
 	return &lockManager{
-		timeout: timeout,
-		granted: make(map[rowLockResource]map[*session]lockMode),
-		held:    make(map[*session]map[rowLockResource]lockMode),
-		waiting: make(map[*session]map[*session]struct{}),
-		changed: make(chan struct{}),
+		timeout:      timeout,
+		granted:      make(map[rowLockResource]map[*session]lockMode),
+		held:         make(map[*session]map[rowLockResource]lockMode),
+		waiting:      make(map[*session]map[*session]struct{}),
+		waitingSince: make(map[*session]time.Time),
+		changed:      make(chan struct{}),
 	}
 }
 
@@ -121,12 +123,17 @@ func (m *lockManager) waitAttempt(waiter *session, resources []rowLockResource, 
 	owners := m.conflictingOwners(waiter, resources, mode)
 	if len(owners) == 0 {
 		delete(m.waiting, waiter)
+		delete(m.waitingSince, waiter)
 		m.grant(waiter, resources, mode)
 		return nil, true, nil
 	}
 	m.waiting[waiter] = owners
+	if _, found := m.waitingSince[waiter]; !found {
+		m.waitingSince[waiter] = time.Now()
+	}
 	if m.waitGraphReaches(owners, waiter, map[*session]bool{}) {
 		delete(m.waiting, waiter)
+		delete(m.waitingSince, waiter)
 		return nil, false, deadlockFailure()
 	}
 	return m.changed, false, nil
@@ -152,6 +159,7 @@ func waitForLockChange(changed, cancelled <-chan struct{}, deadline time.Time) e
 func (m *lockManager) stopWaiting(session *session) {
 	m.mu.Lock()
 	delete(m.waiting, session)
+	delete(m.waitingSince, session)
 	m.mu.Unlock()
 }
 
@@ -227,8 +235,19 @@ func (m *lockManager) release(session *session) {
 	}
 	delete(m.held, session)
 	delete(m.waiting, session)
+	delete(m.waitingSince, session)
 	m.signal()
 	m.mu.Unlock()
+}
+
+func (m *lockManager) waitDuration(session *session, now time.Time) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	started, waiting := m.waitingSince[session]
+	if !waiting {
+		return 0
+	}
+	return now.Sub(started)
 }
 
 func (m *lockManager) snapshot(owner *session) lockSnapshot {

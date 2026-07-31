@@ -19,7 +19,10 @@ var TabularColumns = []string{
 	"key_len", "ref", "rows", "filtered", "Extra",
 	"operator_id", "parent_operator_id", "operator", "strategy", "estimated_cost",
 	"estimated_memory_bytes", "actual_rows", "loops", "first_row_ms", "total_ms",
-	"summary", "warnings",
+	"actual_input_rows", "actual_filtered_rows", "actual_peak_memory_bytes",
+	"actual_logical_reads", "actual_physical_reads", "actual_bytes_read",
+	"actual_lock_ms", "actual_other_ms", "actual_rows_vs_estimate_ratio",
+	"actual_warnings", "summary", "warnings",
 }
 
 type cell struct {
@@ -86,8 +89,18 @@ func stableCells(operator *Operator, parentID int) []cell {
 		actualLoopsCell(operator),
 		actualDurationCell(operator, true),
 		actualDurationCell(operator, false),
+		actualIntegerCell(operator, func(actual *Actual) int { return actual.InputRows }),
+		actualIntegerCell(operator, func(actual *Actual) int { return actual.FilteredRows }),
+		actualIntegerCell(operator, func(actual *Actual) int { return actual.PeakMemoryBytes }),
+		actualIntegerCell(operator, func(actual *Actual) int { return actual.Storage.LogicalReads }),
+		actualIntegerCell(operator, func(actual *Actual) int { return actual.Storage.PhysicalReads }),
+		actualIntegerCell(operator, func(actual *Actual) int { return actual.Storage.BytesRead }),
+		actualNumberCell(operator, func(actual *Actual) float64 { return actual.Wait.LockMS }),
+		actualNumberCell(operator, func(actual *Actual) float64 { return actual.Wait.OtherMS }),
+		actualRatioCell(operator),
+		actualWarningsCell(operator),
 		text(operator.Summary),
-		text(warningCodes(operator.Warnings)),
+		text(warningCodes(append(append([]Warning(nil), operator.Warnings...), actualWarnings(operator)...))),
 	}
 }
 
@@ -117,6 +130,41 @@ func actualDurationCell(operator *Operator, first bool) cell {
 		return nullCell()
 	}
 	return text(formatNumber(*duration))
+}
+
+func actualIntegerCell(operator *Operator, value func(*Actual) int) cell {
+	if operator.Actual == nil {
+		return nullCell()
+	}
+	return text(strconv.Itoa(value(operator.Actual)))
+}
+
+func actualNumberCell(operator *Operator, value func(*Actual) float64) cell {
+	if operator.Actual == nil {
+		return nullCell()
+	}
+	return text(formatNumber(value(operator.Actual)))
+}
+
+func actualRatioCell(operator *Operator) cell {
+	if operator.Actual == nil || operator.Actual.RowsVsEstimateRatio == nil {
+		return nullCell()
+	}
+	return text(formatNumber(*operator.Actual.RowsVsEstimateRatio))
+}
+
+func actualWarningsCell(operator *Operator) cell {
+	if operator.Actual == nil {
+		return nullCell()
+	}
+	return text(warningCodes(operator.Actual.Warnings))
+}
+
+func actualWarnings(operator *Operator) []Warning {
+	if operator.Actual == nil {
+		return nil
+	}
+	return operator.Actual.Warnings
 }
 
 func parentCell(parentID int) cell {

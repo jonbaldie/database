@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/queryexplanation"
 )
 
 // maximumPendingConnections is a private handshake-resource safeguard. It is
@@ -353,6 +354,7 @@ type session struct {
 	nextStmtID      uint32
 	longDataBytes   int
 	statementCancel <-chan struct{}
+	runtimeMetrics  *queryexplanation.RuntimeMetrics
 	transactionState
 }
 

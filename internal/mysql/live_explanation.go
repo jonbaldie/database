@@ -18,21 +18,29 @@ type activeExplanationRegistry struct {
 type activeExplanation struct {
 	plan    *queryexplanation.Document
 	started time.Time
+	session *session
+	metrics *queryexplanation.RuntimeMetrics
 }
 
 func newActiveExplanationRegistry() *activeExplanationRegistry {
 	return &activeExplanationRegistry{active: make(map[uint32]*activeExplanation)}
 }
 
-func (r *activeExplanationRegistry) begin(connectionID uint32, plan *queryexplanation.Document) func() {
+func (r *activeExplanationRegistry) begin(connectionID uint32, plan *queryexplanation.Document, session *session) func() {
 	if r == nil || connectionID == 0 || plan == nil {
 		return func() {}
 	}
-	entry := &activeExplanation{plan: plan, started: time.Now()}
+	entry := &activeExplanation{plan: plan, started: time.Now(), session: session, metrics: queryexplanation.NewRuntimeMetrics(plan)}
 	r.mu.Lock()
 	r.active[connectionID] = entry
 	r.mu.Unlock()
+	if session != nil {
+		session.runtimeMetrics = entry.metrics
+	}
 	return func() {
+		if session != nil && session.runtimeMetrics == entry.metrics {
+			session.runtimeMetrics = nil
+		}
 		r.mu.Lock()
 		if r.active[connectionID] == entry {
 			delete(r.active, connectionID)
@@ -52,5 +60,9 @@ func (r *activeExplanationRegistry) snapshot(connectionID uint32) (*queryexplana
 		return nil, false
 	}
 	now := time.Now()
-	return queryexplanation.Snapshot(entry.plan, connectionID, now, now.Sub(entry.started)), true
+	lockWait := time.Duration(0)
+	if entry.session != nil {
+		lockWait = entry.session.server.locks.waitDuration(entry.session, now)
+	}
+	return queryexplanation.SnapshotWithMetrics(entry.plan, connectionID, now, now.Sub(entry.started), lockWait, entry.metrics), true
 }

@@ -195,7 +195,7 @@ func (c *conversation) recordActiveExplanation(query string) func() {
 	if err != nil {
 		return func() {}
 	}
-	return c.server.explanations.begin(c.session.connectionID, plan)
+	return c.server.explanations.begin(c.session.connectionID, plan, c.session)
 }
 
 func (c *conversation) watchStatement() *statementWatch {

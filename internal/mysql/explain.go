@@ -115,40 +115,62 @@ func splitLeadingWord(text string) (string, string, bool) {
 }
 
 func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*queryResult, error) {
+	planningStarted := time.Now()
 	document, err := s.planExplanation(inner)
 	if err != nil {
 		return nil, err
 	}
+	document.Timing.PlanningMS = float64(time.Since(planningStarted)) / float64(time.Millisecond)
 	if document.Statement.Kind != "select" || document.Statement.LockingRead {
 		return nil, sqlFailure{1235, "42000", "EXPLAIN ANALYZE supports only non-locking SELECT statements"}
 	}
 	started := time.Now()
 	runner := *s
 	runner.streamRows = false
+	metrics := queryexplanation.NewRuntimeMetrics(document)
+	runner.session.runtimeMetrics = metrics
+	defer func() { runner.session.runtimeMetrics = nil }()
 	result, err := runner.executeWithTransaction(inner, strings.ToLower(inner))
 	if err != nil {
 		return nil, err
 	}
-	rows, err := discardResultRows(result)
+	rows, memory, err := discardResultRows(result)
 	if err != nil {
 		return nil, err
 	}
-	return renderExplanation(format, queryexplanation.Analyze(document, time.Since(started), rows))
+	elapsed := time.Since(started)
+	metrics.SetRoot(rows, memory, elapsed, 0, true)
+	return renderExplanation(format, queryexplanation.AnalyzeWithMetrics(document, elapsed, metrics))
 }
 
-func discardResultRows(result *queryResult) (int, error) {
+func discardResultRows(result *queryResult) (int, int, error) {
 	if result == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
 	if result.stream == nil {
-		return len(result.rows), nil
+		return len(result.rows), queryResultMemory(result.rows, result.nulls), nil
 	}
 	rows := 0
-	err := result.stream(func([]string, []bool) error {
+	memory := 0
+	err := result.stream(func(values []string, nulls []bool) error {
 		rows++
+		memory += queryResultMemory([][]string{values}, [][]bool{nulls})
 		return nil
 	})
-	return rows, err
+	return rows, memory, err
+}
+
+func queryResultMemory(rows [][]string, nulls [][]bool) int {
+	bytes := 0
+	for index, row := range rows {
+		if index < len(nulls) {
+			bytes += len(nulls[index])
+		}
+		for _, value := range row {
+			bytes += len(value)
+		}
+	}
+	return bytes
 }
 
 func (s *textStatementExecutor) snapshotExplanation(format string, connectionID uint32) (*queryResult, error) {

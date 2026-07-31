@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/queryexplanation"
@@ -203,8 +204,12 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 	if plan.hasAggregateOrWindow() {
 		return collectAggregateOrWindowRows(plan)
 	}
+	started := time.Now()
+	sourceRows := 0
+	matchedRows := 0
 	resultRows := make([]relationalResultRow, 0)
 	err := plan.forEachSourceRow(func(row relationRow) error {
+		sourceRows++
 		if plan.where != nil {
 			matched, err := predicateMatches(plan.where, row)
 			if err != nil {
@@ -214,6 +219,7 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 				return nil
 			}
 		}
+		matchedRows++
 		result, err := plan.projectRow(row)
 		if err != nil {
 			return err
@@ -221,7 +227,47 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 		resultRows = append(resultRows, result)
 		return nil
 	})
+	if err == nil {
+		plan.recordReadPipeline(sourceRows, matchedRows, resultRows, time.Since(started))
+	}
 	return resultRows, err
+}
+
+func (p *relationalSelectPlan) recordReadPipeline(sourceRows, matchedRows int, resultRows []relationalResultRow, elapsed time.Duration) {
+	metrics := p.session.runtimeMetrics
+	if metrics == nil {
+		return
+	}
+	metrics.Record("scan", 0, sourceRows, 0, sourceRows, sourceBytes(p.source.tables), 0, elapsed)
+	if p.where != nil {
+		metrics.Record("filter", sourceRows, matchedRows, sourceRows-matchedRows, 0, 0, 0, elapsed)
+	}
+	if !p.allColumns {
+		metrics.Record("project", matchedRows, len(resultRows), 0, 0, 0, resultMemory(resultRows), elapsed)
+	}
+}
+
+func sourceBytes(tables []relationalTableSource) int {
+	bytes := 0
+	for _, table := range tables {
+		for _, row := range table.table.Rows {
+			for _, value := range row {
+				bytes += len(value)
+			}
+		}
+	}
+	return bytes
+}
+
+func resultMemory(rows []relationalResultRow) int {
+	bytes := 0
+	for _, row := range rows {
+		bytes += len(row.nulls)
+		for _, value := range row.values {
+			bytes += len(value)
+		}
+	}
+	return bytes
 }
 
 func lockRelationalResultRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {

@@ -44,6 +44,16 @@ func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	if _, found := analysis["plan"].(map[string]any)["actual"]; !found {
 		t.Fatalf("analyzed explanation has no runtime evidence: %#v", analysis)
 	}
+	analysisPlan := analysis["plan"].(map[string]any)
+	actual := analysisPlan["actual"].(map[string]any)
+	if actual["peak_memory_bytes"].(float64) <= 0 || actual["rows_vs_estimate_ratio"] == nil {
+		t.Fatalf("analyzed root evidence: %#v", actual)
+	}
+	filter := analysisPlan["children"].([]any)[0].(map[string]any)
+	scan := filter["children"].([]any)[0].(map[string]any)
+	if scan["actual"].(map[string]any)["storage"].(map[string]any)["logical_reads"].(float64) <= 0 {
+		t.Fatalf("analyzed scan reads: %#v", scan)
+	}
 	tabular := admin.query("EXPLAIN ANALYZE SELECT id FROM orders WHERE id = 1")
 	if tabular.err != "" || len(tabular.rows) == 0 {
 		t.Fatalf("tabular analyzed explanation: %#v", tabular)
@@ -57,6 +67,15 @@ func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	}
 	if actualRowsColumn < 0 || tabular.rows[0][actualRowsColumn] == "" {
 		t.Fatalf("tabular analyzed runtime evidence: %#v", tabular)
+	}
+	for _, required := range []string{"actual_peak_memory_bytes", "actual_logical_reads", "actual_lock_ms", "actual_rows_vs_estimate_ratio"} {
+		found := false
+		for _, column := range tabular.columns {
+			found = found || column == required
+		}
+		if !found {
+			t.Fatalf("tabular runtime column %q: %#v", required, tabular.columns)
+		}
 	}
 	if result := admin.query("EXPLAIN ANALYZE UPDATE orders SET value = 20 WHERE id = 1"); result.errCode != 1235 {
 		t.Fatalf("write analysis: %#v", result)
@@ -103,6 +122,9 @@ func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	}
 	if _, found := snapshot["plan"].(map[string]any)["actual"]; !found {
 		t.Fatalf("snapshot has no partial evidence: %#v", snapshot)
+	}
+	if snapshot["plan"].(map[string]any)["actual"].(map[string]any)["wait"].(map[string]any)["lock_ms"].(float64) <= 0 {
+		t.Fatalf("snapshot does not report the observed lock wait: %#v", snapshot)
 	}
 	mustRemainBlocked(t, blocked)
 	mustQuery(t, owner, "COMMIT")

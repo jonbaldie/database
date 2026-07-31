@@ -28,6 +28,29 @@ func TestAnalyzeAddsCompleteRuntimeEvidence(t *testing.T) {
 	}
 }
 
+func TestTabularRuntimeProjectionIncludesAllRequiredEvidence(t *testing.T) {
+	plan := PlanSelect("0.1.0", "SELECT id FROM orders", "app", Select{Table: ordersTable(), Columns: []string{"id"}})
+	metrics := NewRuntimeMetrics(plan)
+	metrics.Record("scan", 0, 3, 0, 3, 24, 0, time.Millisecond)
+	metrics.Record("project", 3, 3, 0, 0, 0, 72, time.Millisecond)
+	metrics.SetRoot(3, 72, 2*time.Millisecond, 0, true)
+	tabular := RenderTabular(AnalyzeWithMetrics(plan, 2*time.Millisecond, metrics))
+
+	for _, required := range []string{
+		"actual_rows", "total_ms", "actual_peak_memory_bytes", "actual_logical_reads",
+		"actual_physical_reads", "actual_bytes_read", "actual_lock_ms", "actual_other_ms",
+		"actual_rows_vs_estimate_ratio", "actual_warnings",
+	} {
+		found := false
+		for _, column := range tabular.Columns {
+			found = found || column == required
+		}
+		if !found {
+			t.Errorf("tabular projection is missing %q", required)
+		}
+	}
+}
+
 func TestSnapshotAddsPartialRuntimeEvidence(t *testing.T) {
 	plan := PlanSelect("0.1.0", "SELECT id FROM orders", "app", Select{Table: ordersTable(), Columns: []string{"id"}})
 	document := Snapshot(plan, 42, time.Date(2026, time.July, 31, 12, 0, 0, 0, time.UTC), 5*time.Millisecond)

@@ -1,65 +1,251 @@
 package queryexplanation
 
-import "time"
+import (
+	"sync"
+	"time"
+)
+
+// RuntimeMetrics stores counters observed by the executor. It is safe to read
+// while a statement is running, so it is also the source for a live snapshot.
+// Each record names the physical operator that produced the evidence.
+type RuntimeMetrics struct {
+	mu          sync.RWMutex
+	operatorIDs map[string][]int
+	seen        map[string]int
+	operators   map[int]Actual
+	rootID      int
+}
+
+// NewRuntimeMetrics prepares a collector for one immutable explanation plan.
+func NewRuntimeMetrics(plan *Document) *RuntimeMetrics {
+	metrics := &RuntimeMetrics{
+		operatorIDs: make(map[string][]int),
+		seen:        make(map[string]int),
+		operators:   make(map[int]Actual),
+	}
+	metrics.rootID = collectOperatorIDs(plan, metrics.operatorIDs)
+	return metrics
+}
+
+func collectOperatorIDs(document *Document, operatorIDs map[string][]int) int {
+	if document == nil {
+		return 0
+	}
+	var visit func(*Operator)
+	visit = func(operator *Operator) {
+		if operator == nil {
+			return
+		}
+		operatorIDs[operator.Kind] = append(operatorIDs[operator.Kind], operator.ID)
+		for _, child := range operator.Children {
+			visit(child)
+		}
+	}
+	visit(document.Plan)
+	if document.Plan == nil {
+		return 0
+	}
+	return document.Plan.ID
+}
+
+// Record adds observed evidence to the next physical operator of kind. The
+// executor calls it once for each measured pipeline stage.
+func (m *RuntimeMetrics) Record(kind string, inputRows, outputRows, filteredRows, logicalReads, bytesRead, peakMemoryBytes int, elapsed time.Duration) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := m.operatorIDs[kind]
+	index := m.seen[kind]
+	if index >= len(ids) {
+		return
+	}
+	m.seen[kind] = index + 1
+	id := ids[index]
+	actual := m.operators[id]
+	actual.Invocations++
+	actual.InputRows += inputRows
+	actual.OutputRows += outputRows
+	actual.FilteredRows += filteredRows
+	actual.Storage.LogicalReads += logicalReads
+	actual.Storage.BytesRead += bytesRead
+	if peakMemoryBytes > actual.PeakMemoryBytes {
+		actual.PeakMemoryBytes = peakMemoryBytes
+	}
+	total := valueOrZero(actual.TotalMS) + milliseconds(elapsed)
+	actual.TotalMS = &total
+	m.operators[id] = actual
+}
+
+// SetRoot records statement-level evidence that belongs to the root physical
+// operator, such as a lock wait observed before the statement completes.
+func (m *RuntimeMetrics) SetRoot(outputRows, peakMemoryBytes int, elapsed, lockWait time.Duration, complete bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rootID == 0 {
+		return
+	}
+	actual := m.operators[m.rootID]
+	if actual.Invocations == 0 {
+		actual.Invocations = 1
+	}
+	actual.OutputRows = outputRows
+	if peakMemoryBytes > actual.PeakMemoryBytes {
+		actual.PeakMemoryBytes = peakMemoryBytes
+	}
+	total := milliseconds(elapsed)
+	actual.TotalMS = &total
+	if complete {
+		first := total
+		actual.FirstRowMS = &first
+	}
+	actual.Wait.LockMS = milliseconds(lockWait)
+	m.operators[m.rootID] = actual
+}
+
+func (m *RuntimeMetrics) copyOperators() map[int]Actual {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[int]Actual, len(m.operators))
+	for id, actual := range m.operators {
+		result[id] = cloneActual(actual)
+	}
+	return result
+}
 
 // Analyze returns the completed runtime form of a plan. The result count is
 // measured from the executed result stream; execution time covers the same
 // run. The returned document never mutates the plan that supplied it.
 func Analyze(plan *Document, elapsed time.Duration, resultRows int) *Document {
+	metrics := NewRuntimeMetrics(plan)
+	metrics.SetRoot(resultRows, 0, elapsed, 0, true)
+	return AnalyzeWithMetrics(plan, elapsed, metrics)
+}
+
+// AnalyzeWithMetrics returns completed runtime evidence from one executed
+// statement. It never fills an operator from a different operator's counters.
+func AnalyzeWithMetrics(plan *Document, elapsed time.Duration, metrics *RuntimeMetrics) *Document {
 	document := cloneRuntimeDocument(plan)
 	document.Mode = "analyze"
 	document.Partial = false
 	document.Snapshot = nil
 	document.Timing.Execution = &ExecutionTiming{ElapsedMS: milliseconds(elapsed), Complete: true}
-	attachRuntime(document.Plan, elapsed, resultRows, false)
+	attachCompletedRuntime(document.Plan, metrics.copyOperators())
 	return document
 }
 
 // Snapshot returns the partial runtime form of a plan that is still running.
 // It records only evidence visible when the caller captured the snapshot.
 func Snapshot(plan *Document, connectionID uint32, capturedAt time.Time, elapsed time.Duration) *Document {
+	return SnapshotWithMetrics(plan, connectionID, capturedAt, elapsed, 0, nil)
+}
+
+// SnapshotWithMetrics returns only counters observed through capturedAt. The
+// root always has elapsed statement evidence; other operators appear only when
+// the executor recorded them.
+func SnapshotWithMetrics(plan *Document, connectionID uint32, capturedAt time.Time, elapsed, lockWait time.Duration, metrics *RuntimeMetrics) *Document {
 	document := cloneRuntimeDocument(plan)
 	document.Mode = "snapshot"
 	document.Partial = true
 	document.Timing.Execution = &ExecutionTiming{ElapsedMS: milliseconds(elapsed), Complete: false}
 	document.Warnings = append(document.Warnings, partialSnapshotWarning())
 	document.Snapshot = &SnapshotDetails{ConnectionID: connectionID, CapturedAt: capturedAt.UTC().Format(time.RFC3339Nano)}
-	attachRuntime(document.Plan, elapsed, 0, true)
+	if metrics == nil {
+		metrics = NewRuntimeMetrics(plan)
+	}
+	observed := metrics.copyOperators()
+	setRoot(observed, metrics.rootID, 0, 0, elapsed, lockWait, false)
+	attachPartialRuntime(document.Plan, observed)
 	return document
 }
 
-func attachRuntime(operator *Operator, elapsed time.Duration, resultRows int, partial bool) {
+func setRoot(operators map[int]Actual, rootID, outputRows, peakMemoryBytes int, elapsed, lockWait time.Duration, complete bool) {
+	if rootID == 0 {
+		return
+	}
+	actual := operators[rootID]
+	if actual.Invocations == 0 {
+		actual.Invocations = 1
+	}
+	actual.OutputRows = outputRows
+	if peakMemoryBytes > actual.PeakMemoryBytes {
+		actual.PeakMemoryBytes = peakMemoryBytes
+	}
+	total := milliseconds(elapsed)
+	actual.TotalMS = &total
+	if complete {
+		first := total
+		actual.FirstRowMS = &first
+	}
+	actual.Wait.LockMS = milliseconds(lockWait)
+	operators[rootID] = actual
+}
+
+func attachCompletedRuntime(operator *Operator, observed map[int]Actual) {
 	if operator == nil {
 		return
 	}
-	total := milliseconds(elapsed)
-	actual := Actual{
-		Invocations:           1,
-		InputRows:             resultRows,
-		OutputRows:            resultRows,
-		FilteredRows:          0,
-		FirstRowMS:            nil,
-		TotalMS:               &total,
-		PeakMemoryBytes:       0,
-		SpillCount:            0,
-		SpillBytes:            0,
-		TemporaryStorageBytes: 0,
-		Storage:               StorageEvidence{},
-		Wait:                  WaitEvidence{},
-		RowsVsEstimateRatio:   estimateRatio(resultRows, operator.Estimates.Rows),
-		Warnings:              []Warning{},
+	actual, found := observed[operator.ID]
+	if !found {
+		actual = unavailableActual()
 	}
-	if partial {
+	actual.RowsVsEstimateRatio = estimateRatio(actual.OutputRows, operator.Estimates.Rows)
+	operator.Actual = &actual
+	for _, child := range operator.Children {
+		attachCompletedRuntime(child, observed)
+	}
+}
+
+func attachPartialRuntime(operator *Operator, observed map[int]Actual) {
+	if operator == nil {
+		return
+	}
+	if actual, found := observed[operator.ID]; found {
 		actual.RowsVsEstimateRatio = nil
 		actual.Warnings = append(actual.Warnings, Warning{
 			Code: "PARTIAL_RUNTIME_EVIDENCE", Severity: "info",
 			Summary: "Runtime counters were captured before this operator completed.",
 		})
+		operator.Actual = &actual
 	}
-	operator.Actual = &actual
 	for _, child := range operator.Children {
-		attachRuntime(child, elapsed, resultRows, partial)
+		attachPartialRuntime(child, observed)
 	}
+}
+
+func unavailableActual() Actual {
+	return Actual{Warnings: []Warning{{
+		Code: "RUNTIME_OPERATOR_NOT_INVOKED", Severity: "info",
+		Summary: "The operator did not run during this execution.",
+	}}}
+}
+
+func cloneActual(source Actual) Actual {
+	result := source
+	if source.FirstRowMS != nil {
+		first := *source.FirstRowMS
+		result.FirstRowMS = &first
+	}
+	if source.TotalMS != nil {
+		total := *source.TotalMS
+		result.TotalMS = &total
+	}
+	result.Warnings = append([]Warning(nil), source.Warnings...)
+	return result
+}
+
+func valueOrZero(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func estimateRatio(rows int, estimate float64) *float64 {
