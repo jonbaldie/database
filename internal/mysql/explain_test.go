@@ -141,17 +141,23 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 		}
 	}
 	queries := map[string]string{
-		"join":       "SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id",
-		"aggregate":  "SELECT customer_id, COUNT(*) AS order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 0",
-		"window":     "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS by_id, ROW_NUMBER() OVER (ORDER BY total DESC) AS by_total FROM orders",
-		"cte":        "WITH order_ids AS (SELECT id FROM orders) SELECT id FROM order_ids UNION SELECT id FROM orders",
-		"derived":    "SELECT id FROM (SELECT id FROM orders) AS nested UNION SELECT id FROM orders",
-		"subquery":   "SELECT id, (SELECT id FROM orders LIMIT 1) AS first_id, (SELECT id FROM orders LIMIT 1) AS second_id FROM orders UNION SELECT id, id, id FROM orders",
-		"correlated": "SELECT outer_orders.id, (SELECT inner_orders.total FROM orders AS inner_orders WHERE inner_orders.id = outer_orders.id) AS matching_total FROM orders AS outer_orders",
-		"exists":     "SELECT id FROM orders WHERE EXISTS (SELECT id FROM orders)",
-		"scalar_set": "SELECT 1 UNION SELECT 2",
-		"right_join": "SELECT left_orders.id FROM empty_left AS left_orders RIGHT JOIN orders ON left_orders.id = orders.id",
-		"set":        "SELECT id FROM orders UNION SELECT id FROM orders UNION SELECT id FROM orders ORDER BY id DESC LIMIT 2",
+		"join":              "SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id",
+		"aggregate":         "SELECT customer_id, COUNT(*) AS order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 0",
+		"window":            "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS by_id, ROW_NUMBER() OVER (ORDER BY total DESC) AS by_total FROM orders",
+		"cte":               "WITH order_ids AS (SELECT id FROM orders) SELECT id FROM order_ids UNION SELECT id FROM orders",
+		"derived":           "SELECT id FROM (SELECT id FROM orders) AS nested UNION SELECT id FROM orders",
+		"subquery":          "SELECT id, (SELECT id FROM orders LIMIT 1) AS first_id, (SELECT id FROM orders LIMIT 1) AS second_id FROM orders UNION SELECT id, id, id FROM orders",
+		"correlated":        "SELECT outer_orders.id, (SELECT inner_orders.total FROM orders AS inner_orders WHERE inner_orders.id = outer_orders.id) AS matching_total FROM orders AS outer_orders",
+		"exists":            "SELECT id FROM orders WHERE EXISTS (SELECT id FROM orders)",
+		"exists_twice":      "SELECT id FROM orders WHERE EXISTS (SELECT id FROM orders) AND EXISTS (SELECT id FROM orders) UNION SELECT id FROM orders",
+		"in":                "SELECT id FROM orders WHERE id IN (SELECT id FROM orders)",
+		"in_set":            "SELECT id FROM orders WHERE id IN (SELECT id FROM orders) UNION SELECT id FROM orders",
+		"correlated_exists": "SELECT outer_orders.id FROM orders AS outer_orders WHERE EXISTS (SELECT 1 FROM orders AS inner_orders WHERE inner_orders.customer_id = outer_orders.customer_id)",
+		"cte_twice":         "SELECT id, (WITH picked AS (SELECT id FROM orders LIMIT 1) SELECT id FROM picked) AS first_id, (WITH picked AS (SELECT id FROM orders LIMIT 1) SELECT id FROM picked) AS second_id FROM orders UNION SELECT id, id, id FROM orders",
+		"set_twice":         "SELECT id, (SELECT 1 UNION SELECT 1) AS first_value, (SELECT 1 UNION SELECT 1) AS second_value FROM orders UNION SELECT id, id, id FROM orders",
+		"scalar_set":        "SELECT 1 UNION SELECT 2",
+		"right_join":        "SELECT left_orders.id FROM empty_left AS left_orders RIGHT JOIN orders ON left_orders.id = orders.id",
+		"set":               "SELECT id FROM orders UNION SELECT id FROM orders UNION SELECT id FROM orders ORDER BY id DESC LIMIT 2",
 	}
 	for name, query := range queries {
 		t.Run(name, func(t *testing.T) {
@@ -164,6 +170,9 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 				t.Fatalf("decode analysis: %v", err)
 			}
 			assertCompletedOperatorEvidence(t, document["plan"].(map[string]any))
+			if name == "correlated_exists" {
+				assertOperatorInvocations(t, document["plan"].(map[string]any), "scan", 2)
+			}
 		})
 	}
 }
@@ -184,6 +193,31 @@ func assertCompletedOperatorEvidence(t *testing.T, operator map[string]any) {
 	for _, child := range operator["children"].([]any) {
 		assertCompletedOperatorEvidence(t, child.(map[string]any))
 	}
+}
+
+func assertOperatorInvocations(t *testing.T, operator map[string]any, kind string, want float64) {
+	t.Helper()
+	if operator["kind"] == kind && operator["actual"].(map[string]any)["invocations"] == want {
+		return
+	}
+	for _, child := range operator["children"].([]any) {
+		if operatorHasInvocations(child.(map[string]any), kind, want) {
+			return
+		}
+	}
+	t.Errorf("no %s operator recorded %g invocations", kind, want)
+}
+
+func operatorHasInvocations(operator map[string]any, kind string, want float64) bool {
+	if operator["kind"] == kind && operator["actual"].(map[string]any)["invocations"] == want {
+		return true
+	}
+	for _, child := range operator["children"].([]any) {
+		if operatorHasInvocations(child.(map[string]any), kind, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExplainAnalyzeRejectsWritesAndLockingReads(t *testing.T) {

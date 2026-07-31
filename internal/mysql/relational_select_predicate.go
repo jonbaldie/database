@@ -19,32 +19,32 @@ type relationOperand struct {
 }
 
 func compileRelationPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
-	return compileRelationPredicateContext(text, columns, session, nil, nil)
+	return compileRelationPredicateContext(text, columns, session, nil, nil, nil)
 }
 
-func compileRelationPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, error) {
+func compileRelationPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope, runtimeKeys *predicateRuntimeKeys) (relationPredicate, error) {
 	text = stripRelationParentheses(strings.TrimSpace(text))
 	if text == "" {
 		return nil, unsupportedExpression()
 	}
 	if parts := splitRelationKeyword(text, "OR"); len(parts) > 1 {
-		return combineRelationPredicatesContext(parts, columns, session, context, outer, logicalOr)
+		return combineRelationPredicatesContext(parts, columns, session, context, outer, runtimeKeys, logicalOr)
 	}
 	if parts := splitRelationKeyword(text, "AND"); len(parts) > 1 {
-		return combineRelationPredicatesContext(parts, columns, session, context, outer, logicalAnd)
+		return combineRelationPredicatesContext(parts, columns, session, context, outer, runtimeKeys, logicalAnd)
 	}
 	if strings.HasPrefix(strings.ToLower(text), "not ") {
-		return compileNegatedPredicateContext(text, columns, session, context, outer)
+		return compileNegatedPredicateContext(text, columns, session, context, outer, runtimeKeys)
 	}
-	return compileSimpleRelationPredicateContext(text, columns, session, context, outer)
+	return compileSimpleRelationPredicateContext(text, columns, session, context, outer, runtimeKeys)
 }
 
 func compileNegatedPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
-	return compileNegatedPredicateContext(text, columns, session, nil, nil)
+	return compileNegatedPredicateContext(text, columns, session, nil, nil, nil)
 }
 
-func compileNegatedPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, error) {
-	inner, err := compileRelationPredicateContext(strings.TrimSpace(text[len("not "):]), columns, session, context, outer)
+func compileNegatedPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope, runtimeKeys *predicateRuntimeKeys) (relationPredicate, error) {
+	inner, err := compileRelationPredicateContext(strings.TrimSpace(text[len("not "):]), columns, session, context, outer, runtimeKeys)
 	if err != nil {
 		return nil, err
 	}
@@ -58,14 +58,14 @@ func compileNegatedPredicateContext(text string, columns []relationColumn, sessi
 }
 
 func compileSimpleRelationPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
-	return compileSimpleRelationPredicateContext(text, columns, session, nil, nil)
+	return compileSimpleRelationPredicateContext(text, columns, session, nil, nil, nil)
 }
 
-func compileSimpleRelationPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, error) {
-	if predicate, found, err := compileExistsSubquery(text, columns, context, outer); found {
+func compileSimpleRelationPredicateContext(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope, runtimeKeys *predicateRuntimeKeys) (relationPredicate, error) {
+	if predicate, found, err := compileExistsSubquery(text, columns, context, outer, runtimeKeys); found {
 		return predicate, err
 	}
-	if predicate, found, err := compileInSubquery(text, columns, session, context, outer); found {
+	if predicate, found, err := compileInSubquery(text, columns, session, context, outer, runtimeKeys); found {
 		return predicate, err
 	}
 	if operator, left, right, ok := findRelationComparison(text); ok {
@@ -124,13 +124,13 @@ func relationTruthPredicate(operand relationOperand, wantTrue, negate bool) rela
 }
 
 func combineRelationPredicates(parts []string, columns []relationColumn, session *session, combine func(exprValue, exprValue) (exprValue, error)) (relationPredicate, error) {
-	return combineRelationPredicatesContext(parts, columns, session, nil, nil, combine)
+	return combineRelationPredicatesContext(parts, columns, session, nil, nil, nil, combine)
 }
 
-func combineRelationPredicatesContext(parts []string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope, combine func(exprValue, exprValue) (exprValue, error)) (relationPredicate, error) {
+func combineRelationPredicatesContext(parts []string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope, runtimeKeys *predicateRuntimeKeys, combine func(exprValue, exprValue) (exprValue, error)) (relationPredicate, error) {
 	predicates := make([]relationPredicate, len(parts))
 	for index, part := range parts {
-		predicate, err := compileRelationPredicateContext(part, columns, session, context, outer)
+		predicate, err := compileRelationPredicateContext(part, columns, session, context, outer, runtimeKeys)
 		if err != nil {
 			return nil, err
 		}

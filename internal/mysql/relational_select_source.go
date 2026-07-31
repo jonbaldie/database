@@ -141,7 +141,7 @@ func parseCTETableSource(s *relationExecutor, parts []string, remainder string) 
 	}
 	relation.references++
 	s.composed.ctes[key] = relation
-	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason, materializeKey: composedMaterializeKey(relation.name, relation.query, reference)}
+	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason, materializeKey: composedMaterializeKey(s.composed, relation.name, relation.query, reference)}
 	return source, tail, true, nil
 }
 
@@ -197,7 +197,7 @@ func parseDerivedTableSource(s *relationExecutor, text string) (relationalTableS
 		return relationalTableSource{}, "", err
 	}
 	columns := relationalResultColumns(alias, alias, table, result)
-	materializeKey := composedMaterializeKey(alias, query, 0)
+	materializeKey := composedMaterializeKey(s.composed, alias, query, 0)
 	recordMaterializedResult(s.composed, materializeKey, result, time.Since(started))
 	return relationalTableSource{name: alias, alias: alias, table: table, columns: columns, query: query, reason: "derived_table", materializeKey: materializeKey}, remainder, nil
 }

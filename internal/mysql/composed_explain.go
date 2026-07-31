@@ -27,7 +27,7 @@ func (s *textStatementExecutor) explainComposedBody(context *composedQueryContex
 	} else if body != query {
 		return s.explainComposedBody(local, body, outer)
 	}
-	parsed, set, err := parseSetQuery(query)
+	parsed, set, err := parseSetQuery(context, query)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (s *textStatementExecutor) explainSelectTerm(context *composedQueryContext,
 		items := splitCSV(expression)
 		root := queryexplanation.PlanScalarSelect(s.server.config.Version, query, s.database, items).Plan
 		root.RuntimeKey = queryexplanation.RuntimeOperatorKey(termKey, "values", 0)
-		return s.decorateSubqueryText(context, root, expression, outer, "derived", termKey)
+		return s.decorateSubqueryText(context, root, expression, outer, "derived", nil, termKey)
 	}
 	executor := *context.executor
 	executor.composed = context
@@ -128,12 +128,13 @@ func (s *textStatementExecutor) decorateComposedInputs(context *composedQueryCon
 	if err != nil {
 		return nil, err
 	}
-	root, err = s.decorateSubqueryText(context, root, plan.whereText, outer, "where")
+	predicateKeys := &predicateRuntimeKeys{prefix: plan.runtimeKey}
+	root, err = s.decorateSubqueryText(context, root, plan.whereText, outer, "where", predicateKeys)
 	if err != nil {
 		return nil, err
 	}
 	for _, join := range plan.source.joins {
-		root, err = s.decorateSubqueryText(context, root, join.condition, outer, "on")
+		root, err = s.decorateSubqueryText(context, root, join.condition, outer, "on", predicateKeys)
 		if err != nil {
 			return nil, err
 		}
@@ -183,13 +184,16 @@ func (s *textStatementExecutor) decorateProjectionSubqueries(context *composedQu
 	return root, nil
 }
 
-func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryContext, root *queryexplanation.Operator, text string, outer *outerRelationScope, clause string, runtimeBases ...string) (*queryexplanation.Operator, error) {
+func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryContext, root *queryexplanation.Operator, text string, outer *outerRelationScope, clause string, predicateKeys *predicateRuntimeKeys, runtimeBases ...string) (*queryexplanation.Operator, error) {
 	for index, query := range parenthesizedSelectQueries(text) {
 		plannedQuery := query
 		if containsExistsSubquery(text, query) {
 			plannedQuery = existsProjectionQuery(query)
 		}
 		runtimeKey := subqueryRuntimePrefix(runtimeBases, index)
+		if runtimeKey == "" {
+			runtimeKey = predicateKeys.nextRuntimeKey()
+		}
 		input, err := s.explainComposedBody(context.withRuntimePrefix(runtimeKey), plannedQuery, outer)
 		if err != nil {
 			return nil, err

@@ -613,13 +613,14 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err != nil {
 		return nil, err
 	}
+	runtimeKey := s.composed.selectRuntimeKey(query)
 	source, err := parseRelationalSource(s, sourceText)
 	if err != nil {
 		return nil, err
 	}
 	source.locking = locking
 	plan := &relationalSelectPlan{relationalSelectEnvironment: relationalSelectEnvironment{session: s.session, composed: s.composed, outer: outer}, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
-	plan.runtimeKey = s.composed.selectRuntimeKey(query)
+	plan.runtimeKey = runtimeKey
 	if err := finishRelationalSelectPlan(plan, projectionText, groupText, havingText, windowText, orderText, limitText); err != nil {
 		return nil, err
 	}
@@ -928,8 +929,9 @@ func (p *relationalSelectPlan) compileProjection(text string) error {
 }
 
 func (p *relationalSelectPlan) compilePredicates() error {
+	runtimeKeys := &predicateRuntimeKeys{prefix: p.runtimeKey}
 	if p.whereText != "" {
-		predicate, err := compileRelationPredicateContext(p.whereText, p.source.columns, p.session, p.composed, p.outer)
+		predicate, err := compileRelationPredicateContext(p.whereText, p.source.columns, p.session, p.composed, p.outer, runtimeKeys)
 		if err != nil {
 			return err
 		}
@@ -939,7 +941,7 @@ func (p *relationalSelectPlan) compilePredicates() error {
 		if p.source.joins[index].condition == "" {
 			continue
 		}
-		predicate, err := compileRelationPredicateContext(p.source.joins[index].condition, p.source.joins[index].columns, p.session, p.composed, p.outer)
+		predicate, err := compileRelationPredicateContext(p.source.joins[index].condition, p.source.joins[index].columns, p.session, p.composed, p.outer, runtimeKeys)
 		if err != nil {
 			return err
 		}

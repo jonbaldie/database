@@ -26,6 +26,20 @@ type composedQueryContext struct {
 	strictScope   bool
 }
 
+type predicateRuntimeKeys struct {
+	prefix string
+	next   int
+}
+
+func (keys *predicateRuntimeKeys) nextRuntimeKey() string {
+	if keys == nil {
+		return ""
+	}
+	key := queryexplanation.RuntimeOperatorKey(keys.prefix, "subquery", keys.next)
+	keys.next++
+	return key
+}
+
 type composedRelation struct {
 	name           string
 	query          string
@@ -125,7 +139,7 @@ func executeComposedSelect(context *composedQueryContext, query string, outer *o
 	if err != nil {
 		return nil, err
 	}
-	if parsed, ok, err := parseSetQuery(body); err != nil {
+	if parsed, ok, err := parseSetQuery(local, body); err != nil {
 		return nil, err
 	} else if ok {
 		return executeSetQuery(local, parsed, outer)
@@ -148,7 +162,7 @@ func describeComposedSelect(context *composedQueryContext, query string, outer *
 	if err != nil {
 		return nil, err
 	}
-	if parsed, ok, err := parseSetQuery(body); err != nil {
+	if parsed, ok, err := parseSetQuery(local, body); err != nil {
 		return nil, err
 	} else if ok {
 		return describeSetQuery(local, parsed, outer)
@@ -418,7 +432,7 @@ func recordDependentSubquery(context *composedQueryContext, key string, result *
 	metrics.RecordOperator(metrics.OperatorID(key), 1, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
 }
 
-func compileExistsSubquery(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, bool, error) {
+func compileExistsSubquery(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope, runtimeKeys *predicateRuntimeKeys) (relationPredicate, bool, error) {
 	trimmed := strings.TrimSpace(text)
 	if !strings.HasPrefix(strings.ToLower(trimmed), "exists ") {
 		return nil, false, nil
@@ -431,8 +445,9 @@ func compileExistsSubquery(text string, columns []relationColumn, context *compo
 	if err != nil {
 		return nil, true, err
 	}
+	runtimeKey := runtimeKeys.nextRuntimeKey()
 	if !context.planning && !composedQueryIsCorrelated(context, existsProjectionQuery(query), scope) {
-		predicate, err := compileCachedExists(context, query)
+		predicate, err := compileCachedExists(context, query, runtimeKey)
 		if err != nil {
 			return nil, true, err
 		}
@@ -444,7 +459,7 @@ func compileExistsSubquery(text string, columns []relationColumn, context *compo
 			return exprValue{}, err
 		}
 		scope := &outerRelationScope{columns: columns, row: row, parent: outer}
-		found, err := executeExistsSubquery(child, query, scope)
+		found, err := executeExistsSubquery(child.withRuntimePrefix(runtimeKey), query, scope)
 		return boolValue(found), err
 	}, true, nil
 }
@@ -460,12 +475,12 @@ func validatedExistsScope(context *composedQueryContext, query string, columns [
 	return scope, nil
 }
 
-func compileCachedExists(context *composedQueryContext, query string) (relationPredicate, error) {
+func compileCachedExists(context *composedQueryContext, query, runtimeKey string) (relationPredicate, error) {
 	child, err := context.child()
 	if err != nil {
 		return nil, err
 	}
-	found, err := executeExistsSubquery(child, query, nil)
+	found, err := executeExistsSubquery(child.withRuntimePrefix(runtimeKey), query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -526,12 +541,13 @@ func recordExistsSubquery(context *composedQueryContext, query string, dependent
 		outputRows = 1
 	}
 	metrics := context.executor.session.runtimeMetrics
-	metrics.RecordOperator(metrics.OperatorID(composedSubqueryRuntimeKey(query, dependent)), inputRows, outputRows, 0, 0, 0, 0, elapsed)
+	key := scalarSubqueryRuntimeKey(query, dependent, []string{context.runtimePrefix})
+	metrics.RecordOperator(metrics.OperatorID(key), inputRows, outputRows, 0, 0, 0, 0, elapsed)
 }
 
 func existsProjectionQuery(query string) string {
 	query = stripWholeQueryParentheses(strings.TrimSpace(query))
-	if parsed, set, _ := parseSetQuery(query); set {
+	if parsed, set, _ := parseSetQuery(nil, query); set {
 		if rewritten, ok := existsUnionQuery(parsed); ok {
 			return rewritten
 		}
@@ -580,7 +596,7 @@ func setLimitHasOffset(limit string) bool {
 	return strings.Contains(limit, ",") || strings.Contains(lower, " offset ")
 }
 
-func compileInSubquery(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope) (relationPredicate, bool, error) {
+func compileInSubquery(text string, columns []relationColumn, session *session, context *composedQueryContext, outer *outerRelationScope, runtimeKeys *predicateRuntimeKeys) (relationPredicate, bool, error) {
 	found, left, right := splitRelationKeywordOnce(strings.TrimSpace(text), "IN")
 	if !found {
 		return nil, false, nil
@@ -597,12 +613,13 @@ func compileInSubquery(text string, columns []relationColumn, session *session, 
 	if context == nil {
 		return nil, true, unsupportedExpression()
 	}
-	plan := inSubqueryPredicate{operand: operand, columns: columns, context: context, outer: outer, query: query, negate: negate}
+	plan := inSubqueryPredicate{operand: operand, columns: columns, context: context, outer: outer, query: query, negate: negate, runtimeKey: runtimeKeys.nextRuntimeKey()}
 	scope := &outerRelationScope{columns: columns, row: sampleRelationRow(columns), parent: outer}
 	if _, err := describeComposedSelect(context, query, scope); err != nil {
 		return nil, true, err
 	}
-	if !context.planning && !composedQueryIsCorrelated(context, query, scope) {
+	plan.dependent = composedQueryIsCorrelated(context, query, scope)
+	if !context.planning && !plan.dependent {
 		plan.cached, err = plan.executeScope(nil)
 		if err != nil {
 			return nil, true, err
@@ -612,13 +629,15 @@ func compileInSubquery(text string, columns []relationColumn, session *session, 
 }
 
 type inSubqueryPredicate struct {
-	operand relationOperand
-	columns []relationColumn
-	context *composedQueryContext
-	outer   *outerRelationScope
-	query   string
-	negate  bool
-	cached  *queryResult
+	operand    relationOperand
+	columns    []relationColumn
+	context    *composedQueryContext
+	outer      *outerRelationScope
+	query      string
+	negate     bool
+	cached     *queryResult
+	runtimeKey string
+	dependent  bool
 }
 
 func stripNotIn(left string) (string, bool) {
@@ -650,10 +669,12 @@ func (plan inSubqueryPredicate) execute(row relationRow) (*queryResult, error) {
 }
 
 func (plan inSubqueryPredicate) executeScope(scope *outerRelationScope) (*queryResult, error) {
+	started := time.Now()
 	child, err := plan.context.child()
 	if err != nil {
 		return nil, err
 	}
+	child = child.withRuntimePrefix(plan.runtimeKey)
 	result, err := executeComposedSelect(child, plan.query, scope)
 	if err != nil {
 		return nil, err
@@ -665,6 +686,7 @@ func (plan inSubqueryPredicate) executeScope(scope *outerRelationScope) (*queryR
 	if len(result.columns) != 1 {
 		return nil, sqlFailure{1241, "21000", "operand should contain 1 column"}
 	}
+	recordScalarSubquery(plan.context, scalarSubqueryRuntimeKey(plan.query, plan.dependent, []string{plan.runtimeKey}), plan.dependent, result, time.Since(started))
 	return result, nil
 }
 
@@ -755,7 +777,7 @@ func parseAndMaterializeCTEs(context *composedQueryContext, query string, _ *out
 	if strings.HasPrefix(strings.ToLower(query), "with recursive ") {
 		return nil, "", sqlFailure{1235, "42000", "recursive CTEs are not supported in v0.1"}
 	}
-	local := &composedQueryContext{executor: context.executor, ctes: cloneComposedRelations(context.ctes), runtimeKeys: context.runtimeKeys, depth: context.depth, planning: context.planning, rendering: context.rendering, strictScope: context.strictScope}
+	local := &composedQueryContext{executor: context.executor, ctes: cloneComposedRelations(context.ctes), runtimeKeys: context.runtimeKeys, runtimePrefix: context.runtimePrefix, runtimeNext: context.runtimeNext, depth: context.depth, planning: context.planning, rendering: context.rendering, strictScope: context.strictScope}
 	localNames := make(map[string]bool)
 	rest := strings.TrimSpace(query[len("WITH "):])
 	for {
@@ -781,7 +803,7 @@ func parseOneCTE(context *composedQueryContext, localNames map[string]bool, text
 		return "", err
 	}
 	key := catalog.Key(name)
-	context.ctes[key] = composedRelation{name: name, query: query, reason: "cte", ctes: cloneComposedRelations(context.ctes), state: &composedRelationState{}, materializeKey: composedMaterializeKey(name, query, 0)}
+	context.ctes[key] = composedRelation{name: name, query: query, reason: "cte", ctes: cloneComposedRelations(context.ctes), state: &composedRelationState{}, materializeKey: composedMaterializeKey(context, name, query, 0)}
 	localNames[key] = true
 	return remainder, nil
 }
@@ -852,7 +874,10 @@ func materializeCTE(context *composedQueryContext, key string, relation composed
 	return relation, nil
 }
 
-func composedMaterializeKey(name, query string, reference int) string {
+func composedMaterializeKey(context *composedQueryContext, name, query string, reference int) string {
+	if context != nil && context.runtimePrefix != "" {
+		return context.runtimePrefix + "/materialize:" + strings.ToLower(name) + "/" + strconv.Itoa(reference)
+	}
 	return "materialize:" + strings.ToLower(name) + ":" + relationalRuntimeKey(query) + "/" + strconv.Itoa(reference)
 }
 
@@ -888,7 +913,7 @@ func materializeQueryResult(result *queryResult) (*queryResult, error) {
 	return &queryResult{columns: result.columns, rows: rows, nulls: nulls, metadata: result.metadata}, nil
 }
 
-func parseSetQuery(query string) (setQuery, bool, error) {
+func parseSetQuery(context *composedQueryContext, query string) (setQuery, bool, error) {
 	positions := topLevelSetOperations(query)
 	if len(positions) == 0 {
 		return setQuery{}, false, nil
@@ -898,7 +923,7 @@ func parseSetQuery(query string) (setQuery, bool, error) {
 		return setQuery{}, false, err
 	}
 	positions = topLevelSetOperations(body)
-	parsed := setQuery{order: order, limit: limit, runtimeKey: composedSetRuntimeKey(body)}
+	parsed := setQuery{order: order, limit: limit, runtimeKey: composedSetRuntimeKey(context, body)}
 	start := 0
 	for _, position := range positions {
 		term := strings.TrimSpace(body[start:position.start])
@@ -915,7 +940,10 @@ func parseSetQuery(query string) (setQuery, bool, error) {
 	return parsed, true, nil
 }
 
-func composedSetRuntimeKey(query string) string {
+func composedSetRuntimeKey(context *composedQueryContext, query string) string {
+	if context != nil && context.runtimePrefix != "" {
+		return context.runtimePrefix
+	}
 	return "set:" + strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(query)), " "))
 }
 
