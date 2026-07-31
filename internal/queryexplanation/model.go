@@ -204,6 +204,18 @@ type setOperation struct {
 	All          bool   `json:"all"`
 }
 
+type aggregateOperation struct {
+	Scope               string   `json:"scope"`
+	AggregateCount      int      `json:"aggregate_count"`
+	GroupingExpressions []string `json:"grouping_expressions"`
+}
+
+type windowOperation struct {
+	WindowCount   int      `json:"window_count"`
+	FunctionCount int      `json:"function_count"`
+	Windows       []Window `json:"windows"`
+}
+
 type materializeOperation struct {
 	Reason string `json:"reason"`
 }
@@ -211,6 +223,11 @@ type materializeOperation struct {
 type constraintCheckOperation struct {
 	ConstraintType string `json:"constraint_type"`
 	ConstraintName string `json:"constraint_name"`
+}
+
+type lockOperation struct {
+	Mode       string `json:"mode"`
+	WaitPolicy string `json:"wait_policy"`
 }
 
 // Table is the neutral relation description a planner needs.

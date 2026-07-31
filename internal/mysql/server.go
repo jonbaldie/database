@@ -89,6 +89,9 @@ type Config struct {
 	MaxPreparedStmtCount int
 	MaxConnections       int
 	MaxAllowedPacket     int64
+	// LockWaitTimeout bounds the time a statement waits for a conflicting row
+	// lock. It defaults to five seconds.
+	LockWaitTimeout time.Duration
 	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
 	// current-time functions render through. It defaults to UTC and accepts UTC
 	// or a ±HH:MM offset within ±14:00.
@@ -103,6 +106,7 @@ type Server struct {
 	config      Config
 	connections *connectionRegistry
 	auth        authenticator
+	locks       *lockManager
 }
 
 // connectionRegistry owns admission and graceful-drain accounting. It is kept
@@ -149,7 +153,7 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 		sessionMax:    config.MaxConnections,
 		preparedLimit: config.MaxPreparedStmtCount,
 	}
-	return &Server{Listener: listener, config: config, connections: registry, auth: auth}, nil
+	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout)}, nil
 }
 
 func normalizedConfig(config Config) Config {
@@ -164,6 +168,9 @@ func normalizedConfig(config Config) Config {
 	}
 	if config.MaxAllowedPacket == 0 {
 		config.MaxAllowedPacket = 64 * 1024 * 1024
+	}
+	if config.LockWaitTimeout <= 0 {
+		config.LockWaitTimeout = 5 * time.Second
 	}
 	if config.TimeZone == "" {
 		config.TimeZone = "UTC"
@@ -332,6 +339,7 @@ type session struct {
 	statements      map[uint32]*preparedStatement
 	nextStmtID      uint32
 	longDataBytes   int
+	statementCancel <-chan struct{}
 	transactionState
 }
 
@@ -363,10 +371,16 @@ type transactionWork struct {
 }
 
 type savepointState struct {
-	savepoints         map[string]catalog.Definition
-	savepointDirty     map[string]bool
-	savepointMutations map[string]int
-	savepointRead      map[string]bool
+	savepoints []savepoint
+}
+
+type savepoint struct {
+	name          string
+	snapshot      catalog.Definition
+	revision      uint64
+	dirty         bool
+	mutationCount int
+	read          bool
 }
 
 type statementState struct {
@@ -888,6 +902,9 @@ func (s *textStatementExecutor) relationStatement(query, lower string) (*queryRe
 		return nil, true, createTable(&relations, query)
 	case strings.HasPrefix(lower, "insert into "):
 		affected, err := insertRows(&relations, query)
+		return &queryResult{affected: affected}, true, err
+	case strings.HasPrefix(lower, "replace "):
+		affected, err := replaceRows(&relations, query)
 		return &queryResult{affected: affected}, true, err
 	case strings.HasPrefix(lower, "update "):
 		affected, err := updateRows(&relations, query)
@@ -1555,7 +1572,14 @@ func mutateTableRows(definition *catalog.Definition, namespaceName, tableName st
 }
 
 func insertRows(s *relationExecutor, query string) (uint64, error) {
-	plan, err := makeInsertPlan(s, query)
+	input, assignments, upsert, err := splitInsertOnDuplicate(query)
+	if err != nil {
+		return 0, err
+	}
+	if upsert {
+		return upsertRows(s, input, assignments)
+	}
+	plan, err := makeInsertionPlan(s, input)
 	if err != nil {
 		return 0, err
 	}
@@ -1577,12 +1601,595 @@ func insertRows(s *relationExecutor, query string) (uint64, error) {
 	return affected, nil
 }
 
+// splitInsertOnDuplicate keeps the INSERT value input separate from the
+// duplicate-key update list. The keyword scanner ignores quoted text and row
+// groups, so an ordinary value that contains the phrase stays an ordinary
+// value.
+func splitInsertOnDuplicate(query string) (string, string, bool, error) {
+	position := keywordAt(query, "on duplicate key update")
+	if position < 0 {
+		return query, "", false, nil
+	}
+	input, assignments := strings.TrimSpace(query[:position]), strings.TrimSpace(query[position+len("on duplicate key update"):])
+	if input == "" || assignments == "" {
+		return "", "", false, sqlFailure{1064, "42000", "malformed INSERT ... ON DUPLICATE KEY UPDATE"}
+	}
+	return input, assignments, true, nil
+}
+
+func upsertRows(s *relationExecutor, query, assignments string) (uint64, error) {
+	plan, err := makeUpsertPlan(s, query, assignments)
+	if err != nil {
+		return 0, err
+	}
+	_, affected, err := applyUpsertPlan(plan)
+	if err != nil {
+		return 0, err
+	}
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.insert.namespace, plan.insert.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.insert.table = table
+			rows, _, err := applyUpsertPlan(currentPlan)
+			return rows, err
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+	}
+	return affected, nil
+}
+
+type upsertPlan struct {
+	insert  insertPlan
+	updates []upsertAssignment
+}
+
+type upsertAssignment struct {
+	column        int
+	value         string
+	candidateFrom *int
+}
+
+func makeUpsertPlan(s *relationExecutor, query, assignments string) (upsertPlan, error) {
+	insert, err := makeInsertionPlan(s, query)
+	if err != nil {
+		return upsertPlan{}, err
+	}
+	indexes, err := tableColumnIndexes(insert.table)
+	if err != nil {
+		return upsertPlan{}, err
+	}
+	updates, err := parseUpsertAssignments(assignments, indexes)
+	if err != nil {
+		return upsertPlan{}, err
+	}
+	return upsertPlan{insert: insert, updates: updates}, nil
+}
+
+func parseUpsertAssignments(text string, indexes map[string]int) ([]upsertAssignment, error) {
+	updates := make([]upsertAssignment, 0, len(splitCSV(text)))
+	seen := make(map[int]bool)
+	for _, assignment := range splitCSV(text) {
+		column, raw, ok := splitEquals(assignment)
+		if !ok {
+			return nil, sqlFailure{1064, "42000", "malformed ON DUPLICATE KEY UPDATE assignment"}
+		}
+		column, ok = singleIdentifier(column)
+		if !ok {
+			return nil, sqlFailure{1064, "42000", "invalid ON DUPLICATE KEY UPDATE column"}
+		}
+		index, found := indexes[catalog.Key(column)]
+		if !found || seen[index] {
+			return nil, sqlFailure{1054, "42S22", "unknown or duplicate column '" + column + "'"}
+		}
+		candidate, valuesReference, err := upsertValuesReference(raw, indexes)
+		if err != nil {
+			return nil, err
+		}
+		update := upsertAssignment{column: index}
+		if valuesReference {
+			update.candidateFrom = &candidate
+		} else {
+			if !validUpsertLiteral(raw) {
+				return nil, sqlFailure{1235, "42000", "unsupported ON DUPLICATE KEY UPDATE expression"}
+			}
+			update.value = strings.TrimSpace(raw)
+		}
+		seen[index] = true
+		updates = append(updates, update)
+	}
+	return updates, nil
+}
+
+func validUpsertLiteral(raw string) bool {
+	if validDefaultLiteral(raw) {
+		return true
+	}
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if !(strings.HasPrefix(value, "b'") && strings.HasSuffix(value, "'") || strings.HasPrefix(value, "0b")) {
+		return false
+	}
+	_, err := parseBitLiteral(value)
+	return err == nil
+}
+
+func upsertValuesReference(raw string, indexes map[string]int) (int, bool, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(raw), "values") {
+		return 0, false, nil
+	}
+	rest := strings.TrimSpace(raw[len("values"):])
+	if len(rest) < 3 || rest[0] != '(' {
+		return 0, false, sqlFailure{1064, "42000", "malformed VALUES() reference"}
+	}
+	close, ok := matchingParenthesis(rest, 0)
+	if !ok || strings.TrimSpace(rest[close+1:]) != "" {
+		return 0, false, sqlFailure{1064, "42000", "malformed VALUES() reference"}
+	}
+	column, ok := singleIdentifier(rest[1:close])
+	if !ok {
+		return 0, false, sqlFailure{1064, "42000", "invalid VALUES() column"}
+	}
+	index, found := indexes[catalog.Key(column)]
+	if !found {
+		return 0, false, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
+	}
+	return index, true, nil
+}
+
+func applyUpsertPlan(plan upsertPlan) ([][]string, uint64, error) {
+	input := plan.insert
+	input.table.Rows = nil
+	candidates, _, err := applyInsertPlan(input)
+	if err != nil {
+		return nil, 0, err
+	}
+	indexes, err := tableColumnIndexes(plan.insert.table)
+	if err != nil {
+		return nil, 0, err
+	}
+	rows, affected := cloneRows(plan.insert.table.Rows), uint64(0)
+	for number, candidate := range candidates {
+		var changed uint64
+		rows, changed, err = applyUpsertCandidate(plan, indexes, rows, candidate, number+1)
+		if err != nil {
+			return nil, 0, err
+		}
+		affected += changed
+	}
+	return rows, affected, nil
+}
+
+func applyUpsertCandidate(plan upsertPlan, indexes map[string]int, rows [][]string, candidate []string, rowNumber int) ([][]string, uint64, error) {
+	conflicts, err := conflictingUniqueRows(plan.insert.table, indexes, rows, candidate)
+	if err != nil {
+		return nil, 0, err
+	}
+	conflict := firstConflictingRow(rows, conflicts)
+	if conflict < 0 {
+		return append(rows, candidate), 1, nil
+	}
+	updated, err := applyUpsertAssignments(plan, rows[conflict], candidate, rowNumber)
+	if err != nil {
+		return nil, 0, err
+	}
+	changed := uint64(0)
+	if !equalTableRow(updated, rows[conflict]) {
+		changed = 2
+	}
+	rows[conflict] = updated
+	return rows, changed, nil
+}
+
+func firstConflictingRow(rows [][]string, conflicts map[int]bool) int {
+	for index := range rows {
+		if conflicts[index] {
+			return index
+		}
+	}
+	return -1
+}
+
+func applyUpsertAssignments(plan upsertPlan, existing, candidate []string, rowNumber int) ([]string, error) {
+	updated := append([]string(nil), existing...)
+	for _, assignment := range plan.updates {
+		raw := assignment.value
+		if assignment.candidateFrom != nil {
+			column := *assignment.candidateFrom
+			raw = storedColumnLiteral(plan.insert.table, column, candidate[column])
+		}
+		canonical, err := canonicalColumnValueAtOffset(plan.insert.table, assignment.column, raw, rowNumber, plan.insert.offsetMinutes)
+		if err != nil {
+			return nil, err
+		}
+		updated[assignment.column] = canonical
+	}
+	return updated, nil
+}
+
+func storedColumnLiteral(table catalog.Table, column int, value string) string {
+	if value == storedSQLNullValue {
+		return "NULL"
+	}
+	if typeName, known := table.ColumnType(column); known {
+		if typ, err := parseNumericType(typeName); err == nil && typ.kind != numericNone {
+			return value
+		}
+	}
+	return quote(value)
+}
+
+func equalTableRow(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// replaceRows implements REPLACE as a delete of every conflicting unique-key
+// row followed by an insert of the submitted row. The final image is committed
+// through mutateCatalog, so all row and cross-table constraints are checked
+// before it becomes visible.
+func replaceRows(s *relationExecutor, query string) (uint64, error) {
+	plan, err := makeReplacePlan(s, query)
+	if err != nil {
+		return 0, err
+	}
+	_, affected, err := applyReplacePlan(plan)
+	if err != nil {
+		return 0, err
+	}
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			if err := validateReplaceDeletePhases(*definition, currentPlan); err != nil {
+				return nil, err
+			}
+			rows, _, err := applyReplacePlan(currentPlan)
+			return rows, err
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+	}
+	return affected, nil
+}
+
+func makeReplacePlan(s *relationExecutor, query string) (insertPlan, error) {
+	return makeInsertionPlan(s, replaceInsertInput(query))
+}
+
+func makeReplaceExplanationPlan(s *relationExecutor, query string) (insertPlan, error) {
+	return makeInsertionExplanationPlan(s, replaceInsertInput(query))
+}
+
+func replaceInsertInput(query string) string {
+	rest := strings.TrimSpace(query[len("REPLACE"):])
+	if strings.HasPrefix(strings.ToLower(rest), "into ") {
+		return "INSERT " + rest
+	}
+	return "INSERT INTO " + rest
+}
+
+func applyReplacePlan(plan insertPlan) ([][]string, uint64, error) {
+	candidates, err := replacementCandidates(plan)
+	if err != nil {
+		return nil, 0, err
+	}
+	indexes, err := tableColumnIndexes(plan.table)
+	if err != nil {
+		return nil, 0, err
+	}
+	rows, affected := cloneRows(plan.table.Rows), uint64(0)
+	for _, candidate := range candidates {
+		conflicts, err := conflictingUniqueRows(plan.table, indexes, rows, candidate)
+		if err != nil {
+			return nil, 0, err
+		}
+		rows = append(rowsWithoutConflicts(rows, conflicts), candidate)
+		affected += uint64(len(conflicts) + 1)
+	}
+	return rows, affected, nil
+}
+
+func replacementCandidates(plan insertPlan) ([][]string, error) {
+	input := plan
+	input.table.Rows = nil
+	candidates, _, err := applyInsertPlan(input)
+	return candidates, err
+}
+
+func rowsWithoutConflicts(rows [][]string, conflicts map[int]bool) [][]string {
+	kept := make([][]string, 0, len(rows)-len(conflicts))
+	for index, row := range rows {
+		if !conflicts[index] {
+			kept = append(kept, row)
+		}
+	}
+	return kept
+}
+
+// validateReplaceDeletePhases observes the delete stage of each replacement.
+// A later insert cannot repair a foreign-key violation that the delete caused.
+func validateReplaceDeletePhases(definition catalog.Definition, plan insertPlan) error {
+	candidates, err := replacementCandidates(plan)
+	if err != nil {
+		return err
+	}
+	indexes, err := tableColumnIndexes(plan.table)
+	if err != nil {
+		return err
+	}
+	current, rows := definition, cloneRows(plan.table.Rows)
+	for _, candidate := range candidates {
+		conflicts, err := conflictingUniqueRows(plan.table, indexes, rows, candidate)
+		if err != nil {
+			return err
+		}
+		without := rowsWithoutConflicts(rows, conflicts)
+		deleted, err := replaceDefinitionRows(current, plan, without)
+		if err != nil {
+			return err
+		}
+		if err := validateConstraintDefinition(current, deleted); err != nil {
+			return err
+		}
+		rows = append(without, candidate)
+		current, err = replaceDefinitionRows(deleted, plan, rows)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func replaceDefinitionRows(definition catalog.Definition, plan insertPlan, rows [][]string) (catalog.Definition, error) {
+	return catalog.Apply(definition, func(staged *catalog.Definition) error {
+		return mutateTableRows(staged, plan.namespace, plan.name, func(catalog.Table) ([][]string, error) {
+			return rows, nil
+		})
+	})
+}
+
+// conflictingUniqueRows returns every stored row that shares a primary,
+// unique-constraint, or unique-index key with candidate. A replacement can
+// therefore remove more than one row when different unique keys collide.
+func conflictingUniqueRows(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string) (map[int]bool, error) {
+	conflicts := make(map[int]bool)
+	if err := addUniqueConstraintConflicts(table, indexes, rows, candidate, conflicts); err != nil {
+		return nil, err
+	}
+	if err := addUniqueIndexConflicts(table, indexes, rows, candidate, conflicts); err != nil {
+		return nil, err
+	}
+	return conflicts, nil
+}
+
+func addUniqueConstraintConflicts(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string, conflicts map[int]bool) error {
+	for _, constraint := range table.Constraints {
+		if isUniqueConstraint(constraint) {
+			addConstraintConflicts(table, indexes, rows, candidate, constraint, conflicts)
+		}
+	}
+	return nil
+}
+
+func isUniqueConstraint(constraint catalog.Constraint) bool {
+	return constraint.Type == catalog.ConstraintTypePrimary || constraint.Type == catalog.ConstraintTypeUnique
+}
+
+func addConstraintConflicts(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string, constraint catalog.Constraint, conflicts map[int]bool) {
+	columns := constraintIndexes(constraint.Columns, indexes)
+	candidateKey, candidateNullable := constraintRowKey(table, candidate, columns)
+	if candidateNullable && constraint.Type == catalog.ConstraintTypeUnique {
+		return
+	}
+	for index, row := range rows {
+		key, rowNullable := constraintRowKey(table, row, columns)
+		if (!rowNullable || constraint.Type != catalog.ConstraintTypeUnique) && key == candidateKey {
+			conflicts[index] = true
+		}
+	}
+}
+
+func addUniqueIndexConflicts(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string, conflicts map[int]bool) error {
+	for _, index := range table.Indexes {
+		if index.Unique {
+			if err := addIndexConflicts(table, indexes, rows, candidate, index, conflicts); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func addIndexConflicts(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string, index catalog.Index, conflicts map[int]bool) error {
+	candidateKey, nullable, err := uniqueIndexRowKey(table, index, indexes, candidate)
+	if err != nil || nullable {
+		return err
+	}
+	for rowIndex, row := range rows {
+		key, rowNullable, err := uniqueIndexRowKey(table, index, indexes, row)
+		if err != nil {
+			return err
+		}
+		if !rowNullable && key == candidateKey {
+			conflicts[rowIndex] = true
+		}
+	}
+	return nil
+}
+
 type insertPlan struct {
 	namespace, name string
 	table           catalog.Table
 	columns         []int
 	groups          [][]string
+	sourceSQL       string
 	offsetMinutes   int
+}
+
+// makeInsertionPlan parses the two supported insert sources. INSERT ... SELECT
+// first evaluates the read plan against the statement snapshot. The resulting
+// literal groups are then written through the same strict value and constraint
+// path as INSERT ... VALUES.
+func makeInsertionPlan(s *relationExecutor, query string) (insertPlan, error) {
+	if err := rejectUnsupportedInsertionVariant(query); err != nil {
+		return insertPlan{}, err
+	}
+	if plan, selected, err := makeInsertSelectPlan(s, query, true); selected || err != nil {
+		return plan, err
+	}
+	if plan, set, err := makeInsertSetPlan(s, query); set || err != nil {
+		return plan, err
+	}
+	return makeInsertPlan(s, query)
+}
+
+// makeInsertionExplanationPlan validates the same mutation grammar without
+// reading source rows. EXPLAIN must describe INSERT ... SELECT, not run it.
+func makeInsertionExplanationPlan(s *relationExecutor, query string) (insertPlan, error) {
+	if err := rejectUnsupportedInsertionVariant(query); err != nil {
+		return insertPlan{}, err
+	}
+	if plan, selected, err := makeInsertSelectPlan(s, query, false); selected || err != nil {
+		return plan, err
+	}
+	if plan, set, err := makeInsertSetPlan(s, query); set || err != nil {
+		return plan, err
+	}
+	return makeInsertPlan(s, query)
+}
+
+func rejectUnsupportedInsertionVariant(query string) error {
+	if keywordAt(query, "returning") >= 0 {
+		return sqlFailure{1235, "42000", "INSERT and REPLACE RETURNING are not supported in v0.1"}
+	}
+	return nil
+}
+
+func makeInsertSelectPlan(s *relationExecutor, query string, materialize bool) (insertPlan, bool, error) {
+	parts, columns, source, selected, err := parseInsertSelectInput(query)
+	if !selected || err != nil {
+		return insertPlan{}, selected, err
+	}
+	plan, err := makeExplicitInsertPlan(s, parts, columns, nil)
+	if err != nil {
+		return insertPlan{}, true, err
+	}
+	selectPlan, err := parseRelationalSelect(s, source)
+	if err != nil {
+		return insertPlan{}, true, err
+	}
+	if len(selectPlan.projection) != len(plan.columns) {
+		return insertPlan{}, true, sqlFailure{1136, "21S01", "column count does not match value count"}
+	}
+	groups, err := materializedInsertSelectGroups(selectPlan, materialize)
+	if err != nil {
+		return insertPlan{}, true, err
+	}
+	plan.groups, plan.sourceSQL = groups, source
+	return plan, true, nil
+}
+
+func parseInsertSelectInput(query string) ([]string, []string, string, bool, error) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "insert into ") {
+		return nil, nil, "", false, nil
+	}
+	rest := strings.TrimSpace(query[len("INSERT INTO "):])
+	position := keywordAt(rest, "select")
+	if position < 0 {
+		return nil, nil, "", false, nil
+	}
+	parts, columns, ok := insertTarget(strings.TrimSpace(rest[:position]))
+	source := strings.TrimSpace(rest[position:])
+	if !ok || len(parts) == 0 || len(parts) > 2 || source == "" {
+		return nil, nil, "", true, sqlFailure{1064, "42000", "malformed INSERT ... SELECT"}
+	}
+	return parts, columns, source, true, nil
+}
+
+func materializedInsertSelectGroups(plan *relationalSelectPlan, materialize bool) ([][]string, error) {
+	if !materialize {
+		return nil, nil
+	}
+	resultRows, err := collectRelationalResultRows(plan)
+	if err != nil {
+		return nil, err
+	}
+	return insertSelectGroups(plan.shapeRows(resultRows)), nil
+}
+
+func insertSelectGroups(rows []relationalResultRow) [][]string {
+	groups := make([][]string, len(rows))
+	for rowIndex, row := range rows {
+		groups[rowIndex] = make([]string, len(row.projections))
+		for valueIndex, value := range row.projections {
+			groups[rowIndex][valueIndex] = expressionValueLiteral(value)
+		}
+	}
+	return groups
+}
+
+func expressionValueLiteral(value exprValue) string {
+	if value.isNull() {
+		return "NULL"
+	}
+	if value.kind == valueString {
+		return quote(value.s)
+	}
+	return value.render()
+}
+
+func makeInsertSetPlan(s *relationExecutor, query string) (insertPlan, bool, error) {
+	parts, columns, values, set, err := parseInsertSetInput(query)
+	if !set || err != nil {
+		return insertPlan{}, set, err
+	}
+	plan, err := makeExplicitInsertPlan(s, parts, columns, [][]string{values})
+	return plan, true, err
+}
+
+func parseInsertSetInput(query string) ([]string, []string, []string, bool, error) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "insert into ") {
+		return nil, nil, nil, false, nil
+	}
+	rest := strings.TrimSpace(query[len("INSERT INTO "):])
+	position := keywordAt(rest, "set")
+	if position < 0 {
+		return nil, nil, nil, false, nil
+	}
+	parts, ok := splitQualifiedIdentifier(strings.TrimSpace(rest[:position]))
+	assignments := strings.TrimSpace(rest[position+len("set"):])
+	if !ok || len(parts) == 0 || len(parts) > 2 || assignments == "" {
+		return nil, nil, nil, true, sqlFailure{1064, "42000", "malformed INSERT ... SET"}
+	}
+	columns, values, err := insertSetAssignments(assignments)
+	return parts, columns, values, true, err
+}
+
+func insertSetAssignments(text string) ([]string, []string, error) {
+	parts := splitCSV(text)
+	columns, values := make([]string, len(parts)), make([]string, len(parts))
+	for index, assignment := range parts {
+		column, value, ok := splitEquals(assignment)
+		if !ok {
+			return nil, nil, sqlFailure{1064, "42000", "malformed INSERT ... SET assignment"}
+		}
+		column, ok = singleIdentifier(column)
+		if !ok {
+			return nil, nil, sqlFailure{1064, "42000", "invalid INSERT ... SET column"}
+		}
+		columns[index], values[index] = column, strings.TrimSpace(value)
+	}
+	return columns, values, nil
 }
 
 func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
@@ -1590,6 +2197,10 @@ func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
 	if err != nil {
 		return insertPlan{}, err
 	}
+	return makeExplicitInsertPlan(s, parts, columns, groups)
+}
+
+func makeExplicitInsertPlan(s *relationExecutor, parts, columns []string, groups [][]string) (insertPlan, error) {
 	namespace, name, err := tableTarget(s, parts)
 	if err != nil {
 		return insertPlan{}, err
@@ -1808,6 +2419,9 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := s.acquireWriteLocks(matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)); err != nil {
+		return 0, err
+	}
 	_, affected, err := applyUpdatePlan(plan)
 	if err != nil {
 		return 0, err
@@ -1952,6 +2566,9 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := s.acquireWriteLocks(matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)); err != nil {
+		return 0, err
+	}
 	_, affected := applyDeletePlan(plan)
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
@@ -2053,11 +2670,16 @@ func cloneRows(rows [][]string) [][]string {
 
 func splitInsert(query string) (string, string, bool) {
 	rest := strings.TrimSpace(query[len("INSERT INTO "):])
-	position := keywordAt(rest, "values")
+	keyword := "values"
+	position := keywordAt(rest, keyword)
 	if position < 0 {
-		return "", "", false
+		keyword = "value"
+		position = keywordAt(rest, keyword)
+		if position < 0 {
+			return "", "", false
+		}
 	}
-	return strings.TrimSpace(rest[:position]), strings.TrimSpace(rest[position+len("values"):]), true
+	return strings.TrimSpace(rest[:position]), strings.TrimSpace(rest[position+len(keyword):]), true
 }
 
 func insertTarget(value string) ([]string, []string, bool) {
@@ -2988,7 +3610,7 @@ func isPreparedStatement(lower string) bool {
 	if isComposedSelectStatement(lower) {
 		return true
 	}
-	for _, prefix := range []string{"select ", "with ", "insert into ", "update ", "delete from "} {
+	for _, prefix := range []string{"select ", "with ", "insert into ", "replace ", "update ", "delete from "} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}
