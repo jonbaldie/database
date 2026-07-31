@@ -212,6 +212,7 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 			return errors.New("unknown database")
 		}
 		delete(definition.Namespaces, key)
+		removeNamespaceGrants(definition, name)
 		return nil
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1008, "HY000", err.Error()})

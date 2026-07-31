@@ -95,6 +95,9 @@ func (s *textStatementExecutor) executeWithTransaction(query, lower string) (*qu
 	if err := s.session.checkStatementResources(); err != nil {
 		return nil, err
 	}
+	if err := s.authorizeStatement(lower); err != nil {
+		return nil, err
+	}
 	if isImmediateStatement(lower) {
 		// Transaction controls and session settings may publish an irreversible
 		// commit (for example, COMMIT or SET autocommit = 1). Admission is their
@@ -123,7 +126,7 @@ func (s *textStatementExecutor) executeWithTransaction(query, lower string) (*qu
 }
 
 func isImmediateStatement(lower string) bool {
-	return isTransactionControl(lower) || isSettingControl(lower)
+	return isTransactionControl(lower) || isSettingControl(lower) || accountAdministrationStatement(lower)
 }
 
 func (s *textStatementExecutor) dispatchAndCheckResources(query, lower string) (*queryResult, error) {

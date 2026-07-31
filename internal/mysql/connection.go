@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,6 +22,8 @@ type conversation struct {
 	admitted          bool
 	watch             *statementWatch
 	connectionID      uint32
+	revoked           atomic.Bool
+	running           atomic.Bool
 }
 
 type pendingCommand struct {
@@ -60,6 +63,7 @@ func (c *conversation) serve() {
 }
 
 func (c *conversation) close() {
+	c.server.connections.unregisterConversation(c)
 	if c.session != nil {
 		_ = rollbackTransaction(c.session)
 	}
@@ -91,6 +95,7 @@ func (c *conversation) authenticate() bool {
 		return false
 	}
 	c.session = newSession(c.server, authentication, c.connectionID)
+	c.server.connections.registerConversation(c)
 	c.queries = newQueryExecutor(c.session)
 	c.preparation = &preparedPreparation{c.session}
 	c.execution = &preparedExecution{c.session}
@@ -111,6 +116,9 @@ func newSession(server *Server, authentication authenticationResult, connectionI
 }
 
 func (c *conversation) acceptCommand() bool {
+	if c.revoked.Load() {
+		return false
+	}
 	if c.watch != nil {
 		watch := c.watch
 		c.watch = nil
@@ -178,6 +186,8 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	if !c.server.connections.beginStatement() {
 		return false
 	}
+	c.running.Store(true)
+	defer c.running.Store(false)
 	finishExplanation := c.recordActiveExplanation(query)
 	defer finishExplanation()
 	watch := c.watchStatement()
@@ -197,7 +207,7 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	err := run()
 	c.watch = watch
 	c.server.connections.endStatement()
-	return err == nil
+	return err == nil && !c.revoked.Load()
 }
 
 func (c *conversation) recordActiveExplanation(query string) func() {

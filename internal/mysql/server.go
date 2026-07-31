@@ -140,6 +140,7 @@ type connectionRegistry struct {
 	mu               sync.Mutex
 	stopping         bool
 	connections      map[net.Conn]struct{}
+	sessions         map[string]map[*conversation]struct{}
 	connectionW      sync.WaitGroup
 	statementW       sync.WaitGroup
 	pendingMax       int
@@ -174,11 +175,19 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 	}
 	registry := &connectionRegistry{
 		connections:   make(map[net.Conn]struct{}),
+		sessions:      make(map[string]map[*conversation]struct{}),
 		pendingMax:    maximumPendingConnections,
 		sessionMax:    config.MaxConnections,
 		preparedLimit: config.MaxPreparedStmtCount,
 	}
 	resources := newResourceManager(config)
+	if config.Catalog != nil {
+		grants := []catalog.Grant{{Privilege: "ACCOUNT_MANAGER"}, {Privilege: "NAMESPACE_MANAGER"}, {Privilege: "OPERATIONAL_OBSERVATION"}, {Privilege: "OPERATIONAL_CONTROL"}}
+		if err := config.Catalog.EnsureAccount(config.Username, config.PasswordHash, grants); err != nil {
+			_ = listener.Close()
+			return nil, err
+		}
+	}
 	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout), resources: resources, explanations: newActiveExplanationRegistry(), Diagnostics: ResourceDiagnostics{manager: resources}}, nil
 }
 
@@ -299,6 +308,43 @@ func (r *connectionRegistry) unregister(connection net.Conn, admitted bool) {
 	}
 	r.mu.Unlock()
 	r.connectionW.Done()
+}
+
+func (r *connectionRegistry) registerConversation(conv *conversation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sessions[conv.session.username] == nil {
+		r.sessions[conv.session.username] = map[*conversation]struct{}{}
+	}
+	r.sessions[conv.session.username][conv] = struct{}{}
+}
+
+func (r *connectionRegistry) unregisterConversation(conv *conversation) {
+	if conv.session == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sessions := r.sessions[conv.session.username]
+	delete(sessions, conv)
+	if len(sessions) == 0 {
+		delete(r.sessions, conv.session.username)
+	}
+}
+
+func (r *connectionRegistry) revokeAccount(name string) {
+	r.mu.Lock()
+	sessions := make([]*conversation, 0, len(r.sessions[name]))
+	for conversation := range r.sessions[name] {
+		sessions = append(sessions, conversation)
+	}
+	r.mu.Unlock()
+	for _, conversation := range sessions {
+		conversation.revoked.Store(true)
+		if !conversation.running.Load() {
+			_ = conversation.connection.Close()
+		}
+	}
 }
 
 func (r *connectionRegistry) admitSession() bool {
@@ -746,6 +792,7 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 	return []statementHandler{
 		s.transactionStatement,
 		s.settingStatement,
+		s.accountStatement,
 		s.builtinStatement,
 		s.ddlStatement,
 		s.catalogStatement,
@@ -1048,7 +1095,7 @@ func (s *catalogExecutor) createDatabase(query string) error {
 			return errors.New("namespace already exists")
 		}
 		definition.Namespaces[key] = catalog.Namespace{Name: name, Tables: map[string]catalog.Table{}}
-		return nil
+		return grantCreatedNamespace(definition, name, s.username)
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1007, "HY000", err.Error()})
 	}
