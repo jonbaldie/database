@@ -75,7 +75,7 @@ server configuration registry. Sessions may tighten them but cannot exceed or
 disable them. Idle timeouts, connection count, packet size, aggregate budgets,
 and prepared-statement count are read-only to sessions. The server applies
 `lock_wait_timeout_ms` to conflicting row-lock waits. The remaining runtime
-and session enforcement belongs to #58 and #59.
+and session enforcement is defined by the SQL and session-settings contracts.
 
 ## Network, TLS, logging, and secrets
 
@@ -90,13 +90,32 @@ or startup. TLS 1.2 and TLS 1.3 are supported. Cipher selection,
 client-certificate authentication, inline certificate or key material, and live
 reload are unsupported. A restart applies changed TLS files. The v0.1 contract
 requires a prominent structured warning for a non-loopback MySQL listener
-without TLS; that warning and its observability schema are delivered by #66 and
-#31, not by configuration validation.
+without TLS. The `ready` record in `database.lifecycle/v1` carries one warning
+with code `UNSAFE_NON_TLS_LISTENER`, severity `warning`, a stable summary, and
+the non-sensitive context fields `address` and `tls=disabled`. Human output
+prints the same warning prominently. Loopback listeners and TLS-enabled
+listeners do not emit it. Configuration validation remains read-only; the
+warning is emitted only when the service starts.
 
 Leaving `diagnostics_listen_address` unset disables diagnostics. Setting it
 enables the documented non-sensitive liveness, readiness, and Prometheus metric
 surface; diagnostics has no TLS, authentication, path, or metric-selection
-settings. The diagnostics and MySQL settings cannot select the same listener.
+settings. `GET` and `HEAD` are supported for `/live`, `/ready`, and `/metrics`;
+other methods return `405`, and unknown paths return `404`. `/live` remains
+successful while the process can answer. `/ready` returns `503` with a coarse
+`reason` while the process is `starting`, `recovering`, `shutting_down`, or
+`corruption`. The diagnostics and MySQL settings cannot select the same
+listener.
+Alongside readiness, the metrics surface reports current and peak execution
+memory and temporary-storage reservations, plus cumulative spill, cancellation,
+timeout, execution-memory-exhaustion, and temporary-storage-exhaustion counts.
+It contains no SQL text, bound values, session identifiers, or temporary-file
+paths.
+
+Lifecycle JSON records retain the `database.lifecycle/v1` schema and include
+stable `event_code` and `severity` fields for startup, recovery, readiness,
+shutdown, corruption, and exceptional outcomes. Their messages are for human
+context and are not stable identifiers; records never contain secrets or SQL.
 
 The v0.1 logging contract sends logs to standard error. `json` is the default
 structured presentation; `text` is the equivalent human presentation. There is

@@ -1466,9 +1466,10 @@ type preparedParameter struct {
 }
 
 type wireClient struct {
-	t    *testing.T
-	conn net.Conn
-	seq  byte
+	t            *testing.T
+	conn         net.Conn
+	seq          byte
+	connectionID uint32
 }
 
 type wireColumn struct {
@@ -1538,6 +1539,19 @@ func greetingNonceAndCapabilities(t *testing.T, payload []byte) ([]byte, uint32)
 	}
 	nonce = append(nonce, payload[position:position+remaining]...)
 	return nonce, uint32(lower) | uint32(upper)<<16
+}
+
+func greetingConnectionID(t *testing.T, payload []byte) uint32 {
+	t.Helper()
+	if len(payload) == 0 || payload[0] != 0x0a {
+		t.Fatalf("invalid greeting: %x", payload)
+	}
+	versionEnd := bytesIndex(payload[1:], 0) + 1
+	position := versionEnd + 1
+	if position+4 > len(payload) {
+		t.Fatalf("truncated greeting connection ID: %x", payload)
+	}
+	return binary.LittleEndian.Uint32(payload[position : position+4])
 }
 
 func handshakeResponse(capabilities uint32, username string, token []byte) []byte {
@@ -1618,7 +1632,9 @@ func newWireClient(t *testing.T, address, username, password string) *wireClient
 	if err != nil {
 		t.Fatal(err)
 	}
-	nonce, capabilities := greetingNonceAndCapabilities(t, readWirePacket(t, conn))
+	greeting := readWirePacket(t, conn)
+	nonce, capabilities := greetingNonceAndCapabilities(t, greeting)
+	connectionID := greetingConnectionID(t, greeting)
 	writeWirePacket(t, conn, 1, handshakeResponse(capabilities, username, cachingSHA2Token(password, nonce)))
 	if auth := readWirePacket(t, conn); len(auth) != 2 || auth[0] != 0x01 || auth[1] != 0x04 {
 		conn.Close()
@@ -1654,7 +1670,7 @@ func newWireClient(t *testing.T, address, username, password string) *wireClient
 		conn.Close()
 		t.Fatalf("authentication failed: %x", auth)
 	}
-	return &wireClient{t: t, conn: conn}
+	return &wireClient{t: t, conn: conn, connectionID: connectionID}
 }
 
 func parseRSAPublicKey(der []byte) (*rsa.PublicKey, error) {

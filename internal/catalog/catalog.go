@@ -13,6 +13,22 @@ import (
 
 type Definition struct {
 	Namespaces map[string]Namespace `json:"namespaces"`
+	Accounts   map[string]Account   `json:"accounts,omitempty"`
+}
+
+// Account is durable authentication and authorization state. PasswordHash is
+// an opaque verifier and is never part of a SQL result.
+type Account struct {
+	Name         string  `json:"name"`
+	PasswordHash string  `json:"password_hash"`
+	Locked       bool    `json:"locked,omitempty"`
+	Grants       []Grant `json:"grants,omitempty"`
+}
+
+// Grant is one finite v0.1 privilege. Namespace is empty for server grants.
+type Grant struct {
+	Privilege string `json:"privilege"`
+	Namespace string `json:"namespace,omitempty"`
 }
 type Namespace struct {
 	Name   string           `json:"name,omitempty"`
@@ -103,7 +119,7 @@ type Store struct {
 }
 
 func Open(directory string) (*Store, error) {
-	s := &Store{path: filepath.Join(directory, "catalog.json"), definition: Definition{Namespaces: map[string]Namespace{}}}
+	s := &Store{path: filepath.Join(directory, "catalog.json"), definition: Definition{Namespaces: map[string]Namespace{}, Accounts: map[string]Account{}}}
 	b, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -116,6 +132,9 @@ func Open(directory string) (*Store, error) {
 	}
 	if s.definition.Namespaces == nil {
 		return nil, errors.New("catalog namespaces are missing")
+	}
+	if s.definition.Accounts == nil {
+		s.definition.Accounts = map[string]Account{}
 	}
 	if err := validateDefinition(s.definition); err != nil {
 		return nil, fmt.Errorf("invalid catalog: %w", err)
@@ -159,6 +178,11 @@ func validateDefinition(definition Definition) error {
 			if err := validateTableDefinition(tableName, table); err != nil {
 				return err
 			}
+		}
+	}
+	for key, account := range definition.Accounts {
+		if key != account.Name || account.Name == "" || account.PasswordHash == "" {
+			return fmt.Errorf("invalid account %q", key)
 		}
 	}
 	return nil
@@ -321,7 +345,7 @@ func Apply(definition Definition, action func(*Definition) error) (Definition, e
 }
 
 func cloneDefinition(source Definition) Definition {
-	copy := Definition{Namespaces: make(map[string]Namespace, len(source.Namespaces))}
+	copy := Definition{Namespaces: make(map[string]Namespace, len(source.Namespaces)), Accounts: make(map[string]Account, len(source.Accounts))}
 	for namespace, value := range source.Namespaces {
 		cloned := Namespace{Name: value.Name, Tables: make(map[string]Table, len(value.Tables))}
 		for table, definition := range value.Tables {
@@ -336,6 +360,9 @@ func cloneDefinition(source Definition) Definition {
 			}
 		}
 		copy.Namespaces[namespace] = cloned
+	}
+	for name, account := range source.Accounts {
+		copy.Accounts[name] = Account{Name: account.Name, PasswordHash: account.PasswordHash, Locked: account.Locked, Grants: append([]Grant(nil), account.Grants...)}
 	}
 	return copy
 }

@@ -12,14 +12,19 @@ import (
 )
 
 type initializationRequest struct {
-	directory      string
-	passwordFile   string
-	passwordStdin  bool
-	format         string
-	formatProvided bool
+	directory       string
+	account         string
+	accountProvided bool
+	passwordFile    string
+	passwordStdin   bool
+	format          string
+	formatProvided  bool
 }
 
 func initialize(args []string, stdout, stderr io.Writer) int {
+	if hasResultControl(args) {
+		return initializeWithReporter(args, stdout, stderr)
+	}
 	request, err := parseInitializationRequest(args)
 	if err != nil {
 		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, err.Error())
@@ -31,15 +36,44 @@ func initialize(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, "unable to read password")
 	}
-	metadata, err := instance.Initialize(request.directory, "admin", password)
+	metadata, err := instance.Initialize(request.directory, request.account, password)
 	if err != nil {
 		return writeOperatorFailure(stdout, "init", newOperationID(), "precondition", 3, err.Error())
 	}
 	return writeInitializationSuccess(stdout, request, metadata)
 }
 
+func initializeWithReporter(args []string, stdout, stderr io.Writer) int {
+	output, filtered, err := parseCommandOutput(args, true)
+	reporter := newOperationReporter("init", output, stdout, stderr)
+	if err != nil {
+		if containsOutputControl(args) {
+			reporter.output.result = "json"
+		}
+		return reporter.failure("invalid_input", "", err.Error(), nil)
+	}
+	request, err := parseInitializationRequest(filtered)
+	if err != nil {
+		return reporter.failure("invalid_input", "", err.Error(), nil)
+	}
+	reporter.progress("preflight")
+	if err := instance.ValidateInitializationTarget(request.directory); err != nil {
+		return reporter.failure("precondition", "", err.Error(), nil)
+	}
+	reporter.progress("initializing")
+	password, err := request.readPassword(os.Stdin)
+	if err != nil {
+		return reporter.failure("invalid_input", "", "unable to read password", nil)
+	}
+	metadata, err := instance.Initialize(request.directory, request.account, password)
+	if err != nil {
+		return reporter.failure("precondition", "", err.Error(), nil)
+	}
+	return reporter.success(map[string]any{"instance_id": metadata.InstanceID, "data_directory": request.directory, "admin_account": metadata.AdminAccount})
+}
+
 func parseInitializationRequest(args []string) (initializationRequest, error) {
-	request := initializationRequest{format: "human"}
+	request := initializationRequest{format: "human", account: "admin"}
 	argumentCount := len(args)
 	for index := 0; index < argumentCount; index++ {
 		nextIndex, err := request.consume(args, index)
@@ -64,15 +98,40 @@ func (request *initializationRequest) consume(args []string, index int) (int, er
 	}
 	name, value, hasValue := strings.Cut(argument, "=")
 	switch name {
-	case "--password-file":
+	case "--data-directory":
+		return request.setDirectoryValue(args, index, value, hasValue)
+	case "--initial-account":
+		return request.setAccount(args, index, value, hasValue)
+	case "--password-file", "--initial-password-file":
 		return request.setPasswordFile(args, index, value, hasValue)
-	case "--password-stdin":
+	case "--password-stdin", "--initial-password-stdin":
 		return index, request.setPasswordStdin(hasValue)
 	case "--format":
 		return request.setFormat(args, index, value, hasValue)
 	default:
 		return index, fmt.Errorf("unknown flag %q", name)
 	}
+}
+
+func (request *initializationRequest) setDirectoryValue(args []string, index int, value string, hasValue bool) (int, error) {
+	value, next, err := requiredInitializationValue(args, index, "--data-directory", value, hasValue)
+	if err != nil {
+		return index, err
+	}
+	return next, request.setDirectory(value)
+}
+
+func (request *initializationRequest) setAccount(args []string, index int, value string, hasValue bool) (int, error) {
+	if request.accountProvided {
+		return index, errors.New("initial account may be specified once")
+	}
+	value, next, err := requiredInitializationValue(args, index, "--initial-account", value, hasValue)
+	if err != nil {
+		return index, err
+	}
+	request.account = value
+	request.accountProvided = true
+	return next, nil
 }
 
 func (request *initializationRequest) setDirectory(directory string) error {

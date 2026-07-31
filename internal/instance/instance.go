@@ -15,12 +15,19 @@ import (
 )
 
 type Metadata struct {
-	Schema       string `json:"schema"`
-	InstanceID   string `json:"instance_id"`
-	State        string `json:"state"`
-	AdminAccount string `json:"admin_account"`
-	PasswordHash string `json:"password_hash"`
+	Schema           string `json:"schema"`
+	InstanceID       string `json:"instance_id"`
+	SourceInstanceID string `json:"source_instance_id,omitempty"`
+	DataVersion      string `json:"data_version,omitempty"`
+	State            string `json:"state"`
+	AdminAccount     string `json:"admin_account"`
+	PasswordHash     string `json:"password_hash"`
 }
+
+const (
+	CurrentDataVersion      = "0.1.0"
+	UpgradeIncompleteMarker = ".database-upgrade-incomplete"
+)
 
 func Load(directory string) (Metadata, error) {
 	contents, err := os.ReadFile(filepath.Join(directory, "instance.json"))
@@ -35,6 +42,27 @@ func Load(directory string) (Metadata, error) {
 		return Metadata{}, errors.New("invalid instance metadata")
 	}
 	return metadata, nil
+}
+
+// NewRestoredMetadata gives a restored instance a new identity while keeping
+// the source identity as durable provenance. Credentials and the administrator
+// account remain unchanged, and a restored instance is always stopped.
+func NewRestoredMetadata(source Metadata) (Metadata, error) {
+	if source.Schema != "database.instance/v1" || source.InstanceID == "" || source.AdminAccount == "" || source.PasswordHash == "" {
+		return Metadata{}, errors.New("invalid source instance metadata")
+	}
+	var idBytes [16]byte
+	if _, err := rand.Read(idBytes[:]); err != nil {
+		return Metadata{}, fmt.Errorf("generate restored instance identity: %w", err)
+	}
+	result := source
+	result.InstanceID = hex.EncodeToString(idBytes[:])
+	result.SourceInstanceID = source.InstanceID
+	if result.DataVersion == "" {
+		result.DataVersion = CurrentDataVersion
+	}
+	result.State = "stopped"
+	return result, nil
 }
 
 // Initialize creates one new, stopped instance in an empty directory.
@@ -177,6 +205,7 @@ func newMetadata(account, password string) (Metadata, error) {
 	return Metadata{
 		Schema:       "database.instance/v1",
 		InstanceID:   hex.EncodeToString(idBytes[:]),
+		DataVersion:  CurrentDataVersion,
 		State:        "stopped",
 		AdminAccount: account,
 		PasswordHash: hex.EncodeToString(hash[:]),

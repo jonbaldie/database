@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -32,6 +33,7 @@ type Options struct {
 	DiagnosticsAddress string
 	StateFile          string
 	Format             string
+	OperationID        string
 	Timeouts
 	ResourceLimits
 	ConnectionLimits
@@ -64,11 +66,24 @@ type ConnectionLimits struct {
 // Event is emitted once the process has reached a lifecycle state. Recovered
 // reports that the previous owner of the data directory did not stop cleanly.
 type Event struct {
-	Schema             string `json:"schema"`
-	State              string `json:"state"`
-	OperationID        string `json:"operation_id,omitempty"`
-	DiagnosticsAddress string `json:"diagnostics_address,omitempty"`
-	Recovered          bool   `json:"recovered,omitempty"`
+	Schema             string    `json:"schema"`
+	State              string    `json:"state"`
+	EventCode          string    `json:"event_code,omitempty"`
+	Severity           string    `json:"severity,omitempty"`
+	Message            string    `json:"message,omitempty"`
+	OperationID        string    `json:"operation_id,omitempty"`
+	DiagnosticsAddress string    `json:"diagnostics_address,omitempty"`
+	Recovered          bool      `json:"recovered,omitempty"`
+	Warnings           []Warning `json:"warnings,omitempty"`
+}
+
+// Warning is a stable, code-identified lifecycle warning. Context contains
+// only non-secret facts that help an operator correct the configuration.
+type Warning struct {
+	Code     string            `json:"code"`
+	Severity string            `json:"severity"`
+	Summary  string            `json:"summary"`
+	Context  map[string]string `json:"context,omitempty"`
 }
 
 // Serve runs until it receives SIGINT or SIGTERM. It returns only after the
@@ -128,27 +143,79 @@ func (s *server) serve(ctx context.Context) error {
 		state.finish(cleanStop)
 	}()
 	if state.recovered {
-		s.emit(Event{Schema: "database.lifecycle/v1", State: "recovering", Recovered: true})
+		s.health.set("recovering")
+		event := s.lifecycleEvent("recovering", "recovery.started", "info", "database recovery started")
+		event.Recovered = true
+		s.emit(event)
 	}
 	runtime, err := startRuntime(s.options, s.health)
 	if err != nil {
+		s.health.set(startFailureReason(err))
+		s.emit(s.lifecycleEvent("failed", startFailureCode(err), "critical", "database startup failed"))
 		return err
 	}
 	s.reportReady(state.recovered, runtime.diagnosticsAddress)
 	s.awaitStop(ctx)
 	if err := runtime.closeGracefully(); err != nil {
+		s.emit(s.lifecycleEvent("failed", "server.stop_failed", "error", "database shutdown failed"))
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
 	cleanStop = true
-	s.emit(Event{Schema: "database.lifecycle/v1", State: "stopped"})
+	s.emit(s.lifecycleEvent("stopped", "server.stopped", "info", "database stopped"))
 	return nil
 }
 
 func (s *server) reportReady(recovered bool, diagnosticsAddress string) {
 	s.health.set("ready")
-	event := Event{Schema: "database.lifecycle/v1", State: "ready", Recovered: recovered}
+	event := s.lifecycleEvent("ready", "server.ready", "info", "database ready")
 	event.DiagnosticsAddress = diagnosticsAddress
+	event.Recovered = recovered
+	if warning, found := unsafeListenerWarning(s.options); found {
+		event.Warnings = []Warning{warning}
+	}
 	s.emit(event)
+}
+
+func (s *server) lifecycleEvent(state, code, severity, message string) Event {
+	return Event{Schema: "database.lifecycle/v1", State: state, EventCode: code, Severity: severity, Message: message, OperationID: s.options.OperationID}
+}
+
+func startFailureReason(err error) string {
+	if strings.Contains(err.Error(), "recover catalog") || strings.Contains(err.Error(), "damaged") || strings.Contains(err.Error(), "corruption") {
+		return "corruption"
+	}
+	return "starting"
+}
+
+func startFailureCode(err error) string {
+	if startFailureReason(err) == "corruption" {
+		return "corruption.detected"
+	}
+	return "server.start_failed"
+}
+
+func unsafeListenerWarning(opts Options) (Warning, bool) {
+	if !opts.MySQLEnabled || opts.MySQLAddress == "" || opts.TLSCertFile != "" || opts.TLSKeyFile != "" {
+		return Warning{}, false
+	}
+	if listenerIsLoopback(opts.MySQLAddress) {
+		return Warning{}, false
+	}
+	return Warning{
+		Code:     "UNSAFE_NON_TLS_LISTENER",
+		Severity: "warning",
+		Summary:  "MySQL listener is reachable beyond loopback without TLS",
+		Context:  map[string]string{"address": opts.MySQLAddress, "tls": "disabled"},
+	}, true
+}
+
+func listenerIsLoopback(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.To4() != nil && ip.To4().IsLoopback())
 }
 
 func (s *server) awaitStop(ctx context.Context) {
@@ -159,8 +226,8 @@ func (s *server) awaitStop(ctx context.Context) {
 	case <-ctx.Done():
 	case <-signals:
 	}
-	s.health.set("stopping")
-	s.emit(Event{Schema: "database.lifecycle/v1", State: "stopping"})
+	s.health.set("shutting_down")
+	s.emit(s.lifecycleEvent("stopping", "server.stopping", "info", "database shutdown started"))
 }
 
 type runtime struct {
@@ -174,13 +241,13 @@ func startRuntime(opts Options, health *health) (runtime, error) {
 	if err != nil {
 		return runtime{}, err
 	}
-	diagnostics, diagnosticsAddress, err := startDiagnostics(opts.DiagnosticsAddress, health)
+	mysqlServer, err := startMySQL(opts, metadata, store)
 	if err != nil {
 		return runtime{}, err
 	}
-	mysqlServer, err := startMySQL(opts, metadata, store)
+	diagnostics, diagnosticsAddress, err := startDiagnostics(opts.DiagnosticsAddress, health, mysqlServer)
 	if err != nil {
-		_ = diagnostics.close()
+		_ = closeMySQL(mysqlServer)
 		return runtime{}, err
 	}
 	return runtime{diagnostics: diagnostics, diagnosticsAddress: diagnosticsAddress, mysql: mysqlServer}, nil
@@ -208,7 +275,7 @@ type diagnosticsServer struct {
 	server *http.Server
 }
 
-func startDiagnostics(address string, health *health) (diagnosticsServer, string, error) {
+func startDiagnostics(address string, health *health, mysqlServer *mysql.Server) (diagnosticsServer, string, error) {
 	if address == "" {
 		return diagnosticsServer{}, "", nil
 	}
@@ -216,7 +283,7 @@ func startDiagnostics(address string, health *health) (diagnosticsServer, string
 	if err != nil {
 		return diagnosticsServer{}, "", fmt.Errorf("listen for diagnostics: %w", err)
 	}
-	server := &http.Server{Handler: diagnosticsHandler(health)}
+	server := &http.Server{Handler: diagnosticsHandler(health, mysqlServer)}
 	go func() { _ = server.Serve(listener) }()
 	return diagnosticsServer{server: server}, listener.Addr().String(), nil
 }
@@ -232,7 +299,20 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 	if opts.MySQLAddress == "" || !opts.MySQLEnabled {
 		return nil, nil
 	}
-	config := mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile, MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount, MaxAllowedPacket: opts.MaxAllowedPacket, LockWaitTimeout: millisecondsDuration(opts.LockWaitTimeoutMilliseconds)}
+	config := mysql.Config{
+		Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash,
+		TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile,
+		MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount,
+		MaxAllowedPacket: opts.MaxAllowedPacket,
+		LockWaitTimeout:  millisecondsDuration(opts.LockWaitTimeoutMilliseconds),
+		ResourceLimits: mysql.ResourceLimits{
+			StatementTimeout:                    millisecondsDuration(opts.StatementTimeoutMilliseconds),
+			ExecutionMemoryLimitBytes:           opts.ExecutionMemoryLimitBytes,
+			AggregateExecutionMemoryLimitBytes:  opts.AggregateMemoryLimitBytes,
+			TemporaryStorageLimitBytes:          opts.TemporaryStorageLimitBytes,
+			AggregateTemporaryStorageLimitBytes: opts.AggregateTemporaryLimitBytes,
+		},
+	}
 	server, err := mysql.NewWithConfig(opts.MySQLAddress, config)
 	if err != nil {
 		return nil, fmt.Errorf("listen for mysql: %w", err)
@@ -365,6 +445,16 @@ func validateInstance(directory string) error {
 	if !info.IsDir() {
 		return errors.New("data directory is not a directory")
 	}
+	if err := validateInstanceMetadata(directory); err != nil {
+		return err
+	}
+	if err := rejectIncompleteUpgrade(directory); err != nil {
+		return err
+	}
+	return validateInstanceCatalog(directory)
+}
+
+func validateInstanceMetadata(directory string) error {
 	instanceMetadata, err := instance.Load(directory)
 	if err != nil {
 		return errors.New("data directory is not initialized")
@@ -372,13 +462,47 @@ func validateInstance(directory string) error {
 	if instanceMetadata.State != "stopped" {
 		return errors.New("data directory has invalid instance metadata")
 	}
+	return nil
+}
+
+func validateInstanceCatalog(directory string) error {
+	if err := rejectDurableRecoveryArtifacts(directory); err != nil {
+		return err
+	}
 	catalogPath := filepath.Join(directory, "catalog.json")
-	info, err = os.Stat(catalogPath)
+	info, err := os.Stat(catalogPath)
 	if err != nil || !info.Mode().IsRegular() {
 		return errors.New("data directory has missing or invalid catalog")
 	}
 	if _, err := catalog.Open(directory); err != nil {
 		return errors.New("data directory has damaged catalog")
+	}
+	return nil
+}
+
+func rejectDurableRecoveryArtifacts(directory string) error {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return errors.New("data directory has unreadable durable state")
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".catalog-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			return errors.New("data directory has an incomplete catalog commit")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(directory, ".database-initializing")); err == nil {
+		return errors.New("data directory initialization is incomplete")
+	}
+	return nil
+}
+
+func rejectIncompleteUpgrade(directory string) error {
+	_, err := os.Stat(filepath.Join(directory, instance.UpgradeIncompleteMarker))
+	if err == nil {
+		return errors.New("data directory has an incomplete upgrade")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("data directory has an unreadable upgrade marker")
 	}
 	return nil
 }
@@ -443,7 +567,7 @@ func (h *health) current() string {
 	return h.state
 }
 
-func diagnosticsHandler(health *health) http.Handler {
+func diagnosticsHandler(health *health, mysqlServer ...*mysql.Server) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -452,22 +576,64 @@ func diagnosticsHandler(health *health) http.Handler {
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "live"})
 	})
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		if health.current() == "ready" {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 			return
 		}
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": health.current()})
 	})
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		ready := "0"
 		if health.current() == "ready" {
 			ready = "1"
 		}
-		_, _ = w.Write([]byte("# TYPE database_process_ready gauge\ndatabase_process_ready " + ready + "\n"))
+		_, _ = w.Write([]byte(prometheusMetrics(ready, diagnosticResourceUsage(mysqlServer))))
 	})
 	return mux
+}
+
+func diagnosticResourceUsage(servers []*mysql.Server) mysql.ResourceUsage {
+	if len(servers) == 0 || servers[0] == nil {
+		return mysql.ResourceUsage{}
+	}
+	return servers[0].Diagnostics.Usage()
+}
+
+func prometheusMetrics(ready string, usage mysql.ResourceUsage) string {
+	return fmt.Sprintf(`# TYPE database_process_ready gauge
+database_process_ready %s
+# TYPE database_server_ready gauge
+database_server_ready %s
+# TYPE database_execution_memory_bytes gauge
+database_execution_memory_bytes %d
+# TYPE database_execution_memory_peak_bytes gauge
+database_execution_memory_peak_bytes %d
+# TYPE database_temporary_storage_bytes gauge
+database_temporary_storage_bytes %d
+# TYPE database_temporary_storage_peak_bytes gauge
+database_temporary_storage_peak_bytes %d
+# TYPE database_resource_spills_total counter
+database_resource_spills_total %d
+# TYPE database_resource_spill_bytes_total counter
+database_resource_spill_bytes_total %d
+# TYPE database_resource_cancellations_total counter
+database_resource_cancellations_total %d
+# TYPE database_resource_timeouts_total counter
+database_resource_timeouts_total %d
+# TYPE database_resource_exhaustions_total counter
+database_resource_exhaustions_total{resource="memory"} %d
+database_resource_exhaustions_total{resource="temporary_storage"} %d
+`, ready, ready, usage.ExecutionMemoryBytes, usage.PeakExecutionMemoryBytes, usage.TemporaryStorageBytes, usage.PeakTemporaryStorageBytes, usage.SpillCount, usage.SpillBytes, usage.CancellationCount, usage.TimeoutCount, usage.MemoryExhaustionCount, usage.TemporaryExhaustionCount)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

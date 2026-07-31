@@ -28,14 +28,15 @@ func (a authenticator) authenticate(connection net.Conn, nonce []byte) (authenti
 	if err != nil {
 		return exchange.failure(err)
 	}
-	if err := a.validate(response, nonce); err != nil {
+	passwordHash, err := a.validate(response, nonce)
+	if err != nil {
 		return exchange.failure(err)
 	}
 	password, err := exchange.fullPassword(nonce)
 	if err != nil {
 		return exchange.failure(err)
 	}
-	if !validPlainPassword(password, a.config.PasswordHash) {
+	if !validPlainPassword(password, passwordHash) {
 		return exchange.failure(sqlFailure{1045, "28000", "access denied"})
 	}
 	return exchange.success(response), nil
@@ -162,17 +163,28 @@ func requireCachingSHA2Plugin(payload []byte, offset int) error {
 	return nil
 }
 
-func (a authenticator) validate(response handshakeResponse, nonce []byte) error {
-	if a.config.Username != "" && response.accountName != a.config.Username {
-		return sqlFailure{1045, "28000", "access denied"}
-	}
-	if a.config.PasswordHash != "" && !validPasswordToken(response.token, nonce, a.config.PasswordHash) {
-		return sqlFailure{1045, "28000", "access denied"}
+func (a authenticator) validate(response handshakeResponse, nonce []byte) (string, error) {
+	passwordHash, found := a.accountPasswordHash(response.accountName)
+	if !found || !validPasswordToken(response.token, nonce, passwordHash) {
+		return "", sqlFailure{1045, "28000", "access denied"}
 	}
 	if response.database != "" {
-		return a.databaseExists(response.database)
+		if err := a.databaseExists(response.database); err != nil {
+			return "", err
+		}
 	}
-	return nil
+	return passwordHash, nil
+}
+
+func (a authenticator) accountPasswordHash(name string) (string, bool) {
+	if a.config.Catalog != nil {
+		account, found := a.config.Catalog.Account(name)
+		return account.PasswordHash, found && !account.Locked
+	}
+	if a.config.Username != "" && name != a.config.Username {
+		return "", false
+	}
+	return a.config.PasswordHash, a.config.PasswordHash != ""
 }
 
 func (e *authenticationExchange) fullPassword(nonce []byte) ([]byte, error) {

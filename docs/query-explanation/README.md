@@ -68,6 +68,9 @@ The JSON Schema defines the structural grammar. These semantic rules complete it
 - Choice evidence appears only at consequential decisions. It contains no more than three credible rejected alternatives and never exposes the complete optimizer search trace.
 - Planning opportunities contain a stable code, a concise summary, and evidence. They do not prescribe exact SQL or promise an improvement.
 - Runtime elapsed time is inclusive for an operator across all invocations. Parent and child timings may overlap and must not be summed.
+- Runtime memory is the peak bytes tracked by the executor for result or intermediate values. Logical reads and bytes read count catalog values visited by a scan. The v0.1 catalog is in memory, so physical reads are zero.
+- Root runtime evidence also records `peak_memory_bytes`, `spill_count`, `spill_bytes`, and `temporary_storage_bytes`. The last value is the peak reserved temporary-storage footprint, not a temporary-file path or a retained file size. A positive spill count means the executor externalized one or more intermediate runs while preserving SQL results.
+- Resource outcomes use the stable warning codes `STATEMENT_CANCELLED`, `STATEMENT_TIMEOUT`, `EXECUTION_MEMORY_EXHAUSTED`, and `TEMPORARY_STORAGE_EXHAUSTED`. A completed analysis has complete resource evidence; a live snapshot reports only evidence observed through capture time. A failed or cancelled analysis returns its SQL error rather than a partial document; its finalized outcome is available through the non-sensitive aggregate diagnostics counters.
 - Snapshot counters mean “observed through capture time.” A snapshot never fabricates complete values from partial evidence.
 
 ## Tabular projection
@@ -78,9 +81,9 @@ Tabular output emits operators in pre-order. These MySQL-compatible columns are 
 
 These stable columns follow:
 
-`operator_id`, `parent_operator_id`, `operator`, `strategy`, `estimated_cost`, `estimated_memory_bytes`, `actual_rows`, `loops`, `first_row_ms`, `total_ms`, `summary`, `warnings`
+`operator_id`, `parent_operator_id`, `operator`, `strategy`, `estimated_cost`, `estimated_memory_bytes`, `actual_rows`, `loops`, `first_row_ms`, `total_ms`, `actual_input_rows`, `actual_filtered_rows`, `actual_peak_memory_bytes`, `actual_logical_reads`, `actual_physical_reads`, `actual_bytes_read`, `actual_lock_ms`, `actual_other_ms`, `actual_rows_vs_estimate_ratio`, `actual_warnings`, `summary`, `warnings`
 
-Plan-only and analyzed output use the same columns. Inapplicable or unavailable scalar values are SQL `NULL`; warnings are a semicolon-separated list of stable warning codes. Structured predicates, output properties, statistics, choices, rejected alternatives, opportunities, and detailed runtime counters remain JSON-only.
+Plan-only and analyzed output use the same columns. Inapplicable or unavailable scalar values are SQL `NULL`; warnings are a semicolon-separated list of stable warning codes. Runtime rows, time, memory, reads, waits, estimate divergence, and runtime warnings appear in both result forms. Structured predicates, output properties, statistics, choices, rejected alternatives, and opportunities remain JSON-only.
 
 ## Evolution
 

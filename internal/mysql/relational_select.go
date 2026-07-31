@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/queryexplanation"
@@ -26,9 +27,11 @@ type relationalSelectPlan struct {
 }
 
 type relationalSelectEnvironment struct {
-	session  *session
-	composed *composedQueryContext
-	outer    *outerRelationScope
+	session    *session
+	composed   *composedQueryContext
+	outer      *outerRelationScope
+	runtimeKey string
+	runtime    *selectRuntimeBinding
 }
 
 type relationalSource struct {
@@ -36,20 +39,170 @@ type relationalSource struct {
 	joins   []relationalJoin
 	columns []relationColumn
 	locking *lockingRead
+	runtime *selectRuntimeBinding
+}
+
+// selectRuntimeBinding connects executable stages to the immutable physical
+// tree. It stores IDs, rather than names, so repeated execution accumulates
+// on the same physical operator.
+type selectRuntimeBinding struct {
+	metrics      *queryexplanation.RuntimeMetrics
+	scans        []int
+	joins        []int
+	whereFilter  int
+	havingFilter int
+	project      int
+	aggregate    int
+	window       int
+	distinct     int
+	sorts        []int
+	windowSorts  map[string]int
+	limit        int
+}
+
+func newSelectRuntimeBinding(metrics *queryexplanation.RuntimeMetrics, plan *relationalSelectPlan) *selectRuntimeBinding {
+	if metrics == nil || plan == nil || plan.runtimeKey == "" {
+		return nil
+	}
+	binding := &selectRuntimeBinding{metrics: metrics}
+	for index := range plan.source.tables {
+		binding.scans = append(binding.scans, runtimeOperatorID(metrics, plan.runtimeKey, "scan", index))
+	}
+	for index := range plan.source.joins {
+		binding.joins = append(binding.joins, runtimeOperatorID(metrics, plan.runtimeKey, "join", len(plan.source.joins)-index-1))
+	}
+	binding.bindFilters(plan)
+	binding.project = runtimeOperatorID(metrics, plan.runtimeKey, "project", 0)
+	binding.aggregate = runtimeOperatorID(metrics, plan.runtimeKey, "aggregate", 0)
+	binding.window = runtimeOperatorID(metrics, plan.runtimeKey, "window", 0)
+	binding.distinct = runtimeOperatorID(metrics, plan.runtimeKey, "distinct", 0)
+	binding.bindSorts(plan)
+	binding.limit = runtimeOperatorID(metrics, plan.runtimeKey, "limit", 0)
+	return binding
+}
+
+func (b *selectRuntimeBinding) bindFilters(plan *relationalSelectPlan) {
+	filterIndex := 0
+	if plan.aggregation.having != "" {
+		b.havingFilter = runtimeOperatorID(b.metrics, plan.runtimeKey, "filter", filterIndex)
+		filterIndex++
+	}
+	if plan.where != nil {
+		b.whereFilter = runtimeOperatorID(b.metrics, plan.runtimeKey, "filter", filterIndex)
+	}
+}
+
+func (b *selectRuntimeBinding) bindSorts(plan *relationalSelectPlan) {
+	index := 0
+	if len(plan.order) > 0 {
+		b.sorts = append(b.sorts, runtimeOperatorID(b.metrics, plan.runtimeKey, "sort", index))
+		index++
+	}
+	windowSorts := runtimeWindowSorts(plan)
+	if len(windowSorts) == 0 {
+		return
+	}
+	b.windowSorts = make(map[string]int, len(windowSorts))
+	for window := len(windowSorts) - 1; window >= 0; window-- {
+		b.windowSorts[relationalWindowSpecKey(windowSorts[window])] = runtimeOperatorID(b.metrics, plan.runtimeKey, "sort", index)
+		index++
+	}
+}
+
+func runtimeWindowSorts(plan *relationalSelectPlan) []relationalWindowSpec {
+	keys := make(map[string]bool)
+	result := make([]relationalWindowSpec, 0)
+	for _, projection := range plan.projection {
+		for _, function := range projectionWindowFunctions(projection) {
+			if len(function.spec.order) == 0 {
+				continue
+			}
+			key := relationalWindowSpecKey(function.spec)
+			if keys[key] {
+				continue
+			}
+			keys[key] = true
+			result = append(result, function.spec)
+		}
+	}
+	return result
+}
+
+func runtimeOperatorID(metrics *queryexplanation.RuntimeMetrics, termKey, kind string, index int) int {
+	return metrics.OperatorID(queryexplanation.RuntimeOperatorKey(termKey, kind, index))
+}
+
+func reverseOperatorIDs(ids []int) []int {
+	result := append([]int(nil), ids...)
+	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
+		result[left], result[right] = result[right], result[left]
+	}
+	return result
+}
+
+func finalOperatorID(ids []int) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	return ids[len(ids)-1]
+}
+
+func (b *selectRuntimeBinding) record(id, inputRows, outputRows, filteredRows, logicalReads, bytesRead, peakMemoryBytes int, elapsed time.Duration) {
+	if b == nil {
+		return
+	}
+	b.metrics.RecordOperator(id, inputRows, outputRows, filteredRows, logicalReads, bytesRead, peakMemoryBytes, elapsed)
+}
+
+func (b *selectRuntimeBinding) recordScan(index, rows, bytes int, elapsed time.Duration) {
+	if b == nil || index >= len(b.scans) {
+		return
+	}
+	b.record(b.scans[index], 0, rows, 0, rows, bytes, 0, elapsed)
+}
+
+func (b *selectRuntimeBinding) recordSourceScan(index int, table relationalTableSource, rows, bytes int, elapsed time.Duration) {
+	b.recordScan(index, rows, bytes, elapsed)
+	if table.reason == "reuse" {
+		b.recordMaterialize(table.materializeKey, rows, bytes, elapsed)
+	}
+}
+
+func (b *selectRuntimeBinding) recordJoin(index, inputRows, outputRows, memory int, elapsed time.Duration) {
+	if b == nil || index >= len(b.joins) {
+		return
+	}
+	b.record(b.joins[index], inputRows, outputRows, 0, 0, 0, memory, elapsed)
+}
+
+func (b *selectRuntimeBinding) recordMaterialize(key string, rows, bytes int, elapsed time.Duration) {
+	if b == nil {
+		return
+	}
+	b.record(b.metrics.OperatorID(key), 0, rows, 0, 0, 0, bytes, elapsed)
+}
+
+func (b *selectRuntimeBinding) windowSortID(spec relationalWindowSpec) int {
+	if b == nil {
+		return 0
+	}
+	return b.windowSorts[relationalWindowSpecKey(spec)]
 }
 
 type relationalTableSource struct {
-	namespace string
-	name      string
-	alias     string
-	table     catalog.Table
-	columns   []relationColumn
-	query     string
-	reason    string
-	hints     []relationalIndexHint
-	access    *catalog.Index
-	forced    bool
-	covering  bool
+	namespace      string
+	name           string
+	alias          string
+	table          catalog.Table
+	columns        []relationColumn
+	query          string
+	reason         string
+	hints          []relationalIndexHint
+	access         *catalog.Index
+	forced         bool
+	covering       bool
+	materializeKey string
+	runtimePrefix  string
 }
 
 type relationalIndexHint struct {
@@ -81,19 +234,29 @@ type relationColumn struct {
 }
 
 type relationalProjection struct {
-	expression  string
-	name        string
-	alias       string
-	column      int
-	scalar      bool
-	computed    bool
-	subquery    string
-	context     *composedQueryContext
-	value       exprValue
-	metadata    columnMetadata
-	outer       *outerRelationScope
-	aggregate   *relationalAggregate
-	window      *relationalWindowFunction
+	relationalProjectionRuntime
+	relationalProjectionWindow
+	expression string
+	name       string
+	alias      string
+	column     int
+	scalar     bool
+	computed   bool
+	subquery   string
+	context    *composedQueryContext
+	value      exprValue
+	metadata   columnMetadata
+	outer      *outerRelationScope
+	aggregate  *relationalAggregate
+	window     *relationalWindowFunction
+}
+
+type relationalProjectionRuntime struct {
+	runtimeKey  string
+	subquerySet bool
+}
+
+type relationalProjectionWindow struct {
 	windowExpr  string
 	windowParts []relationalComposedWindow
 }
@@ -152,6 +315,9 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 	if err != nil {
 		return nil, err
 	}
+	if plan.supportsSpillSort() {
+		return plan.spilledSortResult()
+	}
 	if s.streamRows && plan.source.locking == nil && !plan.requiresMaterialization() {
 		return plan.streamingResult(), nil
 	}
@@ -203,8 +369,13 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 	if plan.hasAggregateOrWindow() {
 		return collectAggregateOrWindowRows(plan)
 	}
+	started := time.Now()
+	sourceRows := 0
+	matchedRows := 0
+	resultMemoryBytes := 0
 	resultRows := make([]relationalResultRow, 0)
 	err := plan.forEachSourceRow(func(row relationRow) error {
+		sourceRows++
 		if plan.where != nil {
 			matched, err := predicateMatches(plan.where, row)
 			if err != nil {
@@ -214,14 +385,63 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 				return nil
 			}
 		}
+		matchedRows++
 		result, err := plan.projectRow(row)
 		if err != nil {
 			return err
 		}
 		resultRows = append(resultRows, result)
-		return nil
+		resultMemoryBytes += relationalResultRowMemory(result)
+		return plan.session.observeBufferedMemory(resultMemoryBytes)
 	})
+	if err == nil {
+		plan.recordReadPipeline(sourceRows, matchedRows, resultRows, time.Since(started))
+	}
 	return resultRows, err
+}
+
+func (p *relationalSelectPlan) recordReadPipeline(sourceRows, matchedRows int, resultRows []relationalResultRow, elapsed time.Duration) {
+	p.recordReadPipelineCounts(sourceRows, matchedRows, len(resultRows), resultMemory(resultRows), elapsed)
+}
+
+func (p *relationalSelectPlan) recordReadPipelineCounts(sourceRows, matchedRows, outputRows, peakMemoryBytes int, elapsed time.Duration) {
+	if p.runtime == nil {
+		return
+	}
+	if p.where != nil {
+		p.runtime.record(p.runtime.whereFilter, sourceRows, matchedRows, sourceRows-matchedRows, 0, 0, 0, elapsed)
+	}
+	if !p.allColumns {
+		p.runtime.record(p.runtime.project, matchedRows, outputRows, 0, 0, 0, peakMemoryBytes, elapsed)
+	}
+}
+
+func sourceBytes(tables []relationalTableSource) int {
+	bytes := 0
+	for _, table := range tables {
+		for _, row := range table.table.Rows {
+			for _, value := range row {
+				bytes += len(value)
+			}
+		}
+	}
+	return bytes
+}
+
+func resultMemory(rows []relationalResultRow) int {
+	bytes := 0
+	for _, row := range rows {
+		bytes += relationalResultRowMemory(row)
+	}
+	return bytes
+}
+
+func relationalResultRowMemory(row relationalResultRow) int {
+	bytes := len(row.nulls)
+	for _, value := range row.values {
+		bytes += len(value)
+	}
+	return bytes
 }
 
 func lockRelationalResultRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
@@ -290,9 +510,12 @@ func lockSkippedReturnedRows(plan *relationalSelectPlan, rows []relationalResult
 var errStopRelationStream = errors.New("relational row stream complete")
 
 type relationalResultStream struct {
-	plan    *relationalSelectPlan
-	skipped int
-	emitted int
+	plan          *relationalSelectPlan
+	skipped       int
+	emitted       int
+	sourceRows    int
+	matchedRows   int
+	projectMemory int
 }
 
 func (p *relationalSelectPlan) streamingResult() *queryResult {
@@ -309,7 +532,21 @@ func (s *relationalResultStream) rows(yield func([]string, []bool) error) error 
 		}
 		return s.yieldRows(s.plan.shapeRows(rows), yield)
 	}
+	started := time.Now()
+	defer func() { s.recordRuntime(time.Since(started)) }()
 	return s.incrementalRows(yield)
+}
+
+func (s *relationalResultStream) recordRuntime(elapsed time.Duration) {
+	if s.plan.runtime == nil {
+		return
+	}
+	if s.plan.where != nil {
+		s.plan.runtime.record(s.plan.runtime.whereFilter, s.sourceRows, s.matchedRows, s.sourceRows-s.matchedRows, 0, 0, 0, elapsed)
+	}
+	if !s.plan.allColumns {
+		s.plan.runtime.record(s.plan.runtime.project, s.matchedRows, s.emitted, 0, 0, 0, s.projectMemory, elapsed)
+	}
 }
 
 func (s *relationalResultStream) incrementalRows(yield func([]string, []bool) error) error {
@@ -326,10 +563,12 @@ func (s *relationalResultStream) incrementalRows(yield func([]string, []bool) er
 }
 
 func (s *relationalResultStream) yieldSourceRow(row relationRow, yield func([]string, []bool) error) error {
+	s.sourceRows++
 	matched, err := relationalRowMatches(s.plan.where, row)
 	if err != nil || !matched {
 		return err
 	}
+	s.matchedRows++
 	if s.plan.limit.present && s.skipped < s.plan.limit.offset {
 		s.skipped++
 		return nil
@@ -339,14 +578,24 @@ func (s *relationalResultStream) yieldSourceRow(row relationRow, yield func([]st
 		return err
 	}
 	values, nulls := s.outputRow(result)
-	if err := yield(values, nulls); err != nil {
+	s.emitted++
+	s.projectMemory += resultMemory([]relationalResultRow{result})
+	if err := s.yieldDeliveredRow(values, nulls, yield); err != nil {
 		return err
 	}
-	s.emitted++
 	if s.plan.limit.present && s.emitted >= s.plan.limit.count {
 		return errStopRelationStream
 	}
 	return nil
+}
+
+func (s *relationalResultStream) yieldDeliveredRow(values []string, nulls []bool, yield func([]string, []bool) error) error {
+	release, err := s.plan.session.reserveDeliveredRow(queryResultMemory([][]string{values}, [][]bool{nulls}))
+	if err != nil {
+		return err
+	}
+	defer release()
+	return yield(values, nulls)
 }
 
 func relationalRowMatches(predicate relationPredicate, row relationRow) (bool, error) {
@@ -395,16 +644,53 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err != nil {
 		return nil, err
 	}
-	source, err := parseRelationalSource(s, sourceText)
+	runtimeKey := s.composed.selectRuntimeKey(query)
+	sourceExecutor := *s
+	sourceExecutor.composed = s.composed.withRuntimePrefix(queryexplanation.RuntimeOperatorKey(runtimeKey, "source", 0))
+	source, err := parseRelationalSource(&sourceExecutor, sourceText)
 	if err != nil {
 		return nil, err
 	}
 	source.locking = locking
 	plan := &relationalSelectPlan{relationalSelectEnvironment: relationalSelectEnvironment{session: s.session, composed: s.composed, outer: outer}, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
+	plan.runtimeKey = runtimeKey
 	if err := finishRelationalSelectPlan(plan, projectionText, groupText, havingText, windowText, orderText, limitText); err != nil {
 		return nil, err
 	}
+	assignSubqueryRuntimeKeys(plan)
+	if err := prepareScalarSubqueries(plan); err != nil {
+		return nil, err
+	}
+	plan.runtime = newSelectRuntimeBinding(plan.session.runtimeMetrics, plan)
+	plan.source.runtime = plan.runtime
 	return plan, nil
+}
+
+func assignSubqueryRuntimeKeys(plan *relationalSelectPlan) {
+	for index := range plan.projection {
+		if plan.projection[index].subquery == "" {
+			continue
+		}
+		plan.projection[index].runtimeKey = queryexplanation.RuntimeOperatorKey(plan.runtimeKey, "projection_subquery", index)
+	}
+}
+
+func prepareScalarSubqueries(plan *relationalSelectPlan) error {
+	if plan.composed == nil || plan.composed.planning {
+		return nil
+	}
+	for index := range plan.projection {
+		projection := &plan.projection[index]
+		if projection.subquery == "" || !projection.scalar {
+			continue
+		}
+		value, _, err := executeScalarSubquery(projection.context, projection.subquery, nil, projection.runtimeKey)
+		if err != nil {
+			return err
+		}
+		projection.value, projection.subquerySet = value, true
+	}
+	return nil
 }
 
 func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, group, having, windows, order, limit string) error {
@@ -676,8 +962,9 @@ func (p *relationalSelectPlan) compileProjection(text string) error {
 }
 
 func (p *relationalSelectPlan) compilePredicates() error {
+	runtimeKeys := &predicateRuntimeKeys{prefix: p.runtimeKey}
 	if p.whereText != "" {
-		predicate, err := compileRelationPredicateContext(p.whereText, p.source.columns, p.session, p.composed, p.outer)
+		predicate, err := compileRelationPredicateContext(p.whereText, p.source.columns, p.session, p.composed, p.outer, runtimeKeys)
 		if err != nil {
 			return err
 		}
@@ -687,7 +974,7 @@ func (p *relationalSelectPlan) compilePredicates() error {
 		if p.source.joins[index].condition == "" {
 			continue
 		}
-		predicate, err := compileRelationPredicateContext(p.source.joins[index].condition, p.source.joins[index].columns, p.session, p.composed, p.outer)
+		predicate, err := compileRelationPredicateContext(p.source.joins[index].condition, p.source.joins[index].columns, p.session, p.composed, p.outer, runtimeKeys)
 		if err != nil {
 			return err
 		}
@@ -800,6 +1087,14 @@ func (p *relationalSelectPlan) result(rows []relationalResultRow) *queryResult {
 	return &queryResult{columns: columns, rows: resultRows, nulls: nulls, metadata: metadata}
 }
 
+func (p *relationalSelectPlan) renderResultRow(row relationalResultRow) ([]string, []bool) {
+	values := append([]string(nil), row.values...)
+	nulls := append([]bool(nil), row.nulls...)
+	p.renderTemporalResults([][]string{values}, [][]bool{nulls})
+	displayStoredNulls([][]string{values})
+	return values, nulls
+}
+
 func (p *relationalSelectPlan) resultColumns() ([]string, []columnMetadata) {
 	columns := make([]string, len(p.projection))
 	metadata := make([]columnMetadata, len(p.projection))
@@ -852,6 +1147,7 @@ func renderTemporalColumn(rows [][]string, nulls [][]bool, column, offset, preci
 
 func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql string) *queryexplanation.Document {
 	read := queryexplanation.Select{
+		RuntimeKey:            p.runtimeKey,
 		Columns:               projectionNames(p.projection),
 		ProjectionExpressions: projectionExpressions(p.projection, p.source.columns),
 		AllColumns:            p.allColumns,
@@ -888,6 +1184,10 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		})
 	}
 	return queryexplanation.PlanSelect(serverVersion, sql, currentDatabase, read)
+}
+
+func relationalRuntimeKey(query string) string {
+	return "select:" + strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(query)), " "))
 }
 
 func groupExpressions(groups []relationalGroup) []string {

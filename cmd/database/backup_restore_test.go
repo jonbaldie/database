@@ -7,11 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/jonbaldie/database/internal/instance"
 )
 
 func TestBackupRestoreWorkflowCreatesAndRestoresCompleteArtifactWithTerminalConfirmation(t *testing.T) {
 	source := t.TempDir()
 	writeBackupFixture(t, filepath.Join(source, "nested", "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
+	writeBackupFixture(t, filepath.Join(source, ".database-state"), "running\n")
 	archive := filepath.Join(t.TempDir(), "instance.tar")
 
 	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
@@ -26,11 +30,26 @@ func TestBackupRestoreWorkflowCreatesAndRestoresCompleteArtifactWithTerminalConf
 	if got := string(contents); got != "preserved" {
 		t.Fatalf("restored contents = %q, want preserved", got)
 	}
+	if _, err := os.Stat(filepath.Join(destination, ".database-state")); !os.IsNotExist(err) {
+		t.Fatalf("restored runtime state marker: %v", err)
+	}
+	sourceMetadata, err := instance.Load(source)
+	if err != nil {
+		t.Fatalf("load source metadata: %v", err)
+	}
+	restoredMetadata, err := instance.Load(destination)
+	if err != nil {
+		t.Fatalf("load restored metadata: %v", err)
+	}
+	if restoredMetadata.InstanceID == sourceMetadata.InstanceID || restoredMetadata.SourceInstanceID != sourceMetadata.InstanceID || restoredMetadata.State != "stopped" {
+		t.Fatalf("restored identity = %#v, source = %#v", restoredMetadata, sourceMetadata)
+	}
 }
 
 func TestRestoreRejectsNonEmptyDestination(t *testing.T) {
 	source := t.TempDir()
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
 	archive := filepath.Join(t.TempDir(), "instance.tar")
 	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
 
@@ -59,6 +78,7 @@ func TestBackupCreateRejectsMissingSource(t *testing.T) {
 func TestBackupCreateRejectsInvalidOutput(t *testing.T) {
 	source := t.TempDir()
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
 	output := t.TempDir()
 
 	assertOperatorFailure(t, []string{"backup", "create", "--data-dir", source, "--output", output}, "backup create", "operation_failed", 1)
@@ -91,14 +111,15 @@ func TestRestoreReportsExtractionFailure(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "restored")
 
 	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", destination}, "restore", "operation_failed", 1)
-	if _, err := os.Stat(filepath.Join(destination, "entry")); err != nil {
-		t.Fatalf("restore did not preserve first archive entry before extraction failure: %v", err)
+	if _, err := os.Stat(filepath.Join(destination, "entry")); !os.IsNotExist(err) {
+		t.Fatalf("invalid restore left a usable entry: %v", err)
 	}
 }
 
 func TestBackupWorkflowReportsDistinctTerminalOperationIdentities(t *testing.T) {
 	source := t.TempDir()
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
 	archive := filepath.Join(t.TempDir(), "instance.tar")
 
 	createResult := assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
@@ -106,6 +127,70 @@ func TestBackupWorkflowReportsDistinctTerminalOperationIdentities(t *testing.T) 
 	if createResult["operation_id"] == inspectResult["operation_id"] {
 		t.Fatalf("workflow confirmations reused operation identity %q", createResult["operation_id"])
 	}
+}
+
+func TestUpgradeWorkflowRequiresMatchingBackupAndCompletesForwardOnly(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+
+	assertOperatorSuccess(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes"}, "upgrade")
+	metadata, err := instance.Load(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.DataVersion != "0.1.1" || metadata.State != "stopped" {
+		t.Fatalf("upgraded metadata = %#v", metadata)
+	}
+	if _, err := os.Stat(filepath.Join(source, instance.UpgradeIncompleteMarker)); !os.IsNotExist(err) {
+		t.Fatalf("upgrade marker remains: %v", err)
+	}
+}
+
+func TestUpgradeRejectsChangedSourceAndUnsupportedWorkflows(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "before")
+	writeInstanceFixture(t, source)
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "after")
+
+	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes"}, "upgrade", "precondition", 3)
+	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes", "--rolling"}, "upgrade", "precondition", 3)
+	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1"}, "upgrade", "invalid_input", 2)
+}
+
+func TestUpgradeResumesOnlyTheMarkedTarget(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	metadata, err := instance.Load(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.State = "upgrade-incomplete"
+	metadataBytes, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "instance.json"), metadataBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := upgradeMarker{Schema: upgradeMarkerSchema, TargetVersion: "0.1.1", SourceInstanceID: metadata.InstanceID, StartedAt: "2026-07-31T00:00:00Z"}
+	markerBytes, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, instance.UpgradeIncompleteMarker), markerBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.2", "--yes"}, "upgrade", "precondition", 3)
+	assertOperatorSuccess(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes"}, "upgrade")
 }
 
 func assertOperatorSuccess(t *testing.T, args []string, operation string) map[string]any {
@@ -200,5 +285,16 @@ func writeBackupFixture(t *testing.T, path, contents string) {
 	}
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
+	}
+}
+
+func writeInstanceFixture(t *testing.T, directory string) {
+	t.Helper()
+	metadata := `{"schema":"database.instance/v1","instance_id":"source-instance","state":"stopped","admin_account":"admin","password_hash":"password-hash"}`
+	if err := os.WriteFile(filepath.Join(directory, "instance.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatalf("write instance metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "catalog.json"), []byte(`{"namespaces":{},"accounts":{}}`), 0o600); err != nil {
+		t.Fatalf("write catalog: %v", err)
 	}
 }

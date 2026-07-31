@@ -27,7 +27,7 @@ func (s *textStatementExecutor) explainComposedBody(context *composedQueryContex
 	} else if body != query {
 		return s.explainComposedBody(local, body, outer)
 	}
-	parsed, set, err := parseSetQuery(query)
+	parsed, set, err := parseSetQuery(context, query)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +40,7 @@ func (s *textStatementExecutor) explainComposedBody(context *composedQueryContex
 func (s *textStatementExecutor) explainSetQuery(context *composedQueryContext, query setQuery, outer *outerRelationScope) (*queryexplanation.Operator, error) {
 	operators := make([]*queryexplanation.Operator, len(query.terms))
 	for index, term := range query.terms {
-		operator, err := s.explainComposedBody(context, term, outer)
+		operator, err := s.explainComposedBody(setTermContext(context, query.runtimeKey, index), term, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -54,6 +54,7 @@ func (s *textStatementExecutor) explainSetQuery(context *composedQueryContext, q
 			orders = append(orders, queryexplanation.Order{Expression: expression, Direction: direction})
 		}
 		root = queryexplanation.OrderedInput(root, orders)
+		root.RuntimeKey = queryexplanation.RuntimeOperatorKey(query.runtimeKey, "sort", 0)
 	}
 	limit, err := parseRelationalLimit(query.limit)
 	if err != nil {
@@ -61,6 +62,7 @@ func (s *textStatementExecutor) explainSetQuery(context *composedQueryContext, q
 	}
 	if limit.present {
 		root = queryexplanation.LimitedInput(root, queryexplanation.Limit{Present: true, Offset: limit.offset, Count: limit.count})
+		root.RuntimeKey = queryexplanation.RuntimeOperatorKey(query.runtimeKey, "limit", 0)
 	}
 	return root, nil
 }
@@ -74,6 +76,7 @@ func reduceSetExplanation(operators []*queryexplanation.Operator, operations []s
 		}
 		operation := operations[index]
 		operators[index] = queryexplanation.SetOperation(string(operation.kind), operation.all, operators[index], operators[index+1])
+		operators[index].RuntimeKey = operation.runtimeKey
 		operators = append(operators[:index+1], operators[index+2:]...)
 		operations = append(operations[:index], operations[index+1:]...)
 		operationCount--
@@ -81,6 +84,7 @@ func reduceSetExplanation(operators []*queryexplanation.Operator, operations []s
 	root := operators[0]
 	for index, operation := range operations {
 		root = queryexplanation.SetOperation(string(operation.kind), operation.all, root, operators[index+1])
+		root.RuntimeKey = operation.runtimeKey
 	}
 	return root
 }
@@ -92,12 +96,20 @@ func (s *textStatementExecutor) explainSelectTerm(context *composedQueryContext,
 	}
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	if keywordAt(expression, "from") < 0 {
+		wasRendering := context.rendering
+		context.rendering = true
+		defer func() { context.rendering = wasRendering }()
+		termKey := context.selectRuntimeKey(query)
 		items := splitCSV(expression)
 		root := queryexplanation.PlanScalarSelect(s.server.config.Version, query, s.database, items).Plan
-		return s.decorateSubqueryText(context, root, expression, outer, "derived")
+		root.RuntimeKey = queryexplanation.RuntimeOperatorKey(termKey, "values", 0)
+		return s.decorateSubqueryText(context, root, expression, outer, "derived", nil, termKey)
 	}
 	executor := *context.executor
 	executor.composed = context
+	wasRendering := context.rendering
+	context.rendering = true
+	defer func() { context.rendering = wasRendering }()
 	plan, err := parseRelationalSelectContext(&executor, query, outer)
 	if err != nil {
 		return nil, err
@@ -116,12 +128,13 @@ func (s *textStatementExecutor) decorateComposedInputs(context *composedQueryCon
 	if err != nil {
 		return nil, err
 	}
-	root, err = s.decorateSubqueryText(context, root, plan.whereText, outer, "where")
+	predicateKeys := &predicateRuntimeKeys{prefix: plan.runtimeKey}
+	root, err = s.decorateSubqueryText(context, root, plan.whereText, outer, "where", predicateKeys)
 	if err != nil {
 		return nil, err
 	}
 	for _, join := range plan.source.joins {
-		root, err = s.decorateSubqueryText(context, root, join.condition, outer, "on")
+		root, err = s.decorateSubqueryText(context, root, join.condition, outer, "on", predicateKeys)
 		if err != nil {
 			return nil, err
 		}
@@ -140,17 +153,17 @@ func (s *textStatementExecutor) decorateDerivedInputs(context *composedQueryCont
 			for index, column := range table.columns {
 				columns[index] = column.qualifier + "." + column.name
 			}
-			root = queryexplanation.ReusedInput(root, columns)
+			root = queryexplanation.ReusedInput(root, columns, table.materializeKey)
 			continue
 		}
-		input, err := s.explainComposedBody(context, table.query, nil)
+		input, err := s.explainComposedBody(context.withRuntimePrefix(table.runtimePrefix), table.query, nil)
 		if err != nil {
 			return nil, err
 		}
 		if hasComposedInput {
-			root = queryexplanation.AdditionalMaterializedInput(root, input, table.reason, "derived", table.alias)
+			root = queryexplanation.AdditionalMaterializedInput(root, input, table.reason, "derived", table.alias, table.materializeKey)
 		} else {
-			root = queryexplanation.MaterializedInput(root, input, table.reason, "derived", table.alias)
+			root = queryexplanation.MaterializedInput(root, input, table.reason, "derived", table.alias, table.materializeKey)
 			hasComposedInput = true
 		}
 	}
@@ -162,27 +175,31 @@ func (s *textStatementExecutor) decorateProjectionSubqueries(context *composedQu
 		if projection.subquery == "" {
 			continue
 		}
-		input, err := s.explainComposedBody(context, projection.subquery, outer)
+		input, err := s.explainComposedBody(context.withRuntimePrefix(projection.runtimeKey), projection.subquery, outer)
 		if err != nil {
 			return nil, err
 		}
-		root = s.composedInputOperator(context, root, input, projection.subquery, outer, "derived", projection.expression)
+		root = s.composedInputOperator(context, root, input, projection.subquery, outer, "derived", projection.expression, projection.runtimeKey)
 	}
 	return root, nil
 }
 
-func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryContext, root *queryexplanation.Operator, text string, outer *outerRelationScope, clause string) (*queryexplanation.Operator, error) {
-	for _, query := range parenthesizedSelectQueries(text) {
+func (s *textStatementExecutor) decorateSubqueryText(context *composedQueryContext, root *queryexplanation.Operator, text string, outer *outerRelationScope, clause string, predicateKeys *predicateRuntimeKeys, runtimeBases ...string) (*queryexplanation.Operator, error) {
+	for index, query := range parenthesizedSelectQueries(text) {
 		plannedQuery := query
 		if containsExistsSubquery(text, query) {
 			plannedQuery = existsProjectionQuery(query)
 		}
-		input, err := s.explainComposedBody(context, plannedQuery, outer)
+		runtimeKey := subqueryRuntimePrefix(runtimeBases, index)
+		if runtimeKey == "" {
+			runtimeKey = predicateKeys.nextRuntimeKey()
+		}
+		input, err := s.explainComposedBody(context.withRuntimePrefix(runtimeKey), plannedQuery, outer)
 		if err != nil {
 			return nil, err
 		}
 		fragment := "(" + query + ")"
-		root = s.composedInputOperator(context, root, input, plannedQuery, outer, clause, fragment)
+		root = s.composedInputOperator(context, root, input, plannedQuery, outer, clause, fragment, runtimeKey)
 	}
 	return root, nil
 }
@@ -193,11 +210,18 @@ func containsExistsSubquery(text, query string) bool {
 	return strings.Contains(normalized, "exists ("+candidate+")")
 }
 
-func (s *textStatementExecutor) composedInputOperator(context *composedQueryContext, root, input *queryexplanation.Operator, query string, outer *outerRelationScope, clause, fragment string) *queryexplanation.Operator {
+func (s *textStatementExecutor) composedInputOperator(context *composedQueryContext, root, input *queryexplanation.Operator, query string, outer *outerRelationScope, clause, fragment string, runtimePrefix string) *queryexplanation.Operator {
 	if subqueryIsCorrelated(context, query, outer) {
-		return queryexplanation.DependentInput(root, input, clause, fragment)
+		return queryexplanation.DependentInput(root, input, clause, fragment, scalarSubqueryRuntimeKey(query, true, []string{runtimePrefix}))
 	}
-	return queryexplanation.MaterializedInput(root, input, "subquery", clause, fragment)
+	return queryexplanation.MaterializedInput(root, input, "subquery", clause, fragment, scalarSubqueryRuntimeKey(query, false, []string{runtimePrefix}))
+}
+
+func subqueryRuntimePrefix(bases []string, index int) string {
+	if len(bases) == 0 || bases[0] == "" {
+		return ""
+	}
+	return queryexplanation.RuntimeOperatorKey(bases[0], "subquery", index)
 }
 
 func subqueryIsCorrelated(context *composedQueryContext, query string, outer *outerRelationScope) bool {

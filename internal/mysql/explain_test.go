@@ -101,11 +101,199 @@ func TestExplainWriteJSON(t *testing.T) {
 
 func TestExplainRejectsUnsupportedModes(t *testing.T) {
 	executor := explainExecutor(t)
-	if _, err := executor.execute("EXPLAIN ANALYZE SELECT * FROM orders"); err == nil {
-		t.Error("EXPLAIN ANALYZE was accepted in plan-only surface")
-	}
 	if _, err := executor.execute("EXPLAIN SELECT * FROM missing_table"); err == nil {
 		t.Error("EXPLAIN of unknown table was accepted")
+	}
+}
+
+func TestExplainAnalyzeReportsCompletedRuntimeEvidence(t *testing.T) {
+	executor := explainExecutor(t)
+	result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON SELECT * FROM orders")
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode analysis: %v", err)
+	}
+	if document["mode"] != "analyze" || document["partial"] != false {
+		t.Fatalf("analysis envelope = %#v", document)
+	}
+	if complete, ok := document["timing"].(map[string]any)["execution"].(map[string]any)["complete"].(bool); !ok || !complete {
+		t.Fatalf("analysis timing = %#v", document["timing"])
+	}
+	actual := document["plan"].(map[string]any)["actual"].(map[string]any)
+	if actual["output_rows"] != float64(1) || actual["total_ms"] == nil {
+		t.Fatalf("analysis runtime evidence = %#v", actual)
+	}
+}
+
+func TestExplainAnalyzeReportsSpillEvidence(t *testing.T) {
+	executor := explainExecutor(t)
+	for _, values := range [][]string{{"2", "8", "20"}, {"3", "9", "30"}, {"4", "10", "40"}, {"5", "11", "60"}} {
+		if err := executor.server.config.Catalog.Insert("app", "orders", values); err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+	}
+	config := Config{ResourceLimits: ResourceLimits{
+		ExecutionMemoryLimitBytes: 50, AggregateExecutionMemoryLimitBytes: 50,
+		TemporaryStorageLimitBytes: 1024, AggregateTemporaryStorageLimitBytes: 1024,
+	}}
+	resources := newStatementResources(newResourceManager(config), config, nil)
+	executor.session.resources = resources
+	defer func() {
+		closeStatementResources(resources)
+		executor.session.resources = nil
+	}()
+
+	result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON SELECT total FROM orders ORDER BY total DESC")
+	if err != nil {
+		t.Fatalf("analyze spill: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode analysis: %v", err)
+	}
+	actual := document["plan"].(map[string]any)["actual"].(map[string]any)
+	if actual["spill_count"] == float64(0) || actual["temporary_storage_bytes"] == float64(0) {
+		t.Fatalf("spill evidence = %#v", actual)
+	}
+}
+
+func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testing.T) {
+	executor := explainExecutor(t)
+	for _, statement := range []string{
+		"CREATE TABLE customers (id BIGINT, name VARCHAR(20))",
+		"CREATE TABLE empty_left (id BIGINT)",
+		"INSERT INTO customers (id, name) VALUES (7, 'Ada')",
+		"INSERT INTO orders (id, customer_id, total) VALUES (2, 7, 20)",
+	} {
+		if _, err := executor.execute(statement); err != nil {
+			t.Fatalf("seed %q: %v", statement, err)
+		}
+	}
+	queries := map[string]string{
+		"join":              "SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id",
+		"aggregate":         "SELECT customer_id, COUNT(*) AS order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 0",
+		"window":            "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS by_id, ROW_NUMBER() OVER (ORDER BY total DESC) AS by_total FROM orders",
+		"cte":               "WITH order_ids AS (SELECT id FROM orders) SELECT id FROM order_ids UNION SELECT id FROM orders",
+		"cte_reuse":         "WITH picked AS (SELECT id FROM orders) SELECT first.id FROM picked AS first JOIN picked AS second ON first.id = second.id",
+		"derived":           "SELECT id FROM (SELECT id FROM orders) AS nested UNION SELECT id FROM orders",
+		"subquery":          "SELECT id, (SELECT id FROM orders LIMIT 1) AS first_id, (SELECT id FROM orders LIMIT 1) AS second_id FROM orders UNION SELECT id, id, id FROM orders",
+		"correlated":        "SELECT outer_orders.id, (SELECT inner_orders.total FROM orders AS inner_orders WHERE inner_orders.id = outer_orders.id) AS matching_total FROM orders AS outer_orders",
+		"exists":            "SELECT id FROM orders WHERE EXISTS (SELECT id FROM orders)",
+		"exists_twice":      "SELECT id FROM orders WHERE EXISTS (SELECT id FROM orders) AND EXISTS (SELECT id FROM orders) UNION SELECT id FROM orders",
+		"in":                "SELECT id FROM orders WHERE id IN (SELECT id FROM orders)",
+		"in_set":            "SELECT id FROM orders WHERE id IN (SELECT id FROM orders) UNION SELECT id FROM orders",
+		"correlated_exists": "SELECT outer_orders.id FROM orders AS outer_orders WHERE EXISTS (SELECT 1 FROM orders AS inner_orders WHERE inner_orders.customer_id = outer_orders.customer_id)",
+		"cte_twice":         "SELECT id, (WITH picked AS (SELECT id FROM orders LIMIT 1) SELECT id FROM picked) AS first_id, (WITH picked AS (SELECT id FROM orders LIMIT 1) SELECT id FROM picked) AS second_id FROM orders UNION SELECT id, id, id FROM orders",
+		"set_twice":         "SELECT id, (SELECT 1 UNION SELECT 1) AS first_value, (SELECT 1 UNION SELECT 1) AS second_value FROM orders UNION SELECT id, id, id FROM orders",
+		"derived_twice":     "SELECT (SELECT a.id FROM (SELECT id FROM orders) AS a JOIN (SELECT id FROM orders) AS b ON a.id = b.id LIMIT 1) AS nested_id FROM orders",
+		"derived_uneven":    "SELECT (SELECT a.id FROM (SELECT x.id FROM (SELECT id FROM orders) AS x) AS a JOIN (SELECT id FROM orders) AS b ON a.id = b.id LIMIT 1) AS nested_id FROM orders",
+		"projection_exists": "SELECT (SELECT id FROM orders LIMIT 1) AS first_id FROM orders WHERE EXISTS (SELECT id FROM orders) UNION SELECT id FROM orders",
+		"nested_sets":       "SELECT 1 UNION (SELECT 1 UNION SELECT 1) UNION (SELECT 1 UNION SELECT 1)",
+		"scalar_set":        "SELECT 1 UNION SELECT 2",
+		"right_join":        "SELECT left_orders.id FROM empty_left AS left_orders RIGHT JOIN orders ON left_orders.id = orders.id",
+		"set":               "SELECT id FROM orders UNION SELECT id FROM orders UNION SELECT id FROM orders ORDER BY id DESC LIMIT 2",
+	}
+	for name, query := range queries {
+		t.Run(name, func(t *testing.T) {
+			result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON " + query)
+			if err != nil {
+				t.Fatalf("analyze: %v", err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+				t.Fatalf("decode analysis: %v", err)
+			}
+			assertCompletedOperatorEvidence(t, document["plan"].(map[string]any))
+			if name == "correlated_exists" {
+				assertOperatorInvocations(t, document["plan"].(map[string]any), "scan", 2)
+			}
+			if name == "cte_reuse" {
+				assertMaterializeReasonInvocations(t, document["plan"].(map[string]any), "reuse", 2)
+			}
+		})
+	}
+}
+
+func assertCompletedOperatorEvidence(t *testing.T, operator map[string]any) {
+	t.Helper()
+	actual, found := operator["actual"].(map[string]any)
+	if !found {
+		t.Fatalf("%s operator has no actual evidence: %#v", operator["kind"], operator)
+	}
+	if warnings, found := actual["warnings"].([]any); found {
+		for _, warning := range warnings {
+			if warning.(map[string]any)["code"] == "RUNTIME_OPERATOR_NOT_INVOKED" {
+				t.Fatalf("%s operator lacks observed evidence: %#v", operator["kind"], actual)
+			}
+		}
+	}
+	for _, child := range operator["children"].([]any) {
+		assertCompletedOperatorEvidence(t, child.(map[string]any))
+	}
+}
+
+func assertOperatorInvocations(t *testing.T, operator map[string]any, kind string, want float64) {
+	t.Helper()
+	if operator["kind"] == kind && operator["actual"].(map[string]any)["invocations"] == want {
+		return
+	}
+	for _, child := range operator["children"].([]any) {
+		if operatorHasInvocations(child.(map[string]any), kind, want) {
+			return
+		}
+	}
+	t.Errorf("no %s operator recorded %g invocations", kind, want)
+}
+
+func operatorHasInvocations(operator map[string]any, kind string, want float64) bool {
+	if operator["kind"] == kind && operator["actual"].(map[string]any)["invocations"] == want {
+		return true
+	}
+	for _, child := range operator["children"].([]any) {
+		if operatorHasInvocations(child.(map[string]any), kind, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func assertMaterializeReasonInvocations(t *testing.T, operator map[string]any, reason string, want float64) {
+	t.Helper()
+	if materializeReasonHasInvocations(operator, reason, want) {
+		return
+	}
+	t.Errorf("no materialize operator for %q recorded %g invocations", reason, want)
+}
+
+func materializeReasonHasInvocations(operator map[string]any, reason string, want float64) bool {
+	operation, isMaterialization := operator["operation"].(map[string]any)
+	if operator["kind"] == "materialize" && isMaterialization && operation["reason"] == reason && operator["actual"].(map[string]any)["invocations"] == want {
+		return true
+	}
+	for _, child := range operator["children"].([]any) {
+		if materializeReasonHasInvocations(child.(map[string]any), reason, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestExplainAnalyzeRejectsWritesAndLockingReads(t *testing.T) {
+	executor := explainExecutor(t)
+	for _, query := range []string{
+		"EXPLAIN ANALYZE INSERT INTO orders (id, customer_id, total) VALUES ('2', '8', '20')",
+		"EXPLAIN ANALYZE SELECT * FROM orders FOR UPDATE",
+	} {
+		if _, err := executor.execute(query); !isFailureCode(err, 1235) {
+			t.Errorf("%q error = %v, want unsupported analysis error", query, err)
+		}
+	}
+	result, err := executor.execute("SELECT * FROM orders")
+	if err != nil || len(result.rows) != 1 {
+		t.Fatalf("rejected analysis changed rows: result=%#v err=%v", result, err)
 	}
 }
 

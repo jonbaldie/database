@@ -17,12 +17,51 @@ func configCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, configUsage)
 		return 0
 	}
+	if hasResultControl(args) {
+		return configCommandWithReporter(args, stdout, stderr)
+	}
 	format, parsedArgs, err := configOutputFormat(args)
 	operationID := newOperationID()
 	if err != nil {
 		return writeConfigFailure(stdout, "invalid_input", err.Error(), "config validate", operationID, format)
 	}
 	return validateConfiguration(parsedArgs, format, operationID, stdout)
+}
+
+func hasResultControl(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" || strings.HasPrefix(arg, "--result") || strings.HasPrefix(arg, "--progress") {
+			return true
+		}
+	}
+	return false
+}
+
+func configCommandWithReporter(args []string, stdout, stderr io.Writer) int {
+	output, filtered, err := parseCommandOutput(args, false)
+	operation := "config"
+	if len(filtered) > 0 && filtered[0] != "" {
+		operation += " " + filtered[0]
+	}
+	reporter := newOperationReporter(operation, output, stdout, stderr)
+	if err != nil {
+		if containsOutputControl(args) {
+			reporter.output.result = "json"
+		}
+		return reporter.failure("invalid_input", "", err.Error(), nil)
+	}
+	if !isConfigValidation(filtered) {
+		return reporter.failure("invalid_input", "", "config requires the validate operation", nil)
+	}
+	reporter.command = "config validate"
+	reporter.progress("loading")
+	reporter.progress("validating")
+	config, err := resolveConfiguration(filtered[1:], os.Environ())
+	if err != nil {
+		return reporter.failure(configurationClass(err), "", err.Error(), nil)
+	}
+	legacy := configurationResult(config, reporter.id)
+	return reporter.success(map[string]any{"settings": legacy["settings"]})
 }
 
 func validateConfiguration(args []string, format, operationID string, stdout io.Writer) int {

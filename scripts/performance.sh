@@ -1,6 +1,11 @@
 #!/usr/bin/env sh
 set -eu
-start=$(date +%s)
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+mkdir -p "$ROOT/bin" "$ROOT/dist"
 go test ./... >/dev/null
-end=$(date +%s)
-printf '{"schema":"database.performance/v1","verification":"go test ./...","duration_seconds":%s}\n' "$((end-start))"
+go build -trimpath -buildvcs=false -o "$ROOT/bin/database" ./cmd/database
+go run ./scripts/performance \
+  --executable "$ROOT/bin/database" \
+  --output "$ROOT/dist/performance-evidence.json" \
+  "$@"

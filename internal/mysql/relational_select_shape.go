@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func parseRelationalProjection(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, bool, error) {
@@ -83,13 +84,6 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 	}
 	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
 	correlated := composedQueryIsCorrelated(context, query, scope)
-	value := exprValue{}
-	if !correlated && !context.planning {
-		value, metadata, err = executeScalarSubquery(context, query, nil)
-		if err != nil {
-			return nil, err
-		}
-	}
 	name := expression
 	if alias != "" {
 		name = alias
@@ -98,7 +92,7 @@ func subqueryProjection(query, expression, alias string, columns []relationColum
 	metadata.flags &^= mysqlNotNullFlag
 	return []relationalProjection{{
 		expression: expression, name: name, alias: alias, column: -1,
-		subquery: query, context: context, metadata: metadata, scalar: !correlated, value: value,
+		subquery: query, context: context, metadata: metadata, scalar: !correlated,
 	}}, nil
 }
 
@@ -247,10 +241,14 @@ func (p *relationalSelectPlan) projectValues(row relationRow, result *relational
 
 func (p *relationalSelectPlan) projectionValue(projection relationalProjection, row relationRow) (exprValue, error) {
 	if projection.subquery != "" && !projection.scalar {
-		value, _, err := executeScalarSubquery(projection.context, projection.subquery, &outerRelationScope{columns: p.source.columns, row: row, parent: p.outer})
+		value, _, err := executeScalarSubquery(projection.context, projection.subquery, &outerRelationScope{columns: p.source.columns, row: row, parent: p.outer}, projection.runtimeKey)
 		return value, err
 	}
 	if projection.scalar {
+		if projection.subquery != "" && !projection.subquerySet {
+			value, _, err := executeScalarSubquery(projection.context, projection.subquery, nil, projection.runtimeKey)
+			return value, err
+		}
 		return projection.value, nil
 	}
 	if projection.computed {
@@ -525,9 +523,45 @@ func nonNegativeLimitValue(text string) (int, error) {
 func maxIntValue() int { return int(^uint(0) >> 1) }
 
 func (p *relationalSelectPlan) shapeRows(rows []relationalResultRow) []relationalResultRow {
-	rows = distinctRelationalRows(rows, p.distinct, p.projection, p.source.columns)
-	rows = sortRelationalRows(rows, p.order, p.source.columns)
-	return limitRelationalRows(rows, p.limit)
+	if p.distinct {
+		started := time.Now()
+		input := len(rows)
+		rows = distinctRelationalRows(rows, true, p.projection, p.source.columns)
+		if p.runtime != nil {
+			p.runtime.record(p.runtime.distinct, input, len(rows), input-len(rows), 0, 0, resultMemory(rows), time.Since(started))
+		}
+	}
+	if len(p.order) > 0 {
+		started := time.Now()
+		input := len(rows)
+		rows = sortRelationalRows(rows, p.order, p.source.columns)
+		if p.runtime != nil {
+			p.runtime.record(firstOperatorID(p.runtime.sorts), input, len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
+		}
+	}
+	if p.limit.present {
+		started := time.Now()
+		input := len(rows)
+		rows = limitRelationalRows(rows, p.limit)
+		if p.runtime != nil {
+			p.runtime.record(p.runtime.limit, input, len(rows), input-len(rows), 0, 0, 0, time.Since(started))
+		}
+	}
+	return rows
+}
+
+func firstOperatorID(ids []int) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	return ids[0]
+}
+
+func lastOperatorID(ids []int) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	return ids[len(ids)-1]
 }
 
 func sortRelationalRows(rows []relationalResultRow, orders []relationalOrder, columns []relationColumn) []relationalResultRow {

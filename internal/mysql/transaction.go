@@ -54,7 +54,7 @@ func beginTransactionCommand(s *session, query string) error {
 }
 
 func commitTransactionCommand(s *session, _ string) error {
-	return (&transactionExecutor{s}).commit()
+	return (&transactionExecutor{s}).commitTransactionControl()
 }
 
 func rollbackTransactionCommand(s *session, _ string) error {
@@ -92,7 +92,17 @@ type statementTransaction struct {
 }
 
 func (s *textStatementExecutor) executeWithTransaction(query, lower string) (*queryResult, error) {
-	if isTransactionControl(lower) || isSettingControl(lower) {
+	if err := s.session.checkStatementResources(); err != nil {
+		return nil, err
+	}
+	if err := s.authorizeStatement(lower); err != nil {
+		return nil, err
+	}
+	if isImmediateStatement(lower) {
+		// Transaction controls and session settings may publish an irreversible
+		// commit (for example, COMMIT or SET autocommit = 1). Admission is their
+		// final resource check so a later event cannot misreport that publication
+		// as a rejected statement.
 		return s.dispatchStatement(query, lower)
 	}
 	execution, err := s.beginStatementTransaction(lower)
@@ -100,11 +110,31 @@ func (s *textStatementExecutor) executeWithTransaction(query, lower string) (*qu
 		return nil, err
 	}
 	if !execution.transactional {
-		return s.dispatchStatement(query, lower)
+		return s.dispatchAndCheckResources(query, lower)
 	}
 	defer s.clearStatementDefinition()
 	result, err := s.dispatchStatement(query, lower)
+	// A mutation may already be staged inside an explicit transaction. Its
+	// catalog path checks immediately before staging, so do not turn a later
+	// post-dispatch deadline observation into a failed statement with retained
+	// staged changes. Autocommit mutations are safe to check before finish
+	// because finish will roll them back on error.
+	if err == nil && (execution.autocommit || !isMutationStatement(lower)) {
+		err = s.session.checkStatementResources()
+	}
 	return execution.finish(s.session, result, err)
+}
+
+func isImmediateStatement(lower string) bool {
+	return isTransactionControl(lower) || isSettingControl(lower) || accountAdministrationStatement(lower)
+}
+
+func (s *textStatementExecutor) dispatchAndCheckResources(query, lower string) (*queryResult, error) {
+	result, err := s.dispatchStatement(query, lower)
+	if err != nil {
+		return result, err
+	}
+	return result, s.session.checkStatementResources()
 }
 
 func (s *textStatementExecutor) beginStatementTransaction(lower string) (statementTransaction, error) {
@@ -115,7 +145,7 @@ func (s *textStatementExecutor) beginStatementTransaction(lower string) (stateme
 	if err := s.commitBeforeDefinition(dataDefinition); err != nil {
 		return statementTransaction{}, err
 	}
-	autocommit, err := s.startStatementTransaction(dataDefinition, isMutationStatement(lower))
+	autocommit, err := s.startStatementTransaction(dataDefinition, isMutationStatement(lower) || isLockingReadStatement(lower))
 	if err != nil {
 		return statementTransaction{}, err
 	}
@@ -123,6 +153,10 @@ func (s *textStatementExecutor) beginStatementTransaction(lower string) (stateme
 		return statementTransaction{}, err
 	}
 	return statementTransaction{transactional: true, autocommit: autocommit}, nil
+}
+
+func isLockingReadStatement(lower string) bool {
+	return strings.Contains(lower, " for update") || strings.Contains(lower, " for share") || strings.Contains(lower, "lock in share mode")
 }
 
 func (s *textStatementExecutor) commitBeforeDefinition(dataDefinition bool) error {
@@ -141,6 +175,9 @@ func (s *textStatementExecutor) startStatementTransaction(dataDefinition, mutati
 			return false, readOnlyTransactionFailure()
 		}
 		return false, nil
+	}
+	if s.nextReadOnly && mutation {
+		return false, readOnlyTransactionFailure()
 	}
 	s.beginTransaction(s.nextIsolation, s.nextReadOnly)
 	s.consumeNextCharacteristics()
@@ -161,7 +198,7 @@ func (e statementTransaction) finish(s *session, result *queryResult, err error)
 }
 
 func (e statementTransaction) abort(s *session, err error) (*queryResult, error) {
-	if e.autocommit || isDeadlock(err) {
+	if e.autocommit || isDeadlock(err) || isCancellation(err) {
 		_ = rollbackTransaction(s)
 	}
 	return nil, err
@@ -170,6 +207,11 @@ func (e statementTransaction) abort(s *session, err error) (*queryResult, error)
 func isDeadlock(err error) bool {
 	var failure sqlFailure
 	return errors.As(err, &failure) && failure.code == 1213 && failure.state == "40001"
+}
+
+func isCancellation(err error) bool {
+	var failure sqlFailure
+	return errors.As(err, &failure) && failure.code == 1317 && failure.state == "70100"
 }
 
 func (s *textStatementExecutor) dispatchStatement(query, lower string) (*queryResult, error) {
@@ -209,29 +251,27 @@ func (s *textStatementExecutor) settingStatement(query, lower string) (*queryRes
 	if !isSettingControl(lower) {
 		return nil, false, nil
 	}
-	if strings.HasPrefix(lower, "set ") {
-		if handled, err := s.setTimeZone(query); handled {
-			return nil, true, err
-		}
-	}
 	return nil, true, s.applySetting(query, lower)
 }
 
-func (s *textStatementExecutor) applySetting(_ string, lower string) error {
+func (s *textStatementExecutor) applySetting(query string, lower string) error {
 	if strings.HasPrefix(lower, "reset ") {
 		return sqlFailure{1235, "42000", "unsupported session reset"}
 	}
 	normalized := strings.Join(strings.Fields(lower), " ")
-	if handled, err := s.applyAutocommitSetting(normalized); handled {
-		return err
+	if _, _, matched := transactionSetting(normalized); matched {
+		if s.session.transaction {
+			return sqlFailure{1568, "25001", "transaction characteristics cannot change in an active transaction"}
+		}
+		if handled, err := s.applyIsolationSetting(normalized); handled {
+			return err
+		}
+		if handled, err := s.applyReadOnlySetting(normalized); handled {
+			return err
+		}
+		return sqlFailure{1231, "42000", "unsupported transaction setting"}
 	}
-	if handled, err := s.applyIsolationSetting(normalized); handled {
-		return err
-	}
-	if handled, err := s.applyReadOnlySetting(normalized); handled {
-		return err
-	}
-	return sqlFailure{1193, "HY000", "unknown or unsupported session setting"}
+	return s.applySessionAssignments(query)
 }
 
 func (s *session) applyAutocommitSetting(normalized string) (bool, error) {
@@ -489,6 +529,9 @@ func emptyDefinition() catalog.Definition {
 }
 
 func (s *session) mutateCatalog(action func(*catalog.Definition) error) error {
+	if err := s.checkStatementResources(); err != nil {
+		return err
+	}
 	if s.transactionReadOnly {
 		return readOnlyTransactionFailure()
 	}
@@ -512,6 +555,9 @@ func (s *session) mutateTransactionCatalog(action func(*catalog.Definition) erro
 	if err := validateConstraintDefinition(s.transactionSnapshot, staged); err != nil {
 		return err
 	}
+	if err := s.checkStatementResources(); err != nil {
+		return err
+	}
 	s.transactionSnapshot = staged
 	s.transactionDirty = true
 	s.transactionMutations = append(s.transactionMutations, action)
@@ -525,6 +571,9 @@ func (s *session) mutateDurableCatalog(action func(*catalog.Definition) error) e
 		return err
 	}
 	if err := validateConstraintDefinition(definition, staged); err != nil {
+		return err
+	}
+	if err := s.checkStatementResources(); err != nil {
 		return err
 	}
 	if err := s.server.config.Catalog.ReplaceIfRevision(revision, staged); err != nil {
@@ -556,16 +605,33 @@ func (s *session) databaseExists(name string) error {
 }
 
 func (s *transactionExecutor) commit() error {
+	return s.commitWithPublicationBoundary(false)
+}
+
+func (s *transactionExecutor) commitTransactionControl() error {
+	return s.commitWithPublicationBoundary(true)
+}
+
+func (s *transactionExecutor) commitWithPublicationBoundary(finalize bool) error {
 	if !s.transaction {
 		return nil
 	}
+	if err := s.checkStatementResources(); err != nil {
+		return err
+	}
 	if s.transactionDirty && s.server.config.Catalog != nil {
+		if err := s.checkStatementResources(); err != nil {
+			return err
+		}
 		if err := s.server.config.Catalog.ReplaceIfRevision(s.transactionRevision, s.transactionSnapshot); err != nil {
 			s.finishTransaction()
 			if errors.Is(err, catalog.ErrRevisionConflict) {
 				return sqlFailure{1213, "40001", "Deadlock found when trying to get lock; try restarting transaction"}
 			}
 			return sqlFailure{1105, "HY000", err.Error()}
+		}
+		if finalize {
+			finalizeStatementResources(s.resources)
 		}
 	}
 	s.finishTransaction()

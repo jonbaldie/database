@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/queryexplanation"
 )
 
 // maximumPendingConnections is a private handshake-resource safeguard. It is
@@ -35,11 +36,24 @@ const (
 	clientFoundRows           = 1 << 1
 	clientLongFlag            = 1 << 2
 	clientConnectWithDB       = 1 << 3
+	clientIgnoreSpace         = 1 << 6
+	clientODBC                = 1 << 8
+	clientInteractive         = 1 << 10
+	clientIgnoreSigpipe       = 1 << 12
+	clientReserved            = 1 << 14
 	clientLocalFiles          = 1 << 7
 	clientProtocol41          = 1 << 9
 	clientTransactions        = 1 << 13
 	clientSecureConnection    = 1 << 15
+	clientMultiStatements     = 1 << 16
 	clientMultiResults        = 1 << 17
+	clientPSMultiResults      = 1 << 18
+	clientCanHandleExpiredPwd = 1 << 22
+	clientSessionTrack        = 1 << 23
+	clientDeprecateEOF        = 1 << 24
+	clientOptionalMetadata    = 1 << 25
+	clientQueryAttributes     = 1 << 27
+	clientMultiFactorAuth     = 1 << 28
 	clientPluginAuth          = 1 << 19
 	clientConnectAttrs        = 1 << 20
 	clientPluginLenencData    = 1 << 21
@@ -92,6 +106,7 @@ type Config struct {
 	// LockWaitTimeout bounds the time a statement waits for a conflicting row
 	// lock. It defaults to five seconds.
 	LockWaitTimeout time.Duration
+	ResourceLimits  ResourceLimits
 	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
 	// current-time functions render through. It defaults to UTC and accepts UTC
 	// or a ±HH:MM offset within ±14:00.
@@ -101,29 +116,53 @@ type Config struct {
 	Clock func() time.Time
 }
 
+// ResourceLimits is the server resource policy that applies to every session.
+// Later session settings may tighten its statement-scoped values, but they may
+// never enlarge or disable these server ceilings.
+type ResourceLimits struct {
+	StatementTimeout                    time.Duration
+	ExecutionMemoryLimitBytes           int64
+	AggregateExecutionMemoryLimitBytes  int64
+	TemporaryStorageLimitBytes          int64
+	AggregateTemporaryStorageLimitBytes int64
+}
+
 type Server struct {
-	Listener    net.Listener
-	config      Config
-	connections *connectionRegistry
-	auth        authenticator
-	locks       *lockManager
+	Listener     net.Listener
+	config       Config
+	connections  *connectionRegistry
+	auth         authenticator
+	locks        *lockManager
+	resources    *resourceManager
+	explanations *activeExplanationRegistry
+	Diagnostics  ResourceDiagnostics
+}
+
+// ResourceDiagnostics provides the non-sensitive server evidence that the
+// lifecycle diagnostics listener publishes.
+type ResourceDiagnostics struct{ manager *resourceManager }
+
+func (d ResourceDiagnostics) Usage() ResourceUsage {
+	return d.manager.usage()
 }
 
 // connectionRegistry owns admission and graceful-drain accounting. It is kept
 // separate from wire handling so transport lifecycle can evolve independently
 // of command and SQL compatibility work.
 type connectionRegistry struct {
-	mu            sync.Mutex
-	stopping      bool
-	connections   map[net.Conn]struct{}
-	connectionW   sync.WaitGroup
-	statementW    sync.WaitGroup
-	pendingMax    int
-	pendingCount  int
-	sessionMax    int
-	sessionCount  int
-	preparedCount int
-	preparedLimit int
+	mu               sync.Mutex
+	stopping         bool
+	connections      map[net.Conn]struct{}
+	sessions         map[string]map[*conversation]struct{}
+	connectionW      sync.WaitGroup
+	statementW       sync.WaitGroup
+	pendingMax       int
+	pendingCount     int
+	sessionMax       int
+	sessionCount     int
+	preparedCount    int
+	preparedLimit    int
+	nextConnectionID uint32
 }
 
 // New retains a small unauthenticated protocol probe seam for callers that do
@@ -149,11 +188,20 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 	}
 	registry := &connectionRegistry{
 		connections:   make(map[net.Conn]struct{}),
+		sessions:      make(map[string]map[*conversation]struct{}),
 		pendingMax:    maximumPendingConnections,
 		sessionMax:    config.MaxConnections,
 		preparedLimit: config.MaxPreparedStmtCount,
 	}
-	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout)}, nil
+	resources := newResourceManager(config)
+	if config.Catalog != nil {
+		grants := []catalog.Grant{{Privilege: "ACCOUNT_MANAGER"}, {Privilege: "NAMESPACE_MANAGER"}, {Privilege: "OPERATIONAL_OBSERVATION"}, {Privilege: "OPERATIONAL_CONTROL"}}
+		if err := config.Catalog.EnsureAccount(config.Username, config.PasswordHash, grants); err != nil {
+			_ = listener.Close()
+			return nil, err
+		}
+	}
+	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout), resources: resources, explanations: newActiveExplanationRegistry(), Diagnostics: ResourceDiagnostics{manager: resources}}, nil
 }
 
 func normalizedConfig(config Config) Config {
@@ -172,6 +220,7 @@ func normalizedConfig(config Config) Config {
 	if config.LockWaitTimeout <= 0 {
 		config.LockWaitTimeout = 5 * time.Second
 	}
+	config.ResourceLimits = normalizedResourceLimits(config.ResourceLimits)
 	if config.TimeZone == "" {
 		config.TimeZone = "UTC"
 	}
@@ -179,6 +228,25 @@ func normalizedConfig(config Config) Config {
 		config.Clock = time.Now
 	}
 	return config
+}
+
+func normalizedResourceLimits(limits ResourceLimits) ResourceLimits {
+	if limits.StatementTimeout <= 0 {
+		limits.StatementTimeout = 5 * time.Minute
+	}
+	if limits.ExecutionMemoryLimitBytes <= 0 {
+		limits.ExecutionMemoryLimitBytes = 64 * 1024 * 1024
+	}
+	if limits.AggregateExecutionMemoryLimitBytes <= 0 {
+		limits.AggregateExecutionMemoryLimitBytes = 2 * 1024 * 1024 * 1024
+	}
+	if limits.TemporaryStorageLimitBytes <= 0 {
+		limits.TemporaryStorageLimitBytes = 16 * 1024 * 1024 * 1024
+	}
+	if limits.AggregateTemporaryStorageLimitBytes <= 0 {
+		limits.AggregateTemporaryStorageLimitBytes = 32 * 1024 * 1024 * 1024
+	}
+	return limits
 }
 
 func validateTLSConfig(config Config) error {
@@ -255,6 +323,43 @@ func (r *connectionRegistry) unregister(connection net.Conn, admitted bool) {
 	r.connectionW.Done()
 }
 
+func (r *connectionRegistry) registerConversation(conv *conversation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sessions[conv.session.username] == nil {
+		r.sessions[conv.session.username] = map[*conversation]struct{}{}
+	}
+	r.sessions[conv.session.username][conv] = struct{}{}
+}
+
+func (r *connectionRegistry) unregisterConversation(conv *conversation) {
+	if conv.session == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sessions := r.sessions[conv.session.username]
+	delete(sessions, conv)
+	if len(sessions) == 0 {
+		delete(r.sessions, conv.session.username)
+	}
+}
+
+func (r *connectionRegistry) revokeAccount(name string) {
+	r.mu.Lock()
+	sessions := make([]*conversation, 0, len(r.sessions[name]))
+	for conversation := range r.sessions[name] {
+		sessions = append(sessions, conversation)
+	}
+	r.mu.Unlock()
+	for _, conversation := range sessions {
+		conversation.control.revoked.Store(true)
+		if !conversation.control.running.Load() {
+			_ = conversation.connection.Close()
+		}
+	}
+}
+
 func (r *connectionRegistry) admitSession() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -266,6 +371,16 @@ func (r *connectionRegistry) admitSession() bool {
 	}
 	r.sessionCount++
 	return true
+}
+
+func (r *connectionRegistry) allocateConnectionID() uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nextConnectionID++
+	if r.nextConnectionID == 0 {
+		r.nextConnectionID++
+	}
+	return r.nextConnectionID
 }
 
 func (r *connectionRegistry) beginStatement() bool {
@@ -331,15 +446,18 @@ func (r *connectionRegistry) closeGracefully(listener net.Listener) error {
 
 type session struct {
 	server          *Server
+	connectionID    uint32
 	username        string
 	database        string
 	initialDB       string
 	timeZone        string
 	initialTimeZone string
+	settings        sessionSettings
 	statements      map[uint32]*preparedStatement
-	nextStmtID      uint32
-	longDataBytes   int
+	prepared        preparedCounters
 	statementCancel <-chan struct{}
+	resources       *statementResources
+	runtimeMetrics  *queryexplanation.RuntimeMetrics
 	transactionState
 }
 
@@ -348,6 +466,17 @@ type transactionState struct {
 	transactionWork
 	savepointState
 	statementState
+}
+
+type sessionSettings struct {
+	collationConnection                         collationKind
+	statementTimeout, lockWaitTimeout           time.Duration
+	executionMemoryLimit, temporaryStorageLimit int64
+}
+
+type preparedCounters struct {
+	nextStmtID    uint32
+	longDataBytes int
 }
 
 type transactionSettings struct {
@@ -466,8 +595,20 @@ func (a authenticator) databaseExists(name string) error {
 
 func makeNonce() []byte {
 	nonce := make([]byte, 20)
-	if _, err := rand.Read(nonce); err != nil {
-		return []byte("database-authentication")
+	// Connector/J carries the seed through an ASCII String internally. Keep
+	// the random seed printable so that the driver preserves the exact bytes
+	// when it computes the caching_sha2_password scramble.
+	for index := range nonce {
+		var byteValue [1]byte
+		for {
+			if _, err := rand.Read(byteValue[:]); err != nil {
+				return []byte("database-authentication")
+			}
+			if byteValue[0] >= 33 && byteValue[0] <= 126 {
+				nonce[index] = byteValue[0]
+				break
+			}
+		}
 	}
 	return nonce
 }
@@ -503,15 +644,22 @@ func serverCapabilities(tlsEnabled bool) uint32 {
 // feature. They do not negotiate a server feature; unsupported commands still
 // receive their explicit command error.
 func acceptedClientCapabilities(tlsEnabled bool) uint32 {
-	return serverCapabilities(tlsEnabled) | clientFoundRows | clientLongFlag | clientLocalFiles | clientMultiResults | clientConnectAttrs
+	return serverCapabilities(tlsEnabled) |
+		clientFoundRows | clientLongFlag | clientConnectWithDB | clientIgnoreSpace | clientODBC | clientInteractive |
+		clientIgnoreSigpipe | clientReserved | clientLocalFiles | clientMultiStatements | clientMultiResults | clientPSMultiResults |
+		clientConnectAttrs | clientCanHandleExpiredPwd | clientSessionTrack |
+		clientDeprecateEOF | clientOptionalMetadata | clientQueryAttributes | clientMultiFactorAuth
 }
 
-func handshake(version string, nonce []byte, tlsEnabled bool) []byte {
+func handshake(version string, nonce []byte, tlsEnabled bool, connectionID uint32) []byte {
 	capabilities := serverCapabilities(tlsEnabled)
 	p := []byte{0x0a}
-	p = append(p, []byte("database-"+version)...)
+	// Drivers parse the handshake version as a MySQL semantic version. Keep
+	// the product identity as a suffix so strict clients (for example
+	// Connector/Python) accept the connection while VERSION() remains honest.
+	p = append(p, []byte("8.4.11-database-"+version)...)
 	p = append(p, 0)
-	p = append(p, 1, 0, 0, 0)
+	p = append(p, byte(connectionID), byte(connectionID>>8), byte(connectionID>>16), byte(connectionID>>24))
 	p = append(p, nonce[:8]...)
 	p = append(p, 0)
 	p = append(p, byte(capabilities), byte(capabilities>>8), 33, 0x02, 0, byte(capabilities>>16), byte(capabilities>>24), byte(len(nonce)+1))
@@ -663,11 +811,30 @@ func (s *queryExecutor) databaseExists(name string) error {
 
 func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	query = stripLeadingSQLComments(query)
 	lower := strings.ToLower(query)
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
 	}
 	return s.executeWithTransaction(query, lower)
+}
+
+// stripLeadingSQLComments removes comments that clients use to annotate an
+// otherwise ordinary statement. Connector/J prefixes its server-variable
+// probe with a block comment containing its version. Only comments before the
+// first statement keyword are removed.
+func stripLeadingSQLComments(query string) string {
+	for {
+		query = strings.TrimSpace(query)
+		if !strings.HasPrefix(query, "/*") {
+			return query
+		}
+		end := strings.Index(query[2:], "*/")
+		if end < 0 {
+			return query
+		}
+		query = query[end+4:]
+	}
 }
 
 type statementHandler func(query, lower string) (*queryResult, bool, error)
@@ -676,6 +843,7 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 	return []statementHandler{
 		s.transactionStatement,
 		s.settingStatement,
+		s.accountStatement,
 		s.builtinStatement,
 		s.ddlStatement,
 		s.catalogStatement,
@@ -709,6 +877,9 @@ func (s *textStatementExecutor) setTimeZone(query string) (bool, error) {
 }
 
 func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
+	if strings.HasPrefix(lower, "show ") {
+		return s.showVariables(lower)
+	}
 	if column, kind, precision, ok := currentTimeQuery(lower); ok {
 		value, err := s.renderCurrentTime(kind, precision)
 		if err != nil {
@@ -720,23 +891,16 @@ func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*query
 			metadata: []columnMetadata{temporalResultMetadata(column, kind, precision)},
 		}, true, nil
 	}
-	if lower == "select @@time_zone" || lower == "select @@session.time_zone" || lower == "select @@session time_zone" {
-		offset, err := sessionTimeZoneOffset(s.session)
-		if err != nil {
-			return nil, true, err
+	if strings.HasPrefix(lower, "select @@") {
+		variable := strings.TrimSpace(lower[len("select "):])
+		if strings.Contains(variable, ",") || strings.Contains(variable, " ") {
+			return nil, false, nil
 		}
-		return &queryResult{
-			columns: []string{"@@time_zone"},
-			rows:    [][]string{{formatFixedOffset(offset)}},
-			metadata: []columnMetadata{{
-				catalog: "def", name: "@@time_zone", characterSet: mysqlCharsetUTF8MB40900AICI,
-				typ: mysqlTypeVarString, length: 6,
-			}},
-		}, true, nil
+		result, err := s.sessionVariableResult(variable)
+		return result, true, err
 	}
 	result, found := map[string]*queryResult{
-		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
-		"select @@version":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
+		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{"8.4.11-database-" + s.server.config.Version}}},
 		"select database()": {columns: []string{"DATABASE()"}, rows: [][]string{{s.database}}},
 	}[lower]
 	return result, found, nil
@@ -801,10 +965,7 @@ func (s *textStatementExecutor) operationStatement(query, lower string) (*queryR
 		result, err := s.explainStatement(query)
 		return result, true, err
 	}
-	if strings.HasPrefix(lower, "show processlist") {
-		return &queryResult{columns: []string{"Id"}}, true, nil
-	}
-	return nil, false, nil
+	return s.sessionControlStatement(query, lower)
 }
 
 func (s *textStatementExecutor) transactionStatement(query, lower string) (*queryResult, bool, error) {
@@ -873,7 +1034,7 @@ func (s *catalogExecutor) showTables() (*queryResult, error) {
 	}
 	namespace, found := s.metadataDefinition().Namespaces[catalog.Key(s.database)]
 	if !found {
-		return nil, sqlFailure{1049, "42000", "unknown database"}
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, s.database)
 	}
 	return namespaceTables(s.database, namespace), nil
 }
@@ -944,7 +1105,7 @@ func (s *catalogExecutor) metadataDefinition() catalog.Definition {
 	}
 	// Catalog metadata is statement-scoped even when ordinary data reads use
 	// a repeatable-read transaction snapshot.
-	return s.server.config.Catalog.Snapshot()
+	return visibleCatalogDefinition(s.server.config.Catalog.Snapshot(), s.session.username)
 }
 
 func snapshotNamespace(s *relationExecutor, name string) (catalog.Namespace, bool) {
@@ -982,7 +1143,7 @@ func (s *catalogExecutor) createDatabase(query string) error {
 			return errors.New("namespace already exists")
 		}
 		definition.Namespaces[key] = catalog.Namespace{Name: name, Tables: map[string]catalog.Table{}}
-		return nil
+		return grantCreatedNamespace(definition, name, s.username)
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1007, "HY000", err.Error()})
 	}
@@ -1281,7 +1442,7 @@ func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error)
 	key := catalog.Key(name)
 	namespace, ok := s.metadataDefinition().Namespaces[key]
 	if !ok {
-		return nil, sqlFailure{1049, "42000", "unknown database '" + name + "'"}
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, name)
 	}
 	if namespace.Name == "" {
 		namespace.Name = key
@@ -1299,7 +1460,7 @@ func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 	}
 	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
 	if !ok {
-		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, namespaceName)
 	}
 	table, ok := namespace.Tables[catalog.Key(tableName)]
 	if !ok {
@@ -1327,7 +1488,7 @@ func (s *catalogExecutor) showIndexes(query string) (*queryResult, error) {
 	}
 	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
 	if !ok {
-		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, namespaceName)
 	}
 	table, ok := namespace.Tables[catalog.Key(tableName)]
 	if !ok {
@@ -3497,8 +3658,8 @@ func (s *preparedPreparation) allocate(query string) (uint32, int, []columnMetad
 	if !s.server.connections.reservePreparedStatement() {
 		return 0, 0, nil, sqlFailure{1461, "HY000", "can't create more than max_prepared_stmt_count statements"}
 	}
-	id := s.nextStmtID
-	s.nextStmtID++
+	id := s.prepared.nextStmtID
+	s.prepared.nextStmtID++
 	s.statements[id] = &preparedStatement{query: query, parameters: parameters, longData: make(map[uint16][]byte)}
 	metadata, err := s.preparedColumns(query)
 	if err != nil {
@@ -3805,6 +3966,8 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
+	finishExplanation := s.recordPreparedExplanation(statement)
+	defer finishExplanation()
 	result, err := queries.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
@@ -3816,6 +3979,56 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 		return writePacket(connection, sequence, okPacket(result.affected))
 	}
 	return writeBinaryResult(connection, sequence, result, s.server.config.MaxAllowedPacket)
+}
+
+// recordPreparedExplanation plans a value-free copy of the prepared SQL. The
+// executable query can contain bound values, but the public document must not.
+func (s *preparedExecution) recordPreparedExplanation(statement *preparedStatement) func() {
+	if statement == nil || s.session == nil {
+		return func() {}
+	}
+	maskedValues := make([]string, statement.parameters)
+	for index := range maskedValues {
+		maskedValues[index] = "0"
+	}
+	maskedQuery, err := bindPreparedQuery(statement.query, maskedValues)
+	if err != nil {
+		return func() {}
+	}
+	started := time.Now()
+	planner := textStatementExecutor{session: s.session}
+	plan, err := planner.planExplanation(maskedQuery)
+	if err != nil {
+		return func() {}
+	}
+	plan.Timing.PlanningMS = float64(time.Since(started)) / float64(time.Millisecond)
+	plan.Statement.SQL = statement.query
+	plan.Statement.Parameters = preparedExplanationParameters(statement.types)
+	return s.server.explanations.begin(s.session.connectionID, plan, s.session)
+}
+
+func preparedExplanationParameters(types []preparedParameterType) []queryexplanation.Parameter {
+	parameters := make([]queryexplanation.Parameter, len(types))
+	for index, parameter := range types {
+		parameters[index] = queryexplanation.Parameter{Position: index + 1, Type: preparedExplanationType(parameter)}
+	}
+	return parameters
+}
+
+var preparedExplanationTypes = map[byte]string{
+	mysqlTypeTiny: "TINYINT", mysqlTypeShort: "SMALLINT",
+	mysqlTypeLong: "INT", mysqlTypeInt24: "INT", mysqlTypeLongLong: "BIGINT",
+	mysqlTypeFloat: "FLOAT", mysqlTypeDouble: "DOUBLE",
+	mysqlTypeDate: "DATE", mysqlTypeDatetime: "DATETIME", mysqlTypeTimestamp: "TIMESTAMP", mysqlTypeTime: "TIME",
+	mysqlTypeJSON: "JSON", mysqlTypeNewDecimal: "DECIMAL",
+	mysqlTypeBlob: "BLOB", mysqlTypeTinyBlob: "BLOB", mysqlTypeMediumBlob: "BLOB", mysqlTypeLongBlob: "BLOB",
+}
+
+func preparedExplanationType(parameter preparedParameterType) string {
+	if typeName, found := preparedExplanationTypes[parameter.typ]; found {
+		return typeName
+	}
+	return "VARCHAR"
 }
 
 func (s *preparedExecution) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {
@@ -4005,11 +4218,11 @@ func (s *preparedLifecycle) sendLongData(payload []byte) error {
 	if int(parameter) >= statement.parameters {
 		return sqlFailure{1210, "HY000", "prepared statement parameter index out of range"}
 	}
-	if s.longDataBytes+len(payload[7:]) > maxPreparedLongDataBytes {
+	if s.prepared.longDataBytes+len(payload[7:]) > maxPreparedLongDataBytes {
 		return sqlFailure{1153, "08S01", "prepared statement long data exceeds maximum size"}
 	}
 	statement.longData[parameter] = append(statement.longData[parameter], payload[7:]...)
-	s.longDataBytes += len(payload[7:])
+	s.prepared.longDataBytes += len(payload[7:])
 	return nil
 }
 
@@ -4036,8 +4249,9 @@ func (s *preparedLifecycle) resetConnection() error {
 	s.nextReadOnly = false
 	s.database = s.initialDB
 	s.timeZone = s.initialTimeZone
+	s.resetSessionSettings()
 	s.closeAllPrepared()
-	s.longDataBytes = 0
+	s.prepared.longDataBytes = 0
 	return nil
 }
 
@@ -4057,7 +4271,7 @@ func (s *preparedLifecycle) closeAllPrepared() {
 
 func clearPreparedLongData(session *session, statement *preparedStatement) {
 	for _, value := range statement.longData {
-		session.longDataBytes -= len(value)
+		session.prepared.longDataBytes -= len(value)
 	}
 	statement.longData = make(map[uint16][]byte)
 }

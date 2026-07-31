@@ -26,6 +26,9 @@ func isCommandHelp(args []string) bool {
 }
 
 func runServe(args []string, stdout, stderr io.Writer) int {
+	if hasResultControl(args) {
+		return runServeWithReporter(args, stdout, stderr)
+	}
 	format, configurationArgs, err := configOutputFormat(args)
 	if err != nil {
 		return serveInputFailure(stderr, err)
@@ -35,6 +38,55 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		return serveConfigurationFailure(stderr, err)
 	}
 	return serveLifecycle(format, opts, stdout, stderr)
+}
+
+func runServeWithReporter(args []string, stdout, stderr io.Writer) int {
+	output, configurationArgs, err := parseCommandOutput(args, false)
+	reporter := newOperationReporter("serve", output, stdout, stderr)
+	if err != nil {
+		if containsOutputControl(args) {
+			reporter.output.result = "json"
+		}
+		return reporter.failure("invalid_input", "", err.Error(), nil)
+	}
+	opts, err := parseServeFlags(configurationArgs)
+	if err != nil {
+		return reporter.failure(configurationClass(err), "", err.Error(), nil)
+	}
+	return serveLifecycleWithReporter(opts, reporter)
+}
+
+func serveLifecycleWithReporter(opts lifecycle.Options, reporter *operationReporter) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	opts.OperationID = reporter.id
+	state := ""
+	recovered := false
+	details := map[string]any{}
+	reporter.progress("starting")
+	err := lifecycle.Serve(ctx, opts, func(event lifecycle.Event) {
+		state = event.State
+		recovered = recovered || event.Recovered
+		reporter.progress(event.State)
+		if event.State == "ready" {
+			details["state"] = "ready"
+			if event.DiagnosticsAddress != "" {
+				details["diagnostics_address"] = event.DiagnosticsAddress
+			}
+			if len(event.Warnings) != 0 {
+				details["warnings"] = event.Warnings
+			}
+		}
+	})
+	if err != nil {
+		return reporter.failure("operation_failed", "", err.Error(), details)
+	}
+	if state == "stopped" || state == "" {
+		details["state"] = "stopped"
+	}
+	details["data_directory"] = opts.DataDirectory
+	details["recovered"] = recovered
+	return reporter.success(details)
 }
 
 func serveInputFailure(stderr io.Writer, err error) int {
@@ -51,6 +103,7 @@ func serveLifecycle(format string, opts lifecycle.Options, stdout, stderr io.Wri
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	operationID := newOperationID()
+	opts.OperationID = operationID
 	if err := lifecycle.Serve(ctx, opts, serveEventWriter(format, operationID, stdout)); err != nil {
 		return serveFailure(format, operationID, stdout, stderr, err)
 	}
@@ -69,6 +122,9 @@ func serveEventWriter(format, operationID string, stdout io.Writer) func(lifecyc
 }
 
 func writeHumanServeEvent(stdout io.Writer, event lifecycle.Event) {
+	for _, warning := range event.Warnings {
+		fmt.Fprintf(stdout, "database: WARNING [%s] %s\n", warning.Code, warning.Summary)
+	}
 	if event.State != "ready" {
 		fmt.Fprintf(stdout, "database: %s\n", event.State)
 		return

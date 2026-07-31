@@ -2,7 +2,9 @@ package mysql
 
 import (
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
 )
@@ -133,13 +135,18 @@ func parseCTETableSource(s *relationExecutor, parts []string, remainder string) 
 		return relationalTableSource{}, "", true, err
 	}
 	columns := relationalResultColumns(relation.name, alias, table, relation.result)
+	reference := relation.references
 	reason := relation.reason
-	if relation.references > 0 {
+	if reference > 0 {
 		reason = "reuse"
 	}
 	relation.references++
 	s.composed.ctes[key] = relation
-	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason}
+	materializeKey := relation.materializeKey
+	if reference > 0 {
+		materializeKey += "/reuse/" + strconv.Itoa(reference)
+	}
+	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason, materializeKey: materializeKey, runtimePrefix: relation.runtimePrefix}
 	return source, tail, true, nil
 }
 
@@ -181,10 +188,11 @@ func parseDerivedTableSource(s *relationExecutor, text string) (relationalTableS
 	if s.composed == nil {
 		return relationalTableSource{}, "", sqlFailure{1064, "42000", "derived table context is unavailable"}
 	}
-	child, err := s.composed.child()
+	child, runtimePrefix, err := s.composed.inputChild()
 	if err != nil {
 		return relationalTableSource{}, "", err
 	}
+	started := time.Now()
 	result, err := composedSourceResult(s.composed, child, query)
 	if err != nil {
 		return relationalTableSource{}, "", err
@@ -194,7 +202,9 @@ func parseDerivedTableSource(s *relationExecutor, text string) (relationalTableS
 		return relationalTableSource{}, "", err
 	}
 	columns := relationalResultColumns(alias, alias, table, result)
-	return relationalTableSource{name: alias, alias: alias, table: table, columns: columns, query: query, reason: "derived_table"}, remainder, nil
+	materializeKey := composedMaterializeKey(child, alias, query, 0)
+	recordMaterializedResult(s.composed, materializeKey, result, time.Since(started))
+	return relationalTableSource{name: alias, alias: alias, table: table, columns: columns, query: query, reason: "derived_table", materializeKey: materializeKey, runtimePrefix: runtimePrefix}, remainder, nil
 }
 
 func composedSourceResult(context, child *composedQueryContext, query string) (*queryResult, error) {
@@ -600,27 +610,36 @@ type relationRowYield func(relationRow) error
 type relationRowIterator func(relationRowYield) error
 
 func (p *relationalSelectPlan) forEachSourceRow(yield relationRowYield) error {
-	return p.source.rowIterator()(yield)
+	return p.source.rowIterator()(func(row relationRow) error {
+		if err := p.session.checkStatementResources(); err != nil {
+			return err
+		}
+		return yield(row)
+	})
 }
 
 func (source relationalSource) rowIterator() relationRowIterator {
-	iterator := tableRowIterator(source.tables[0])
+	iterator := tableRowIterator(source.tables[0], source.runtime, 0)
 	leftWidth := len(source.tables[0].columns)
 	leftTables := 1
 	for _, join := range source.joins {
-		iterator = joinedRowIterator(iterator, join, leftWidth, leftTables)
+		iterator = joinedRowIterator(iterator, join, leftWidth, leftTables, source.runtime)
 		leftWidth += len(join.right.columns)
 		leftTables++
 	}
 	return iterator
 }
 
-func tableRowIterator(table relationalTableSource) relationRowIterator {
+func tableRowIterator(table relationalTableSource, runtime *selectRuntimeBinding, scanIndex int) relationRowIterator {
 	return func(yield relationRowYield) error {
+		started := time.Now()
 		rows, err := indexScanRows(table)
 		if err != nil {
 			return err
 		}
+		elapsed := time.Since(started)
+		bytes := sourceRowBytes(table.table.Rows)
+		runtime.recordSourceScan(scanIndex, table, len(rows), bytes, elapsed)
 		for _, row := range rows {
 			if err := yield(relationRow{values: append([]string(nil), row.values...), lockKeys: []string{rowLockKey(row.values)}}); err != nil {
 				return err
@@ -697,19 +716,60 @@ func orderedIndexRowBefore(left, right indexedRelationRow, index catalog.Index) 
 	return false
 }
 
-func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int) relationRowIterator {
+func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int, runtime *selectRuntimeBinding) relationRowIterator {
 	return func(yield relationRowYield) error {
+		started := time.Now()
+		inputRows, outputRows, outputBytes := 0, 0, 0
 		matchedRight := make([]bool, len(join.right.table.Rows))
 		if err := left(func(row relationRow) error {
-			return yieldJoinedRows(row, join, matchedRight, yield)
+			inputRows += 1 + len(join.right.table.Rows)
+			rightStarted := time.Now()
+			err := yieldJoinedRows(row, join, matchedRight, func(row relationRow) error {
+				outputRows++
+				outputBytes += relationRowMemory(row)
+				return yield(row)
+			})
+			runtime.recordSourceScan(leftTables, join.right, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(rightStarted))
+			return err
 		}); err != nil {
 			return err
 		}
 		if join.kind != "right" {
+			runtime.recordJoin(leftTables-1, inputRows, outputRows, outputBytes, time.Since(started))
 			return nil
 		}
-		return yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, leftTables, yield)
+		if inputRows == 0 {
+			runtime.recordSourceScan(leftTables, join.right, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(started))
+		}
+		err := yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, leftTables, func(row relationRow) error {
+			outputRows++
+			outputBytes += relationRowMemory(row)
+			return yield(row)
+		})
+		runtime.recordJoin(leftTables-1, inputRows, outputRows, outputBytes, time.Since(started))
+		return err
 	}
+}
+
+func relationRowMemory(row relationRow) int {
+	bytes := 0
+	for _, value := range row.values {
+		bytes += len(value)
+	}
+	for _, key := range row.lockKeys {
+		bytes += len(key)
+	}
+	return bytes
+}
+
+func sourceRowBytes(rows [][]string) int {
+	bytes := 0
+	for _, row := range rows {
+		for _, value := range row {
+			bytes += len(value)
+		}
+	}
+	return bytes
 }
 
 func yieldJoinedRows(left relationRow, join relationalJoin, matchedRight []bool, yield relationRowYield) error {

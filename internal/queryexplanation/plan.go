@@ -2,10 +2,14 @@ package queryexplanation
 
 import (
 	"encoding/json"
+	"strconv"
 )
 
 // Select describes a supported read to be explained.
 type Select struct {
+	// RuntimeKey identifies one executable SELECT term. It is only used to
+	// attach observed counters to the matching physical operators.
+	RuntimeKey            string
 	Table                 Table
 	Tables                []Table
 	Joins                 []Join
@@ -91,7 +95,36 @@ func PlanSelect(serverVersion, sql, currentDatabase string, read Select) *Docume
 		ReadOnly:    !read.Locking.Enabled,
 		LockingRead: read.Locking.Enabled,
 	}
-	return newDocument(serverVersion, currentDatabase, statement, selectPlan(read))
+	root := selectPlan(read)
+	assignRuntimeKeys(root, read.RuntimeKey)
+	return newDocument(serverVersion, currentDatabase, statement, root)
+}
+
+// RuntimeOperatorKey returns the private identity of one operator in a SELECT
+// term. Callers must use the same term key and tree-order index that planning
+// used. The key is never part of the JSON or tabular API.
+func RuntimeOperatorKey(termKey, kind string, index int) string {
+	return termKey + "/" + kind + "/" + strconv.Itoa(index)
+}
+
+func assignRuntimeKeys(root *Operator, termKey string) {
+	if root == nil || termKey == "" {
+		return
+	}
+	indexes := make(map[string]int)
+	var visit func(*Operator)
+	visit = func(operator *Operator) {
+		if operator == nil {
+			return
+		}
+		index := indexes[operator.Kind]
+		operator.RuntimeKey = RuntimeOperatorKey(termKey, operator.Kind, index)
+		indexes[operator.Kind] = index + 1
+		for _, child := range operator.Children {
+			visit(child)
+		}
+	}
+	visit(root)
 }
 
 // PlanScalarSelect returns the plan-only explanation for a supported read that

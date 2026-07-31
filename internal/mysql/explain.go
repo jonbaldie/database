@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,27 +12,79 @@ import (
 // explainStatement plans a supported statement without executing it and renders
 // the canonical JSON document or the stable MySQL-oriented tabular projection.
 func (s *textStatementExecutor) explainStatement(query string) (*queryResult, error) {
-	format, inner, err := parseExplain(query)
+	request, err := parseExplain(query)
 	if err != nil {
 		return nil, err
 	}
-	document, err := s.planExplanation(inner)
-	if err != nil {
-		return nil, err
+	switch request.mode {
+	case "analyze":
+		return s.analyzeExplanation(request.format, request.inner)
+	case "snapshot":
+		return s.snapshotExplanation(request.format, request.connectionID)
+	default:
+		document, err := s.planExplanation(request.inner)
+		if err != nil {
+			return nil, err
+		}
+		return renderExplanation(request.format, document)
 	}
-	return renderExplanation(format, document)
 }
 
-func parseExplain(query string) (string, string, error) {
+type explainRequest struct {
+	mode         string
+	format       string
+	inner        string
+	connectionID uint32
+}
+
+func parseExplain(query string) (explainRequest, error) {
 	rest := strings.TrimSpace(query[len("explain "):])
 	lower := strings.ToLower(rest)
-	if strings.HasPrefix(lower, "analyze") || strings.HasPrefix(lower, "for connection") {
-		return "", "", sqlFailure{1235, "42000", "EXPLAIN ANALYZE and FOR CONNECTION are not supported in v0.1 plan-only explanation"}
+	if strings.HasPrefix(lower, "analyze") && (len(rest) == len("analyze") || isWhitespace(rest[len("analyze")])) {
+		format, inner, err := parseExplainTarget(strings.TrimSpace(rest[len("analyze"):]))
+		if err != nil {
+			return explainRequest{}, err
+		}
+		return explainRequest{mode: "analyze", format: format, inner: inner}, nil
 	}
-	if !strings.HasPrefix(lower, "format") {
+	format, inner, err := parseExplainTarget(rest)
+	if err != nil {
+		return explainRequest{}, err
+	}
+	if strings.HasPrefix(strings.ToLower(inner), "for connection") {
+		connectionID, err := parseExplainConnection(inner)
+		if err != nil {
+			return explainRequest{}, err
+		}
+		return explainRequest{mode: "snapshot", format: format, connectionID: connectionID}, nil
+	}
+	return explainRequest{mode: "plan", format: format, inner: inner}, nil
+}
+
+func parseExplainTarget(rest string) (string, string, error) {
+	if strings.TrimSpace(rest) == "" {
+		return "", "", sqlFailure{1064, "42000", "EXPLAIN requires a statement"}
+	}
+	if !strings.HasPrefix(strings.ToLower(rest), "format") {
 		return "traditional", rest, nil
 	}
 	return parseExplainFormat(rest)
+}
+
+func isWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\n' || value == '\r'
+}
+
+func parseExplainConnection(value string) (uint32, error) {
+	rest := strings.TrimSpace(value[len("for connection"):])
+	if rest == "" || strings.ContainsAny(rest, " \t\n\r") {
+		return 0, sqlFailure{1064, "42000", "EXPLAIN FOR CONNECTION requires one positive connection ID"}
+	}
+	connectionID, err := strconv.ParseUint(rest, 10, 32)
+	if err != nil || connectionID == 0 {
+		return 0, sqlFailure{1064, "42000", "EXPLAIN FOR CONNECTION requires one positive connection ID"}
+	}
+	return uint32(connectionID), nil
 }
 
 func parseExplainFormat(rest string) (string, string, error) {
@@ -61,23 +114,98 @@ func splitLeadingWord(text string) (string, string, bool) {
 	return text[:boundary], strings.TrimSpace(text[boundary+1:]), true
 }
 
+func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*queryResult, error) {
+	planningStarted := time.Now()
+	document, err := s.planExplanation(inner)
+	if err != nil {
+		return nil, err
+	}
+	document.Timing.PlanningMS = float64(time.Since(planningStarted)) / float64(time.Millisecond)
+	if document.Statement.Kind != "select" || document.Statement.LockingRead {
+		return nil, sqlFailure{1235, "42000", "EXPLAIN ANALYZE supports only non-locking SELECT statements"}
+	}
+	started := time.Now()
+	runner := *s
+	runner.streamRows = false
+	metrics := queryexplanation.NewRuntimeMetrics(document)
+	runner.session.runtimeMetrics = metrics
+	defer func() { runner.session.runtimeMetrics = nil }()
+	result, err := runner.executeWithTransaction(inner, strings.ToLower(inner))
+	if err != nil {
+		return nil, err
+	}
+	rows, memory, err := discardResultRows(result)
+	if err != nil {
+		return nil, err
+	}
+	elapsed := time.Since(started)
+	recordRuntimeResources(metrics, runner.session.resourceSnapshot())
+	metrics.SetRoot(rows, memory, elapsed, 0, true)
+	return renderExplanation(format, queryexplanation.AnalyzeWithMetrics(document, elapsed, metrics))
+}
+
+func discardResultRows(result *queryResult) (int, int, error) {
+	if result == nil {
+		return 0, 0, nil
+	}
+	if result.stream == nil {
+		return len(result.rows), queryResultMemory(result.rows, result.nulls), nil
+	}
+	rows := 0
+	memory := 0
+	err := result.stream(func(values []string, nulls []bool) error {
+		rows++
+		memory += queryResultMemory([][]string{values}, [][]bool{nulls})
+		return nil
+	})
+	return rows, memory, err
+}
+
+func queryResultMemory(rows [][]string, nulls [][]bool) int {
+	bytes := 0
+	for index, row := range rows {
+		if index < len(nulls) {
+			bytes += len(nulls[index])
+		}
+		for _, value := range row {
+			bytes += len(value)
+		}
+	}
+	return bytes
+}
+
+func (s *textStatementExecutor) snapshotExplanation(format string, connectionID uint32) (*queryResult, error) {
+	document, found := s.server.explanations.snapshot(connectionID)
+	if !found {
+		return nil, sqlFailure{1094, "HY000", "unknown or inactive connection ID"}
+	}
+	return renderExplanation(format, document)
+}
+
 func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation.Document, error) {
 	relations := relationExecutor{session: s.session}
 	lower := strings.ToLower(inner)
+	var document *queryexplanation.Document
+	var err error
 	switch {
 	case isComposedSelectStatement(inner):
-		return s.explainSelect(&relations, inner)
+		document, err = s.explainSelect(&relations, inner)
 	case strings.HasPrefix(lower, "insert into "):
-		return s.explainInsert(&relations, inner)
+		document, err = s.explainInsert(&relations, inner)
 	case strings.HasPrefix(lower, "replace "):
-		return s.explainReplace(&relations, inner)
+		document, err = s.explainReplace(&relations, inner)
 	case strings.HasPrefix(lower, "update "):
-		return s.explainUpdate(&relations, inner)
+		document, err = s.explainUpdate(&relations, inner)
 	case strings.HasPrefix(lower, "delete from "):
-		return s.explainDelete(&relations, inner)
+		document, err = s.explainDelete(&relations, inner)
 	default:
 		return nil, sqlFailure{1064, "42000", "EXPLAIN supports SELECT, INSERT, REPLACE, UPDATE, and DELETE statements"}
 	}
+	if err != nil {
+		return nil, err
+	}
+	document.Statement.PlanningSettings = s.planningSettings()
+	return document, nil
 }
 
 func (s *textStatementExecutor) explainSelect(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
