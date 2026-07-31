@@ -930,6 +930,35 @@ func TestMySQLPreparedCloseKeepsWireConnectionReady(t *testing.T) {
 	}
 }
 
+func TestMySQLTextErrorsKeepWireConnectionReady(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("text-error-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
+		t.Fatalf("initialize: %#v", result)
+	}
+	process, mysqlAddress := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, mysqlAddress, "admin", "text-error-secret")
+	defer client.close()
+
+	if err := client.conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.conn.SetDeadline(time.Time{}) }()
+	for range 32 {
+		if result := client.query("SET unsupported_setting = 1"); result.err == "" {
+			t.Fatalf("unsupported setting succeeded: %#v", result)
+		}
+		if result := client.query("ROLLBACK"); result.err != "" {
+			t.Fatalf("command after text error: %#v", result)
+		}
+	}
+}
+
 func TestMySQLPreparedStatementCountIsBounded(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
