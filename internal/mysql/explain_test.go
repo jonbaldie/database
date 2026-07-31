@@ -101,11 +101,46 @@ func TestExplainWriteJSON(t *testing.T) {
 
 func TestExplainRejectsUnsupportedModes(t *testing.T) {
 	executor := explainExecutor(t)
-	if _, err := executor.execute("EXPLAIN ANALYZE SELECT * FROM orders"); err == nil {
-		t.Error("EXPLAIN ANALYZE was accepted in plan-only surface")
-	}
 	if _, err := executor.execute("EXPLAIN SELECT * FROM missing_table"); err == nil {
 		t.Error("EXPLAIN of unknown table was accepted")
+	}
+}
+
+func TestExplainAnalyzeReportsCompletedRuntimeEvidence(t *testing.T) {
+	executor := explainExecutor(t)
+	result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON SELECT * FROM orders")
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode analysis: %v", err)
+	}
+	if document["mode"] != "analyze" || document["partial"] != false {
+		t.Fatalf("analysis envelope = %#v", document)
+	}
+	if complete, ok := document["timing"].(map[string]any)["execution"].(map[string]any)["complete"].(bool); !ok || !complete {
+		t.Fatalf("analysis timing = %#v", document["timing"])
+	}
+	actual := document["plan"].(map[string]any)["actual"].(map[string]any)
+	if actual["output_rows"] != float64(1) || actual["total_ms"] == nil {
+		t.Fatalf("analysis runtime evidence = %#v", actual)
+	}
+}
+
+func TestExplainAnalyzeRejectsWritesAndLockingReads(t *testing.T) {
+	executor := explainExecutor(t)
+	for _, query := range []string{
+		"EXPLAIN ANALYZE INSERT INTO orders (id, customer_id, total) VALUES ('2', '8', '20')",
+		"EXPLAIN ANALYZE SELECT * FROM orders FOR UPDATE",
+	} {
+		if _, err := executor.execute(query); !isFailureCode(err, 1235) {
+			t.Errorf("%q error = %v, want unsupported analysis error", query, err)
+		}
+	}
+	result, err := executor.execute("SELECT * FROM orders")
+	if err != nil || len(result.rows) != 1 {
+		t.Fatalf("rejected analysis changed rows: result=%#v err=%v", result, err)
 	}
 }
 

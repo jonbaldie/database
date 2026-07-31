@@ -3,6 +3,7 @@ package mysql
 import (
 	"encoding/binary"
 	"net"
+	"strings"
 )
 
 // conversation owns one accepted connection from greeting through cleanup.
@@ -18,6 +19,7 @@ type conversation struct {
 	preparedLifecycle *preparedLifecycle
 	admitted          bool
 	watch             *statementWatch
+	connectionID      uint32
 }
 
 type pendingCommand struct {
@@ -69,7 +71,8 @@ func (c *conversation) close() {
 
 func (c *conversation) authenticate() bool {
 	nonce := makeNonce()
-	if err := writePacket(c.connection, 0, handshake(c.server.config.Version, nonce, c.server.auth.tlsConfig != nil)); err != nil {
+	c.connectionID = c.server.connections.allocateConnectionID()
+	if err := writePacket(c.connection, 0, handshake(c.server.config.Version, nonce, c.server.auth.tlsConfig != nil, c.connectionID)); err != nil {
 		return false
 	}
 	authentication, err := c.server.auth.authenticate(c.connection, nonce)
@@ -86,7 +89,7 @@ func (c *conversation) authenticate() bool {
 	if err := writePacket(c.connection, authentication.nextSequence, okPacket()); err != nil {
 		return false
 	}
-	c.session = newSession(c.server, authentication)
+	c.session = newSession(c.server, authentication, c.connectionID)
 	c.queries = newQueryExecutor(c.session)
 	c.preparation = &preparedPreparation{c.session}
 	c.execution = &preparedExecution{c.session}
@@ -94,9 +97,9 @@ func (c *conversation) authenticate() bool {
 	return true
 }
 
-func newSession(server *Server, authentication authenticationResult) *session {
+func newSession(server *Server, authentication authenticationResult, connectionID uint32) *session {
 	return &session{
-		server: server, username: authentication.accountName, database: authentication.database,
+		server: server, connectionID: connectionID, username: authentication.accountName, database: authentication.database,
 		initialDB: authentication.database, timeZone: server.config.TimeZone, initialTimeZone: server.config.TimeZone,
 		statements: map[uint32]*preparedStatement{}, nextStmtID: 1,
 		transactionState: transactionState{},
@@ -149,8 +152,9 @@ func (c *conversation) initDatabase(sequence byte, payload []byte) bool {
 }
 
 func (c *conversation) query(sequence byte, payload []byte) bool {
-	return c.runStatement(func() error {
-		return c.queries.writeQueryResult(c.connection, sequence, string(payload[1:]))
+	query := string(payload[1:])
+	return c.runStatement(query, func() error {
+		return c.queries.writeQueryResult(c.connection, sequence, query)
 	})
 }
 
@@ -161,15 +165,17 @@ func (c *conversation) prepare(sequence byte, payload []byte) bool {
 }
 
 func (c *conversation) executePrepared(sequence byte, payload []byte) bool {
-	return c.runStatement(func() error {
+	return c.runStatement("", func() error {
 		return c.execution.executePrepared(c.connection, sequence, payload)
 	})
 }
 
-func (c *conversation) runStatement(run func() error) bool {
+func (c *conversation) runStatement(query string, run func() error) bool {
 	if !c.server.connections.beginStatement() {
 		return false
 	}
+	finishExplanation := c.recordActiveExplanation(query)
+	defer finishExplanation()
 	watch := c.watchStatement()
 	c.session.statementCancel = watch.cancelled
 	err := run()
@@ -177,6 +183,19 @@ func (c *conversation) runStatement(run func() error) bool {
 	c.watch = watch
 	c.server.connections.endStatement()
 	return err == nil
+}
+
+func (c *conversation) recordActiveExplanation(query string) func() {
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	if query == "" || c.session == nil {
+		return func() {}
+	}
+	planner := textStatementExecutor{session: c.session}
+	plan, err := planner.planExplanation(query)
+	if err != nil {
+		return func() {}
+	}
+	return c.server.explanations.begin(c.session.connectionID, plan)
 }
 
 func (c *conversation) watchStatement() *statementWatch {

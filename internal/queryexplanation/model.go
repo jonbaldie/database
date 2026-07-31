@@ -14,14 +14,15 @@ const rowWidthPerColumn = 16
 
 // Document is the canonical explanation envelope.
 type Document struct {
-	FormatVersion int       `json:"format_version"`
-	ServerVersion string    `json:"server_version"`
-	Mode          string    `json:"mode"`
-	Partial       bool      `json:"partial"`
-	Statement     Statement `json:"statement"`
-	Timing        Timing    `json:"timing"`
-	Plan          *Operator `json:"plan"`
-	Warnings      []Warning `json:"warnings"`
+	FormatVersion int              `json:"format_version"`
+	ServerVersion string           `json:"server_version"`
+	Mode          string           `json:"mode"`
+	Partial       bool             `json:"partial"`
+	Statement     Statement        `json:"statement"`
+	Timing        Timing           `json:"timing"`
+	Plan          *Operator        `json:"plan"`
+	Warnings      []Warning        `json:"warnings"`
+	Snapshot      *SnapshotDetails `json:"snapshot,omitempty"`
 }
 
 // Statement records the submitted statement and its public planning context.
@@ -44,7 +45,21 @@ type Parameter struct {
 
 // Timing reports planning time. Plan-only documents omit execution timing.
 type Timing struct {
-	PlanningMS float64 `json:"planning_ms"`
+	PlanningMS float64          `json:"planning_ms"`
+	Execution  *ExecutionTiming `json:"execution,omitempty"`
+}
+
+// ExecutionTiming records the observed duration of an executed explanation.
+type ExecutionTiming struct {
+	ElapsedMS float64 `json:"elapsed_ms"`
+	Complete  bool    `json:"complete"`
+}
+
+// SnapshotDetails identifies the active session and the capture instant for a
+// partial live explanation.
+type SnapshotDetails struct {
+	ConnectionID uint32 `json:"connection_id"`
+	CapturedAt   string `json:"captured_at"`
 }
 
 // Operator is one physical operator in the explanation tree.
@@ -63,6 +78,39 @@ type Operator struct {
 	Output        Output            `json:"output"`
 	Warnings      []Warning         `json:"warnings"`
 	Children      []*Operator       `json:"children"`
+	Actual        *Actual           `json:"actual,omitempty"`
+}
+
+// Actual is the observed runtime evidence for one operator. Nil timing fields
+// are encoded as JSON null when the value did not become available.
+type Actual struct {
+	Invocations           int             `json:"invocations"`
+	InputRows             int             `json:"input_rows"`
+	OutputRows            int             `json:"output_rows"`
+	FilteredRows          int             `json:"filtered_rows"`
+	FirstRowMS            *float64        `json:"first_row_ms"`
+	TotalMS               *float64        `json:"total_ms"`
+	PeakMemoryBytes       int             `json:"peak_memory_bytes"`
+	SpillCount            int             `json:"spill_count"`
+	SpillBytes            int             `json:"spill_bytes"`
+	TemporaryStorageBytes int             `json:"temporary_storage_bytes"`
+	Storage               StorageEvidence `json:"storage"`
+	Wait                  WaitEvidence    `json:"wait"`
+	RowsVsEstimateRatio   *float64        `json:"rows_vs_estimate_ratio"`
+	Warnings              []Warning       `json:"warnings"`
+}
+
+// StorageEvidence records storage reads that the statement observed.
+type StorageEvidence struct {
+	LogicalReads  int `json:"logical_reads"`
+	PhysicalReads int `json:"physical_reads"`
+	BytesRead     int `json:"bytes_read"`
+}
+
+// WaitEvidence records the wait time that the statement observed.
+type WaitEvidence struct {
+	LockMS  float64 `json:"lock_ms"`
+	OtherMS float64 `json:"other_ms"`
 }
 
 // Strategy names a documented execution tactic within an operator kind.

@@ -102,28 +102,30 @@ type Config struct {
 }
 
 type Server struct {
-	Listener    net.Listener
-	config      Config
-	connections *connectionRegistry
-	auth        authenticator
-	locks       *lockManager
+	Listener     net.Listener
+	config       Config
+	connections  *connectionRegistry
+	auth         authenticator
+	locks        *lockManager
+	explanations *activeExplanationRegistry
 }
 
 // connectionRegistry owns admission and graceful-drain accounting. It is kept
 // separate from wire handling so transport lifecycle can evolve independently
 // of command and SQL compatibility work.
 type connectionRegistry struct {
-	mu            sync.Mutex
-	stopping      bool
-	connections   map[net.Conn]struct{}
-	connectionW   sync.WaitGroup
-	statementW    sync.WaitGroup
-	pendingMax    int
-	pendingCount  int
-	sessionMax    int
-	sessionCount  int
-	preparedCount int
-	preparedLimit int
+	mu               sync.Mutex
+	stopping         bool
+	connections      map[net.Conn]struct{}
+	connectionW      sync.WaitGroup
+	statementW       sync.WaitGroup
+	pendingMax       int
+	pendingCount     int
+	sessionMax       int
+	sessionCount     int
+	preparedCount    int
+	preparedLimit    int
+	nextConnectionID uint32
 }
 
 // New retains a small unauthenticated protocol probe seam for callers that do
@@ -153,7 +155,7 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 		sessionMax:    config.MaxConnections,
 		preparedLimit: config.MaxPreparedStmtCount,
 	}
-	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout)}, nil
+	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout), explanations: newActiveExplanationRegistry()}, nil
 }
 
 func normalizedConfig(config Config) Config {
@@ -268,6 +270,16 @@ func (r *connectionRegistry) admitSession() bool {
 	return true
 }
 
+func (r *connectionRegistry) allocateConnectionID() uint32 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nextConnectionID++
+	if r.nextConnectionID == 0 {
+		r.nextConnectionID++
+	}
+	return r.nextConnectionID
+}
+
 func (r *connectionRegistry) beginStatement() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -331,6 +343,7 @@ func (r *connectionRegistry) closeGracefully(listener net.Listener) error {
 
 type session struct {
 	server          *Server
+	connectionID    uint32
 	username        string
 	database        string
 	initialDB       string
@@ -506,12 +519,12 @@ func acceptedClientCapabilities(tlsEnabled bool) uint32 {
 	return serverCapabilities(tlsEnabled) | clientFoundRows | clientLongFlag | clientLocalFiles | clientMultiResults | clientConnectAttrs
 }
 
-func handshake(version string, nonce []byte, tlsEnabled bool) []byte {
+func handshake(version string, nonce []byte, tlsEnabled bool, connectionID uint32) []byte {
 	capabilities := serverCapabilities(tlsEnabled)
 	p := []byte{0x0a}
 	p = append(p, []byte("database-"+version)...)
 	p = append(p, 0)
-	p = append(p, 1, 0, 0, 0)
+	p = append(p, byte(connectionID), byte(connectionID>>8), byte(connectionID>>16), byte(connectionID>>24))
 	p = append(p, nonce[:8]...)
 	p = append(p, 0)
 	p = append(p, byte(capabilities), byte(capabilities>>8), 33, 0x02, 0, byte(capabilities>>16), byte(capabilities>>24), byte(len(nonce)+1))

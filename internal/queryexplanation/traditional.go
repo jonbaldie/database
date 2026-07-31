@@ -82,13 +82,41 @@ func stableCells(operator *Operator, parentID int) []cell {
 		strategyCell(operator),
 		text(formatNumber(operator.Estimates.Cost)),
 		text(strconv.Itoa(operator.Estimates.PeakMemoryBytes)),
-		nullCell(),
-		nullCell(),
-		nullCell(),
-		nullCell(),
+		actualRowsCell(operator),
+		actualLoopsCell(operator),
+		actualDurationCell(operator, true),
+		actualDurationCell(operator, false),
 		text(operator.Summary),
 		text(warningCodes(operator.Warnings)),
 	}
+}
+
+func actualRowsCell(operator *Operator) cell {
+	if operator.Actual == nil {
+		return nullCell()
+	}
+	return text(strconv.Itoa(operator.Actual.OutputRows))
+}
+
+func actualLoopsCell(operator *Operator) cell {
+	if operator.Actual == nil {
+		return nullCell()
+	}
+	return text(strconv.Itoa(operator.Actual.Invocations))
+}
+
+func actualDurationCell(operator *Operator, first bool) cell {
+	if operator.Actual == nil {
+		return nullCell()
+	}
+	duration := operator.Actual.TotalMS
+	if first {
+		duration = operator.Actual.FirstRowMS
+	}
+	if duration == nil {
+		return nullCell()
+	}
+	return text(formatNumber(*duration))
 }
 
 func parentCell(parentID int) cell {
