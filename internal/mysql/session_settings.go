@@ -62,12 +62,17 @@ type sessionVariableReader func(*session) (string, error)
 
 var sessionVariableReaders = map[string]sessionVariableReader{
 	"autocommit": sessionAutocommit, "transaction_isolation": sessionIsolation, "transaction_read_only": sessionReadOnly,
+	"tx_isolation": sessionIsolation, "auto_increment_increment": fixedSessionVariable("1"),
 	"time_zone": sessionTimeZone, "collation_connection": sessionCollation, "statement_timeout_ms": sessionStatementTimeout,
 	"lock_wait_timeout_ms": sessionLockWaitTimeout, "execution_memory_limit_bytes": sessionMemoryLimit,
 	"temporary_storage_limit_bytes": sessionTemporaryLimit, "sql_mode": fixedSessionVariable(fixedSQLMode),
 	"character_set_client": fixedSessionVariable("utf8mb4"), "character_set_connection": fixedSessionVariable("utf8mb4"),
 	"character_set_results": fixedSessionVariable("utf8mb4"), "character_set_server": fixedSessionVariable("utf8mb4"),
 	"collation_server": fixedSessionVariable("utf8mb4_0900_ai_ci"), "system_time_zone": fixedSessionVariable("+00:00"),
+	"init_connect": fixedSessionVariable(""), "interactive_timeout": fixedSessionVariable("28800"),
+	"language": fixedSessionVariable("English"), "lower_case_table_names": fixedSessionVariable("0"),
+	"net_write_timeout": fixedSessionVariable("60"), "performance_schema": fixedSessionVariable("0"),
+	"wait_timeout":       fixedSessionVariable("28800"),
 	"max_allowed_packet": sessionMaxAllowedPacket, "max_connections": sessionMaxConnections,
 	"max_prepared_stmt_count": sessionMaxPreparedStatements, "idle_session_timeout_ms": fixedSessionVariable("0"),
 	"idle_in_transaction_timeout_ms": fixedSessionVariable("0"), "aggregate_execution_memory_limit_bytes": sessionAggregateMemory,
@@ -82,6 +87,9 @@ var readOnlySessionVariables = map[string]bool{
 	"idle_in_transaction_timeout_ms": true, "aggregate_execution_memory_limit_bytes": true,
 	"aggregate_temporary_storage_limit_bytes": true, "character_set_server": true, "collation_server": true,
 	"system_time_zone": true, "version": true, "version_comment": true, "license": true, "protocol_version": true,
+	"tx_isolation": true, "auto_increment_increment": true, "init_connect": true, "interactive_timeout": true,
+	"language": true, "lower_case_table_names": true, "net_write_timeout": true, "performance_schema": true,
+	"wait_timeout": true,
 }
 
 func knownSessionVariable(name string) bool { _, found := sessionVariableReaders[name]; return found }
@@ -164,6 +172,33 @@ func (s *session) sessionVariable(name string) (string, error) {
 	return reader(s)
 }
 
+// sessionVariableExpression recognises the exact @@name form used by client
+// startup probes. The general scalar expression grammar deliberately does not
+// include system-variable tokens, so resolve this small compatibility seam
+// before handing other expressions to that grammar.
+func sessionVariableExpression(s *session, expression string) (exprValue, bool, error) {
+	trimmed := strings.TrimSpace(expression)
+	if !strings.HasPrefix(trimmed, "@@") || strings.ContainsAny(trimmed[2:], " \t\r\n+-*/%<>=(),") {
+		return exprValue{}, false, nil
+	}
+	value, err := s.sessionVariable(trimmed)
+	if err != nil {
+		return exprValue{}, true, err
+	}
+	return stringValue(value), true, nil
+}
+
+func sessionVariableMetadata(s *session, expression string) (columnMetadata, bool, error) {
+	value, handled, err := sessionVariableExpression(s, expression)
+	if !handled {
+		return columnMetadata{}, false, nil
+	}
+	if err != nil {
+		return columnMetadata{}, true, err
+	}
+	return scalarMetadata(strings.TrimSpace(expression), value.render(), value), true, nil
+}
+
 func (s *textStatementExecutor) sessionVariableResult(name string) (*queryResult, error) {
 	value, err := s.session.sessionVariable(name)
 	if err != nil {
@@ -218,17 +253,26 @@ func (s *textStatementExecutor) applySessionVariable(rawName, rawValue string) e
 		return sqlFailure{1193, "HY000", "unknown system variable '" + name + "'"}
 	}
 	if readOnlySessionVariables[name] {
-		if (name == "sql_mode" && strings.EqualFold(scalar(rawValue), fixedSQLMode)) ||
-			(strings.HasPrefix(name, "character_set_") && strings.EqualFold(scalar(rawValue), "utf8mb4")) {
-			return nil
+		if !readOnlySessionAssignmentAllowed(name, scalar(rawValue)) {
+			return sqlFailure{1238, "HY000", "variable is read only"}
 		}
-		return sqlFailure{1238, "HY000", "variable is read only"}
+		return nil
 	}
 	if strings.EqualFold(rawValue, "default") {
 		return s.resetSessionVariable(name)
 	}
 	writer := sessionVariableWriters[name]
 	return writer(s, scalar(rawValue))
+}
+
+func readOnlySessionAssignmentAllowed(name, value string) bool {
+	if name == "sql_mode" {
+		return strings.EqualFold(value, fixedSQLMode) || strings.Contains(strings.ToUpper(value), "STRICT_TRANS_TABLES")
+	}
+	if strings.HasPrefix(name, "character_set_") {
+		return strings.EqualFold(value, "utf8mb4") || (name == "character_set_results" && strings.EqualFold(value, "null"))
+	}
+	return false
 }
 
 type sessionVariableWriter func(*textStatementExecutor, string) error
@@ -375,7 +419,7 @@ func (s *textStatementExecutor) showVariables(query string) (*queryResult, bool,
 	return result, true, nil
 }
 
-var publishedSessionVariables = []string{"autocommit", "transaction_isolation", "transaction_read_only", "time_zone", "collation_connection", "statement_timeout_ms", "lock_wait_timeout_ms", "execution_memory_limit_bytes", "temporary_storage_limit_bytes", "sql_mode", "character_set_client", "character_set_connection", "character_set_results", "max_allowed_packet", "max_connections", "max_prepared_stmt_count", "idle_session_timeout_ms", "idle_in_transaction_timeout_ms", "aggregate_execution_memory_limit_bytes", "aggregate_temporary_storage_limit_bytes", "character_set_server", "collation_server", "system_time_zone", "version", "version_comment", "license", "protocol_version"}
+var publishedSessionVariables = []string{"autocommit", "transaction_isolation", "transaction_read_only", "tx_isolation", "time_zone", "collation_connection", "statement_timeout_ms", "lock_wait_timeout_ms", "execution_memory_limit_bytes", "temporary_storage_limit_bytes", "sql_mode", "character_set_client", "character_set_connection", "character_set_results", "character_set_server", "collation_server", "system_time_zone", "auto_increment_increment", "init_connect", "interactive_timeout", "language", "lower_case_table_names", "max_allowed_packet", "max_connections", "max_prepared_stmt_count", "net_write_timeout", "performance_schema", "wait_timeout", "idle_session_timeout_ms", "idle_in_transaction_timeout_ms", "aggregate_execution_memory_limit_bytes", "aggregate_temporary_storage_limit_bytes", "version", "version_comment", "license", "protocol_version"}
 
 func showVariablesStatement(lower string) bool {
 	return strings.HasPrefix(lower, "show variables") || strings.HasPrefix(lower, "show session variables") || strings.HasPrefix(lower, "show global variables")

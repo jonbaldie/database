@@ -255,7 +255,7 @@ func describeScalarSelect(context *composedQueryContext, expression string, oute
 			metadata[index] = resultColumnDefinition(result.columns[0], 0, result.metadata)
 			metadata[index].flags &^= mysqlNotNullFlag
 		} else {
-			metadata[index], err = plannedScalarMetadata(expression, context.strictScope, outer)
+			metadata[index], err = plannedScalarMetadataForSession(expression, context.strictScope, outer, context.executor.session)
 			if err != nil {
 				return nil, err
 			}
@@ -266,7 +266,16 @@ func describeScalarSelect(context *composedQueryContext, expression string, oute
 }
 
 func plannedScalarMetadata(expression string, strictScope bool, outer *outerRelationScope) (columnMetadata, error) {
+	return plannedScalarMetadataForSession(expression, strictScope, outer, nil)
+}
+
+func plannedScalarMetadataForSession(expression string, strictScope bool, outer *outerRelationScope, session *session) (columnMetadata, error) {
 	trimmed := strings.TrimSpace(expression)
+	if session != nil {
+		if metadata, handled, err := sessionVariableMetadata(session, trimmed); handled {
+			return metadata, err
+		}
+	}
 	if value, err := evaluateScalar(trimmed); err == nil {
 		return scalarMetadata(trimmed, value.render(), value), nil
 	}
@@ -358,6 +367,12 @@ func executeScalarSelectContext(context *composedQueryContext, query, expression
 func evaluateComposedScalar(context *composedQueryContext, expression string, outer *outerRelationScope, runtimePrefixes ...string) (exprValue, columnMetadata, error) {
 	if query, ok := scalarSubquerySQL(expression); ok {
 		return executeScalarSubquery(context, query, outer, runtimePrefixes...)
+	}
+	if value, handled, err := sessionVariableExpression(context.executor.session, expression); handled {
+		if err != nil {
+			return exprValue{}, columnMetadata{}, err
+		}
+		return value, scalarMetadata(expression, value.render(), value), nil
 	}
 	value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
 		return outerRelationValue(name, outer)

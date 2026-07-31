@@ -36,11 +36,24 @@ const (
 	clientFoundRows           = 1 << 1
 	clientLongFlag            = 1 << 2
 	clientConnectWithDB       = 1 << 3
+	clientIgnoreSpace         = 1 << 6
+	clientODBC                = 1 << 8
+	clientInteractive         = 1 << 10
+	clientIgnoreSigpipe       = 1 << 12
+	clientReserved            = 1 << 14
 	clientLocalFiles          = 1 << 7
 	clientProtocol41          = 1 << 9
 	clientTransactions        = 1 << 13
 	clientSecureConnection    = 1 << 15
+	clientMultiStatements     = 1 << 16
 	clientMultiResults        = 1 << 17
+	clientPSMultiResults      = 1 << 18
+	clientCanHandleExpiredPwd = 1 << 22
+	clientSessionTrack        = 1 << 23
+	clientDeprecateEOF        = 1 << 24
+	clientOptionalMetadata    = 1 << 25
+	clientQueryAttributes     = 1 << 27
+	clientMultiFactorAuth     = 1 << 28
 	clientPluginAuth          = 1 << 19
 	clientConnectAttrs        = 1 << 20
 	clientPluginLenencData    = 1 << 21
@@ -582,8 +595,20 @@ func (a authenticator) databaseExists(name string) error {
 
 func makeNonce() []byte {
 	nonce := make([]byte, 20)
-	if _, err := rand.Read(nonce); err != nil {
-		return []byte("database-authentication")
+	// Connector/J carries the seed through an ASCII String internally. Keep
+	// the random seed printable so that the driver preserves the exact bytes
+	// when it computes the caching_sha2_password scramble.
+	for index := range nonce {
+		var byteValue [1]byte
+		for {
+			if _, err := rand.Read(byteValue[:]); err != nil {
+				return []byte("database-authentication")
+			}
+			if byteValue[0] >= 33 && byteValue[0] <= 126 {
+				nonce[index] = byteValue[0]
+				break
+			}
+		}
 	}
 	return nonce
 }
@@ -619,13 +644,20 @@ func serverCapabilities(tlsEnabled bool) uint32 {
 // feature. They do not negotiate a server feature; unsupported commands still
 // receive their explicit command error.
 func acceptedClientCapabilities(tlsEnabled bool) uint32 {
-	return serverCapabilities(tlsEnabled) | clientFoundRows | clientLongFlag | clientLocalFiles | clientMultiResults | clientConnectAttrs
+	return serverCapabilities(tlsEnabled) |
+		clientFoundRows | clientLongFlag | clientConnectWithDB | clientIgnoreSpace | clientODBC | clientInteractive |
+		clientIgnoreSigpipe | clientReserved | clientLocalFiles | clientMultiStatements | clientMultiResults | clientPSMultiResults |
+		clientConnectAttrs | clientCanHandleExpiredPwd | clientSessionTrack |
+		clientDeprecateEOF | clientOptionalMetadata | clientQueryAttributes | clientMultiFactorAuth
 }
 
 func handshake(version string, nonce []byte, tlsEnabled bool, connectionID uint32) []byte {
 	capabilities := serverCapabilities(tlsEnabled)
 	p := []byte{0x0a}
-	p = append(p, []byte("database-"+version)...)
+	// Drivers parse the handshake version as a MySQL semantic version. Keep
+	// the product identity as a suffix so strict clients (for example
+	// Connector/Python) accept the connection while VERSION() remains honest.
+	p = append(p, []byte("8.4.11-database-"+version)...)
 	p = append(p, 0)
 	p = append(p, byte(connectionID), byte(connectionID>>8), byte(connectionID>>16), byte(connectionID>>24))
 	p = append(p, nonce[:8]...)
@@ -779,11 +811,30 @@ func (s *queryExecutor) databaseExists(name string) error {
 
 func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
 	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	query = stripLeadingSQLComments(query)
 	lower := strings.ToLower(query)
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
 	}
 	return s.executeWithTransaction(query, lower)
+}
+
+// stripLeadingSQLComments removes comments that clients use to annotate an
+// otherwise ordinary statement. Connector/J prefixes its server-variable
+// probe with a block comment containing its version. Only comments before the
+// first statement keyword are removed.
+func stripLeadingSQLComments(query string) string {
+	for {
+		query = strings.TrimSpace(query)
+		if !strings.HasPrefix(query, "/*") {
+			return query
+		}
+		end := strings.Index(query[2:], "*/")
+		if end < 0 {
+			return query
+		}
+		query = query[end+4:]
+	}
 }
 
 type statementHandler func(query, lower string) (*queryResult, bool, error)
