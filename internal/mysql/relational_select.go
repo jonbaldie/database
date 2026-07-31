@@ -195,6 +195,7 @@ type relationalTableSource struct {
 	forced         bool
 	covering       bool
 	materializeKey string
+	runtimePrefix  string
 }
 
 type relationalIndexHint struct {
@@ -614,7 +615,9 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 		return nil, err
 	}
 	runtimeKey := s.composed.selectRuntimeKey(query)
-	source, err := parseRelationalSource(s, sourceText)
+	sourceExecutor := *s
+	sourceExecutor.composed = s.composed.withRuntimePrefix(queryexplanation.RuntimeOperatorKey(runtimeKey, "source", 0))
+	source, err := parseRelationalSource(&sourceExecutor, sourceText)
 	if err != nil {
 		return nil, err
 	}
@@ -638,7 +641,7 @@ func assignSubqueryRuntimeKeys(plan *relationalSelectPlan) {
 		if plan.projection[index].subquery == "" {
 			continue
 		}
-		plan.projection[index].runtimeKey = queryexplanation.RuntimeOperatorKey(plan.runtimeKey, "subquery", index)
+		plan.projection[index].runtimeKey = queryexplanation.RuntimeOperatorKey(plan.runtimeKey, "projection_subquery", index)
 	}
 }
 

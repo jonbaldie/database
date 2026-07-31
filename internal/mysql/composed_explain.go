@@ -40,7 +40,7 @@ func (s *textStatementExecutor) explainComposedBody(context *composedQueryContex
 func (s *textStatementExecutor) explainSetQuery(context *composedQueryContext, query setQuery, outer *outerRelationScope) (*queryexplanation.Operator, error) {
 	operators := make([]*queryexplanation.Operator, len(query.terms))
 	for index, term := range query.terms {
-		operator, err := s.explainComposedBody(context, term, outer)
+		operator, err := s.explainComposedBody(setTermContext(context, query.runtimeKey, index), term, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +156,7 @@ func (s *textStatementExecutor) decorateDerivedInputs(context *composedQueryCont
 			root = queryexplanation.ReusedInput(root, columns, table.materializeKey)
 			continue
 		}
-		input, err := s.explainComposedBody(context, table.query, nil)
+		input, err := s.explainComposedBody(context.withRuntimePrefix(table.runtimePrefix), table.query, nil)
 		if err != nil {
 			return nil, err
 		}

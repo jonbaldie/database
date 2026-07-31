@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -141,7 +142,12 @@ func parseCTETableSource(s *relationExecutor, parts []string, remainder string) 
 	}
 	relation.references++
 	s.composed.ctes[key] = relation
-	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason, materializeKey: composedMaterializeKey(s.composed, relation.name, relation.query, reference)}
+	materializeKey := relation.materializeKey
+	if reference > 0 {
+		materializeKey += "/reuse/" + strconv.Itoa(reference)
+		recordMaterializedResult(s.composed, materializeKey, relation.result, 0)
+	}
+	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason, materializeKey: materializeKey, runtimePrefix: relation.runtimePrefix}
 	return source, tail, true, nil
 }
 
@@ -183,7 +189,7 @@ func parseDerivedTableSource(s *relationExecutor, text string) (relationalTableS
 	if s.composed == nil {
 		return relationalTableSource{}, "", sqlFailure{1064, "42000", "derived table context is unavailable"}
 	}
-	child, err := s.composed.child()
+	child, runtimePrefix, err := s.composed.inputChild()
 	if err != nil {
 		return relationalTableSource{}, "", err
 	}
@@ -197,9 +203,9 @@ func parseDerivedTableSource(s *relationExecutor, text string) (relationalTableS
 		return relationalTableSource{}, "", err
 	}
 	columns := relationalResultColumns(alias, alias, table, result)
-	materializeKey := composedMaterializeKey(s.composed, alias, query, 0)
+	materializeKey := composedMaterializeKey(child, alias, query, 0)
 	recordMaterializedResult(s.composed, materializeKey, result, time.Since(started))
-	return relationalTableSource{name: alias, alias: alias, table: table, columns: columns, query: query, reason: "derived_table", materializeKey: materializeKey}, remainder, nil
+	return relationalTableSource{name: alias, alias: alias, table: table, columns: columns, query: query, reason: "derived_table", materializeKey: materializeKey, runtimePrefix: runtimePrefix}, remainder, nil
 }
 
 func composedSourceResult(context, child *composedQueryContext, query string) (*queryResult, error) {

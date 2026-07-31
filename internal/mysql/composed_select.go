@@ -35,7 +35,7 @@ func (keys *predicateRuntimeKeys) nextRuntimeKey() string {
 	if keys == nil {
 		return ""
 	}
-	key := queryexplanation.RuntimeOperatorKey(keys.prefix, "subquery", keys.next)
+	key := queryexplanation.RuntimeOperatorKey(keys.prefix, "predicate_subquery", keys.next)
 	keys.next++
 	return key
 }
@@ -49,6 +49,7 @@ type composedRelation struct {
 	references     int
 	state          *composedRelationState
 	materializeKey string
+	runtimePrefix  string
 }
 
 type composedRelationState struct{ result *queryResult }
@@ -91,7 +92,7 @@ func (context *composedQueryContext) child() (*composedQueryContext, error) {
 	}
 	executor := *context.executor
 	executor.streamRows = false
-	return &composedQueryContext{executor: &executor, ctes: context.ctes, runtimeKeys: context.runtimeKeys, runtimePrefix: context.runtimePrefix, runtimeNext: context.runtimeNext, depth: context.depth + 1, planning: context.planning, strictScope: context.strictScope}, nil
+	return &composedQueryContext{executor: &executor, ctes: context.ctes, runtimeKeys: context.runtimeKeys, runtimePrefix: context.runtimePrefix, runtimeNext: context.runtimeNext, depth: context.depth + 1, planning: context.planning, rendering: context.rendering, strictScope: context.strictScope}, nil
 }
 
 func (context *composedQueryContext) selectRuntimeKey(query string) string {
@@ -131,6 +132,29 @@ func (context *composedQueryContext) withRuntimePrefix(prefix string) *composedQ
 	copy.runtimeKeys = cloneRuntimeKeys(context.runtimeKeys)
 	copy.runtimePrefix, copy.runtimeNext = prefix, 0
 	return &copy
+}
+
+func (context *composedQueryContext) inputChild() (*composedQueryContext, string, error) {
+	child, err := context.child()
+	if err != nil {
+		return nil, "", err
+	}
+	prefix := context.nextInputRuntimePrefix()
+	return child.withRuntimePrefix(prefix), prefix, nil
+}
+
+func (context *composedQueryContext) nextInputRuntimePrefix() string {
+	if context.runtimePrefix != "" {
+		prefix := queryexplanation.RuntimeOperatorKey(context.runtimePrefix, "input", context.runtimeNext)
+		context.runtimeNext++
+		return prefix
+	}
+	if context.runtimeKeys == nil {
+		context.runtimeKeys = make(map[string]int)
+	}
+	index := context.runtimeKeys["input"]
+	context.runtimeKeys["input"] = index + 1
+	return queryexplanation.RuntimeOperatorKey("input", "scope", index)
 }
 
 func executeComposedSelect(context *composedQueryContext, query string, outer *outerRelationScope) (*queryResult, error) {
@@ -266,7 +290,7 @@ func plannedScalarMetadata(expression string, strictScope bool, outer *outerRela
 func describeSetQuery(context *composedQueryContext, query setQuery, outer *outerRelationScope) (*queryResult, error) {
 	results := make([]*queryResult, len(query.terms))
 	for index, term := range query.terms {
-		result, err := describeComposedSelect(context, term, outer)
+		result, err := describeComposedSelect(setTermContext(context, query.runtimeKey, index), term, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -847,7 +871,7 @@ func materializeCTE(context *composedQueryContext, key string, relation composed
 		return relation, nil
 	}
 	started := time.Now()
-	child, err := context.child()
+	child, runtimePrefix, err := context.inputChild()
 	if err != nil {
 		return composedRelation{}, err
 	}
@@ -866,6 +890,8 @@ func materializeCTE(context *composedQueryContext, key string, relation composed
 		return composedRelation{}, err
 	}
 	relation.result = result
+	relation.runtimePrefix = runtimePrefix
+	relation.materializeKey = composedMaterializeKey(child, relation.name, relation.query, 0)
 	recordMaterializedResult(context, relation.materializeKey, result, time.Since(started))
 	if relation.state != nil {
 		relation.state.result = result
@@ -942,7 +968,7 @@ func parseSetQuery(context *composedQueryContext, query string) (setQuery, bool,
 
 func composedSetRuntimeKey(context *composedQueryContext, query string) string {
 	if context != nil && context.runtimePrefix != "" {
-		return context.runtimePrefix
+		return queryexplanation.RuntimeOperatorKey(context.runtimePrefix, "set", 0)
 	}
 	return "set:" + strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(query)), " "))
 }
@@ -1088,7 +1114,7 @@ func firstNonNegative(left, right int) int {
 func executeSetQuery(context *composedQueryContext, query setQuery, outer *outerRelationScope) (*queryResult, error) {
 	results := make([]*queryResult, len(query.terms))
 	for index, term := range query.terms {
-		result, err := executeComposedSelect(context, term, outer)
+		result, err := executeComposedSelect(setTermContext(context, query.runtimeKey, index), term, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -1119,6 +1145,10 @@ func executeSetQuery(context *composedQueryContext, query setQuery, outer *outer
 		recordSetStage(context, query.runtimeKey, "limit", inputRows, len(result.rows), queryResultMemory(result.rows, result.nulls), time.Since(started))
 	}
 	return result, nil
+}
+
+func setTermContext(context *composedQueryContext, runtimeKey string, index int) *composedQueryContext {
+	return context.withRuntimePrefix(queryexplanation.RuntimeOperatorKey(runtimeKey, "set_term", index))
 }
 
 func reduceSetResults(context *composedQueryContext, results []*queryResult, operations []setQueryOperation) (*queryResult, error) {
