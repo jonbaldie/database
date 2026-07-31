@@ -1447,6 +1447,7 @@ type wireResult struct {
 	metadata []wireColumn
 	affected uint64
 	errCode  uint16
+	errState string
 	err      string
 }
 
@@ -1885,7 +1886,11 @@ func (c *wireClient) readResultHeader() (wireResult, bool) {
 		if len(payload) < 4 {
 			return wireResult{err: fmt.Sprintf("malformed error packet %x", payload)}, true
 		}
-		return wireResult{errCode: binary.LittleEndian.Uint16(payload[1:3]), err: string(payload[4:])}, true
+		result := wireResult{errCode: binary.LittleEndian.Uint16(payload[1:3]), err: string(payload[4:])}
+		if len(payload) >= 9 && payload[3] == '#' {
+			result.errState = string(payload[4:9])
+		}
+		return result, true
 	}
 	if payload[0] == 0x00 {
 		affected, _, ok := readLengthInt(payload, 1)

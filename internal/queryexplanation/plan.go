@@ -13,12 +13,26 @@ type Select struct {
 	ProjectionExpressions []string // source SQL expressions, when distinct from output names
 	AllColumns            bool     // projection was '*'
 	Where                 string   // predicate fragment without the WHERE keyword, "" if absent
+	Aggregation           Aggregation
+	Window                WindowDetails
 	Distinct              bool
 	Orders                []Order
 	Limit                 Limit
-	LockingRead           bool
-	LockMode              string
-	LockWaitPolicy        string
+	Locking               LockingRead
+}
+
+// Aggregation records SQL-visible grouped aggregate work in a SELECT list.
+type Aggregation struct {
+	GroupExpressions []string // GROUP BY expressions
+	Having           string   // HAVING predicate fragment without the keyword
+	Count            int      // aggregate expressions in the SELECT list
+}
+
+// LockingRead records whether a SELECT takes locks and the requested policy.
+type LockingRead struct {
+	Enabled    bool
+	Mode       string
+	WaitPolicy string
 }
 
 // Join records one source relation and its SQL join predicate.
@@ -32,8 +46,23 @@ type Join struct {
 
 // Order records one ORDER BY expression and direction.
 type Order struct {
-	Expression string
-	Direction  string
+	Expression string `json:"expression"`
+	Direction  string `json:"direction"`
+}
+
+// Window records the SQL-visible definition and functions for one window.
+type Window struct {
+	PartitionExpressions []string `json:"partition_expressions"`
+	Orders               []Order  `json:"orders"`
+	Frame                string   `json:"frame"`
+	Functions            []string `json:"functions"`
+}
+
+// WindowDetails records the resolved window work in a SELECT list.
+type WindowDetails struct {
+	Count         int      // distinct window definitions in the SELECT list
+	FunctionCount int      // window functions in the SELECT list
+	Definitions   []Window // resolved window definitions and functions
 }
 
 // Limit records the bounded row window requested by LIMIT.
@@ -59,8 +88,8 @@ func PlanSelect(serverVersion, sql, currentDatabase string, read Select) *Docume
 	statement := Statement{
 		Kind:        "select",
 		SQL:         sql,
-		ReadOnly:    !read.LockingRead,
-		LockingRead: read.LockingRead,
+		ReadOnly:    !read.Locking.Enabled,
+		LockingRead: read.Locking.Enabled,
 	}
 	return newDocument(serverVersion, currentDatabase, statement, selectPlan(read))
 }
@@ -118,17 +147,59 @@ func assignIdentifiers(operator *Operator, counter *int) {
 }
 
 func selectPlan(read Select) *Operator {
-	tables := read.Tables
-	if len(tables) == 0 {
-		tables = []Table{read.Table}
+	tables := selectTables(read)
+	root := selectSource(read, tables)
+	root = selectFilter(read, root)
+	root = selectGrouping(read, root)
+	return selectOutput(read, tables, root)
+}
+
+func selectTables(read Select) []Table {
+	if len(read.Tables) > 0 {
+		return read.Tables
 	}
+	return []Table{read.Table}
+}
+
+func selectSource(read Select, tables []Table) *Operator {
 	root := tableScan(tables[0])
 	for _, join := range read.Joins {
 		root = joinOperator(join, root, tableScan(join.Table))
 	}
-	if read.Where != "" {
-		root = whereFilter(read.Where, root)
+	return root
+}
+
+func selectFilter(read Select, root *Operator) *Operator {
+	if read.Where == "" {
+		return root
 	}
+	return whereFilter(read.Where, root)
+}
+
+func selectGrouping(read Select, root *Operator) *Operator {
+	if read.Aggregation.Count > 0 || len(read.Aggregation.GroupExpressions) > 0 {
+		root = aggregateOperator(read, root)
+	}
+	if read.Aggregation.Having != "" {
+		root = havingFilter(read.Aggregation.Having, root)
+	}
+	if read.Window.FunctionCount > 0 {
+		root = windowSortOperators(read.Window.Definitions, root)
+		root = windowOperator(read, root)
+	}
+	return root
+}
+
+func windowSortOperators(windows []Window, root *Operator) *Operator {
+	for _, window := range windows {
+		if len(window.Orders) > 0 {
+			root = windowSortOperator(window.Orders, root)
+		}
+	}
+	return root
+}
+
+func selectOutput(read Select, tables []Table, root *Operator) *Operator {
 	root = selectProjection(read, tables, root)
 	if read.Distinct {
 		root = distinctOperator(root)
@@ -139,10 +210,46 @@ func selectPlan(read Select) *Operator {
 	if read.Limit.Present {
 		root = limitOperator(read.Limit, root)
 	}
-	if read.LockingRead {
-		root = lockInput(root, read.LockMode, read.LockWaitPolicy)
+	if read.Locking.Enabled {
+		root = lockInput(root, read.Locking.Mode, read.Locking.WaitPolicy)
 	}
 	return root
+}
+
+func aggregateOperator(read Select, child *Operator) *Operator {
+	scope := "global"
+	if len(read.Aggregation.GroupExpressions) > 0 {
+		scope = "grouped"
+	}
+	rows := child.Estimates.Rows
+	if scope == "global" {
+		rows = 1
+	}
+	return &Operator{
+		Kind: "aggregate", Summary: "Combine input rows into aggregate result groups.",
+		Operation: aggregateOperation{Scope: scope, AggregateCount: read.Aggregation.Count, GroupingExpressions: append([]string(nil), read.Aggregation.GroupExpressions...)},
+		Estimates: Estimates{Rows: rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: child.Estimates.RowWidthBytes * int(child.Estimates.Rows)},
+		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
+}
+
+func havingFilter(having string, child *Operator) *Operator {
+	predicate := Predicate{Role: "having", Expression: having, Sources: []PredicateSource{{Clause: "having", Fragment: having}}}
+	return &Operator{
+		Kind: "filter", Summary: "Keep only aggregate groups matching the HAVING predicate.",
+		Operation: filterOperation{Role: "having"}, Predicates: []Predicate{predicate},
+		Estimates: Estimates{Rows: child.Estimates.Rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: 0},
+		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
+}
+
+func windowOperator(read Select, child *Operator) *Operator {
+	return &Operator{
+		Kind: "window", Summary: "Evaluate window functions over ordered partitions.",
+		Operation: windowOperation{WindowCount: read.Window.Count, FunctionCount: read.Window.FunctionCount, Windows: append([]Window(nil), read.Window.Definitions...)},
+		Estimates: Estimates{Rows: child.Estimates.Rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: child.Estimates.RowWidthBytes * int(child.Estimates.Rows)},
+		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
 }
 
 func selectProjection(read Select, tables []Table, child *Operator) *Operator {
@@ -226,6 +333,14 @@ func sortOperator(orders []Order, child *Operator) *Operator {
 		Estimates: Estimates{Rows: child.Estimates.Rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: child.Estimates.RowWidthBytes * int(child.Estimates.Rows)},
 		Output:    output, Warnings: []Warning{}, Children: []*Operator{child},
 	}
+}
+
+func windowSortOperator(orders []Order, child *Operator) *Operator {
+	operator := sortOperator(orders, child)
+	operator.Summary = "Order rows inside each window partition."
+	operator.Operation = sortOperation{Purpose: "window"}
+	operator.Output = child.Output
+	return operator
 }
 
 func limitOperator(limit Limit, child *Operator) *Operator {
