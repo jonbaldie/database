@@ -38,6 +38,12 @@ func operatorCommand(args []string, stdout io.Writer) int {
 	if args[0] == "backup" || args[0] == "restore" {
 		return backupRestoreCommand(args, stdout)
 	}
+	if args[0] == "upgrade" {
+		if len(args) == 1 {
+			return unsupportedSimpleOperatorCommand(args, stdout, operation, operationID)
+		}
+		return upgradeCommand(args[1:], stdout)
+	}
 	return unsupportedOperatorCommand(args, stdout, operation, operationID)
 }
 

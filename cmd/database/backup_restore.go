@@ -28,6 +28,7 @@ type backupManifest struct {
 	Schema            string       `json:"schema"`
 	BackupVersion     string       `json:"backup_version"`
 	DataCompatibility string       `json:"data_compatibility"`
+	DataVersion       string       `json:"data_version,omitempty"`
 	SourceInstanceID  string       `json:"source_instance_id"`
 	CreatedAt         string       `json:"created_at"`
 	Complete          bool         `json:"complete"`
@@ -213,7 +214,14 @@ func (collector sourceFileCollector) capture(relative, path string, info os.File
 
 func runtimeSourcePath(path string) bool {
 	base := filepath.Base(path)
-	return base == ".running.lock" || base == ".database-state" || base == ".database-initializing" || strings.HasPrefix(base, ".catalog-") && strings.HasSuffix(base, ".tmp")
+	return base == ".running.lock" || base == ".database-state" || base == ".database-initializing" || base == instance.UpgradeIncompleteMarker || strings.HasPrefix(base, ".catalog-") && strings.HasSuffix(base, ".tmp")
+}
+
+func effectiveDataVersion(metadata instance.Metadata) string {
+	if metadata.DataVersion == "" {
+		return instance.CurrentDataVersion
+	}
+	return metadata.DataVersion
 }
 
 func makeBackupManifest(metadata instance.Metadata, files map[string][]byte) backupManifest {
@@ -230,7 +238,7 @@ func makeBackupManifest(metadata instance.Metadata, files map[string][]byte) bac
 	}
 	info := buildinfo.Current()
 	return backupManifest{Schema: backupSchema, BackupVersion: info.BackupCompatibility,
-		DataCompatibility: info.DataCompatibility, SourceInstanceID: metadata.InstanceID,
+		DataCompatibility: info.DataCompatibility, DataVersion: effectiveDataVersion(metadata), SourceInstanceID: metadata.InstanceID,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Complete: true, Files: entries}
 }
 
@@ -434,7 +442,7 @@ func validateBackupArchive(manifest backupManifest, files map[string][]byte) err
 	if len(seen) != len(files) || !seen["instance.json"] || !seen["catalog.json"] {
 		return errors.New("backup file set is incomplete")
 	}
-	return validateDurableBackupFiles(manifest.SourceInstanceID, files)
+	return validateDurableBackupFiles(manifest.SourceInstanceID, manifest.DataVersion, files)
 }
 
 func validateBackupManifest(manifest backupManifest) error {
@@ -466,14 +474,32 @@ func validateBackupFileEntries(entries []backupFile, files map[string][]byte) (m
 	return seen, nil
 }
 
-func validateDurableBackupFiles(sourceID string, files map[string][]byte) error {
-	var metadata instance.Metadata
-	if err := json.Unmarshal(files["instance.json"], &metadata); err != nil || metadata.Schema != "database.instance/v1" || metadata.InstanceID != sourceID || metadata.AdminAccount == "" || metadata.PasswordHash == "" {
+func validateDurableBackupFiles(sourceID, dataVersion string, files map[string][]byte) error {
+	metadata, err := decodeBackupMetadata(files["instance.json"])
+	if err != nil || metadata.Schema != "database.instance/v1" || metadata.InstanceID != sourceID || metadata.AdminAccount == "" || metadata.PasswordHash == "" {
 		return errors.New("backup instance identity is invalid")
 	}
-	var definition catalog.Definition
-	if err := json.Unmarshal(files["catalog.json"], &definition); err != nil || definition.Namespaces == nil {
+	if dataVersion != "" && effectiveDataVersion(metadata) != dataVersion {
+		return errors.New("backup data version is invalid")
+	}
+	if err := validateBackupCatalog(files["catalog.json"]); err != nil {
 		return errors.New("backup catalog is invalid")
+	}
+	return nil
+}
+
+func decodeBackupMetadata(contents []byte) (instance.Metadata, error) {
+	var metadata instance.Metadata
+	if err := json.Unmarshal(contents, &metadata); err != nil {
+		return instance.Metadata{}, err
+	}
+	return metadata, nil
+}
+
+func validateBackupCatalog(contents []byte) error {
+	var definition catalog.Definition
+	if err := json.Unmarshal(contents, &definition); err != nil || definition.Namespaces == nil {
+		return errors.New("invalid catalog")
 	}
 	return nil
 }

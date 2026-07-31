@@ -378,6 +378,16 @@ func validateInstance(directory string) error {
 	if !info.IsDir() {
 		return errors.New("data directory is not a directory")
 	}
+	if err := validateInstanceMetadata(directory); err != nil {
+		return err
+	}
+	if err := rejectIncompleteUpgrade(directory); err != nil {
+		return err
+	}
+	return validateInstanceCatalog(directory)
+}
+
+func validateInstanceMetadata(directory string) error {
 	instanceMetadata, err := instance.Load(directory)
 	if err != nil {
 		return errors.New("data directory is not initialized")
@@ -385,13 +395,28 @@ func validateInstance(directory string) error {
 	if instanceMetadata.State != "stopped" {
 		return errors.New("data directory has invalid instance metadata")
 	}
+	return nil
+}
+
+func validateInstanceCatalog(directory string) error {
 	catalogPath := filepath.Join(directory, "catalog.json")
-	info, err = os.Stat(catalogPath)
+	info, err := os.Stat(catalogPath)
 	if err != nil || !info.Mode().IsRegular() {
 		return errors.New("data directory has missing or invalid catalog")
 	}
 	if _, err := catalog.Open(directory); err != nil {
 		return errors.New("data directory has damaged catalog")
+	}
+	return nil
+}
+
+func rejectIncompleteUpgrade(directory string) error {
+	_, err := os.Stat(filepath.Join(directory, instance.UpgradeIncompleteMarker))
+	if err == nil {
+		return errors.New("data directory has an incomplete upgrade")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("data directory has an unreadable upgrade marker")
 	}
 	return nil
 }

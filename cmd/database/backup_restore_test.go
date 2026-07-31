@@ -129,6 +129,70 @@ func TestBackupWorkflowReportsDistinctTerminalOperationIdentities(t *testing.T) 
 	}
 }
 
+func TestUpgradeWorkflowRequiresMatchingBackupAndCompletesForwardOnly(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+
+	assertOperatorSuccess(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes"}, "upgrade")
+	metadata, err := instance.Load(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.DataVersion != "0.1.1" || metadata.State != "stopped" {
+		t.Fatalf("upgraded metadata = %#v", metadata)
+	}
+	if _, err := os.Stat(filepath.Join(source, instance.UpgradeIncompleteMarker)); !os.IsNotExist(err) {
+		t.Fatalf("upgrade marker remains: %v", err)
+	}
+}
+
+func TestUpgradeRejectsChangedSourceAndUnsupportedWorkflows(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "before")
+	writeInstanceFixture(t, source)
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "after")
+
+	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes"}, "upgrade", "precondition", 3)
+	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes", "--rolling"}, "upgrade", "precondition", 3)
+	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1"}, "upgrade", "invalid_input", 2)
+}
+
+func TestUpgradeResumesOnlyTheMarkedTarget(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	metadata, err := instance.Load(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.State = "upgrade-incomplete"
+	metadataBytes, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "instance.json"), metadataBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := upgradeMarker{Schema: upgradeMarkerSchema, TargetVersion: "0.1.1", SourceInstanceID: metadata.InstanceID, StartedAt: "2026-07-31T00:00:00Z"}
+	markerBytes, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, instance.UpgradeIncompleteMarker), markerBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.2", "--yes"}, "upgrade", "precondition", 3)
+	assertOperatorSuccess(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes"}, "upgrade")
+}
+
 func assertOperatorSuccess(t *testing.T, args []string, operation string) map[string]any {
 	t.Helper()
 	result, code := operatorResultForTest(t, args)

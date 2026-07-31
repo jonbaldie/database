@@ -18,10 +18,16 @@ type Metadata struct {
 	Schema           string `json:"schema"`
 	InstanceID       string `json:"instance_id"`
 	SourceInstanceID string `json:"source_instance_id,omitempty"`
+	DataVersion      string `json:"data_version,omitempty"`
 	State            string `json:"state"`
 	AdminAccount     string `json:"admin_account"`
 	PasswordHash     string `json:"password_hash"`
 }
+
+const (
+	CurrentDataVersion      = "0.1.0"
+	UpgradeIncompleteMarker = ".database-upgrade-incomplete"
+)
 
 func Load(directory string) (Metadata, error) {
 	contents, err := os.ReadFile(filepath.Join(directory, "instance.json"))
@@ -52,6 +58,9 @@ func NewRestoredMetadata(source Metadata) (Metadata, error) {
 	result := source
 	result.InstanceID = hex.EncodeToString(idBytes[:])
 	result.SourceInstanceID = source.InstanceID
+	if result.DataVersion == "" {
+		result.DataVersion = CurrentDataVersion
+	}
 	result.State = "stopped"
 	return result, nil
 }
@@ -196,6 +205,7 @@ func newMetadata(account, password string) (Metadata, error) {
 	return Metadata{
 		Schema:       "database.instance/v1",
 		InstanceID:   hex.EncodeToString(idBytes[:]),
+		DataVersion:  CurrentDataVersion,
 		State:        "stopped",
 		AdminAccount: account,
 		PasswordHash: hex.EncodeToString(hash[:]),
