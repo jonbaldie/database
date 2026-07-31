@@ -145,7 +145,6 @@ func parseCTETableSource(s *relationExecutor, parts []string, remainder string) 
 	materializeKey := relation.materializeKey
 	if reference > 0 {
 		materializeKey += "/reuse/" + strconv.Itoa(reference)
-		recordMaterializedResult(s.composed, materializeKey, relation.result, 0)
 	}
 	source := relationalTableSource{name: relation.name, alias: alias, table: table, columns: columns, query: relation.query, reason: reason, materializeKey: materializeKey, runtimePrefix: relation.runtimePrefix}
 	return source, tail, true, nil
@@ -635,10 +634,7 @@ func tableRowIterator(table relationalTableSource, runtime *selectRuntimeBinding
 		}
 		elapsed := time.Since(started)
 		bytes := sourceRowBytes(table.table.Rows)
-		runtime.recordScan(scanIndex, len(rows), bytes, elapsed)
-		if table.reason == "reuse" {
-			runtime.recordMaterialize(table.materializeKey, len(rows), bytes, elapsed)
-		}
+		runtime.recordSourceScan(scanIndex, table, len(rows), bytes, elapsed)
 		for _, row := range rows {
 			if err := yield(relationRow{values: append([]string(nil), row.values...), lockKeys: []string{rowLockKey(row.values)}}); err != nil {
 				return err
@@ -728,7 +724,7 @@ func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth,
 				outputBytes += relationRowMemory(row)
 				return yield(row)
 			})
-			runtime.recordScan(leftTables, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(rightStarted))
+			runtime.recordSourceScan(leftTables, join.right, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(rightStarted))
 			return err
 		}); err != nil {
 			return err
@@ -738,7 +734,7 @@ func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth,
 			return nil
 		}
 		if inputRows == 0 {
-			runtime.recordScan(leftTables, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(started))
+			runtime.recordSourceScan(leftTables, join.right, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(started))
 		}
 		err := yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, leftTables, func(row relationRow) error {
 			outputRows++

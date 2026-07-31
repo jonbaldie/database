@@ -178,6 +178,9 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 			if name == "correlated_exists" {
 				assertOperatorInvocations(t, document["plan"].(map[string]any), "scan", 2)
 			}
+			if name == "cte_reuse" {
+				assertMaterializeReasonInvocations(t, document["plan"].(map[string]any), "reuse", 2)
+			}
 		})
 	}
 }
@@ -219,6 +222,27 @@ func operatorHasInvocations(operator map[string]any, kind string, want float64) 
 	}
 	for _, child := range operator["children"].([]any) {
 		if operatorHasInvocations(child.(map[string]any), kind, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func assertMaterializeReasonInvocations(t *testing.T, operator map[string]any, reason string, want float64) {
+	t.Helper()
+	if materializeReasonHasInvocations(operator, reason, want) {
+		return
+	}
+	t.Errorf("no materialize operator for %q recorded %g invocations", reason, want)
+}
+
+func materializeReasonHasInvocations(operator map[string]any, reason string, want float64) bool {
+	operation, isMaterialization := operator["operation"].(map[string]any)
+	if operator["kind"] == "materialize" && isMaterialization && operation["reason"] == reason && operator["actual"].(map[string]any)["invocations"] == want {
+		return true
+	}
+	for _, child := range operator["children"].([]any) {
+		if materializeReasonHasInvocations(child.(map[string]any), reason, want) {
 			return true
 		}
 	}

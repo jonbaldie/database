@@ -161,6 +161,13 @@ func (b *selectRuntimeBinding) recordScan(index, rows, bytes int, elapsed time.D
 	b.record(b.scans[index], 0, rows, 0, rows, bytes, 0, elapsed)
 }
 
+func (b *selectRuntimeBinding) recordSourceScan(index int, table relationalTableSource, rows, bytes int, elapsed time.Duration) {
+	b.recordScan(index, rows, bytes, elapsed)
+	if table.reason == "reuse" {
+		b.recordMaterialize(table.materializeKey, rows, bytes, elapsed)
+	}
+}
+
 func (b *selectRuntimeBinding) recordJoin(index, inputRows, outputRows, memory int, elapsed time.Duration) {
 	if b == nil || index >= len(b.joins) {
 		return
