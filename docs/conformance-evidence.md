@@ -62,9 +62,9 @@ go test ./test/blackbox -run '^TestExternalDriverCompatibilityProfile$' -count=1
 
 | Issue #1 stories | Normative contract | Public evidence |
 | --- | --- | --- |
-| 52–56: explicit initialization, command family, results, exit classes, diagnostics, and secret input | [operator automation](operator-automation.md) | Initialization and serve have black-box evidence: `TestInitializeCreatesStoppedInspectableInstance`, `TestInitializeAcceptsStdinAndRejectsInlinePassword`, `TestInitializeRejectsAmbiguousOrMalformedSecretInputs`, `TestCommandFailureIsObservable`, and `TestServeEmitsTerminalOperatorResult`. Command-output unit checks are supporting evidence. |
+| 52–56: explicit initialization, command family, results, exit classes, diagnostics, and secret input | [operator automation](operator-automation.md) | Initialization and serve have black-box evidence: `TestInitializeCreatesStoppedInspectableInstance`, `TestInitializeAcceptsStdinAndRejectsInlinePassword`, `TestInitializeRejectsAmbiguousOrMalformedSecretInputs`, `TestCommandFailureIsObservable`, and `TestServeEmitsTerminalOperatorResult`. The real `database shutdown --yes --result=json` command is not implemented. Issue #67 is open again. |
 | 57–59: configuration source precedence, invalid input rejection, and bounded limits | [server configuration](server-configuration.md) | Session and prepared-statement limits have black-box evidence: `TestMySQLSessionCeilingRejectsAdditionalConnections` and `TestMySQLPreparedStatementCountIsBounded`. Configuration resolver tests are supporting evidence; public command coverage remains to be mapped. |
-| 60–62: online backup, empty-target restore, and forward-only upgrade | [operator automation](operator-automation.md) | Current checks are supporting command-package evidence. Public executable black-box coverage remains to be mapped. |
+| 60–62: online backup, empty-target restore, and forward-only upgrade | [operator automation](operator-automation.md) | Current checks are supporting command-package evidence. The real executable rejects the required online backup input `--address` and instead accepts direct stopped-directory input. It cannot prove an online transactionally consistent backup. Issue #63 is open again. |
 | 63–64: offline validation and corruption fail-closed behavior | [operator automation](operator-automation.md) | Current data-command and lifecycle checks are supporting evidence. Public executable black-box coverage remains to be mapped. |
 | 65–66: liveness, readiness, metrics, and sensitivity-safe lifecycle events | [server configuration](server-configuration.md) | `TestDiagnosticsHTTPContractIsObservableEndToEnd` is public black-box evidence. Lifecycle component checks are supporting evidence. |
 
@@ -83,5 +83,7 @@ This draft maps every Issue #1 story but does not yet prove every normative
 contract rule and explicit rejection. It records the open performance
 dependency honestly: Issue #71 needs five valid runs for each of the four
 operation gates and ten clean starts on the published reference environment.
-Until the contract inventory and the performance evidence are accepted, v0.1
-is not release-accepted and Issue #72 must remain open.
+The release audit also found two implementation gaps: online backup is absent
+(Issue #63), and the shutdown operator command is absent (Issue #67). Until
+those gaps, the contract inventory, and the performance evidence are accepted,
+v0.1 is not release-accepted and Issue #72 must remain open.
