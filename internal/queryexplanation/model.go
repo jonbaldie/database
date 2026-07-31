@@ -49,17 +49,20 @@ type Timing struct {
 
 // Operator is one physical operator in the explanation tree.
 type Operator struct {
-	ID         int               `json:"id"`
-	Kind       string            `json:"kind"`
-	Summary    string            `json:"summary"`
-	Operation  any               `json:"operation"`
-	Strategy   *Strategy         `json:"strategy,omitempty"`
-	Objects    []ObjectReference `json:"objects,omitempty"`
-	Predicates []Predicate       `json:"predicates,omitempty"`
-	Estimates  Estimates         `json:"estimates"`
-	Output     Output            `json:"output"`
-	Warnings   []Warning         `json:"warnings"`
-	Children   []*Operator       `json:"children"`
+	ID            int               `json:"id"`
+	Kind          string            `json:"kind"`
+	Summary       string            `json:"summary"`
+	Operation     any               `json:"operation"`
+	Strategy      *Strategy         `json:"strategy,omitempty"`
+	Objects       []ObjectReference `json:"objects,omitempty"`
+	Predicates    []Predicate       `json:"predicates,omitempty"`
+	Choice        *Choice           `json:"choice,omitempty"`
+	Statistics    []Statistic       `json:"statistics,omitempty"`
+	Opportunities []Opportunity     `json:"opportunities,omitempty"`
+	Estimates     Estimates         `json:"estimates"`
+	Output        Output            `json:"output"`
+	Warnings      []Warning         `json:"warnings"`
+	Children      []*Operator       `json:"children"`
 }
 
 // Strategy names a documented execution tactic within an operator kind.
@@ -87,6 +90,43 @@ type Predicate struct {
 type PredicateSource struct {
 	Clause   string `json:"clause"`
 	Fragment string `json:"fragment"`
+}
+
+// CodeSummary identifies a stable planner reason and its user-facing meaning.
+type CodeSummary struct {
+	Code    string `json:"code"`
+	Summary string `json:"summary"`
+}
+
+// Choice records the selected access path and the credible alternatives.
+type Choice struct {
+	Selected     string        `json:"selected"`
+	Reason       CodeSummary   `json:"reason"`
+	Alternatives []Alternative `json:"alternatives"`
+}
+
+// Alternative records one rejected plan shape.
+type Alternative struct {
+	Name          string      `json:"name"`
+	EstimatedCost float64     `json:"estimated_cost"`
+	Reason        CodeSummary `json:"reason"`
+}
+
+// Statistic records catalog evidence used while a plan is built.
+type Statistic struct {
+	Object       ObjectReference `json:"object"`
+	Kind         string          `json:"kind"`
+	CollectedAt  string          `json:"collected_at"`
+	ObservedRows int             `json:"observed_rows"`
+	Stale        bool            `json:"stale"`
+	Limitations  []string        `json:"limitations"`
+}
+
+// Opportunity records a stable, non-prescriptive planning opportunity.
+type Opportunity struct {
+	Code     string   `json:"code"`
+	Summary  string   `json:"summary"`
+	Evidence []string `json:"evidence"`
 }
 
 // Estimates are the planner's pre-execution estimates for an operator.
@@ -164,8 +204,30 @@ type setOperation struct {
 	All          bool   `json:"all"`
 }
 
+type aggregateOperation struct {
+	Scope               string   `json:"scope"`
+	AggregateCount      int      `json:"aggregate_count"`
+	GroupingExpressions []string `json:"grouping_expressions"`
+}
+
+type windowOperation struct {
+	WindowCount   int      `json:"window_count"`
+	FunctionCount int      `json:"function_count"`
+	Windows       []Window `json:"windows"`
+}
+
 type materializeOperation struct {
 	Reason string `json:"reason"`
+}
+
+type constraintCheckOperation struct {
+	ConstraintType string `json:"constraint_type"`
+	ConstraintName string `json:"constraint_name"`
+}
+
+type lockOperation struct {
+	Mode       string `json:"mode"`
+	WaitPolicy string `json:"wait_policy"`
 }
 
 // Table is the neutral relation description a planner needs.
@@ -174,6 +236,23 @@ type Table struct {
 	Name     string
 	Columns  []string
 	RowCount int
+	Access   *IndexAccess
+}
+
+// IndexAccess describes the selected B-tree path for a relation.
+type IndexAccess struct {
+	Name        string
+	Unique      bool
+	Forced      bool
+	Covering    bool
+	CollectedAt string
+}
+
+// Constraint is a public constraint check in a write plan.
+type Constraint struct {
+	Type  string
+	Name  string
+	Table Table
 }
 
 func emptyOutput() Output {

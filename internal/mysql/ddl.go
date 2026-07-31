@@ -15,6 +15,10 @@ const (
 	ddlDropColumn
 	ddlRenameColumn
 	ddlModifyColumn
+	ddlAddConstraint
+	ddlAddIndex
+	ddlDropIndex
+	ddlAlterIndex
 )
 
 type ddlAction struct {
@@ -22,8 +26,11 @@ type ddlAction struct {
 	name        string
 	newName     string
 	typeName    string
+	attribute   catalog.ColumnAttribute
 	ifExists    bool
 	ifNotExists bool
+	constraint  catalog.Constraint
+	index       catalog.Index
 }
 
 const maxTableColumns = 1024
@@ -33,6 +40,10 @@ type ddlExecutor struct{ *session }
 func (s *textStatementExecutor) ddlStatement(query, lower string) (*queryResult, bool, error) {
 	executor := ddlExecutor{s.session}
 	switch {
+	case strings.HasPrefix(lower, "create unique index "), strings.HasPrefix(lower, "create index "):
+		return nil, true, executor.createIndex(query)
+	case strings.HasPrefix(lower, "drop index "):
+		return nil, true, executor.dropIndex(query)
 	case strings.HasPrefix(lower, "drop database "), strings.HasPrefix(lower, "drop schema "):
 		return nil, true, executor.dropDatabase(query)
 	case strings.HasPrefix(lower, "drop table "):
@@ -46,6 +57,138 @@ func (s *textStatementExecutor) ddlStatement(query, lower string) (*queryResult,
 	default:
 		return nil, false, nil
 	}
+}
+
+func (s *ddlExecutor) createIndex(query string) error {
+	target, index, err := parseCreateIndex(query)
+	if err != nil {
+		return err
+	}
+	namespace, tableName, err := ddlTableTarget(s.session, target)
+	if err != nil {
+		return err
+	}
+	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
+		return addIndexToDefinition(definition, namespace, tableName, index)
+	}); err != nil {
+		return catalogMutationFailure(err, sqlFailure{1061, "42000", err.Error()})
+	}
+	return nil
+}
+
+func parseCreateIndex(query string) (string, catalog.Index, error) {
+	definition := strings.TrimSpace(query[len("CREATE "):])
+	left, right, found := splitDDLKeyword(definition, "on")
+	if !found {
+		return "", catalog.Index{}, sqlFailure{1064, "42000", "malformed CREATE INDEX"}
+	}
+	open := strings.Index(right, "(")
+	if open < 1 {
+		return "", catalog.Index{}, sqlFailure{1064, "42000", "CREATE INDEX requires a table and key parts"}
+	}
+	target := strings.TrimSpace(right[:open])
+	head, method, err := parseCreateIndexHead(left)
+	if err != nil {
+		return "", catalog.Index{}, err
+	}
+	index, err := parseTableIndexDefinition(head + " " + right[open:] + method)
+	if err != nil {
+		return "", catalog.Index{}, err
+	}
+	if index.Name == "" {
+		return "", catalog.Index{}, sqlFailure{1064, "42000", "CREATE INDEX requires an index name"}
+	}
+	return target, index, nil
+}
+
+func parseCreateIndexHead(value string) (string, string, error) {
+	left, right, found := splitDDLKeyword(value, "using")
+	if !found {
+		return value, "", nil
+	}
+	method, valid := singleIdentifier(right)
+	if !valid || !strings.EqualFold(method, "btree") {
+		return "", "", sqlFailure{1235, "42000", "only BTREE indexes are supported"}
+	}
+	return left, " USING BTREE", nil
+}
+
+func (s *ddlExecutor) dropIndex(query string) error {
+	name, target, err := parseDropIndex(query)
+	if err != nil {
+		return err
+	}
+	namespace, tableName, err := ddlTableTarget(s.session, target)
+	if err != nil {
+		return err
+	}
+	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
+		return dropIndexFromDefinition(definition, namespace, tableName, name)
+	}); err != nil {
+		return catalogMutationFailure(err, sqlFailure{1091, "42000", err.Error()})
+	}
+	return nil
+}
+
+func parseDropIndex(query string) (string, string, error) {
+	value := strings.TrimSpace(query[len("DROP INDEX "):])
+	name, target, found := splitDDLKeyword(value, "on")
+	if !found {
+		return "", "", sqlFailure{1064, "42000", "malformed DROP INDEX"}
+	}
+	name, valid := singleIdentifier(name)
+	if !valid {
+		return "", "", sqlFailure{1064, "42000", "invalid index name"}
+	}
+	return name, target, nil
+}
+
+func addIndexToDefinition(definition *catalog.Definition, namespaceName, tableName string, index catalog.Index) error {
+	namespace, found := definition.Namespaces[catalog.Key(namespaceName)]
+	if !found {
+		return errors.New("namespace does not exist")
+	}
+	table, found := namespace.Tables[catalog.Key(tableName)]
+	if !found {
+		return errors.New("table does not exist")
+	}
+	indexes, err := namedTableIndexes(table.Name, append(catalog.CloneIndexes(table.Indexes), index), table.Constraints)
+	if err != nil {
+		return err
+	}
+	table.Indexes = indexes
+	namespace.Tables[catalog.Key(tableName)] = table
+	definition.Namespaces[catalog.Key(namespaceName)] = namespace
+	return nil
+}
+
+func dropIndexFromDefinition(definition *catalog.Definition, namespaceName, tableName, name string) error {
+	namespace, found := definition.Namespaces[catalog.Key(namespaceName)]
+	if !found {
+		return errors.New("namespace does not exist")
+	}
+	table, found := namespace.Tables[catalog.Key(tableName)]
+	if !found {
+		return errors.New("table does not exist")
+	}
+	indexes, found := withoutTableIndex(table.Indexes, name)
+	if !found {
+		return errors.New("can't drop index; check that it exists")
+	}
+	table.Indexes = indexes
+	namespace.Tables[catalog.Key(tableName)] = table
+	definition.Namespaces[catalog.Key(namespaceName)] = namespace
+	return nil
+}
+
+func withoutTableIndex(indexes []catalog.Index, name string) ([]catalog.Index, bool) {
+	for number, index := range indexes {
+		if catalog.Key(index.Name) != catalog.Key(name) {
+			continue
+		}
+		return append(indexes[:number:number], indexes[number+1:]...), true
+	}
+	return indexes, false
 }
 
 func (s *ddlExecutor) dropDatabase(query string) error {
@@ -293,9 +436,11 @@ func parseAlterTableAction(value string) (ddlAction, error) {
 	lower := strings.ToLower(value)
 	switch {
 	case strings.HasPrefix(lower, "add "):
-		return parseAddColumnAction(strings.TrimSpace(value[len("ADD "):]))
+		return parseAddTableAction(strings.TrimSpace(value[len("ADD "):]))
 	case strings.HasPrefix(lower, "drop "):
-		return parseDropColumnAction(strings.TrimSpace(value[len("DROP "):]))
+		return parseDropTableAction(strings.TrimSpace(value[len("DROP "):]))
+	case strings.HasPrefix(lower, "alter index "):
+		return parseAlterIndexAction(strings.TrimSpace(value[len("ALTER INDEX "):]))
 	case strings.HasPrefix(lower, "rename "):
 		return parseRenameColumnAction(strings.TrimSpace(value[len("RENAME "):]))
 	case strings.HasPrefix(lower, "change "):
@@ -307,6 +452,49 @@ func parseAlterTableAction(value string) (ddlAction, error) {
 	}
 }
 
+func parseAddTableAction(value string) (ddlAction, error) {
+	if isTableIndexDefinition(value) {
+		index, err := parseTableIndexDefinition(value)
+		if err != nil {
+			return ddlAction{}, err
+		}
+		return ddlAction{kind: ddlAddIndex, index: index}, nil
+	}
+	if isTableConstraintDefinition(value) {
+		constraint, err := parseTableConstraint(value)
+		if err != nil {
+			return ddlAction{}, err
+		}
+		return ddlAction{kind: ddlAddConstraint, constraint: constraint}, nil
+	}
+	return parseAddColumnAction(value)
+}
+
+func parseDropTableAction(value string) (ddlAction, error) {
+	value = strings.TrimSpace(value)
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "index ") || strings.HasPrefix(lower, "key ") {
+		name, valid := singleIdentifier(strings.TrimSpace(value[strings.Index(value, " ")+1:]))
+		if !valid {
+			return ddlAction{}, sqlFailure{1064, "42000", "invalid index name"}
+		}
+		return ddlAction{kind: ddlDropIndex, name: name}, nil
+	}
+	return parseDropColumnAction(value)
+}
+
+func parseAlterIndexAction(value string) (ddlAction, error) {
+	name, remainder, valid := consumeIdentifier(value)
+	if !valid {
+		return ddlAction{}, sqlFailure{1064, "42000", "invalid index name"}
+	}
+	visibility := strings.ToLower(strings.TrimSpace(remainder))
+	if visibility != "visible" && visibility != "invisible" {
+		return ddlAction{}, sqlFailure{1064, "42000", "invalid index visibility"}
+	}
+	return ddlAction{kind: ddlAlterIndex, name: name, index: catalog.Index{Invisible: visibility == "invisible"}}, nil
+}
+
 func parseAddColumnAction(value string) (ddlAction, error) {
 	value = stripOptionalKeyword(value, "column")
 	ifNotExists := false
@@ -314,11 +502,11 @@ func parseAddColumnAction(value string) (ddlAction, error) {
 		ifNotExists = true
 		value = strings.TrimSpace(value[len("IF NOT EXISTS "):])
 	}
-	column, typeName, err := parseAlterColumnDefinition(value)
+	column, typeName, attribute, err := parseAlterColumnDefinition(value)
 	if err != nil {
 		return ddlAction{}, err
 	}
-	return ddlAction{kind: ddlAddColumn, name: column, typeName: typeName, ifNotExists: ifNotExists}, nil
+	return ddlAction{kind: ddlAddColumn, name: column, typeName: typeName, attribute: attribute, ifNotExists: ifNotExists}, nil
 }
 
 func parseDropColumnAction(value string) (ddlAction, error) {
@@ -358,20 +546,20 @@ func parseChangeColumnAction(value string) (ddlAction, error) {
 	if !ok {
 		return ddlAction{}, sqlFailure{1064, "42000", "invalid column name"}
 	}
-	newName, typeName, err := parseAlterColumnDefinition(remainder)
+	newName, typeName, attribute, err := parseAlterColumnDefinition(remainder)
 	if err != nil {
 		return ddlAction{}, err
 	}
-	return ddlAction{kind: ddlModifyColumn, name: oldName, newName: newName, typeName: typeName}, nil
+	return ddlAction{kind: ddlModifyColumn, name: oldName, newName: newName, typeName: typeName, attribute: attribute}, nil
 }
 
 func parseModifyColumnAction(value string) (ddlAction, error) {
 	value = stripOptionalKeyword(value, "column")
-	name, typeName, err := parseAlterColumnDefinition(value)
+	name, typeName, attribute, err := parseAlterColumnDefinition(value)
 	if err != nil {
 		return ddlAction{}, err
 	}
-	return ddlAction{kind: ddlModifyColumn, name: name, typeName: typeName}, nil
+	return ddlAction{kind: ddlModifyColumn, name: name, typeName: typeName, attribute: attribute}, nil
 }
 
 func stripOptionalKeyword(value, keyword string) string {
@@ -382,15 +570,18 @@ func stripOptionalKeyword(value, keyword string) string {
 	return strings.TrimSpace(value)
 }
 
-func parseAlterColumnDefinition(value string) (string, string, error) {
-	column, typeName, err := parseTableColumn(value)
+func parseAlterColumnDefinition(value string) (string, string, catalog.ColumnAttribute, error) {
+	column, typeName, attribute, constraints, err := parseTableColumn(value)
 	if err != nil {
-		return "", "", err
+		return "", "", catalog.ColumnAttribute{}, err
+	}
+	if len(constraints) != 0 {
+		return "", "", catalog.ColumnAttribute{}, sqlFailure{1235, "42000", "column constraints require ADD CONSTRAINT"}
 	}
 	if typeName == "" {
-		return "", "", sqlFailure{1064, "42000", "column type is required"}
+		return "", "", catalog.ColumnAttribute{}, sqlFailure{1064, "42000", "column type is required"}
 	}
-	return column, typeName, nil
+	return column, typeName, attribute, nil
 }
 
 func applyTableDefinitionActions(table catalog.Table, actions []ddlAction) (catalog.Table, error) {
@@ -399,6 +590,9 @@ func applyTableDefinitionActions(table catalog.Table, actions []ddlAction) (cata
 		if err := applyTableDefinitionAction(&updated, action); err != nil {
 			return catalog.Table{}, err
 		}
+	}
+	if err := validateTableIndexes(updated); err != nil {
+		return catalog.Table{}, err
 	}
 	return updated, nil
 }
@@ -413,9 +607,68 @@ func applyTableDefinitionAction(table *catalog.Table, action ddlAction) error {
 		return renameTableColumn(table, action)
 	case ddlModifyColumn:
 		return modifyTableColumn(table, action)
+	case ddlAddConstraint:
+		return addTableConstraint(table, action.constraint)
+	case ddlAddIndex:
+		return addTableIndex(table, action.index)
+	case ddlDropIndex:
+		return dropTableIndex(table, action.name)
+	case ddlAlterIndex:
+		return alterTableIndexVisibility(table, action.name, action.index.Invisible)
 	default:
 		return errors.New("unsupported DDL action")
 	}
+}
+
+func addTableIndex(table *catalog.Table, index catalog.Index) error {
+	indexes, err := namedTableIndexes(table.Name, append(catalog.CloneIndexes(table.Indexes), index), table.Constraints)
+	if err != nil {
+		return err
+	}
+	table.Indexes = indexes
+	return validateTableIndexes(*table)
+}
+
+func dropTableIndex(table *catalog.Table, name string) error {
+	indexes, found := withoutTableIndex(table.Indexes, name)
+	if !found {
+		return errors.New("can't drop index; check that it exists")
+	}
+	table.Indexes = indexes
+	return nil
+}
+
+func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool) error {
+	for number := range table.Indexes {
+		if catalog.Key(table.Indexes[number].Name) != catalog.Key(name) {
+			continue
+		}
+		table.Indexes[number].Invisible = invisible
+		return nil
+	}
+	if catalog.Key(name) == catalog.Key("PRIMARY") {
+		if invisible {
+			return sqlFailure{3522, "HY000", "a primary key index cannot be invisible"}
+		}
+		return errors.New("can't alter primary index visibility")
+	}
+	return errors.New("can't alter index; check that it exists")
+}
+
+func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) error {
+	candidates := append(catalog.CloneConstraints(table.Constraints), constraint)
+	named, err := namedTableConstraints(table.Name, candidates)
+	if err != nil {
+		return err
+	}
+	constraint = named[len(named)-1]
+	for _, existing := range table.Constraints {
+		if catalog.Key(existing.Name) == catalog.Key(constraint.Name) {
+			return errors.New("constraint already exists")
+		}
+	}
+	table.Constraints = append(table.Constraints, constraint)
+	return applyPrimaryColumnRules(table)
 }
 
 func addTableColumn(table *catalog.Table, action ddlAction) error {
@@ -429,10 +682,23 @@ func addTableColumn(table *catalog.Table, action ddlAction) error {
 		return sqlFailure{1117, "HY000", "too many columns"}
 	}
 	ensureColumnTypes(table)
+	ensureColumnAttributes(table)
 	table.Columns = append(table.Columns, action.name)
 	table.ColumnTypes = append(table.ColumnTypes, action.typeName)
+	table.ColumnAttributes = append(table.ColumnAttributes, action.attribute)
+	if action.attribute.HasDefault {
+		canonical, err := canonicalColumnValue(*table, len(table.Columns)-1, action.attribute.Default, 1)
+		if err != nil {
+			return err
+		}
+		table.ColumnAttributes[len(table.ColumnAttributes)-1].Default = canonical
+	}
 	for rowIndex := range table.Rows {
-		table.Rows[rowIndex] = append(table.Rows[rowIndex], storedSQLNullValue)
+		value := storedSQLNullValue
+		if table.ColumnAttributes[len(table.ColumnAttributes)-1].HasDefault {
+			value = table.ColumnAttributes[len(table.ColumnAttributes)-1].Default
+		}
+		table.Rows[rowIndex] = append(table.Rows[rowIndex], value)
 	}
 	return nil
 }
@@ -461,6 +727,7 @@ func renameTableColumn(table *catalog.Table, action ddlAction) error {
 		return errors.New("column already exists")
 	}
 	table.Columns[index] = action.newName
+	renameTableIndexColumns(table, action.name, action.newName)
 	return nil
 }
 
@@ -477,8 +744,28 @@ func modifyTableColumn(table *catalog.Table, action ddlAction) error {
 	}
 	if action.newName != "" {
 		table.Columns[index] = action.newName
+		renameTableIndexColumns(table, action.name, action.newName)
 	}
+	ensureColumnAttributes(table)
+	if action.attribute.HasDefault {
+		canonical, err := canonicalColumnValue(*table, index, action.attribute.Default, 1)
+		if err != nil {
+			return err
+		}
+		action.attribute.Default = canonical
+	}
+	table.ColumnAttributes[index] = action.attribute
 	return nil
+}
+
+func renameTableIndexColumns(table *catalog.Table, oldName, newName string) {
+	for index := range table.Indexes {
+		for part := range table.Indexes[index].Parts {
+			if catalog.Key(table.Indexes[index].Parts[part].Column) == catalog.Key(oldName) {
+				table.Indexes[index].Parts[part].Column = newName
+			}
+		}
+	}
 }
 
 func convertTableColumn(table *catalog.Table, index int, typeName string) error {
@@ -499,16 +786,28 @@ func convertTableColumn(table *catalog.Table, index int, typeName string) error 
 
 func cloneCatalogTable(table catalog.Table) catalog.Table {
 	return catalog.Table{
-		Name:        table.Name,
-		Columns:     append([]string(nil), table.Columns...),
-		ColumnTypes: append([]string(nil), table.ColumnTypes...),
-		Rows:        cloneRows(table.Rows),
+		Name:             table.Name,
+		Columns:          append([]string(nil), table.Columns...),
+		ColumnTypes:      append([]string(nil), table.ColumnTypes...),
+		ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.ColumnAttributes...),
+		Constraints:      catalog.CloneConstraints(table.Constraints),
+		Indexes:          catalog.CloneIndexes(table.Indexes),
+		Rows:             cloneRows(table.Rows),
 	}
 }
 
 func ensureColumnTypes(table *catalog.Table) {
 	if len(table.ColumnTypes) == 0 {
 		table.ColumnTypes = make([]string, len(table.Columns))
+	}
+}
+
+func ensureColumnAttributes(table *catalog.Table) {
+	if len(table.ColumnAttributes) == 0 {
+		table.ColumnAttributes = make([]catalog.ColumnAttribute, len(table.Columns))
+		for index := range table.ColumnAttributes {
+			table.ColumnAttributes[index].Nullable = true
+		}
 	}
 }
 
@@ -526,6 +825,9 @@ func removeTableColumn(table *catalog.Table, index int) {
 	table.Columns = append(table.Columns[:index], table.Columns[index+1:]...)
 	if len(table.ColumnTypes) > index {
 		table.ColumnTypes = append(table.ColumnTypes[:index], table.ColumnTypes[index+1:]...)
+	}
+	if len(table.ColumnAttributes) > index {
+		table.ColumnAttributes = append(table.ColumnAttributes[:index], table.ColumnAttributes[index+1:]...)
 	}
 	for rowIndex, row := range table.Rows {
 		table.Rows[rowIndex] = append(row[:index], row[index+1:]...)

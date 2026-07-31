@@ -3,8 +3,6 @@ package mysql
 import (
 	"encoding/binary"
 	"net"
-
-	"github.com/jonbaldie/database/internal/catalog"
 )
 
 // conversation owns one accepted connection from greeting through cleanup.
@@ -19,6 +17,17 @@ type conversation struct {
 	execution         *preparedExecution
 	preparedLifecycle *preparedLifecycle
 	admitted          bool
+	watch             *statementWatch
+}
+
+type pendingCommand struct {
+	sequence byte
+	payload  []byte
+}
+
+type statementWatch struct {
+	finished  chan *pendingCommand
+	cancelled chan struct{}
 }
 
 const (
@@ -90,18 +99,20 @@ func newSession(server *Server, authentication authenticationResult) *session {
 		server: server, username: authentication.accountName, database: authentication.database,
 		initialDB: authentication.database, timeZone: server.config.TimeZone, initialTimeZone: server.config.TimeZone,
 		statements: map[uint32]*preparedStatement{}, nextStmtID: 1,
-		transactionState: transactionState{
-			savepointState: savepointState{
-				savepoints:         map[string]catalog.Definition{},
-				savepointDirty:     map[string]bool{},
-				savepointMutations: map[string]int{},
-				savepointRead:      map[string]bool{},
-			},
-		},
+		transactionState: transactionState{},
 	}
 }
 
 func (c *conversation) acceptCommand() bool {
+	if c.watch != nil {
+		watch := c.watch
+		c.watch = nil
+		pending := <-watch.finished
+		if pending == nil {
+			return false
+		}
+		return c.dispatch(pending.sequence, pending.payload)
+	}
 	sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
 	if err != nil || len(payload) == 0 || !c.server.connections.acceptingWork() {
 		return false
@@ -159,9 +170,31 @@ func (c *conversation) runStatement(run func() error) bool {
 	if !c.server.connections.beginStatement() {
 		return false
 	}
+	watch := c.watchStatement()
+	c.session.statementCancel = watch.cancelled
 	err := run()
+	c.session.statementCancel = nil
+	c.watch = watch
 	c.server.connections.endStatement()
 	return err == nil
+}
+
+func (c *conversation) watchStatement() *statementWatch {
+	watch := &statementWatch{
+		finished:  make(chan *pendingCommand, 1),
+		cancelled: make(chan struct{}),
+	}
+	go func() {
+		sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
+		if err == nil && len(payload) > 0 {
+			close(watch.cancelled)
+			watch.finished <- &pendingCommand{sequence: sequence + 1, payload: payload}
+			return
+		}
+		close(watch.cancelled)
+		watch.finished <- nil
+	}()
+	return watch
 }
 
 func (c *conversation) closePrepared(sequence byte, payload []byte) bool {

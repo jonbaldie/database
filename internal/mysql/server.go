@@ -89,6 +89,9 @@ type Config struct {
 	MaxPreparedStmtCount int
 	MaxConnections       int
 	MaxAllowedPacket     int64
+	// LockWaitTimeout bounds the time a statement waits for a conflicting row
+	// lock. It defaults to five seconds.
+	LockWaitTimeout time.Duration
 	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
 	// current-time functions render through. It defaults to UTC and accepts UTC
 	// or a ±HH:MM offset within ±14:00.
@@ -103,6 +106,7 @@ type Server struct {
 	config      Config
 	connections *connectionRegistry
 	auth        authenticator
+	locks       *lockManager
 }
 
 // connectionRegistry owns admission and graceful-drain accounting. It is kept
@@ -149,7 +153,7 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 		sessionMax:    config.MaxConnections,
 		preparedLimit: config.MaxPreparedStmtCount,
 	}
-	return &Server{Listener: listener, config: config, connections: registry, auth: auth}, nil
+	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout)}, nil
 }
 
 func normalizedConfig(config Config) Config {
@@ -164,6 +168,9 @@ func normalizedConfig(config Config) Config {
 	}
 	if config.MaxAllowedPacket == 0 {
 		config.MaxAllowedPacket = 64 * 1024 * 1024
+	}
+	if config.LockWaitTimeout <= 0 {
+		config.LockWaitTimeout = 5 * time.Second
 	}
 	if config.TimeZone == "" {
 		config.TimeZone = "UTC"
@@ -332,6 +339,7 @@ type session struct {
 	statements      map[uint32]*preparedStatement
 	nextStmtID      uint32
 	longDataBytes   int
+	statementCancel <-chan struct{}
 	transactionState
 }
 
@@ -363,10 +371,16 @@ type transactionWork struct {
 }
 
 type savepointState struct {
-	savepoints         map[string]catalog.Definition
-	savepointDirty     map[string]bool
-	savepointMutations map[string]int
-	savepointRead      map[string]bool
+	savepoints []savepoint
+}
+
+type savepoint struct {
+	name          string
+	snapshot      catalog.Definition
+	revision      uint64
+	dirty         bool
+	mutationCount int
+	read          bool
 }
 
 type statementState struct {
@@ -803,7 +817,7 @@ func (s *textStatementExecutor) transactionStatement(query, lower string) (*quer
 
 func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryResult, bool, error) {
 	catalogQueries := catalogExecutor{s.session}
-	if result, handled, err := catalogQueries.show(query, lower); handled {
+	if result, handled, err := showCatalog(&catalogQueries, query, lower); handled {
 		return result, true, err
 	}
 	if strings.HasPrefix(lower, "use ") {
@@ -816,7 +830,7 @@ func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryRes
 	return nil, false, nil
 }
 
-func (s *catalogExecutor) show(query, lower string) (*queryResult, bool, error) {
+func showCatalog(s *catalogExecutor, query, lower string) (*queryResult, bool, error) {
 	switch {
 	case lower == "show databases":
 		return s.showDatabases(), true, nil
@@ -825,6 +839,9 @@ func (s *catalogExecutor) show(query, lower string) (*queryResult, bool, error) 
 		return result, true, err
 	case strings.HasPrefix(lower, "show create table "):
 		result, err := s.showCreateTable(query)
+		return result, true, err
+	case showIndexTarget(query) != "":
+		result, err := s.showIndexes(query)
 		return result, true, err
 	case lower == "show tables":
 		result, err := s.showTables()
@@ -885,6 +902,9 @@ func (s *textStatementExecutor) relationStatement(query, lower string) (*queryRe
 		return nil, true, createTable(&relations, query)
 	case strings.HasPrefix(lower, "insert into "):
 		affected, err := insertRows(&relations, query)
+		return &queryResult{affected: affected}, true, err
+	case strings.HasPrefix(lower, "replace "):
+		affected, err := replaceRows(&relations, query)
 		return &queryResult{affected: affected}, true, err
 	case strings.HasPrefix(lower, "update "):
 		affected, err := updateRows(&relations, query)
@@ -1000,12 +1020,67 @@ func createTableInDefinition(definition *catalog.Definition, namespace, name str
 		}
 		return errors.New("table already exists")
 	}
-	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...)}
-	if len(table.types) > 0 {
-		tableDefinition.ColumnTypes = append([]string(nil), table.types...)
+	tableDefinition, err := builtCatalogTable(name, table)
+	if err != nil {
+		return err
 	}
 	namespaceDefinition.Tables[key] = tableDefinition
 	definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
+	return nil
+}
+
+func builtCatalogTable(name string, table tableDefinition) (catalog.Table, error) {
+	indexes, err := namedTableIndexes(name, table.indexes, table.constraints)
+	if err != nil {
+		return catalog.Table{}, err
+	}
+	tableDefinition := catalog.Table{Name: name, Columns: append([]string(nil), table.columns...), ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.attributes...), Constraints: catalog.CloneConstraints(table.constraints), Indexes: indexes}
+	if len(table.types) > 0 {
+		tableDefinition.ColumnTypes = append([]string(nil), table.types...)
+	}
+	if err := applyPrimaryColumnRules(&tableDefinition); err != nil {
+		return catalog.Table{}, err
+	}
+	if err := canonicalizeTableDefaults(&tableDefinition); err != nil {
+		return catalog.Table{}, err
+	}
+	if err := validateTableIndexes(tableDefinition); err != nil {
+		return catalog.Table{}, err
+	}
+	return tableDefinition, nil
+}
+
+func applyPrimaryColumnRules(table *catalog.Table) error {
+	ensureColumnAttributes(table)
+	indexes, err := tableColumnIndexes(*table)
+	if err != nil {
+		return err
+	}
+	for _, constraint := range table.Constraints {
+		if constraint.Type != catalog.ConstraintTypePrimary {
+			continue
+		}
+		for _, column := range constraint.Columns {
+			index, found := indexes[catalog.Key(column)]
+			if found {
+				table.ColumnAttributes[index].Nullable = false
+			}
+		}
+	}
+	return nil
+}
+
+func canonicalizeTableDefaults(table *catalog.Table) error {
+	for index, attribute := range table.ColumnAttributes {
+		if !attribute.HasDefault {
+			continue
+		}
+		canonical, err := canonicalColumnValue(*table, index, attribute.Default, 1)
+		if err != nil {
+			return err
+		}
+		table.ColumnAttributes[index].Default = canonical
+	}
 	return nil
 }
 
@@ -1013,7 +1088,18 @@ type tableDefinition struct {
 	target      []string
 	columns     []string
 	types       []string
+	attributes  []catalog.ColumnAttribute
+	constraints []catalog.Constraint
+	indexes     []catalog.Index
 	ifNotExists bool
+}
+
+type parsedTableColumns struct {
+	columns     []string
+	types       []string
+	attributes  []catalog.ColumnAttribute
+	constraints []catalog.Constraint
+	indexes     []catalog.Index
 }
 
 func parseCreateTable(query string) (tableDefinition, error) {
@@ -1026,20 +1112,35 @@ func parseCreateTable(query string) (tableDefinition, error) {
 		ifNotExists = true
 		head = strings.TrimSpace(head[len("IF NOT EXISTS "):])
 	}
+	target, err := createTableTarget(head)
+	if err != nil {
+		return tableDefinition{}, err
+	}
+	columns, err := parseTableColumns(body)
+	if err != nil {
+		return tableDefinition{}, err
+	}
+	if err := validateTableColumns(columns.columns); err != nil {
+		return tableDefinition{}, err
+	}
+	constraints, err := namedTableConstraints(target[len(target)-1], columns.constraints)
+	if err != nil {
+		return tableDefinition{}, err
+	}
+	return tableDefinition{target: target, columns: columns.columns, types: columns.types, attributes: columns.attributes, constraints: constraints, indexes: columns.indexes, ifNotExists: ifNotExists}, nil
+}
+
+func createTableTarget(head string) ([]string, error) {
 	target, ok := splitQualifiedIdentifier(head)
 	if !ok || len(target) == 0 || len(target) > 2 {
-		return tableDefinition{}, sqlFailure{1064, "42000", "invalid table name"}
+		return nil, sqlFailure{1064, "42000", "invalid table name"}
 	}
 	for _, part := range target {
 		if err := validateIdentifierLength(part); err != nil {
-			return tableDefinition{}, err
+			return nil, err
 		}
 	}
-	columns, types, err := parseTableColumns(body)
-	if err == nil {
-		err = validateTableColumns(columns)
-	}
-	return tableDefinition{target: target, columns: columns, types: types, ifNotExists: ifNotExists}, err
+	return target, nil
 }
 
 func validateTableColumns(columns []string) error {
@@ -1070,40 +1171,69 @@ func createTableParts(query string) (string, string, error) {
 	return head, query[open+1 : close], nil
 }
 
-func parseTableColumns(body string) ([]string, []string, error) {
+func parseTableColumns(body string) (parsedTableColumns, error) {
 	parts := splitCSV(body)
-	columns := make([]string, 0, len(parts))
-	types := make([]string, 0, len(parts))
-	for _, part := range parts {
-		column, typeName, err := parseTableColumn(part)
-		if err != nil {
-			return nil, nil, err
-		}
-		columns, types = append(columns, column), append(types, typeName)
+	parsed := parsedTableColumns{
+		columns:     make([]string, 0, len(parts)),
+		types:       make([]string, 0, len(parts)),
+		attributes:  make([]catalog.ColumnAttribute, 0, len(parts)),
+		constraints: make([]catalog.Constraint, 0, len(parts)),
+		indexes:     make([]catalog.Index, 0, len(parts)),
 	}
-	return columns, types, nil
+	for _, part := range parts {
+		if isTableIndexDefinition(part) {
+			index, err := parseTableIndexDefinition(part)
+			if err != nil {
+				return parsedTableColumns{}, err
+			}
+			parsed.indexes = append(parsed.indexes, index)
+			continue
+		}
+		if isTableConstraintDefinition(part) {
+			constraint, err := parseTableConstraint(part)
+			if err != nil {
+				return parsedTableColumns{}, err
+			}
+			parsed.constraints = append(parsed.constraints, constraint)
+			continue
+		}
+		column, typeName, attribute, columnConstraints, err := parseTableColumn(part)
+		if err != nil {
+			return parsedTableColumns{}, err
+		}
+		parsed.columns = append(parsed.columns, column)
+		parsed.types = append(parsed.types, typeName)
+		parsed.attributes = append(parsed.attributes, attribute)
+		parsed.constraints = append(parsed.constraints, columnConstraints...)
+	}
+	return parsed, nil
 }
 
-func parseTableColumn(part string) (string, string, error) {
+func parseTableColumn(part string) (string, string, catalog.ColumnAttribute, []catalog.Constraint, error) {
 	column, remainder, valid := consumeIdentifier(part)
 	if !valid {
-		return "", "", sqlFailure{1064, "42000", "invalid column definition"}
+		return "", "", catalog.ColumnAttribute{}, nil, sqlFailure{1064, "42000", "invalid column definition"}
 	}
 	if err := validateIdentifierLength(column); err != nil {
-		return "", "", err
+		return "", "", catalog.ColumnAttribute{}, nil, err
 	}
-	fields := strings.Fields(remainder)
-	if isUnsupportedTableDefinition(column) || hasUnsupportedColumnModifier(fields) {
-		return "", "", sqlFailure{1235, "42000", "unsupported table definition"}
-	}
+	typePart, modifiers := splitColumnTypeAndModifiers(remainder)
+	fields := strings.Fields(typePart)
 	if len(fields) == 0 {
-		return column, "", nil
+		if strings.TrimSpace(modifiers) != "" {
+			return "", "", catalog.ColumnAttribute{}, nil, sqlFailure{1064, "42000", "column type is required"}
+		}
+		return column, "", catalog.ColumnAttribute{Nullable: true}, nil, nil
 	}
 	typeName, err := columnTypeName(fields)
 	if err != nil {
-		return "", "", err
+		return "", "", catalog.ColumnAttribute{}, nil, err
 	}
-	return column, typeName, nil
+	attribute, constraints, err := parseColumnModifiers(column, modifiers)
+	if err != nil {
+		return "", "", catalog.ColumnAttribute{}, nil, err
+	}
+	return column, typeName, attribute, constraints, nil
 }
 
 // columnTypeName folds a trailing UNSIGNED modifier into the declared type and
@@ -1185,6 +1315,103 @@ func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 	return &queryResult{columns: []string{"Table", "Create Table"}, rows: [][]string{{table.Name, definition}}}, nil
 }
 
+func (s *catalogExecutor) showIndexes(query string) (*queryResult, error) {
+	target := showIndexTarget(query)
+	parts, valid := splitQualifiedIdentifier(target)
+	if !valid || len(parts) > 2 {
+		return nil, sqlFailure{1064, "42000", "invalid table name"}
+	}
+	namespaceName, tableName, err := s.qualifiedShowTableTarget(target, parts)
+	if err != nil {
+		return nil, err
+	}
+	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
+	if !ok {
+		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
+	}
+	table, ok := namespace.Tables[catalog.Key(tableName)]
+	if !ok {
+		return nil, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
+	}
+	if table.Name == "" {
+		table.Name = strings.ToLower(tableName)
+	}
+	return showTableIndexes(table), nil
+}
+
+func showIndexTarget(query string) string {
+	value := strings.TrimSpace(query)
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{"show index from ", "show index in ", "show indexes from ", "show indexes in ", "show keys from ", "show keys in "} {
+		if strings.HasPrefix(lower, prefix) {
+			return strings.TrimSpace(value[len(prefix):])
+		}
+	}
+	return ""
+}
+
+func showTableIndexes(table catalog.Table) *queryResult {
+	columns := []string{"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality", "Sub_part", "Packed", "Null", "Index_type", "Comment", "Index_comment", "Visible", "Expression"}
+	rows := [][]string{}
+	nulls := [][]bool{}
+	for _, index := range effectiveTableIndexes(table) {
+		for number, part := range index.Parts {
+			row, null := showIndexRow(table, index, part, number)
+			rows = append(rows, row)
+			nulls = append(nulls, null)
+		}
+	}
+	return &queryResult{columns: columns, rows: rows, nulls: nulls}
+}
+
+func showIndexRow(table catalog.Table, index catalog.Index, part catalog.IndexPart, number int) ([]string, []bool) {
+	column, expression := part.Column, part.Expression
+	nullable := false
+	if column != "" {
+		columnIndex := tableColumnIndex(table.Columns, column)
+		nullable = columnIndex >= 0 && catalog.ColumnAttributeAt(table, columnIndex).Nullable
+	}
+	null := []bool{false, false, false, false, column == "", false, false, part.PrefixLength == 0, true, !nullable, false, false, false, false, expression == ""}
+	return []string{
+		table.Name,
+		strconv.Itoa(boolToInt(!index.Unique)),
+		index.Name,
+		strconv.Itoa(number + 1),
+		column,
+		indexPartCollation(part),
+		strconv.Itoa(len(table.Rows)),
+		strconv.Itoa(part.PrefixLength),
+		"",
+		"YES",
+		"BTREE",
+		"",
+		index.Comment,
+		indexVisibility(index),
+		expression,
+	}, null
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func indexPartCollation(part catalog.IndexPart) string {
+	if part.Descending {
+		return "D"
+	}
+	return "A"
+}
+
+func indexVisibility(index catalog.Index) string {
+	if index.Invisible {
+		return "NO"
+	}
+	return "YES"
+}
+
 func (s *catalogExecutor) showTableTarget(query string) (string, string, error) {
 	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
 	parts, valid := splitQualifiedIdentifier(target)
@@ -1229,9 +1456,96 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 			return "", fmt.Errorf("canonical DDL unavailable: type for column %q is unknown", column)
 		}
 		definition.WriteString(columnType)
+		attribute := catalog.ColumnAttributeAt(table, index)
+		if !attribute.Nullable {
+			definition.WriteString(" NOT NULL")
+		}
+		if attribute.HasDefault {
+			definition.WriteString(" DEFAULT ")
+			definition.WriteString(canonicalDefaultValue(columnType, attribute.Default))
+		}
+	}
+	for _, constraint := range table.Constraints {
+		definition.WriteString(",\n  ")
+		definition.WriteString(canonicalConstraintDefinition(constraint))
+	}
+	for _, index := range table.Indexes {
+		definition.WriteString(",\n  ")
+		definition.WriteString(canonicalIndexDefinition(index))
 	}
 	definition.WriteString("\n)")
 	return definition.String(), nil
+}
+
+func canonicalIndexDefinition(index catalog.Index) string {
+	prefix := "INDEX "
+	if index.Unique {
+		prefix = "UNIQUE INDEX "
+	}
+	definition := prefix + quoteIdentifier(index.Name) + " " + canonicalIndexParts(index.Parts)
+	if index.Invisible {
+		definition += " INVISIBLE"
+	}
+	if index.Comment != "" {
+		definition += " COMMENT '" + strings.ReplaceAll(index.Comment, "'", "''") + "'"
+	}
+	return definition
+}
+
+func canonicalIndexParts(parts []catalog.IndexPart) string {
+	values := make([]string, len(parts))
+	for number, part := range parts {
+		value := quoteIdentifier(part.Column)
+		if part.Expression != "" {
+			value = "(" + part.Expression + ")"
+		}
+		if part.PrefixLength > 0 {
+			value += "(" + strconv.Itoa(part.PrefixLength) + ")"
+		}
+		if part.Descending {
+			value += " DESC"
+		}
+		values[number] = value
+	}
+	return "(" + strings.Join(values, ", ") + ")"
+}
+
+func canonicalDefaultValue(typeName, value string) string {
+	if value == storedSQLNullValue {
+		return "NULL"
+	}
+	if character, err := parseCharacterType(typeName); err == nil && character.kind == characterText {
+		return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	}
+	return value
+}
+
+func canonicalConstraintDefinition(constraint catalog.Constraint) string {
+	columns := canonicalConstraintColumns(constraint.Columns)
+	switch constraint.Type {
+	case catalog.ConstraintTypePrimary:
+		return "PRIMARY KEY " + columns
+	case catalog.ConstraintTypeUnique:
+		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " UNIQUE " + columns
+	case catalog.ConstraintTypeForeignKey:
+		target := quoteIdentifier(constraint.ReferencedTable)
+		if constraint.ReferencedNamespace != "" {
+			target = quoteIdentifier(constraint.ReferencedNamespace) + "." + target
+		}
+		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " FOREIGN KEY " + columns + " REFERENCES " + target + " " + canonicalConstraintColumns(constraint.ReferencedColumns)
+	case catalog.ConstraintTypeCheck:
+		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " CHECK (" + constraint.Check + ")"
+	default:
+		return "CONSTRAINT " + quoteIdentifier(constraint.Name)
+	}
+}
+
+func canonicalConstraintColumns(columns []string) string {
+	quoted := make([]string, len(columns))
+	for index, column := range columns {
+		quoted[index] = quoteIdentifier(column)
+	}
+	return "(" + strings.Join(quoted, ", ") + ")"
 }
 
 func quoteIdentifier(value string) string {
@@ -1258,7 +1572,14 @@ func mutateTableRows(definition *catalog.Definition, namespaceName, tableName st
 }
 
 func insertRows(s *relationExecutor, query string) (uint64, error) {
-	plan, err := makeInsertPlan(s, query)
+	input, assignments, upsert, err := splitInsertOnDuplicate(query)
+	if err != nil {
+		return 0, err
+	}
+	if upsert {
+		return upsertRows(s, input, assignments)
+	}
+	plan, err := makeInsertionPlan(s, input)
 	if err != nil {
 		return 0, err
 	}
@@ -1280,12 +1601,595 @@ func insertRows(s *relationExecutor, query string) (uint64, error) {
 	return affected, nil
 }
 
+// splitInsertOnDuplicate keeps the INSERT value input separate from the
+// duplicate-key update list. The keyword scanner ignores quoted text and row
+// groups, so an ordinary value that contains the phrase stays an ordinary
+// value.
+func splitInsertOnDuplicate(query string) (string, string, bool, error) {
+	position := keywordAt(query, "on duplicate key update")
+	if position < 0 {
+		return query, "", false, nil
+	}
+	input, assignments := strings.TrimSpace(query[:position]), strings.TrimSpace(query[position+len("on duplicate key update"):])
+	if input == "" || assignments == "" {
+		return "", "", false, sqlFailure{1064, "42000", "malformed INSERT ... ON DUPLICATE KEY UPDATE"}
+	}
+	return input, assignments, true, nil
+}
+
+func upsertRows(s *relationExecutor, query, assignments string) (uint64, error) {
+	plan, err := makeUpsertPlan(s, query, assignments)
+	if err != nil {
+		return 0, err
+	}
+	_, affected, err := applyUpsertPlan(plan)
+	if err != nil {
+		return 0, err
+	}
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.insert.namespace, plan.insert.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.insert.table = table
+			rows, _, err := applyUpsertPlan(currentPlan)
+			return rows, err
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+	}
+	return affected, nil
+}
+
+type upsertPlan struct {
+	insert  insertPlan
+	updates []upsertAssignment
+}
+
+type upsertAssignment struct {
+	column        int
+	value         string
+	candidateFrom *int
+}
+
+func makeUpsertPlan(s *relationExecutor, query, assignments string) (upsertPlan, error) {
+	insert, err := makeInsertionPlan(s, query)
+	if err != nil {
+		return upsertPlan{}, err
+	}
+	indexes, err := tableColumnIndexes(insert.table)
+	if err != nil {
+		return upsertPlan{}, err
+	}
+	updates, err := parseUpsertAssignments(assignments, indexes)
+	if err != nil {
+		return upsertPlan{}, err
+	}
+	return upsertPlan{insert: insert, updates: updates}, nil
+}
+
+func parseUpsertAssignments(text string, indexes map[string]int) ([]upsertAssignment, error) {
+	updates := make([]upsertAssignment, 0, len(splitCSV(text)))
+	seen := make(map[int]bool)
+	for _, assignment := range splitCSV(text) {
+		column, raw, ok := splitEquals(assignment)
+		if !ok {
+			return nil, sqlFailure{1064, "42000", "malformed ON DUPLICATE KEY UPDATE assignment"}
+		}
+		column, ok = singleIdentifier(column)
+		if !ok {
+			return nil, sqlFailure{1064, "42000", "invalid ON DUPLICATE KEY UPDATE column"}
+		}
+		index, found := indexes[catalog.Key(column)]
+		if !found || seen[index] {
+			return nil, sqlFailure{1054, "42S22", "unknown or duplicate column '" + column + "'"}
+		}
+		candidate, valuesReference, err := upsertValuesReference(raw, indexes)
+		if err != nil {
+			return nil, err
+		}
+		update := upsertAssignment{column: index}
+		if valuesReference {
+			update.candidateFrom = &candidate
+		} else {
+			if !validUpsertLiteral(raw) {
+				return nil, sqlFailure{1235, "42000", "unsupported ON DUPLICATE KEY UPDATE expression"}
+			}
+			update.value = strings.TrimSpace(raw)
+		}
+		seen[index] = true
+		updates = append(updates, update)
+	}
+	return updates, nil
+}
+
+func validUpsertLiteral(raw string) bool {
+	if validDefaultLiteral(raw) {
+		return true
+	}
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if !(strings.HasPrefix(value, "b'") && strings.HasSuffix(value, "'") || strings.HasPrefix(value, "0b")) {
+		return false
+	}
+	_, err := parseBitLiteral(value)
+	return err == nil
+}
+
+func upsertValuesReference(raw string, indexes map[string]int) (int, bool, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(raw), "values") {
+		return 0, false, nil
+	}
+	rest := strings.TrimSpace(raw[len("values"):])
+	if len(rest) < 3 || rest[0] != '(' {
+		return 0, false, sqlFailure{1064, "42000", "malformed VALUES() reference"}
+	}
+	close, ok := matchingParenthesis(rest, 0)
+	if !ok || strings.TrimSpace(rest[close+1:]) != "" {
+		return 0, false, sqlFailure{1064, "42000", "malformed VALUES() reference"}
+	}
+	column, ok := singleIdentifier(rest[1:close])
+	if !ok {
+		return 0, false, sqlFailure{1064, "42000", "invalid VALUES() column"}
+	}
+	index, found := indexes[catalog.Key(column)]
+	if !found {
+		return 0, false, sqlFailure{1054, "42S22", "unknown column '" + column + "'"}
+	}
+	return index, true, nil
+}
+
+func applyUpsertPlan(plan upsertPlan) ([][]string, uint64, error) {
+	input := plan.insert
+	input.table.Rows = nil
+	candidates, _, err := applyInsertPlan(input)
+	if err != nil {
+		return nil, 0, err
+	}
+	indexes, err := tableColumnIndexes(plan.insert.table)
+	if err != nil {
+		return nil, 0, err
+	}
+	rows, affected := cloneRows(plan.insert.table.Rows), uint64(0)
+	for number, candidate := range candidates {
+		var changed uint64
+		rows, changed, err = applyUpsertCandidate(plan, indexes, rows, candidate, number+1)
+		if err != nil {
+			return nil, 0, err
+		}
+		affected += changed
+	}
+	return rows, affected, nil
+}
+
+func applyUpsertCandidate(plan upsertPlan, indexes map[string]int, rows [][]string, candidate []string, rowNumber int) ([][]string, uint64, error) {
+	conflicts, err := conflictingUniqueRows(plan.insert.table, indexes, rows, candidate)
+	if err != nil {
+		return nil, 0, err
+	}
+	conflict := firstConflictingRow(rows, conflicts)
+	if conflict < 0 {
+		return append(rows, candidate), 1, nil
+	}
+	updated, err := applyUpsertAssignments(plan, rows[conflict], candidate, rowNumber)
+	if err != nil {
+		return nil, 0, err
+	}
+	changed := uint64(0)
+	if !equalTableRow(updated, rows[conflict]) {
+		changed = 2
+	}
+	rows[conflict] = updated
+	return rows, changed, nil
+}
+
+func firstConflictingRow(rows [][]string, conflicts map[int]bool) int {
+	for index := range rows {
+		if conflicts[index] {
+			return index
+		}
+	}
+	return -1
+}
+
+func applyUpsertAssignments(plan upsertPlan, existing, candidate []string, rowNumber int) ([]string, error) {
+	updated := append([]string(nil), existing...)
+	for _, assignment := range plan.updates {
+		raw := assignment.value
+		if assignment.candidateFrom != nil {
+			column := *assignment.candidateFrom
+			raw = storedColumnLiteral(plan.insert.table, column, candidate[column])
+		}
+		canonical, err := canonicalColumnValueAtOffset(plan.insert.table, assignment.column, raw, rowNumber, plan.insert.offsetMinutes)
+		if err != nil {
+			return nil, err
+		}
+		updated[assignment.column] = canonical
+	}
+	return updated, nil
+}
+
+func storedColumnLiteral(table catalog.Table, column int, value string) string {
+	if value == storedSQLNullValue {
+		return "NULL"
+	}
+	if typeName, known := table.ColumnType(column); known {
+		if typ, err := parseNumericType(typeName); err == nil && typ.kind != numericNone {
+			return value
+		}
+	}
+	return quote(value)
+}
+
+func equalTableRow(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// replaceRows implements REPLACE as a delete of every conflicting unique-key
+// row followed by an insert of the submitted row. The final image is committed
+// through mutateCatalog, so all row and cross-table constraints are checked
+// before it becomes visible.
+func replaceRows(s *relationExecutor, query string) (uint64, error) {
+	plan, err := makeReplacePlan(s, query)
+	if err != nil {
+		return 0, err
+	}
+	_, affected, err := applyReplacePlan(plan)
+	if err != nil {
+		return 0, err
+	}
+	action := func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+			currentPlan := plan
+			currentPlan.table = table
+			if err := validateReplaceDeletePhases(*definition, currentPlan); err != nil {
+				return nil, err
+			}
+			rows, _, err := applyReplacePlan(currentPlan)
+			return rows, err
+		})
+	}
+	if err := s.mutateCatalog(action); err != nil {
+		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+	}
+	return affected, nil
+}
+
+func makeReplacePlan(s *relationExecutor, query string) (insertPlan, error) {
+	return makeInsertionPlan(s, replaceInsertInput(query))
+}
+
+func makeReplaceExplanationPlan(s *relationExecutor, query string) (insertPlan, error) {
+	return makeInsertionExplanationPlan(s, replaceInsertInput(query))
+}
+
+func replaceInsertInput(query string) string {
+	rest := strings.TrimSpace(query[len("REPLACE"):])
+	if strings.HasPrefix(strings.ToLower(rest), "into ") {
+		return "INSERT " + rest
+	}
+	return "INSERT INTO " + rest
+}
+
+func applyReplacePlan(plan insertPlan) ([][]string, uint64, error) {
+	candidates, err := replacementCandidates(plan)
+	if err != nil {
+		return nil, 0, err
+	}
+	indexes, err := tableColumnIndexes(plan.table)
+	if err != nil {
+		return nil, 0, err
+	}
+	rows, affected := cloneRows(plan.table.Rows), uint64(0)
+	for _, candidate := range candidates {
+		conflicts, err := conflictingUniqueRows(plan.table, indexes, rows, candidate)
+		if err != nil {
+			return nil, 0, err
+		}
+		rows = append(rowsWithoutConflicts(rows, conflicts), candidate)
+		affected += uint64(len(conflicts) + 1)
+	}
+	return rows, affected, nil
+}
+
+func replacementCandidates(plan insertPlan) ([][]string, error) {
+	input := plan
+	input.table.Rows = nil
+	candidates, _, err := applyInsertPlan(input)
+	return candidates, err
+}
+
+func rowsWithoutConflicts(rows [][]string, conflicts map[int]bool) [][]string {
+	kept := make([][]string, 0, len(rows)-len(conflicts))
+	for index, row := range rows {
+		if !conflicts[index] {
+			kept = append(kept, row)
+		}
+	}
+	return kept
+}
+
+// validateReplaceDeletePhases observes the delete stage of each replacement.
+// A later insert cannot repair a foreign-key violation that the delete caused.
+func validateReplaceDeletePhases(definition catalog.Definition, plan insertPlan) error {
+	candidates, err := replacementCandidates(plan)
+	if err != nil {
+		return err
+	}
+	indexes, err := tableColumnIndexes(plan.table)
+	if err != nil {
+		return err
+	}
+	current, rows := definition, cloneRows(plan.table.Rows)
+	for _, candidate := range candidates {
+		conflicts, err := conflictingUniqueRows(plan.table, indexes, rows, candidate)
+		if err != nil {
+			return err
+		}
+		without := rowsWithoutConflicts(rows, conflicts)
+		deleted, err := replaceDefinitionRows(current, plan, without)
+		if err != nil {
+			return err
+		}
+		if err := validateConstraintDefinition(current, deleted); err != nil {
+			return err
+		}
+		rows = append(without, candidate)
+		current, err = replaceDefinitionRows(deleted, plan, rows)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func replaceDefinitionRows(definition catalog.Definition, plan insertPlan, rows [][]string) (catalog.Definition, error) {
+	return catalog.Apply(definition, func(staged *catalog.Definition) error {
+		return mutateTableRows(staged, plan.namespace, plan.name, func(catalog.Table) ([][]string, error) {
+			return rows, nil
+		})
+	})
+}
+
+// conflictingUniqueRows returns every stored row that shares a primary,
+// unique-constraint, or unique-index key with candidate. A replacement can
+// therefore remove more than one row when different unique keys collide.
+func conflictingUniqueRows(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string) (map[int]bool, error) {
+	conflicts := make(map[int]bool)
+	if err := addUniqueConstraintConflicts(table, indexes, rows, candidate, conflicts); err != nil {
+		return nil, err
+	}
+	if err := addUniqueIndexConflicts(table, indexes, rows, candidate, conflicts); err != nil {
+		return nil, err
+	}
+	return conflicts, nil
+}
+
+func addUniqueConstraintConflicts(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string, conflicts map[int]bool) error {
+	for _, constraint := range table.Constraints {
+		if isUniqueConstraint(constraint) {
+			addConstraintConflicts(table, indexes, rows, candidate, constraint, conflicts)
+		}
+	}
+	return nil
+}
+
+func isUniqueConstraint(constraint catalog.Constraint) bool {
+	return constraint.Type == catalog.ConstraintTypePrimary || constraint.Type == catalog.ConstraintTypeUnique
+}
+
+func addConstraintConflicts(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string, constraint catalog.Constraint, conflicts map[int]bool) {
+	columns := constraintIndexes(constraint.Columns, indexes)
+	candidateKey, candidateNullable := constraintRowKey(table, candidate, columns)
+	if candidateNullable && constraint.Type == catalog.ConstraintTypeUnique {
+		return
+	}
+	for index, row := range rows {
+		key, rowNullable := constraintRowKey(table, row, columns)
+		if (!rowNullable || constraint.Type != catalog.ConstraintTypeUnique) && key == candidateKey {
+			conflicts[index] = true
+		}
+	}
+}
+
+func addUniqueIndexConflicts(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string, conflicts map[int]bool) error {
+	for _, index := range table.Indexes {
+		if index.Unique {
+			if err := addIndexConflicts(table, indexes, rows, candidate, index, conflicts); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func addIndexConflicts(table catalog.Table, indexes map[string]int, rows [][]string, candidate []string, index catalog.Index, conflicts map[int]bool) error {
+	candidateKey, nullable, err := uniqueIndexRowKey(table, index, indexes, candidate)
+	if err != nil || nullable {
+		return err
+	}
+	for rowIndex, row := range rows {
+		key, rowNullable, err := uniqueIndexRowKey(table, index, indexes, row)
+		if err != nil {
+			return err
+		}
+		if !rowNullable && key == candidateKey {
+			conflicts[rowIndex] = true
+		}
+	}
+	return nil
+}
+
 type insertPlan struct {
 	namespace, name string
 	table           catalog.Table
 	columns         []int
 	groups          [][]string
+	sourceSQL       string
 	offsetMinutes   int
+}
+
+// makeInsertionPlan parses the two supported insert sources. INSERT ... SELECT
+// first evaluates the read plan against the statement snapshot. The resulting
+// literal groups are then written through the same strict value and constraint
+// path as INSERT ... VALUES.
+func makeInsertionPlan(s *relationExecutor, query string) (insertPlan, error) {
+	if err := rejectUnsupportedInsertionVariant(query); err != nil {
+		return insertPlan{}, err
+	}
+	if plan, selected, err := makeInsertSelectPlan(s, query, true); selected || err != nil {
+		return plan, err
+	}
+	if plan, set, err := makeInsertSetPlan(s, query); set || err != nil {
+		return plan, err
+	}
+	return makeInsertPlan(s, query)
+}
+
+// makeInsertionExplanationPlan validates the same mutation grammar without
+// reading source rows. EXPLAIN must describe INSERT ... SELECT, not run it.
+func makeInsertionExplanationPlan(s *relationExecutor, query string) (insertPlan, error) {
+	if err := rejectUnsupportedInsertionVariant(query); err != nil {
+		return insertPlan{}, err
+	}
+	if plan, selected, err := makeInsertSelectPlan(s, query, false); selected || err != nil {
+		return plan, err
+	}
+	if plan, set, err := makeInsertSetPlan(s, query); set || err != nil {
+		return plan, err
+	}
+	return makeInsertPlan(s, query)
+}
+
+func rejectUnsupportedInsertionVariant(query string) error {
+	if keywordAt(query, "returning") >= 0 {
+		return sqlFailure{1235, "42000", "INSERT and REPLACE RETURNING are not supported in v0.1"}
+	}
+	return nil
+}
+
+func makeInsertSelectPlan(s *relationExecutor, query string, materialize bool) (insertPlan, bool, error) {
+	parts, columns, source, selected, err := parseInsertSelectInput(query)
+	if !selected || err != nil {
+		return insertPlan{}, selected, err
+	}
+	plan, err := makeExplicitInsertPlan(s, parts, columns, nil)
+	if err != nil {
+		return insertPlan{}, true, err
+	}
+	selectPlan, err := parseRelationalSelect(s, source)
+	if err != nil {
+		return insertPlan{}, true, err
+	}
+	if len(selectPlan.projection) != len(plan.columns) {
+		return insertPlan{}, true, sqlFailure{1136, "21S01", "column count does not match value count"}
+	}
+	groups, err := materializedInsertSelectGroups(selectPlan, materialize)
+	if err != nil {
+		return insertPlan{}, true, err
+	}
+	plan.groups, plan.sourceSQL = groups, source
+	return plan, true, nil
+}
+
+func parseInsertSelectInput(query string) ([]string, []string, string, bool, error) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "insert into ") {
+		return nil, nil, "", false, nil
+	}
+	rest := strings.TrimSpace(query[len("INSERT INTO "):])
+	position := keywordAt(rest, "select")
+	if position < 0 {
+		return nil, nil, "", false, nil
+	}
+	parts, columns, ok := insertTarget(strings.TrimSpace(rest[:position]))
+	source := strings.TrimSpace(rest[position:])
+	if !ok || len(parts) == 0 || len(parts) > 2 || source == "" {
+		return nil, nil, "", true, sqlFailure{1064, "42000", "malformed INSERT ... SELECT"}
+	}
+	return parts, columns, source, true, nil
+}
+
+func materializedInsertSelectGroups(plan *relationalSelectPlan, materialize bool) ([][]string, error) {
+	if !materialize {
+		return nil, nil
+	}
+	resultRows, err := collectRelationalResultRows(plan)
+	if err != nil {
+		return nil, err
+	}
+	return insertSelectGroups(plan.shapeRows(resultRows)), nil
+}
+
+func insertSelectGroups(rows []relationalResultRow) [][]string {
+	groups := make([][]string, len(rows))
+	for rowIndex, row := range rows {
+		groups[rowIndex] = make([]string, len(row.projections))
+		for valueIndex, value := range row.projections {
+			groups[rowIndex][valueIndex] = expressionValueLiteral(value)
+		}
+	}
+	return groups
+}
+
+func expressionValueLiteral(value exprValue) string {
+	if value.isNull() {
+		return "NULL"
+	}
+	if value.kind == valueString {
+		return quote(value.s)
+	}
+	return value.render()
+}
+
+func makeInsertSetPlan(s *relationExecutor, query string) (insertPlan, bool, error) {
+	parts, columns, values, set, err := parseInsertSetInput(query)
+	if !set || err != nil {
+		return insertPlan{}, set, err
+	}
+	plan, err := makeExplicitInsertPlan(s, parts, columns, [][]string{values})
+	return plan, true, err
+}
+
+func parseInsertSetInput(query string) ([]string, []string, []string, bool, error) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(query)), "insert into ") {
+		return nil, nil, nil, false, nil
+	}
+	rest := strings.TrimSpace(query[len("INSERT INTO "):])
+	position := keywordAt(rest, "set")
+	if position < 0 {
+		return nil, nil, nil, false, nil
+	}
+	parts, ok := splitQualifiedIdentifier(strings.TrimSpace(rest[:position]))
+	assignments := strings.TrimSpace(rest[position+len("set"):])
+	if !ok || len(parts) == 0 || len(parts) > 2 || assignments == "" {
+		return nil, nil, nil, true, sqlFailure{1064, "42000", "malformed INSERT ... SET"}
+	}
+	columns, values, err := insertSetAssignments(assignments)
+	return parts, columns, values, true, err
+}
+
+func insertSetAssignments(text string) ([]string, []string, error) {
+	parts := splitCSV(text)
+	columns, values := make([]string, len(parts)), make([]string, len(parts))
+	for index, assignment := range parts {
+		column, value, ok := splitEquals(assignment)
+		if !ok {
+			return nil, nil, sqlFailure{1064, "42000", "malformed INSERT ... SET assignment"}
+		}
+		column, ok = singleIdentifier(column)
+		if !ok {
+			return nil, nil, sqlFailure{1064, "42000", "invalid INSERT ... SET column"}
+		}
+		columns[index], values[index] = column, strings.TrimSpace(value)
+	}
+	return columns, values, nil
 }
 
 func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
@@ -1293,6 +2197,10 @@ func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
 	if err != nil {
 		return insertPlan{}, err
 	}
+	return makeExplicitInsertPlan(s, parts, columns, groups)
+}
+
+func makeExplicitInsertPlan(s *relationExecutor, parts, columns []string, groups [][]string) (insertPlan, error) {
 	namespace, name, err := tableTarget(s, parts)
 	if err != nil {
 		return insertPlan{}, err
@@ -1355,7 +2263,7 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		if len(group) != len(plan.columns) {
 			return nil, 0, sqlFailure{1136, "21S01", "column count does not match value count"}
 		}
-		row := make([]string, len(plan.table.Columns))
+		row := defaultTableRow(plan.table)
 		for valueIndex, value := range group {
 			columnIndex := plan.columns[valueIndex]
 			canonical, err := canonicalColumnValueAtOffset(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
@@ -1368,6 +2276,19 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		rowNumber++
 	}
 	return rows, uint64(len(plan.groups)), nil
+}
+
+func defaultTableRow(table catalog.Table) []string {
+	row := make([]string, len(table.Columns))
+	for index := range row {
+		attribute := catalog.ColumnAttributeAt(table, index)
+		if attribute.HasDefault {
+			row[index] = attribute.Default
+		} else {
+			row[index] = storedSQLNullValue
+		}
+	}
+	return row
 }
 
 // canonicalColumnValue enforces the strict value contract for a written column.
@@ -1496,6 +2417,9 @@ func temporalCanonicalizer(typeName, value, column string, row, offsetMinutes in
 func updateRows(s *relationExecutor, query string) (uint64, error) {
 	plan, err := makeUpdatePlan(s, query)
 	if err != nil {
+		return 0, err
+	}
+	if err := s.acquireWriteLocks(matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)); err != nil {
 		return 0, err
 	}
 	_, affected, err := applyUpdatePlan(plan)
@@ -1642,6 +2566,9 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := s.acquireWriteLocks(matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)); err != nil {
+		return 0, err
+	}
 	_, affected := applyDeletePlan(plan)
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
@@ -1743,11 +2670,16 @@ func cloneRows(rows [][]string) [][]string {
 
 func splitInsert(query string) (string, string, bool) {
 	rest := strings.TrimSpace(query[len("INSERT INTO "):])
-	position := keywordAt(rest, "values")
+	keyword := "values"
+	position := keywordAt(rest, keyword)
 	if position < 0 {
-		return "", "", false
+		keyword = "value"
+		position = keywordAt(rest, keyword)
+		if position < 0 {
+			return "", "", false
+		}
 	}
-	return strings.TrimSpace(rest[:position]), strings.TrimSpace(rest[position+len("values"):]), true
+	return strings.TrimSpace(rest[:position]), strings.TrimSpace(rest[position+len(keyword):]), true
 }
 
 func insertTarget(value string) ([]string, []string, bool) {
@@ -2218,6 +3150,9 @@ func tableMetadata(namespace, tableName string, table catalog.Table, selected []
 				definition.flags |= mysqlUnsignedFlag
 			}
 		}
+		if !catalog.ColumnAttributeAt(table, columnIndex).Nullable {
+			definition.flags |= mysqlNotNullFlag
+		}
 		metadata[resultIndex] = definition
 	}
 	return metadata
@@ -2281,28 +3216,6 @@ func tableTarget(s *relationExecutor, parts []string) (string, string, error) {
 		return "", "", err
 	}
 	return namespace, table, nil
-}
-
-func isUnsupportedTableDefinition(value string) bool {
-	switch strings.ToLower(value) {
-	case "primary", "unique", "foreign", "check", "constraint", "key", "index", "fulltext", "spatial":
-		return true
-	default:
-		return false
-	}
-}
-
-func hasUnsupportedColumnModifier(fields []string) bool {
-	if len(fields) < 2 {
-		return false
-	}
-	for _, field := range fields[1:] {
-		switch strings.ToLower(strings.Trim(field, "(),")) {
-		case "not", "null", "default", "primary", "unique", "references", "check", "constraint", "auto_increment", "generated", "comment":
-			return true
-		}
-	}
-	return false
 }
 
 type literalQueryResult struct {
@@ -2697,7 +3610,7 @@ func isPreparedStatement(lower string) bool {
 	if isComposedSelectStatement(lower) {
 		return true
 	}
-	for _, prefix := range []string{"select ", "with ", "insert into ", "update ", "delete from "} {
+	for _, prefix := range []string{"select ", "with ", "insert into ", "replace ", "update ", "delete from "} {
 		if strings.HasPrefix(lower, prefix) {
 			return true
 		}

@@ -232,13 +232,24 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 	if opts.MySQLAddress == "" || !opts.MySQLEnabled {
 		return nil, nil
 	}
-	config := mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile, MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount, MaxAllowedPacket: opts.MaxAllowedPacket}
+	config := mysql.Config{Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile, MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount, MaxAllowedPacket: opts.MaxAllowedPacket, LockWaitTimeout: millisecondsDuration(opts.LockWaitTimeoutMilliseconds)}
 	server, err := mysql.NewWithConfig(opts.MySQLAddress, config)
 	if err != nil {
 		return nil, fmt.Errorf("listen for mysql: %w", err)
 	}
 	go server.Serve()
 	return server, nil
+}
+
+func millisecondsDuration(milliseconds int64) time.Duration {
+	if milliseconds <= 0 {
+		return 0
+	}
+	const maximum = time.Duration(1<<63 - 1)
+	if milliseconds > int64(maximum/time.Millisecond) {
+		return maximum
+	}
+	return time.Duration(milliseconds) * time.Millisecond
 }
 
 func (r runtime) closeGracefully() error {

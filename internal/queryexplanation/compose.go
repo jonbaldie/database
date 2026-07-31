@@ -2,8 +2,24 @@ package queryexplanation
 
 // PlanOperator returns a plan-only document around a composed operator tree.
 func PlanOperator(serverVersion, sql, currentDatabase string, root *Operator) *Document {
-	statement := Statement{Kind: "select", SQL: sql, ReadOnly: true, LockingRead: false}
+	lockingRead := containsLock(root)
+	statement := Statement{Kind: "select", SQL: sql, ReadOnly: !lockingRead, LockingRead: lockingRead}
 	return newDocument(serverVersion, currentDatabase, statement, root)
+}
+
+func containsLock(operator *Operator) bool {
+	if operator == nil {
+		return false
+	}
+	if operator.Kind == "lock" {
+		return true
+	}
+	for _, child := range operator.Children {
+		if containsLock(child) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetOperation combines two SELECT inputs with one SQL set operation.

@@ -20,7 +20,9 @@ var exactTransactionCommands = map[string]transactionCommand{
 	"begin":             beginTransactionCommand,
 	"start transaction": beginTransactionCommand,
 	"commit":            commitTransactionCommand,
+	"commit work":       commitTransactionCommand,
 	"rollback":          rollbackTransactionCommand,
+	"rollback work":     rollbackTransactionCommand,
 }
 
 var prefixTransactionCommands = []struct {
@@ -30,7 +32,8 @@ var prefixTransactionCommands = []struct {
 	{"begin ", beginTransactionCommand},
 	{"start transaction ", beginTransactionCommand},
 	{"savepoint ", savepointCommand},
-	{"rollback to savepoint ", rollbackToSavepointCommand},
+	{"rollback work to ", rollbackToSavepointCommand},
+	{"rollback to ", rollbackToSavepointCommand},
 	{"release savepoint ", releaseSavepointCommand},
 }
 
@@ -63,7 +66,20 @@ func savepointCommand(s *session, query string) error {
 }
 
 func rollbackToSavepointCommand(s *session, query string) error {
-	return (&transactionExecutor{s}).rollbackTo(query[len("ROLLBACK TO SAVEPOINT "):])
+	suffix := strings.TrimSpace(query[len("ROLLBACK"):])
+	lower := strings.ToLower(suffix)
+	if strings.HasPrefix(lower, "work ") {
+		suffix = strings.TrimSpace(suffix[len("WORK "):])
+		lower = strings.ToLower(suffix)
+	}
+	if !strings.HasPrefix(lower, "to ") {
+		return sqlFailure{1064, "42000", "invalid rollback to savepoint statement"}
+	}
+	suffix = strings.TrimSpace(suffix[len("TO "):])
+	if strings.HasPrefix(strings.ToLower(suffix), "savepoint ") {
+		suffix = strings.TrimSpace(suffix[len("SAVEPOINT "):])
+	}
+	return (&transactionExecutor{s}).rollbackTo(suffix)
 }
 
 func releaseSavepointCommand(s *session, query string) error {
@@ -145,10 +161,15 @@ func (e statementTransaction) finish(s *session, result *queryResult, err error)
 }
 
 func (e statementTransaction) abort(s *session, err error) (*queryResult, error) {
-	if e.autocommit {
+	if e.autocommit || isDeadlock(err) {
 		_ = rollbackTransaction(s)
 	}
 	return nil, err
+}
+
+func isDeadlock(err error) bool {
+	var failure sqlFailure
+	return errors.As(err, &failure) && failure.code == 1213 && failure.state == "40001"
 }
 
 func (s *textStatementExecutor) dispatchStatement(query, lower string) (*queryResult, error) {
@@ -177,7 +198,7 @@ func isDataDefinition(lower string) bool {
 }
 
 func isMutationStatement(lower string) bool {
-	return strings.HasPrefix(lower, "insert into ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete from ") || isDataDefinition(lower)
+	return strings.HasPrefix(lower, "insert into ") || strings.HasPrefix(lower, "replace ") || strings.HasPrefix(lower, "update ") || strings.HasPrefix(lower, "delete from ") || isDataDefinition(lower)
 }
 
 func isTransactionalStatement(lower string) bool {
@@ -363,10 +384,7 @@ func (s *session) beginTransaction(isolation isolationLevel, readOnly bool) {
 	s.transactionDirty = false
 	s.transactionIsolation = isolation
 	s.transactionReadOnly = readOnly
-	s.savepoints = make(map[string]catalog.Definition)
-	s.savepointDirty = make(map[string]bool)
-	s.savepointMutations = make(map[string]int)
-	s.savepointRead = make(map[string]bool)
+	s.savepoints = nil
 	s.transactionMutations = nil
 }
 
@@ -478,21 +496,35 @@ func (s *session) mutateCatalog(action func(*catalog.Definition) error) error {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
 	if s.transaction {
-		if err := s.ensureWorkingDefinition(); err != nil {
-			return err
-		}
-		staged, err := catalog.Apply(s.transactionSnapshot, action)
-		if err != nil {
-			return err
-		}
-		s.transactionSnapshot = staged
-		s.transactionDirty = true
-		s.transactionMutations = append(s.transactionMutations, action)
-		return nil
+		return s.mutateTransactionCatalog(action)
 	}
+	return s.mutateDurableCatalog(action)
+}
+
+func (s *session) mutateTransactionCatalog(action func(*catalog.Definition) error) error {
+	if err := s.ensureWorkingDefinition(); err != nil {
+		return err
+	}
+	staged, err := catalog.Apply(s.transactionSnapshot, action)
+	if err != nil {
+		return err
+	}
+	if err := validateConstraintDefinition(s.transactionSnapshot, staged); err != nil {
+		return err
+	}
+	s.transactionSnapshot = staged
+	s.transactionDirty = true
+	s.transactionMutations = append(s.transactionMutations, action)
+	return nil
+}
+
+func (s *session) mutateDurableCatalog(action func(*catalog.Definition) error) error {
 	definition, revision := s.server.config.Catalog.SnapshotWithRevision()
 	staged, err := catalog.Apply(definition, action)
 	if err != nil {
+		return err
+	}
+	if err := validateConstraintDefinition(definition, staged); err != nil {
 		return err
 	}
 	if err := s.server.config.Catalog.ReplaceIfRevision(revision, staged); err != nil {
@@ -541,6 +573,9 @@ func (s *transactionExecutor) commit() error {
 }
 
 func (s *session) finishTransaction() {
+	if s.server != nil && s.server.locks != nil {
+		s.server.locks.release(s)
+	}
 	s.transaction = false
 	s.transactionSnapshot = catalog.Definition{}
 	s.transactionRevision = 0
@@ -549,10 +584,7 @@ func (s *session) finishTransaction() {
 	s.transactionDirty = false
 	s.transactionIsolation = isolationRepeatableRead
 	s.transactionReadOnly = false
-	s.savepoints = make(map[string]catalog.Definition)
-	s.savepointDirty = make(map[string]bool)
-	s.savepointMutations = make(map[string]int)
-	s.savepointRead = make(map[string]bool)
+	s.savepoints = nil
 	s.transactionMutations = nil
 }
 
@@ -563,23 +595,21 @@ func (s *transactionExecutor) save(value string) error {
 	if err := s.ensureWorkingDefinition(); err != nil {
 		return err
 	}
-	if s.savepoints == nil {
-		s.savepoints = make(map[string]catalog.Definition)
+	name, err := parseSavepointName(value)
+	if err != nil {
+		return err
 	}
-	if s.savepointDirty == nil {
-		s.savepointDirty = make(map[string]bool)
+	if index := s.savepointIndex(name); index >= 0 {
+		s.savepoints = append(s.savepoints[:index], s.savepoints[index+1:]...)
 	}
-	if s.savepointMutations == nil {
-		s.savepointMutations = make(map[string]int)
-	}
-	if s.savepointRead == nil {
-		s.savepointRead = make(map[string]bool)
-	}
-	name := identifier(strings.TrimSpace(value))
-	s.savepoints[catalog.Key(name)] = s.transactionSnapshot
-	s.savepointDirty[catalog.Key(name)] = s.transactionDirty
-	s.savepointMutations[catalog.Key(name)] = len(s.transactionMutations)
-	s.savepointRead[catalog.Key(name)] = s.transactionReadSet
+	s.savepoints = append(s.savepoints, savepoint{
+		name:          name,
+		snapshot:      s.transactionSnapshot,
+		revision:      s.transactionRevision,
+		dirty:         s.transactionDirty,
+		mutationCount: len(s.transactionMutations),
+		read:          s.transactionReadSet,
+	})
 	return nil
 }
 
@@ -587,34 +617,55 @@ func (s *transactionExecutor) rollbackTo(value string) error {
 	if !s.transaction {
 		return sqlFailure{1305, "42000", "savepoint does not exist"}
 	}
-	name := identifier(strings.TrimSpace(value))
-	key := catalog.Key(name)
-	snapshot, found := s.savepoints[key]
-	if !found {
+	name, err := parseSavepointName(value)
+	if err != nil {
+		return err
+	}
+	index := s.savepointIndex(name)
+	if index < 0 {
 		return sqlFailure{1305, "42000", "savepoint does not exist"}
 	}
-	s.transactionSnapshot = snapshot
+	savepoint := s.savepoints[index]
+	s.transactionSnapshot = savepoint.snapshot
+	s.transactionRevision = savepoint.revision
 	s.transactionStateSet = true
-	s.transactionDirty = s.savepointDirty[key]
-	s.transactionReadSet = s.savepointRead[key]
-	mutationCount := s.savepointMutations[key]
-	if mutationCount < len(s.transactionMutations) {
-		s.transactionMutations = append([]func(*catalog.Definition) error(nil), s.transactionMutations[:mutationCount]...)
+	s.transactionDirty = savepoint.dirty
+	s.transactionReadSet = savepoint.read
+	if savepoint.mutationCount < len(s.transactionMutations) {
+		s.transactionMutations = append([]func(*catalog.Definition) error(nil), s.transactionMutations[:savepoint.mutationCount]...)
 	}
+	s.savepoints = s.savepoints[:index+1]
 	return nil
 }
 
 func (s *transactionExecutor) release(value string) error {
-	name := identifier(strings.TrimSpace(value))
-	key := catalog.Key(name)
-	if _, found := s.savepoints[key]; !found {
+	name, err := parseSavepointName(value)
+	if err != nil {
+		return err
+	}
+	index := s.savepointIndex(name)
+	if index < 0 {
 		return sqlFailure{1305, "42000", "savepoint does not exist"}
 	}
-	delete(s.savepoints, key)
-	delete(s.savepointDirty, key)
-	delete(s.savepointMutations, key)
-	delete(s.savepointRead, key)
+	s.savepoints = append(s.savepoints[:index], s.savepoints[index+1:]...)
 	return nil
+}
+
+func parseSavepointName(value string) (string, error) {
+	name, remainder, ok := consumeIdentifier(value)
+	if !ok || strings.TrimSpace(remainder) != "" {
+		return "", sqlFailure{1064, "42000", "invalid savepoint name"}
+	}
+	return name, nil
+}
+
+func (s *transactionExecutor) savepointIndex(name string) int {
+	for index := len(s.savepoints) - 1; index >= 0; index-- {
+		if identifiersEqual(s.savepoints[index].name, name) {
+			return index
+		}
+	}
+	return -1
 }
 
 func (s *transactionExecutor) rollback() error {

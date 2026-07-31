@@ -13,23 +13,29 @@ import (
 // execution and EXPLAIN. Tables are resolved from the session definition once;
 // all later operators consume that same immutable relation image.
 type relationalSelectPlan struct {
-	session    *session
-	composed   *composedQueryContext
-	outer      *outerRelationScope
-	projection []relationalProjection
-	allColumns bool
-	distinct   bool
-	source     relationalSource
-	where      relationPredicate
-	whereText  string
-	order      []relationalOrder
-	limit      relationalLimit
+	relationalSelectEnvironment
+	projection  []relationalProjection
+	allColumns  bool
+	distinct    bool
+	source      relationalSource
+	where       relationPredicate
+	whereText   string
+	aggregation relationalAggregation
+	order       []relationalOrder
+	limit       relationalLimit
+}
+
+type relationalSelectEnvironment struct {
+	session  *session
+	composed *composedQueryContext
+	outer    *outerRelationScope
 }
 
 type relationalSource struct {
 	tables  []relationalTableSource
 	joins   []relationalJoin
 	columns []relationColumn
+	locking *lockingRead
 }
 
 type relationalTableSource struct {
@@ -40,6 +46,16 @@ type relationalTableSource struct {
 	columns   []relationColumn
 	query     string
 	reason    string
+	hints     []relationalIndexHint
+	access    *catalog.Index
+	forced    bool
+	covering  bool
+}
+
+type relationalIndexHint struct {
+	kind    string
+	scope   string
+	indexes []string
 }
 
 type relationalJoin struct {
@@ -65,17 +81,29 @@ type relationColumn struct {
 }
 
 type relationalProjection struct {
-	expression string
-	name       string
-	alias      string
-	column     int
-	scalar     bool
-	computed   bool
-	subquery   string
-	context    *composedQueryContext
-	value      exprValue
-	metadata   columnMetadata
-	outer      *outerRelationScope
+	expression  string
+	name        string
+	alias       string
+	column      int
+	scalar      bool
+	computed    bool
+	subquery    string
+	context     *composedQueryContext
+	value       exprValue
+	metadata    columnMetadata
+	outer       *outerRelationScope
+	aggregate   *relationalAggregate
+	window      *relationalWindowFunction
+	windowExpr  string
+	windowParts []relationalComposedWindow
+}
+
+// relationalComposedWindow is one window result that a scalar projection uses.
+// The placeholder is a private identifier in the scalar expression.
+type relationalComposedWindow struct {
+	function    relationalWindowFunction
+	placeholder string
+	metadata    columnMetadata
 }
 
 type relationalOrder struct {
@@ -93,12 +121,16 @@ type relationalLimit struct {
 	count   int
 }
 
-type relationRow struct{ values []string }
+type relationRow struct {
+	values   []string
+	lockKeys []string
+}
 
 type relationalResultRow struct {
 	values      []string
 	nulls       []bool
 	source      relationRow
+	group       []relationRow
 	projections []exprValue
 	orders      []exprValue
 }
@@ -120,14 +152,30 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 	if err != nil {
 		return nil, err
 	}
-	if s.streamRows && !plan.hasRuntimeSubqueries() {
+	if s.streamRows && plan.source.locking == nil && !plan.requiresMaterialization() {
 		return plan.streamingResult(), nil
+	}
+	if plan.source.locking != nil {
+		return executeLockingRelationalSelect(plan)
 	}
 	resultRows, err := collectRelationalResultRows(plan)
 	if err != nil {
 		return nil, err
 	}
 	return plan.result(plan.shapeRows(resultRows)), nil
+}
+
+func executeLockingRelationalSelect(plan *relationalSelectPlan) (*queryResult, error) {
+	locks := plan.session.server.locks.snapshot(plan.session)
+	resultRows, err := collectRelationalResultRows(plan)
+	if err == nil {
+		resultRows, err = lockRelationalResultRows(plan, resultRows)
+	}
+	if err != nil {
+		plan.session.server.locks.restore(plan.session, locks)
+		return nil, err
+	}
+	return plan.result(resultRows), nil
 }
 
 func (p *relationalSelectPlan) hasRuntimeSubqueries() bool {
@@ -147,7 +195,14 @@ func (p *relationalSelectPlan) hasRuntimeSubqueries() bool {
 	return false
 }
 
+func (p *relationalSelectPlan) requiresMaterialization() bool {
+	return p.hasRuntimeSubqueries() || p.hasAggregateOrWindow()
+}
+
 func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResultRow, error) {
+	if plan.hasAggregateOrWindow() {
+		return collectAggregateOrWindowRows(plan)
+	}
 	resultRows := make([]relationalResultRow, 0)
 	err := plan.forEachSourceRow(func(row relationRow) error {
 		if plan.where != nil {
@@ -167,6 +222,69 @@ func collectRelationalResultRows(plan *relationalSelectPlan) ([]relationalResult
 		return nil
 	})
 	return resultRows, err
+}
+
+func lockRelationalResultRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	if plan.source.locking.policy == lockSkip {
+		rows = distinctRelationalRows(rows, plan.distinct, plan.projection, plan.source.columns)
+		return lockSkippedRelationalRows(plan, sortRelationalRows(rows, plan.order, plan.source.columns))
+	}
+	return lockReturnedRelationalRows(plan, plan.shapeRows(rows))
+}
+
+func lockReturnedRelationalRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	for _, row := range rows {
+		if _, err := plan.source.locking.acquire(plan, row.source); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
+}
+
+func lockSkippedRelationalRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	rows, err := skipLockedOffsetRows(plan, rows)
+	if err != nil {
+		return nil, err
+	}
+	return lockSkippedReturnedRows(plan, rows)
+}
+
+func skipLockedOffsetRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	offset := plan.limit.offset
+	for index, row := range rows {
+		if offset == 0 {
+			return rows[index:], nil
+		}
+		available, err := plan.source.locking.available(plan, row.source)
+		if err != nil {
+			return nil, err
+		}
+		if available {
+			offset--
+		}
+	}
+	return rows[len(rows):], nil
+}
+
+func lockSkippedReturnedRows(plan *relationalSelectPlan, rows []relationalResultRow) ([]relationalResultRow, error) {
+	count := len(rows)
+	if plan.limit.present && plan.limit.count < count {
+		count = plan.limit.count
+	}
+	locked := make([]relationalResultRow, 0, count)
+	for _, row := range rows {
+		if len(locked) == count {
+			break
+		}
+		acquired, err := plan.source.locking.acquire(plan, row.source)
+		if err != nil {
+			return nil, err
+		}
+		if acquired {
+			locked = append(locked, row)
+		}
+	}
+	return locked, nil
 }
 
 var errStopRelationStream = errors.New("relational row stream complete")
@@ -261,6 +379,10 @@ func parseRelationalSelect(s *relationExecutor, query string) (*relationalSelect
 }
 
 func parseRelationalSelectContext(s *relationExecutor, query string, outer *outerRelationScope) (*relationalSelectPlan, error) {
+	query, locking, err := splitLockingRead(query)
+	if err != nil {
+		return nil, err
+	}
 	expression, err := selectExpression(query)
 	if err != nil {
 		return nil, err
@@ -269,7 +391,7 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err != nil {
 		return nil, err
 	}
-	sourceText, whereText, orderText, limitText, err := splitSelectTail(tail)
+	sourceText, whereText, groupText, havingText, windowText, orderText, limitText, err := splitSelectTail(tail)
 	if err != nil {
 		return nil, err
 	}
@@ -277,22 +399,29 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err != nil {
 		return nil, err
 	}
-	plan := &relationalSelectPlan{session: s.session, composed: s.composed, outer: outer, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
-	if err := finishRelationalSelectPlan(plan, projectionText, orderText, limitText); err != nil {
+	source.locking = locking
+	plan := &relationalSelectPlan{relationalSelectEnvironment: relationalSelectEnvironment{session: s.session, composed: s.composed, outer: outer}, distinct: distinct, source: source, whereText: strings.TrimSpace(whereText)}
+	if err := finishRelationalSelectPlan(plan, projectionText, groupText, havingText, windowText, orderText, limitText); err != nil {
 		return nil, err
 	}
 	return plan, nil
 }
 
-func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, order, limit string) error {
+func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, group, having, windows, order, limit string) error {
 	if err := plan.compileProjection(projection); err != nil {
 		return err
 	}
 	if err := plan.compilePredicates(); err != nil {
 		return err
 	}
+	if err := plan.compileAggregation(group, having, windows); err != nil {
+		return err
+	}
 	parsedOrder, err := parseRelationalOrder(order, plan.projection, plan.source.columns)
 	if err != nil {
+		return err
+	}
+	if err := plan.validateGroupedOrders(parsedOrder); err != nil {
 		return err
 	}
 	if err := validateDistinctOrder(plan.distinct, parsedOrder, plan.projection); err != nil {
@@ -303,7 +432,196 @@ func finishRelationalSelectPlan(plan *relationalSelectPlan, projection, order, l
 		return err
 	}
 	plan.order, plan.limit = parsedOrder, parsedLimit
+	return plan.chooseIndexAccesses()
+}
+
+func (p *relationalSelectPlan) chooseIndexAccesses() error {
+	for number := range p.source.tables {
+		access, forced, covering, err := chooseTableIndexAccess(p.source.tables[number], p.whereText, p.order, p.projection, p.allColumns, p.source.columns)
+		if err != nil {
+			return err
+		}
+		p.source.tables[number].access, p.source.tables[number].forced, p.source.tables[number].covering = access, forced, covering
+	}
+	for number := range p.source.joins {
+		for _, table := range p.source.tables {
+			if identifiersEqual(table.alias, p.source.joins[number].right.alias) {
+				p.source.joins[number].right.access = table.access
+				p.source.joins[number].right.forced = table.forced
+				p.source.joins[number].right.covering = table.covering
+				break
+			}
+		}
+	}
 	return nil
+}
+
+func chooseTableIndexAccess(table relationalTableSource, where string, orders []relationalOrder, projections []relationalProjection, allColumns bool, columns []relationColumn) (*catalog.Index, bool, bool, error) {
+	indexes := effectiveTableIndexes(table.table)
+	allowed, forced, err := indexHintCandidates(table, indexes, indexSelectionScope(where, orders))
+	if err != nil {
+		return nil, false, false, err
+	}
+	if forced && len(allowed) > 0 {
+		index := allowed[0]
+		return cloneIndexPointer(index), true, indexCoversProjection(index, table, projections, allColumns, columns), nil
+	}
+	for _, index := range allowed {
+		if indexSupportsSelect(index, table, where, orders) {
+			return cloneIndexPointer(index), false, indexCoversProjection(index, table, projections, allColumns, columns), nil
+		}
+	}
+	return nil, false, false, nil
+}
+
+func indexSelectionScope(where string, orders []relationalOrder) string {
+	if strings.TrimSpace(where) != "" || len(orders) == 0 {
+		return "join"
+	}
+	return "order_by"
+}
+
+func indexCoversProjection(index catalog.Index, table relationalTableSource, projections []relationalProjection, allColumns bool, columns []relationColumn) bool {
+	if allColumns {
+		return false
+	}
+	parts := indexProjectionParts(index)
+	for _, projection := range projections {
+		if !indexCoversProjectionItem(parts, table, projection, columns) {
+			return false
+		}
+	}
+	return true
+}
+
+func indexProjectionParts(index catalog.Index) map[string]bool {
+	parts := map[string]bool{}
+	for _, part := range index.Parts {
+		addIndexProjectionPart(parts, part)
+	}
+	return parts
+}
+
+func addIndexProjectionPart(parts map[string]bool, part catalog.IndexPart) {
+	if part.Column != "" {
+		parts["column:"+catalog.Key(part.Column)] = true
+	}
+	if part.Expression != "" {
+		parts["expression:"+normalizedIndexExpression(part.Expression)] = true
+	}
+}
+
+func indexCoversProjectionItem(parts map[string]bool, table relationalTableSource, projection relationalProjection, columns []relationColumn) bool {
+	if projection.scalar || projection.subquery != "" {
+		return true
+	}
+	if projection.computed {
+		return parts["expression:"+normalizedIndexExpression(projection.expression)]
+	}
+	return indexCoversColumnProjection(parts, table, projection.column, columns)
+}
+
+func indexCoversColumnProjection(parts map[string]bool, table relationalTableSource, position int, columns []relationColumn) bool {
+	if position < 0 || position >= len(columns) {
+		return false
+	}
+	column := columns[position]
+	return identifiersEqual(column.qualifier, table.alias) && parts["column:"+catalog.Key(column.name)]
+}
+
+func normalizedIndexExpression(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
+func indexHintCandidates(table relationalTableSource, indexes []catalog.Index, scope string) ([]catalog.Index, bool, error) {
+	allowed := visibleTableIndexes(indexes)
+	var use, force []string
+	ignored := map[string]bool{}
+	for _, hint := range table.hints {
+		if hint.scope != scope {
+			continue
+		}
+		switch hint.kind {
+		case "use":
+			use = hint.indexes
+		case "force":
+			force = hint.indexes
+		case "ignore":
+			for _, name := range hint.indexes {
+				ignored[catalog.Key(name)] = true
+			}
+		}
+	}
+	if len(force) > 0 {
+		return namedIndexCandidates(indexes, force, ignored), true, nil
+	}
+	if use != nil {
+		return namedIndexCandidates(indexes, use, ignored), false, nil
+	}
+	return withoutIgnoredIndexes(allowed, ignored), false, nil
+}
+
+func visibleTableIndexes(indexes []catalog.Index) []catalog.Index {
+	visible := make([]catalog.Index, 0, len(indexes))
+	for _, index := range indexes {
+		if !index.Invisible {
+			visible = append(visible, index)
+		}
+	}
+	return visible
+}
+
+func namedIndexCandidates(indexes []catalog.Index, names []string, ignored map[string]bool) []catalog.Index {
+	result := make([]catalog.Index, 0, len(names))
+	for _, name := range names {
+		for _, index := range indexes {
+			if catalog.Key(index.Name) == catalog.Key(name) && !ignored[catalog.Key(index.Name)] {
+				result = append(result, index)
+				break
+			}
+		}
+	}
+	return result
+}
+
+func withoutIgnoredIndexes(indexes []catalog.Index, ignored map[string]bool) []catalog.Index {
+	result := make([]catalog.Index, 0, len(indexes))
+	for _, index := range indexes {
+		if !ignored[catalog.Key(index.Name)] {
+			result = append(result, index)
+		}
+	}
+	return result
+}
+
+func indexSupportsSelect(index catalog.Index, table relationalTableSource, where string, orders []relationalOrder) bool {
+	if len(index.Parts) == 0 {
+		return false
+	}
+	part := index.Parts[0]
+	if indexTextContains(where, table, part) {
+		return true
+	}
+	for _, order := range orders {
+		if indexTextContains(order.expression, table, part) {
+			return true
+		}
+	}
+	return false
+}
+
+func indexTextContains(text string, table relationalTableSource, part catalog.IndexPart) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if part.Expression != "" {
+		return strings.Contains(text, strings.ToLower(strings.TrimSpace(part.Expression)))
+	}
+	column := strings.ToLower(part.Column)
+	return strings.Contains(text, column) && (strings.Contains(text, strings.ToLower(table.alias)+"."+column) || strings.Contains(text, column))
+}
+
+func cloneIndexPointer(index catalog.Index) *catalog.Index {
+	copy := catalog.CloneIndexes([]catalog.Index{index})
+	return &copy[0]
 }
 
 func validateDistinctOrder(distinct bool, orders []relationalOrder, projections []relationalProjection) error {
@@ -386,14 +704,14 @@ func parseDistinctProjection(expression string) (bool, string) {
 	return true, strings.TrimSpace(expression[len("distinct "):])
 }
 
-func splitSelectTail(tail string) (string, string, string, string, error) {
+func splitSelectTail(tail string) (string, string, string, string, string, string, string, error) {
 	clauses := selectClauses(tail)
 	sort.Slice(clauses, func(i, j int) bool { return clauses[i].at < clauses[j].at })
 	if len(clauses) == 0 {
-		return strings.TrimSpace(tail), "", "", "", nil
+		return strings.TrimSpace(tail), "", "", "", "", "", "", nil
 	}
 	if clauses[0].at == 0 {
-		return "", "", "", "", sqlFailure{1064, "42000", "malformed SELECT source"}
+		return "", "", "", "", "", "", "", sqlFailure{1064, "42000", "malformed SELECT source"}
 	}
 	values := map[string]string{}
 	for index, current := range clauses {
@@ -403,11 +721,11 @@ func splitSelectTail(tail string) (string, string, string, string, error) {
 		}
 		value, err := selectClauseValue(tail, current.name, current.at, end)
 		if err != nil {
-			return "", "", "", "", err
+			return "", "", "", "", "", "", "", err
 		}
 		values[current.name] = value
 	}
-	return strings.TrimSpace(tail[:clauses[0].at]), values["where"], values["order"], values["limit"], nil
+	return strings.TrimSpace(tail[:clauses[0].at]), values["where"], values["group"], values["having"], values["window"], values["order"], values["limit"], nil
 }
 
 func selectClauses(tail string) []struct {
@@ -417,9 +735,9 @@ func selectClauses(tail string) []struct {
 	clauses := make([]struct {
 		name string
 		at   int
-	}, 0, 3)
-	for _, candidate := range []string{"where", "order", "limit"} {
-		if at := keywordAt(tail, candidate); at >= 0 {
+	}, 0, 6)
+	for _, candidate := range []string{"where", "group", "having", "window", "order", "limit"} {
+		if at := selectClauseAt(tail, candidate); at >= 0 {
 			clauses = append(clauses, struct {
 				name string
 				at   int
@@ -429,11 +747,33 @@ func selectClauses(tail string) []struct {
 	return clauses
 }
 
+func selectClauseAt(text, keyword string) int {
+	start := 0
+	length := len(text)
+	for start < length {
+		at := keywordAt(text[start:], keyword)
+		if at < 0 {
+			return -1
+		}
+		at += start
+		if keyword != "order" || !indexHintOrderKeyword(text, at) {
+			return at
+		}
+		start = at + len(keyword)
+	}
+	return -1
+}
+
+func indexHintOrderKeyword(text string, at int) bool {
+	before := strings.Fields(strings.ToLower(strings.TrimSpace(text[:at])))
+	return len(before) > 0 && before[len(before)-1] == "for"
+}
+
 func selectClauseValue(tail, name string, start, end int) (string, error) {
 	value := strings.TrimSpace(tail[start+len(name) : end])
-	if name == "order" {
+	if name == "order" || name == "group" {
 		if !strings.HasPrefix(strings.ToLower(value), "by ") {
-			return "", sqlFailure{1064, "42000", "ORDER requires BY"}
+			return "", sqlFailure{1064, "42000", strings.ToUpper(name) + " requires BY"}
 		}
 		value = strings.TrimSpace(value[len("by "):])
 	}
@@ -485,7 +825,7 @@ func (p *relationalSelectPlan) renderTemporalResults(rows [][]string, nulls [][]
 		return
 	}
 	for index, projection := range p.projection {
-		if projection.scalar || projection.computed || projection.subquery != "" {
+		if !projectionNeedsTemporalRendering(projection) {
 			continue
 		}
 		column := p.source.columns[projection.column]
@@ -495,6 +835,10 @@ func (p *relationalSelectPlan) renderTemporalResults(rows [][]string, nulls [][]
 		}
 		renderTemporalColumn(rows, nulls, index, offset, typ.precision)
 	}
+}
+
+func projectionNeedsTemporalRendering(projection relationalProjection) bool {
+	return !projection.scalar && !projection.computed && projection.subquery == "" && projection.aggregate == nil && projection.window == nil
 }
 
 func renderTemporalColumn(rows [][]string, nulls [][]bool, column, offset, precision int) {
@@ -512,12 +856,23 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		ProjectionExpressions: projectionExpressions(p.projection, p.source.columns),
 		AllColumns:            p.allColumns,
 		Where:                 p.whereText,
-		Distinct:              p.distinct,
-		Orders:                explanationOrders(p.order),
-		Limit:                 queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
+		Aggregation: queryexplanation.Aggregation{
+			GroupExpressions: groupExpressions(p.aggregation.groups),
+			Having:           p.aggregation.having,
+			Count:            aggregateProjectionCount(p.projection),
+		},
+		Window:   queryexplanation.WindowDetails{Count: windowDefinitionCount(p.projection), FunctionCount: windowProjectionCount(p.projection), Definitions: windowExplanationDefinitions(p.projection)},
+		Distinct: p.distinct,
+		Orders:   explanationOrders(p.order),
+		Limit:    queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
+		Locking:  queryexplanation.LockingRead{Enabled: p.source.locking != nil},
+	}
+	if p.source.locking != nil {
+		read.Locking.Mode = p.source.locking.explanationMode()
+		read.Locking.WaitPolicy = p.source.locking.explanationWaitPolicy()
 	}
 	for _, table := range p.source.tables {
-		read.Tables = append(read.Tables, relationInfo(table.namespace, table.name, table.table))
+		read.Tables = append(read.Tables, relationSourceInfo(table))
 	}
 	if len(read.Tables) > 0 {
 		read.Table = read.Tables[0]
@@ -528,11 +883,37 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 			clause, fragment = "using", "("+strings.Join(join.using, ", ")+")"
 		}
 		read.Joins = append(read.Joins, queryexplanation.Join{
-			Type: join.kind, Table: relationInfo(join.right.namespace, join.right.name, join.right.table), Condition: join.condition,
+			Type: join.kind, Table: relationSourceInfo(join.right), Condition: join.condition,
 			SourceClause: clause, SourceFragment: fragment,
 		})
 	}
 	return queryexplanation.PlanSelect(serverVersion, sql, currentDatabase, read)
+}
+
+func groupExpressions(groups []relationalGroup) []string {
+	expressions := make([]string, len(groups))
+	for index, group := range groups {
+		expressions[index] = group.source
+	}
+	return expressions
+}
+
+func aggregateProjectionCount(projections []relationalProjection) int {
+	count := 0
+	for _, projection := range projections {
+		if projection.aggregate != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func windowProjectionCount(projections []relationalProjection) int {
+	count := 0
+	for _, projection := range projections {
+		count += len(projectionWindowFunctions(projection))
+	}
+	return count
 }
 
 func projectionNames(projection []relationalProjection) []string {

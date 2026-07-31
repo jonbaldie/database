@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/queryexplanation"
@@ -68,12 +69,14 @@ func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation
 		return s.explainSelect(&relations, inner)
 	case strings.HasPrefix(lower, "insert into "):
 		return s.explainInsert(&relations, inner)
+	case strings.HasPrefix(lower, "replace "):
+		return s.explainReplace(&relations, inner)
 	case strings.HasPrefix(lower, "update "):
 		return s.explainUpdate(&relations, inner)
 	case strings.HasPrefix(lower, "delete from "):
 		return s.explainDelete(&relations, inner)
 	default:
-		return nil, sqlFailure{1064, "42000", "EXPLAIN supports SELECT, INSERT, UPDATE, and DELETE statements"}
+		return nil, sqlFailure{1064, "42000", "EXPLAIN supports SELECT, INSERT, REPLACE, UPDATE, and DELETE statements"}
 	}
 }
 
@@ -136,12 +139,53 @@ func validateExplainPredicate(relations *relationExecutor, where string, table c
 // explainInsert, explainUpdate, and explainDelete reuse the executor's own plan
 // builders so a plan is only produced for a statement the executor would run.
 func (s *textStatementExecutor) explainInsert(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
-	plan, err := makeInsertPlan(relations, inner)
+	input, assignments, upsert, err := splitInsertOnDuplicate(inner)
 	if err != nil {
 		return nil, err
 	}
-	write := queryexplanation.Write{Kind: "insert", Table: relationInfo(plan.namespace, plan.name, plan.table), ValueRows: len(plan.groups)}
+	plan, err := makeInsertionExplanationPlan(relations, input)
+	if err != nil {
+		return nil, err
+	}
+	if upsert {
+		indexes, err := tableColumnIndexes(plan.table)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := parseUpsertAssignments(assignments, indexes); err != nil {
+			return nil, err
+		}
+	}
+	source, err := s.explanationInsertSource(relations, plan)
+	if err != nil {
+		return nil, err
+	}
+	write := queryexplanation.Write{Kind: "insert", Table: relationInfo(plan.namespace, plan.name, plan.table), ValueRows: len(plan.groups), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table), Source: source, Upsert: upsert}
 	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
+}
+
+func (s *textStatementExecutor) explainReplace(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
+	plan, err := makeReplaceExplanationPlan(relations, inner)
+	if err != nil {
+		return nil, err
+	}
+	source, err := s.explanationInsertSource(relations, plan)
+	if err != nil {
+		return nil, err
+	}
+	write := queryexplanation.Write{Kind: "replace", Table: relationInfo(plan.namespace, plan.name, plan.table), ValueRows: len(plan.groups), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table), Source: source}
+	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
+}
+
+func (s *textStatementExecutor) explanationInsertSource(relations *relationExecutor, plan insertPlan) (*queryexplanation.Operator, error) {
+	if plan.sourceSQL == "" {
+		return nil, nil
+	}
+	document, err := s.explainComposedSelect(relations, plan.sourceSQL)
+	if err != nil {
+		return nil, err
+	}
+	return document.Plan, nil
 }
 
 func (s *textStatementExecutor) explainUpdate(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {
@@ -153,7 +197,7 @@ func (s *textStatementExecutor) explainUpdate(relations *relationExecutor, inner
 	if err != nil {
 		return nil, err
 	}
-	write := queryexplanation.Write{Kind: "update", Table: relationInfo(plan.namespace, plan.name, plan.table), Where: strings.TrimSpace(where)}
+	write := queryexplanation.Write{Kind: "update", Table: relationInfo(plan.namespace, plan.name, plan.table), Where: strings.TrimSpace(where), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table)}
 	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
 }
 
@@ -166,8 +210,57 @@ func (s *textStatementExecutor) explainDelete(relations *relationExecutor, inner
 	if err != nil {
 		return nil, err
 	}
-	write := queryexplanation.Write{Kind: "delete", Table: relationInfo(plan.namespace, plan.name, plan.table), Where: strings.TrimSpace(where)}
+	write := queryexplanation.Write{Kind: "delete", Table: relationInfo(plan.namespace, plan.name, plan.table), Where: strings.TrimSpace(where), Constraints: explanationConstraints(relations.currentDefinition(), plan.namespace, plan.name, plan.table)}
 	return queryexplanation.PlanWrite(s.server.config.Version, inner, s.database, write), nil
+}
+
+func explanationConstraints(definition catalog.Definition, namespaceName, tableName string, table catalog.Table) []queryexplanation.Constraint {
+	constraints := make([]queryexplanation.Constraint, 0, len(table.Constraints)+len(table.Columns))
+	owner := relationInfo(namespaceName, tableName, table)
+	for index, column := range table.Columns {
+		if !catalog.ColumnAttributeAt(table, index).Nullable {
+			constraints = append(constraints, queryexplanation.Constraint{Type: "not_null", Name: table.Name + "_" + column + "_not_null", Table: owner})
+		}
+	}
+	for _, constraint := range table.Constraints {
+		kind := constraint.Type
+		if kind == catalog.ConstraintTypePrimary {
+			kind = catalog.ConstraintTypeUnique
+		}
+		constraints = append(constraints, queryexplanation.Constraint{Type: kind, Name: constraint.Name, Table: owner})
+	}
+	return append(constraints, inboundForeignKeyConstraints(definition, namespaceName, tableName)...)
+}
+
+func inboundForeignKeyConstraints(definition catalog.Definition, namespaceName, tableName string) []queryexplanation.Constraint {
+	constraints := []queryexplanation.Constraint{}
+	for ownerKey, namespace := range definition.Namespaces {
+		ownerName := namespace.Name
+		if ownerName == "" {
+			ownerName = ownerKey
+		}
+		for tableKey, table := range namespace.Tables {
+			ownerTableName := table.Name
+			if ownerTableName == "" {
+				ownerTableName = tableKey
+			}
+			for _, constraint := range table.Constraints {
+				if constraint.Type != catalog.ConstraintTypeForeignKey || !foreignKeyTargets(constraint, ownerName, namespaceName, tableName) {
+					continue
+				}
+				constraints = append(constraints, queryexplanation.Constraint{Type: catalog.ConstraintTypeForeignKey, Name: constraint.Name, Table: relationInfo(ownerName, ownerTableName, table)})
+			}
+		}
+	}
+	return constraints
+}
+
+func foreignKeyTargets(constraint catalog.Constraint, ownerNamespace, namespaceName, tableName string) bool {
+	targetNamespace := constraint.ReferencedNamespace
+	if targetNamespace == "" {
+		targetNamespace = ownerNamespace
+	}
+	return catalog.Key(targetNamespace) == catalog.Key(namespaceName) && catalog.Key(constraint.ReferencedTable) == catalog.Key(tableName)
 }
 
 func explainTable(relations *relationExecutor, parts []string) (string, string, catalog.Table, error) {
@@ -189,6 +282,17 @@ func relationInfo(namespace, tableName string, table catalog.Table) queryexplana
 		Columns:  append([]string(nil), table.Columns...),
 		RowCount: len(table.Rows),
 	}
+}
+
+func relationSourceInfo(source relationalTableSource) queryexplanation.Table {
+	info := relationInfo(source.namespace, source.name, source.table)
+	if source.access != nil {
+		info.Access = &queryexplanation.IndexAccess{
+			Name: source.access.Name, Unique: source.access.Unique, Forced: source.forced, Covering: source.covering,
+			CollectedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+	}
+	return info
 }
 
 func renderExplanation(format string, document *queryexplanation.Document) (*queryResult, error) {
