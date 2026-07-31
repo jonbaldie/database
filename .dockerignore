@@ -1,0 +1,9 @@
+.git
+.github
+.claude
+.serena
+bin
+dist
+report.json
+*.swp
+*.tmp

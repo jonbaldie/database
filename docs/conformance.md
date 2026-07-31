@@ -29,3 +29,8 @@ closed visibility boundary, supported `SHOW` statements,
 `information_schema` views, MySQL-shaped metadata, canonical definitions,
 snapshot consistency, and explicit-failure behavior. Implementations and
 conformance evidence must preserve that contract as catalog coverage expands.
+
+The [distribution evidence](distribution.md) records the finite native and OCI
+runtime contract, the reproducible release build, and the tested examples. It
+keeps tested products and machines separate from the supported runtime
+boundaries.

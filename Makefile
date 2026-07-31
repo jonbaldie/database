@@ -7,7 +7,7 @@ MESSGO_MODULE := github.com/quality-gates/messgo/cmd/messgo
 MESSGO_RULESET := config/messgo.xml
 MESSGO_PATHS := $(shell $(GO) list -f '{{.Dir}}' ./... | tr '\n' ',' | sed 's/,$$//')
 
-.PHONY: build test vet fmt-check validate-query-explanation quality messgo mutation
+.PHONY: build test vet fmt-check validate-query-explanation quality messgo mutation release release-smoke
 
 build:
 	mkdir -p bin
@@ -32,3 +32,9 @@ messgo:
 
 mutation:
 	./scripts/mutation-threshold.sh
+
+release:
+	./scripts/build-release.sh
+
+release-smoke:
+	./scripts/verify-release.sh
