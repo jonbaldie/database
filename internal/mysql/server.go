@@ -393,9 +393,9 @@ type session struct {
 	initialDB       string
 	timeZone        string
 	initialTimeZone string
+	settings        sessionSettings
 	statements      map[uint32]*preparedStatement
-	nextStmtID      uint32
-	longDataBytes   int
+	prepared        preparedCounters
 	statementCancel <-chan struct{}
 	resources       *statementResources
 	runtimeMetrics  *queryexplanation.RuntimeMetrics
@@ -407,6 +407,17 @@ type transactionState struct {
 	transactionWork
 	savepointState
 	statementState
+}
+
+type sessionSettings struct {
+	collationConnection                         collationKind
+	statementTimeout, lockWaitTimeout           time.Duration
+	executionMemoryLimit, temporaryStorageLimit int64
+}
+
+type preparedCounters struct {
+	nextStmtID    uint32
+	longDataBytes int
 }
 
 type transactionSettings struct {
@@ -768,6 +779,9 @@ func (s *textStatementExecutor) setTimeZone(query string) (bool, error) {
 }
 
 func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
+	if strings.HasPrefix(lower, "show ") {
+		return s.showVariables(lower)
+	}
 	if column, kind, precision, ok := currentTimeQuery(lower); ok {
 		value, err := s.renderCurrentTime(kind, precision)
 		if err != nil {
@@ -779,23 +793,16 @@ func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*query
 			metadata: []columnMetadata{temporalResultMetadata(column, kind, precision)},
 		}, true, nil
 	}
-	if lower == "select @@time_zone" || lower == "select @@session.time_zone" || lower == "select @@session time_zone" {
-		offset, err := sessionTimeZoneOffset(s.session)
-		if err != nil {
-			return nil, true, err
+	if strings.HasPrefix(lower, "select @@") {
+		variable := strings.TrimSpace(lower[len("select "):])
+		if strings.Contains(variable, ",") || strings.Contains(variable, " ") {
+			return nil, false, nil
 		}
-		return &queryResult{
-			columns: []string{"@@time_zone"},
-			rows:    [][]string{{formatFixedOffset(offset)}},
-			metadata: []columnMetadata{{
-				catalog: "def", name: "@@time_zone", characterSet: mysqlCharsetUTF8MB40900AICI,
-				typ: mysqlTypeVarString, length: 6,
-			}},
-		}, true, nil
+		result, err := s.sessionVariableResult(variable)
+		return result, true, err
 	}
 	result, found := map[string]*queryResult{
-		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
-		"select @@version":  {columns: []string{"VERSION()"}, rows: [][]string{{s.server.config.Version}}},
+		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{"8.4.11-database-" + s.server.config.Version}}},
 		"select database()": {columns: []string{"DATABASE()"}, rows: [][]string{{s.database}}},
 	}[lower]
 	return result, found, nil
@@ -3556,8 +3563,8 @@ func (s *preparedPreparation) allocate(query string) (uint32, int, []columnMetad
 	if !s.server.connections.reservePreparedStatement() {
 		return 0, 0, nil, sqlFailure{1461, "HY000", "can't create more than max_prepared_stmt_count statements"}
 	}
-	id := s.nextStmtID
-	s.nextStmtID++
+	id := s.prepared.nextStmtID
+	s.prepared.nextStmtID++
 	s.statements[id] = &preparedStatement{query: query, parameters: parameters, longData: make(map[uint16][]byte)}
 	metadata, err := s.preparedColumns(query)
 	if err != nil {
@@ -4116,11 +4123,11 @@ func (s *preparedLifecycle) sendLongData(payload []byte) error {
 	if int(parameter) >= statement.parameters {
 		return sqlFailure{1210, "HY000", "prepared statement parameter index out of range"}
 	}
-	if s.longDataBytes+len(payload[7:]) > maxPreparedLongDataBytes {
+	if s.prepared.longDataBytes+len(payload[7:]) > maxPreparedLongDataBytes {
 		return sqlFailure{1153, "08S01", "prepared statement long data exceeds maximum size"}
 	}
 	statement.longData[parameter] = append(statement.longData[parameter], payload[7:]...)
-	s.longDataBytes += len(payload[7:])
+	s.prepared.longDataBytes += len(payload[7:])
 	return nil
 }
 
@@ -4147,8 +4154,9 @@ func (s *preparedLifecycle) resetConnection() error {
 	s.nextReadOnly = false
 	s.database = s.initialDB
 	s.timeZone = s.initialTimeZone
+	s.resetSessionSettings()
 	s.closeAllPrepared()
-	s.longDataBytes = 0
+	s.prepared.longDataBytes = 0
 	return nil
 }
 
@@ -4168,7 +4176,7 @@ func (s *preparedLifecycle) closeAllPrepared() {
 
 func clearPreparedLongData(session *session, statement *preparedStatement) {
 	for _, value := range statement.longData {
-		session.longDataBytes -= len(value)
+		session.prepared.longDataBytes -= len(value)
 	}
 	statement.longData = make(map[uint16][]byte)
 }

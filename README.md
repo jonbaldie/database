@@ -19,6 +19,10 @@ The closed [server configuration registry](docs/server-configuration.md)
 defines every startup setting, exact input form, precedence rule, default, and
 validation boundary.
 
+The [session settings registry](docs/session-settings.md) defines every
+published MySQL session setting, its default, scope, mutability, and reset
+behavior.
+
 The [operator automation contract](docs/operator-automation.md) defines the
 exact command inputs, secret boundary, progress records, terminal results,
 diagnostics, exit classes, and compatibility rules for automating every

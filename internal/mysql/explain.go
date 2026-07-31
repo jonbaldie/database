@@ -185,20 +185,27 @@ func (s *textStatementExecutor) snapshotExplanation(format string, connectionID 
 func (s *textStatementExecutor) planExplanation(inner string) (*queryexplanation.Document, error) {
 	relations := relationExecutor{session: s.session}
 	lower := strings.ToLower(inner)
+	var document *queryexplanation.Document
+	var err error
 	switch {
 	case isComposedSelectStatement(inner):
-		return s.explainSelect(&relations, inner)
+		document, err = s.explainSelect(&relations, inner)
 	case strings.HasPrefix(lower, "insert into "):
-		return s.explainInsert(&relations, inner)
+		document, err = s.explainInsert(&relations, inner)
 	case strings.HasPrefix(lower, "replace "):
-		return s.explainReplace(&relations, inner)
+		document, err = s.explainReplace(&relations, inner)
 	case strings.HasPrefix(lower, "update "):
-		return s.explainUpdate(&relations, inner)
+		document, err = s.explainUpdate(&relations, inner)
 	case strings.HasPrefix(lower, "delete from "):
-		return s.explainDelete(&relations, inner)
+		document, err = s.explainDelete(&relations, inner)
 	default:
 		return nil, sqlFailure{1064, "42000", "EXPLAIN supports SELECT, INSERT, REPLACE, UPDATE, and DELETE statements"}
 	}
+	if err != nil {
+		return nil, err
+	}
+	document.Statement.PlanningSettings = s.planningSettings()
+	return document, nil
 }
 
 func (s *textStatementExecutor) explainSelect(relations *relationExecutor, inner string) (*queryexplanation.Document, error) {

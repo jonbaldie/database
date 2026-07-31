@@ -102,7 +102,10 @@ func newSession(server *Server, authentication authenticationResult, connectionI
 	return &session{
 		server: server, connectionID: connectionID, username: authentication.accountName, database: authentication.database,
 		initialDB: authentication.database, timeZone: server.config.TimeZone, initialTimeZone: server.config.TimeZone,
-		statements: map[uint32]*preparedStatement{}, nextStmtID: 1,
+		settings: sessionSettings{collationConnection: collation0900AICI, statementTimeout: server.config.ResourceLimits.StatementTimeout,
+			lockWaitTimeout: server.config.LockWaitTimeout, executionMemoryLimit: server.config.ResourceLimits.ExecutionMemoryLimitBytes,
+			temporaryStorageLimit: server.config.ResourceLimits.TemporaryStorageLimitBytes},
+		statements: map[uint32]*preparedStatement{}, prepared: preparedCounters{nextStmtID: 1},
 		transactionState: transactionState{},
 	}
 }
@@ -179,7 +182,9 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	defer finishExplanation()
 	watch := c.watchStatement()
 	c.session.statementCancel = watch.cancelled
-	resources := newStatementResources(c.server.resources, c.server.config, watch.cancelled)
+	config := c.server.config
+	config.ResourceLimits = c.session.resourceLimits()
+	resources := newStatementResources(c.server.resources, config, watch.cancelled)
 	c.session.resources = resources
 	defer func() {
 		recordRuntimeResources(c.session.runtimeMetrics, statementResourceSnapshot(resources))

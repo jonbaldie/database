@@ -101,7 +101,7 @@ func lockNowait(m *lockManager, waiter *session, resources []rowLockResource, mo
 }
 
 func (m *lockManager) waitForLock(waiter *session, resources []rowLockResource, mode lockMode) (bool, error) {
-	deadline := time.Now().Add(m.timeout)
+	deadline := time.Now().Add(waiter.settings.lockWaitTimeout)
 	for {
 		changed, acquired, err := m.waitAttempt(waiter, resources, mode)
 		if err != nil {

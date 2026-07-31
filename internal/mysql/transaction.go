@@ -142,7 +142,7 @@ func (s *textStatementExecutor) beginStatementTransaction(lower string) (stateme
 	if err := s.commitBeforeDefinition(dataDefinition); err != nil {
 		return statementTransaction{}, err
 	}
-	autocommit, err := s.startStatementTransaction(dataDefinition, isMutationStatement(lower))
+	autocommit, err := s.startStatementTransaction(dataDefinition, isMutationStatement(lower) || isLockingReadStatement(lower))
 	if err != nil {
 		return statementTransaction{}, err
 	}
@@ -150,6 +150,10 @@ func (s *textStatementExecutor) beginStatementTransaction(lower string) (stateme
 		return statementTransaction{}, err
 	}
 	return statementTransaction{transactional: true, autocommit: autocommit}, nil
+}
+
+func isLockingReadStatement(lower string) bool {
+	return strings.Contains(lower, " for update") || strings.Contains(lower, " for share") || strings.Contains(lower, "lock in share mode")
 }
 
 func (s *textStatementExecutor) commitBeforeDefinition(dataDefinition bool) error {
@@ -168,6 +172,9 @@ func (s *textStatementExecutor) startStatementTransaction(dataDefinition, mutati
 			return false, readOnlyTransactionFailure()
 		}
 		return false, nil
+	}
+	if s.nextReadOnly && mutation {
+		return false, readOnlyTransactionFailure()
 	}
 	s.beginTransaction(s.nextIsolation, s.nextReadOnly)
 	s.consumeNextCharacteristics()
@@ -241,29 +248,27 @@ func (s *textStatementExecutor) settingStatement(query, lower string) (*queryRes
 	if !isSettingControl(lower) {
 		return nil, false, nil
 	}
-	if strings.HasPrefix(lower, "set ") {
-		if handled, err := s.setTimeZone(query); handled {
-			return nil, true, err
-		}
-	}
 	return nil, true, s.applySetting(query, lower)
 }
 
-func (s *textStatementExecutor) applySetting(_ string, lower string) error {
+func (s *textStatementExecutor) applySetting(query string, lower string) error {
 	if strings.HasPrefix(lower, "reset ") {
 		return sqlFailure{1235, "42000", "unsupported session reset"}
 	}
 	normalized := strings.Join(strings.Fields(lower), " ")
-	if handled, err := s.applyAutocommitSetting(normalized); handled {
-		return err
+	if _, _, matched := transactionSetting(normalized); matched {
+		if s.session.transaction {
+			return sqlFailure{1568, "25001", "transaction characteristics cannot change in an active transaction"}
+		}
+		if handled, err := s.applyIsolationSetting(normalized); handled {
+			return err
+		}
+		if handled, err := s.applyReadOnlySetting(normalized); handled {
+			return err
+		}
+		return sqlFailure{1231, "42000", "unsupported transaction setting"}
 	}
-	if handled, err := s.applyIsolationSetting(normalized); handled {
-		return err
-	}
-	if handled, err := s.applyReadOnlySetting(normalized); handled {
-		return err
-	}
-	return sqlFailure{1193, "HY000", "unknown or unsupported session setting"}
+	return s.applySessionAssignments(query)
 }
 
 func (s *session) applyAutocommitSetting(normalized string) (bool, error) {
