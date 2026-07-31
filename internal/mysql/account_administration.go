@@ -46,6 +46,43 @@ func grantsWithoutNamespace(grants []catalog.Grant, namespace string) []catalog.
 	return result
 }
 
+func visibleCatalogDefinition(definition catalog.Definition, username string) catalog.Definition {
+	if username == "" || accountSeesAllNamespaces(definition.Accounts[username]) {
+		return definition
+	}
+	account := definition.Accounts[username]
+	visible := catalog.Definition{Namespaces: map[string]catalog.Namespace{}, Accounts: definition.Accounts}
+	for key, namespace := range definition.Namespaces {
+		if accountSeesNamespace(account, namespace.Name) {
+			visible.Namespaces[key] = namespace
+		}
+	}
+	return visible
+}
+
+func accountSeesAllNamespaces(account catalog.Account) bool {
+	return accountHasGrant(account, "NAMESPACE_MANAGER")
+}
+
+func accountSeesNamespace(account catalog.Account, namespace string) bool {
+	for _, grant := range account.Grants {
+		if grant.Namespace == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+func metadataNamespaceFailure(store *catalog.Store, name string) error {
+	if store != nil {
+		_, exists := store.Snapshot().Namespaces[catalog.Key(name)]
+		if exists {
+			return sqlFailure{1044, "42000", "access denied"}
+		}
+	}
+	return sqlFailure{1049, "42000", "unknown database '" + name + "'"}
+}
+
 func (s *textStatementExecutor) authorizeStatement(lower string) error {
 	privilege, namespace := s.statementGrant(lower)
 	if privilege == "" {

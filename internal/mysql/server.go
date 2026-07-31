@@ -986,7 +986,7 @@ func (s *catalogExecutor) showTables() (*queryResult, error) {
 	}
 	namespace, found := s.metadataDefinition().Namespaces[catalog.Key(s.database)]
 	if !found {
-		return nil, sqlFailure{1049, "42000", "unknown database"}
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, s.database)
 	}
 	return namespaceTables(s.database, namespace), nil
 }
@@ -1057,7 +1057,7 @@ func (s *catalogExecutor) metadataDefinition() catalog.Definition {
 	}
 	// Catalog metadata is statement-scoped even when ordinary data reads use
 	// a repeatable-read transaction snapshot.
-	return s.server.config.Catalog.Snapshot()
+	return visibleCatalogDefinition(s.server.config.Catalog.Snapshot(), s.session.username)
 }
 
 func snapshotNamespace(s *relationExecutor, name string) (catalog.Namespace, bool) {
@@ -1394,7 +1394,7 @@ func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error)
 	key := catalog.Key(name)
 	namespace, ok := s.metadataDefinition().Namespaces[key]
 	if !ok {
-		return nil, sqlFailure{1049, "42000", "unknown database '" + name + "'"}
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, name)
 	}
 	if namespace.Name == "" {
 		namespace.Name = key
@@ -1412,7 +1412,7 @@ func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 	}
 	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
 	if !ok {
-		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, namespaceName)
 	}
 	table, ok := namespace.Tables[catalog.Key(tableName)]
 	if !ok {
@@ -1440,7 +1440,7 @@ func (s *catalogExecutor) showIndexes(query string) (*queryResult, error) {
 	}
 	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
 	if !ok {
-		return nil, sqlFailure{1049, "42000", "unknown database '" + namespaceName + "'"}
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, namespaceName)
 	}
 	table, ok := namespace.Tables[catalog.Key(tableName)]
 	if !ok {

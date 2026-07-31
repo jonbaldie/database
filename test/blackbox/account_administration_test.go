@@ -2,6 +2,7 @@ package blackbox_test
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/jonbaldie/database/test/blackbox"
@@ -46,5 +47,33 @@ func TestMySQLAccountAdministrationPersistsAcrossRestart(t *testing.T) {
 	defer reader.close()
 	if result := reader.query("SELECT 1"); result.err != "" {
 		t.Fatalf("durable account login query: %#v", result)
+	}
+}
+
+func TestMySQLCatalogMetadataFollowsNamespaceGrants(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "catalog-grants-secret")
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+
+	admin := newWireClient(t, address, "admin", "catalog-grants-secret")
+	defer admin.close()
+	mustQuery(t, admin, "CREATE DATABASE public_data")
+	mustQuery(t, admin, "CREATE DATABASE private_data")
+	mustQuery(t, admin, "CREATE USER 'cataloguser' IDENTIFIED BY 'catalog-user-secret'")
+	mustQuery(t, admin, "GRANT DATA_READ ON public_data.* TO 'cataloguser'")
+	user := newWireClient(t, address, "cataloguser", "catalog-user-secret")
+	defer user.close()
+
+	if result := user.query("SHOW DATABASES"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"information_schema"}, {"public_data"}}) {
+		t.Fatalf("visible databases: %#v", result)
+	}
+	result := user.query("SELECT SCHEMA_NAME FROM information_schema.schemata")
+	if result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"information_schema"}, {"public_data"}}) {
+		t.Fatalf("visible schemata: %#v", result)
+	}
+	if result := user.query("SHOW CREATE DATABASE private_data"); result.errCode != 1044 {
+		t.Fatalf("hidden namespace result: %#v", result)
 	}
 }
