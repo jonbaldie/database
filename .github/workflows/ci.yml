@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          # messgo v0.2.0 declares Go 1.26. Pin its toolchain so both its
+          # install and full production analysis are reproducible.
+          go-version: 1.26.3
+          cache: true
+      - name: Production quality gate
+        run: make quality
+      - name: Install mutation tester
+        run: go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@v0.0.0-20251226130216-48d0401f00fb
+      - name: Changed-code mutation threshold
+        run: make mutation
+        env:
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}

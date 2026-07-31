@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ruleset name="database production quality gate"
+         xmlns="http://pmd.sf.net/ruleset/1.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="http://pmd.sf.net/ruleset_xml_schema.xsd">
+    <description>
+The production gate analyses every repository Go package, excluding test files
+only at the command line. It imports every messgo design and code-size rule at
+its upstream default level. A violation is corrected in production code; this
+gate has no exclusions, suppressions, or threshold overrides.
+    </description>
+
+    <rule ref="codesize"/>
+    <rule ref="design"/>
+</ruleset>
