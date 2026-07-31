@@ -20,9 +20,10 @@ workflow coverage is delivered by separate tickets.
 The normative [performance acceptance scenario](performance-acceptance.md)
 defines the fixed corpus, application-visible operations, load boundary,
 measurement and repetition rules, clean-start gate, and published release
-evidence. `scripts/performance.sh` is the current repeatable verification
-entry point; running it does not by itself establish the release acceptance
-judgment or turn performance into a CI gate.
+evidence. `make performance` runs the real SQL-driver harness and writes
+`dist/performance-evidence.json`. Its default settings implement the full
+acceptance scenario. Reduced flags are useful for local diagnostics only and
+cannot establish the release judgment.
 
 The normative [catalog metadata contract](catalog-metadata.md) defines the
 closed visibility boundary, supported `SHOW` statements,

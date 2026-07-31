@@ -157,3 +157,17 @@ scenario into a representative application workload. Storage layout, caching,
 worker counts, optimizer organization, disk amplification, memory allocation,
 and measurement-client architecture remain implementation choices unless they
 alter an observable contract stated here.
+
+## Harness
+
+Run `make performance` to build the current executable, load the fixed corpus,
+restart the server, run each SQL-driver gate, measure clean starts, and write
+`dist/performance-evidence.json`. The command uses the default fixed contract:
+10 GB, 50 sessions, five-minute warm-up, five-minute measured runs, five
+repetitions, and ten clean starts. It returns a failure when the acceptance
+judgment is not accepted.
+
+For local troubleshooting, pass smaller values to `scripts/performance.sh`,
+such as `--logical-bytes`, `--warmup`, `--run`, or
+`--enforce-thresholds=false`. A reduced run records `diagnostic_only` evidence
+and cannot support a release decision.
