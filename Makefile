@@ -6,6 +6,7 @@ MESSGO_VERSION := v0.2.0
 MESSGO_MODULE := github.com/quality-gates/messgo/cmd/messgo
 MESSGO_RULESET := config/messgo.xml
 MESSGO_PATHS := $(shell $(GO) list -f '{{.Dir}}' ./... | tr '\n' ',' | sed 's/,$$//')
+MUTAGO_VERSION := v2.7.7
 
 .PHONY: build test vet fmt-check validate-query-explanation quality messgo mutation performance release release-smoke
 
@@ -31,7 +32,7 @@ messgo:
 	$(GO) run $(MESSGO_MODULE)@$(MESSGO_VERSION) $(MESSGO_PATHS) text $(MESSGO_RULESET) --ignore-tests
 
 mutation:
-	./scripts/mutation-threshold.sh
+	MUTAGO_VERSION=$(MUTAGO_VERSION) ./scripts/mutation-threshold.sh
 
 performance:
 	./scripts/performance.sh
