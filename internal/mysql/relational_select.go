@@ -856,18 +856,20 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		ProjectionExpressions: projectionExpressions(p.projection, p.source.columns),
 		AllColumns:            p.allColumns,
 		Where:                 p.whereText,
-		GroupExpressions:      groupExpressions(p.aggregation.groups),
-		Having:                p.aggregation.having,
-		AggregateCount:        aggregateProjectionCount(p.projection),
-		Window:                queryexplanation.WindowDetails{Count: windowDefinitionCount(p.projection), FunctionCount: windowProjectionCount(p.projection), Definitions: windowExplanationDefinitions(p.projection)},
-		Distinct:              p.distinct,
-		Orders:                explanationOrders(p.order),
-		Limit:                 queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
-		LockingRead:           p.source.locking != nil,
+		Aggregation: queryexplanation.Aggregation{
+			GroupExpressions: groupExpressions(p.aggregation.groups),
+			Having:           p.aggregation.having,
+			Count:            aggregateProjectionCount(p.projection),
+		},
+		Window:   queryexplanation.WindowDetails{Count: windowDefinitionCount(p.projection), FunctionCount: windowProjectionCount(p.projection), Definitions: windowExplanationDefinitions(p.projection)},
+		Distinct: p.distinct,
+		Orders:   explanationOrders(p.order),
+		Limit:    queryexplanation.Limit{Present: p.limit.present, Offset: p.limit.offset, Count: p.limit.count},
+		Locking:  queryexplanation.LockingRead{Enabled: p.source.locking != nil},
 	}
 	if p.source.locking != nil {
-		read.LockMode = p.source.locking.explanationMode()
-		read.LockWaitPolicy = p.source.locking.explanationWaitPolicy()
+		read.Locking.Mode = p.source.locking.explanationMode()
+		read.Locking.WaitPolicy = p.source.locking.explanationWaitPolicy()
 	}
 	for _, table := range p.source.tables {
 		read.Tables = append(read.Tables, relationSourceInfo(table))

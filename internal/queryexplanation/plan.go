@@ -13,16 +13,26 @@ type Select struct {
 	ProjectionExpressions []string // source SQL expressions, when distinct from output names
 	AllColumns            bool     // projection was '*'
 	Where                 string   // predicate fragment without the WHERE keyword, "" if absent
-	GroupExpressions      []string // GROUP BY expressions
-	Having                string   // HAVING predicate fragment without the keyword
-	AggregateCount        int      // aggregate expressions in the SELECT list
+	Aggregation           Aggregation
 	Window                WindowDetails
 	Distinct              bool
 	Orders                []Order
 	Limit                 Limit
-	LockingRead           bool
-	LockMode              string
-	LockWaitPolicy        string
+	Locking               LockingRead
+}
+
+// Aggregation records SQL-visible grouped aggregate work in a SELECT list.
+type Aggregation struct {
+	GroupExpressions []string // GROUP BY expressions
+	Having           string   // HAVING predicate fragment without the keyword
+	Count            int      // aggregate expressions in the SELECT list
+}
+
+// LockingRead records whether a SELECT takes locks and the requested policy.
+type LockingRead struct {
+	Enabled    bool
+	Mode       string
+	WaitPolicy string
 }
 
 // Join records one source relation and its SQL join predicate.
@@ -78,8 +88,8 @@ func PlanSelect(serverVersion, sql, currentDatabase string, read Select) *Docume
 	statement := Statement{
 		Kind:        "select",
 		SQL:         sql,
-		ReadOnly:    !read.LockingRead,
-		LockingRead: read.LockingRead,
+		ReadOnly:    !read.Locking.Enabled,
+		LockingRead: read.Locking.Enabled,
 	}
 	return newDocument(serverVersion, currentDatabase, statement, selectPlan(read))
 }
@@ -167,11 +177,11 @@ func selectFilter(read Select, root *Operator) *Operator {
 }
 
 func selectGrouping(read Select, root *Operator) *Operator {
-	if read.AggregateCount > 0 || len(read.GroupExpressions) > 0 {
+	if read.Aggregation.Count > 0 || len(read.Aggregation.GroupExpressions) > 0 {
 		root = aggregateOperator(read, root)
 	}
-	if read.Having != "" {
-		root = havingFilter(read.Having, root)
+	if read.Aggregation.Having != "" {
+		root = havingFilter(read.Aggregation.Having, root)
 	}
 	if read.Window.FunctionCount > 0 {
 		root = windowSortOperators(read.Window.Definitions, root)
@@ -200,15 +210,15 @@ func selectOutput(read Select, tables []Table, root *Operator) *Operator {
 	if read.Limit.Present {
 		root = limitOperator(read.Limit, root)
 	}
-	if read.LockingRead {
-		root = lockInput(root, read.LockMode, read.LockWaitPolicy)
+	if read.Locking.Enabled {
+		root = lockInput(root, read.Locking.Mode, read.Locking.WaitPolicy)
 	}
 	return root
 }
 
 func aggregateOperator(read Select, child *Operator) *Operator {
 	scope := "global"
-	if len(read.GroupExpressions) > 0 {
+	if len(read.Aggregation.GroupExpressions) > 0 {
 		scope = "grouped"
 	}
 	rows := child.Estimates.Rows
@@ -217,7 +227,7 @@ func aggregateOperator(read Select, child *Operator) *Operator {
 	}
 	return &Operator{
 		Kind: "aggregate", Summary: "Combine input rows into aggregate result groups.",
-		Operation: aggregateOperation{Scope: scope, AggregateCount: read.AggregateCount, GroupingExpressions: append([]string(nil), read.GroupExpressions...)},
+		Operation: aggregateOperation{Scope: scope, AggregateCount: read.Aggregation.Count, GroupingExpressions: append([]string(nil), read.Aggregation.GroupExpressions...)},
 		Estimates: Estimates{Rows: rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: child.Estimates.RowWidthBytes * int(child.Estimates.Rows)},
 		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
 	}
