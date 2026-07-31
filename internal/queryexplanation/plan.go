@@ -13,9 +13,26 @@ type Select struct {
 	ProjectionExpressions []string // source SQL expressions, when distinct from output names
 	AllColumns            bool     // projection was '*'
 	Where                 string   // predicate fragment without the WHERE keyword, "" if absent
+	Aggregation           Aggregation
+	Window                WindowDetails
 	Distinct              bool
 	Orders                []Order
 	Limit                 Limit
+	Locking               LockingRead
+}
+
+// Aggregation records SQL-visible grouped aggregate work in a SELECT list.
+type Aggregation struct {
+	GroupExpressions []string // GROUP BY expressions
+	Having           string   // HAVING predicate fragment without the keyword
+	Count            int      // aggregate expressions in the SELECT list
+}
+
+// LockingRead records whether a SELECT takes locks and the requested policy.
+type LockingRead struct {
+	Enabled    bool
+	Mode       string
+	WaitPolicy string
 }
 
 // Join records one source relation and its SQL join predicate.
@@ -29,8 +46,23 @@ type Join struct {
 
 // Order records one ORDER BY expression and direction.
 type Order struct {
-	Expression string
-	Direction  string
+	Expression string `json:"expression"`
+	Direction  string `json:"direction"`
+}
+
+// Window records the SQL-visible definition and functions for one window.
+type Window struct {
+	PartitionExpressions []string `json:"partition_expressions"`
+	Orders               []Order  `json:"orders"`
+	Frame                string   `json:"frame"`
+	Functions            []string `json:"functions"`
+}
+
+// WindowDetails records the resolved window work in a SELECT list.
+type WindowDetails struct {
+	Count         int      // distinct window definitions in the SELECT list
+	FunctionCount int      // window functions in the SELECT list
+	Definitions   []Window // resolved window definitions and functions
 }
 
 // Limit records the bounded row window requested by LIMIT.
@@ -40,13 +72,15 @@ type Limit struct {
 	Count   int
 }
 
-// Write describes a supported insert, update, or delete to be explained.
+// Write describes a supported mutation to be explained.
 type Write struct {
-	Kind        string // insert, update, or delete
+	Kind        string // insert, replace, update, or delete
 	Table       Table
 	ValueRows   int    // number of literal rows, for insert
 	Where       string // predicate fragment without the WHERE keyword, for update and delete
 	Constraints []Constraint
+	Source      *Operator // planned INSERT ... SELECT input, when present
+	Upsert      bool
 }
 
 // PlanSelect returns the plan-only explanation document for a supported read.
@@ -54,8 +88,8 @@ func PlanSelect(serverVersion, sql, currentDatabase string, read Select) *Docume
 	statement := Statement{
 		Kind:        "select",
 		SQL:         sql,
-		ReadOnly:    true,
-		LockingRead: false,
+		ReadOnly:    !read.Locking.Enabled,
+		LockingRead: read.Locking.Enabled,
 	}
 	return newDocument(serverVersion, currentDatabase, statement, selectPlan(read))
 }
@@ -113,17 +147,59 @@ func assignIdentifiers(operator *Operator, counter *int) {
 }
 
 func selectPlan(read Select) *Operator {
-	tables := read.Tables
-	if len(tables) == 0 {
-		tables = []Table{read.Table}
+	tables := selectTables(read)
+	root := selectSource(read, tables)
+	root = selectFilter(read, root)
+	root = selectGrouping(read, root)
+	return selectOutput(read, tables, root)
+}
+
+func selectTables(read Select) []Table {
+	if len(read.Tables) > 0 {
+		return read.Tables
 	}
+	return []Table{read.Table}
+}
+
+func selectSource(read Select, tables []Table) *Operator {
 	root := tableScan(tables[0])
 	for _, join := range read.Joins {
 		root = joinOperator(join, root, tableScan(join.Table))
 	}
-	if read.Where != "" {
-		root = whereFilter(read.Where, root)
+	return root
+}
+
+func selectFilter(read Select, root *Operator) *Operator {
+	if read.Where == "" {
+		return root
 	}
+	return whereFilter(read.Where, root)
+}
+
+func selectGrouping(read Select, root *Operator) *Operator {
+	if read.Aggregation.Count > 0 || len(read.Aggregation.GroupExpressions) > 0 {
+		root = aggregateOperator(read, root)
+	}
+	if read.Aggregation.Having != "" {
+		root = havingFilter(read.Aggregation.Having, root)
+	}
+	if read.Window.FunctionCount > 0 {
+		root = windowSortOperators(read.Window.Definitions, root)
+		root = windowOperator(read, root)
+	}
+	return root
+}
+
+func windowSortOperators(windows []Window, root *Operator) *Operator {
+	for _, window := range windows {
+		if len(window.Orders) > 0 {
+			root = windowSortOperator(window.Orders, root)
+		}
+	}
+	return root
+}
+
+func selectOutput(read Select, tables []Table, root *Operator) *Operator {
 	root = selectProjection(read, tables, root)
 	if read.Distinct {
 		root = distinctOperator(root)
@@ -134,7 +210,46 @@ func selectPlan(read Select) *Operator {
 	if read.Limit.Present {
 		root = limitOperator(read.Limit, root)
 	}
+	if read.Locking.Enabled {
+		root = lockInput(root, read.Locking.Mode, read.Locking.WaitPolicy)
+	}
 	return root
+}
+
+func aggregateOperator(read Select, child *Operator) *Operator {
+	scope := "global"
+	if len(read.Aggregation.GroupExpressions) > 0 {
+		scope = "grouped"
+	}
+	rows := child.Estimates.Rows
+	if scope == "global" {
+		rows = 1
+	}
+	return &Operator{
+		Kind: "aggregate", Summary: "Combine input rows into aggregate result groups.",
+		Operation: aggregateOperation{Scope: scope, AggregateCount: read.Aggregation.Count, GroupingExpressions: append([]string(nil), read.Aggregation.GroupExpressions...)},
+		Estimates: Estimates{Rows: rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: child.Estimates.RowWidthBytes * int(child.Estimates.Rows)},
+		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
+}
+
+func havingFilter(having string, child *Operator) *Operator {
+	predicate := Predicate{Role: "having", Expression: having, Sources: []PredicateSource{{Clause: "having", Fragment: having}}}
+	return &Operator{
+		Kind: "filter", Summary: "Keep only aggregate groups matching the HAVING predicate.",
+		Operation: filterOperation{Role: "having"}, Predicates: []Predicate{predicate},
+		Estimates: Estimates{Rows: child.Estimates.Rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: 0},
+		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
+}
+
+func windowOperator(read Select, child *Operator) *Operator {
+	return &Operator{
+		Kind: "window", Summary: "Evaluate window functions over ordered partitions.",
+		Operation: windowOperation{WindowCount: read.Window.Count, FunctionCount: read.Window.FunctionCount, Windows: append([]Window(nil), read.Window.Definitions...)},
+		Estimates: Estimates{Rows: child.Estimates.Rows, RowWidthBytes: child.Estimates.RowWidthBytes, Cost: child.Estimates.Cost + child.Estimates.Rows, PeakMemoryBytes: child.Estimates.RowWidthBytes * int(child.Estimates.Rows)},
+		Output:    child.Output, Warnings: []Warning{}, Children: []*Operator{child},
+	}
 }
 
 func selectProjection(read Select, tables []Table, child *Operator) *Operator {
@@ -220,6 +335,14 @@ func sortOperator(orders []Order, child *Operator) *Operator {
 	}
 }
 
+func windowSortOperator(orders []Order, child *Operator) *Operator {
+	operator := sortOperator(orders, child)
+	operator.Summary = "Order rows inside each window partition."
+	operator.Operation = sortOperation{Purpose: "window"}
+	operator.Output = child.Output
+	return operator
+}
+
 func limitOperator(limit Limit, child *Operator) *Operator {
 	rows := float64(limit.Count)
 	if rows > child.Estimates.Rows {
@@ -233,10 +356,27 @@ func limitOperator(limit Limit, child *Operator) *Operator {
 	}
 }
 
+func lockInput(child *Operator, mode, waitPolicy string) *Operator {
+	return &Operator{
+		Kind:      "lock",
+		Summary:   "Take row locks for the returned rows.",
+		Operation: lockOperation{Mode: mode, WaitPolicy: waitPolicy},
+		Estimates: child.Estimates,
+		Output:    child.Output,
+		Warnings:  []Warning{},
+		Children:  []*Operator{child},
+	}
+}
+
 func writePlan(write Write) *Operator {
 	switch write.Kind {
 	case "insert":
+		if write.Upsert {
+			return upsertPlan(write)
+		}
 		return insertPlan(write)
+	case "replace":
+		return replacePlan(write)
 	case "delete":
 		return mutationOverScan(write, "delete", "Delete the matching rows from the table.")
 	default:
@@ -245,7 +385,7 @@ func writePlan(write Write) *Operator {
 }
 
 func insertPlan(write Write) *Operator {
-	source := literalRows(write.Table, write.ValueRows)
+	source := writeSource(write)
 	source = constraintChecks(write, source)
 	root := &Operator{
 		Kind:      "mutation",
@@ -258,6 +398,45 @@ func insertPlan(write Write) *Operator {
 		Children:  []*Operator{source},
 	}
 	return root
+}
+
+func upsertPlan(write Write) *Operator {
+	source := constraintChecks(write, writeSource(write))
+	return &Operator{
+		Kind:      "mutation",
+		Summary:   "Insert each submitted row or update its conflicting unique-key row.",
+		Operation: mutationOperation{MutationType: "upsert"},
+		Objects:   []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, source.Estimates.Rows, source.Estimates.Cost),
+		Output:    emptyOutput(), Warnings: []Warning{}, Children: []*Operator{source},
+	}
+}
+
+func replacePlan(write Write) *Operator {
+	source := constraintChecks(write, writeSource(write))
+	rows, cost := source.Estimates.Rows, source.Estimates.Cost
+	deleteRows := &Operator{
+		Kind: "mutation", Summary: "Delete rows that conflict with a primary or unique key.",
+		Operation: mutationOperation{MutationType: "delete"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{},
+	}
+	insertRows := &Operator{
+		Kind: "mutation", Summary: "Insert the replacement rows after conflict deletion.",
+		Operation: mutationOperation{MutationType: "insert"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{},
+	}
+	return &Operator{
+		Kind: "mutation", Summary: "Replace rows with delete-and-insert semantics for conflicting keys.",
+		Operation: mutationOperation{MutationType: "replace"}, Objects: []ObjectReference{tableObject(write.Table)},
+		Estimates: mutationEstimates(write.Table, rows, cost), Output: emptyOutput(), Warnings: []Warning{}, Children: []*Operator{source, deleteRows, insertRows},
+	}
+}
+
+func writeSource(write Write) *Operator {
+	if write.Source != nil {
+		return write.Source
+	}
+	return literalRows(write.Table, write.ValueRows)
 }
 
 func mutationOverScan(write Write, mutationType, summary string) *Operator {
@@ -292,6 +471,9 @@ func constraintChecks(write Write, child *Operator) *Operator {
 }
 
 func tableScan(table Table) *Operator {
+	if table.Access != nil {
+		return btreeIndexScan(table)
+	}
 	rows := float64(table.RowCount)
 	return &Operator{
 		Kind:      "scan",
@@ -300,6 +482,45 @@ func tableScan(table Table) *Operator {
 		Strategy:  &Strategy{Name: "full_table_scan", Summary: "Sequentially read all stored rows."},
 		Objects:   []ObjectReference{tableObject(table)},
 		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 1, PeakMemoryBytes: 0},
+		Output:    columnOutput(table, table.Columns),
+		Warnings:  []Warning{},
+		Children:  []*Operator{},
+	}
+}
+
+func btreeIndexScan(table Table) *Operator {
+	rows := float64(table.RowCount)
+	access := table.Access
+	objects := []ObjectReference{tableObject(table), {Type: "index", Database: table.Database, Table: table.Name, Name: access.Name}}
+	reason := CodeSummary{Code: "INDEX_SUPPORTS_QUERY", Summary: "The index supports the query filter or ordering."}
+	if access.Forced {
+		reason = CodeSummary{Code: "INDEX_HINT", Summary: "The statement requires this index through an index hint."}
+	}
+	strategy := &Strategy{Name: "btree_index_scan", Summary: "Traverse the selected B-tree index in key order."}
+	summary := "Read rows through the selected B-tree index."
+	if access.Covering {
+		strategy = &Strategy{Name: "btree_covering_index_scan", Summary: "Traverse a B-tree index that contains every projected value."}
+		summary = "Read the projected values through the selected covering B-tree index."
+	}
+	return &Operator{
+		Kind:      "scan",
+		Summary:   summary,
+		Operation: scanOperation{Source: "index", Direction: "forward"},
+		Strategy:  strategy,
+		Objects:   objects,
+		Choice: &Choice{Selected: access.Name, Reason: reason, Alternatives: []Alternative{{
+			Name: "full_table_scan", EstimatedCost: rows + 1,
+			Reason: CodeSummary{Code: "INDEX_NOT_SELECTED", Summary: "The alternative reads rows in stored table order."},
+		}}},
+		Statistics: []Statistic{{
+			Object: tableObject(table), Kind: "catalog_row_count", CollectedAt: access.CollectedAt,
+			ObservedRows: table.RowCount, Stale: false, Limitations: []string{"The statistic records the current catalog snapshot only."},
+		}},
+		Opportunities: []Opportunity{{
+			Code: "INDEX_COVERAGE", Summary: "A covering index can reduce table-row reads.",
+			Evidence: []string{"The selected path returns rows from the table after the index traversal."},
+		}},
+		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 2, PeakMemoryBytes: 0},
 		Output:    columnOutput(table, table.Columns),
 		Warnings:  []Warning{},
 		Children:  []*Operator{},

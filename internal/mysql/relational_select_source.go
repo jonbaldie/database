@@ -156,8 +156,12 @@ func parseCatalogTableSource(s *relationExecutor, parts []string, remainder stri
 	if err != nil {
 		return relationalTableSource{}, "", err
 	}
+	hints, remainder, err := parseRelationalIndexHints(table, remainder)
+	if err != nil {
+		return relationalTableSource{}, "", err
+	}
 	columns := relationalTableColumns(namespace, name, alias, table)
-	return relationalTableSource{namespace: namespace, name: name, alias: alias, table: table, columns: columns}, remainder, nil
+	return relationalTableSource{namespace: namespace, name: name, alias: alias, table: table, columns: columns, hints: hints}, remainder, nil
 }
 
 func parseDerivedTableSource(s *relationExecutor, text string) (relationalTableSource, string, error) {
@@ -265,7 +269,7 @@ func relationTokenBacktick(text string, index, length int, quoted bool) (relatio
 
 func relationAlias(text, tableName string) (string, string, error) {
 	text = strings.TrimSpace(text)
-	if text == "" || text[0] == ',' || isJoinWord(text) {
+	if text == "" || text[0] == ',' || isJoinWord(text) || isIndexHintStart(text) {
 		return tableName, text, nil
 	}
 	if strings.HasPrefix(strings.ToLower(text), "as ") {
@@ -291,7 +295,7 @@ func explicitRelationAlias(text string) (string, string, error) {
 
 func implicitRelationAlias(text, tableName string) (string, string, error) {
 	alias, remainder, ok := relationToken(text)
-	if !ok || isJoinWord(alias) {
+	if !ok || isJoinWord(alias) || isIndexHintStart(alias) {
 		return tableName, text, nil
 	}
 	name, valid := singleIdentifier(alias)
@@ -302,6 +306,169 @@ func implicitRelationAlias(text, tableName string) (string, string, error) {
 		return "", "", err
 	}
 	return name, remainder, nil
+}
+
+func isIndexHintStart(text string) bool {
+	fields := strings.Fields(strings.ToLower(text))
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "use", "force", "ignore":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseRelationalIndexHints(table catalog.Table, text string) ([]relationalIndexHint, string, error) {
+	hints := []relationalIndexHint{}
+	for isIndexHintStart(text) {
+		hint, remainder, err := parseRelationalIndexHint(table, text)
+		if err != nil {
+			return nil, "", err
+		}
+		hints = append(hints, hint)
+		text = remainder
+	}
+	if err := validateRelationalIndexHints(hints); err != nil {
+		return nil, "", err
+	}
+	return hints, text, nil
+}
+
+func parseRelationalIndexHint(table catalog.Table, text string) (relationalIndexHint, string, error) {
+	kind, remainder, err := parseIndexHintStart(text)
+	if err != nil {
+		return relationalIndexHint{}, "", err
+	}
+	remainder, err = consumeIndexHintKeyword(remainder)
+	if err != nil {
+		return relationalIndexHint{}, "", err
+	}
+	scope, remainder, err := parseIndexHintScope(remainder)
+	if err != nil {
+		return relationalIndexHint{}, "", err
+	}
+	names, remainder, err := parseIndexHintNames(table, remainder)
+	if err != nil {
+		return relationalIndexHint{}, "", err
+	}
+	if !strings.EqualFold(kind, "use") && len(names) == 0 {
+		return relationalIndexHint{}, "", sqlFailure{1064, "42000", "index hint requires an index name"}
+	}
+	return relationalIndexHint{kind: strings.ToLower(kind), scope: scope, indexes: names}, remainder, nil
+}
+
+func parseIndexHintStart(text string) (string, string, error) {
+	kind, remainder, valid := relationToken(text)
+	if !valid || !isIndexHintStart(kind) {
+		return "", "", sqlFailure{1064, "42000", "invalid index hint"}
+	}
+	return kind, strings.TrimSpace(remainder), nil
+}
+
+func consumeIndexHintKeyword(value string) (string, error) {
+	keyword, remainder, valid := consumeIdentifier(value)
+	if !valid || !isIndexHintKeyword(keyword) {
+		return "", sqlFailure{1064, "42000", "index hint requires INDEX or KEY"}
+	}
+	return remainder, nil
+}
+
+func isIndexHintKeyword(value string) bool {
+	return strings.EqualFold(value, "index") || strings.EqualFold(value, "key")
+}
+
+func parseIndexHintScope(text string) (string, string, error) {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(strings.ToLower(text), "for ") {
+		return "join", text, nil
+	}
+	scope, remainder, valid := consumeIdentifier(strings.TrimSpace(text[len("FOR "):]))
+	if !valid {
+		return "", "", sqlFailure{1064, "42000", "invalid index hint scope"}
+	}
+	return indexHintScope(strings.ToLower(scope), remainder)
+}
+
+func indexHintScope(scope, remainder string) (string, string, error) {
+	switch strings.ToLower(scope) {
+	case "join":
+		return "join", remainder, nil
+	case "order":
+		return indexHintByScope("order", remainder)
+	case "group":
+		return indexHintByScope("group", remainder)
+	default:
+		return "", "", sqlFailure{1064, "42000", "invalid index hint scope"}
+	}
+}
+
+func indexHintByScope(scope, remainder string) (string, string, error) {
+	by, after, valid := consumeIdentifier(strings.TrimSpace(remainder))
+	if !valid || !strings.EqualFold(by, "by") {
+		return "", "", sqlFailure{1064, "42000", "index hint " + strings.ToUpper(scope) + " requires BY"}
+	}
+	return scope + "_by", after, nil
+}
+
+func parseIndexHintNames(table catalog.Table, text string) ([]string, string, error) {
+	body, remainder, valid := consumeParenthesized(strings.TrimSpace(text))
+	if !valid {
+		return nil, "", sqlFailure{1064, "42000", "index hint requires a key list"}
+	}
+	if strings.TrimSpace(body) == "" {
+		return []string{}, remainder, nil
+	}
+	names := splitCSV(body)
+	resolved := make([]string, len(names))
+	for number, name := range names {
+		identifier, valid := singleIdentifier(strings.TrimSpace(name))
+		if !valid {
+			return nil, "", sqlFailure{1064, "42000", "invalid index name in hint"}
+		}
+		match, err := resolveHintIndex(table, identifier)
+		if err != nil {
+			return nil, "", err
+		}
+		resolved[number] = match
+	}
+	return resolved, remainder, nil
+}
+
+func resolveHintIndex(table catalog.Table, name string) (string, error) {
+	matches := []catalog.Index{}
+	for _, index := range effectiveTableIndexes(table) {
+		if strings.HasPrefix(catalog.Key(index.Name), catalog.Key(name)) {
+			matches = append(matches, index)
+		}
+	}
+	if len(matches) != 1 {
+		return "", sqlFailure{1176, "42000", "key '" + name + "' doesn't exist in table '" + table.Name + "'"}
+	}
+	if matches[0].Invisible {
+		return "", sqlFailure{3522, "HY000", "an invisible index cannot be used in a hint"}
+	}
+	return matches[0].Name, nil
+}
+
+func validateRelationalIndexHints(hints []relationalIndexHint) error {
+	seenUse, seenForce := map[string]bool{}, map[string]bool{}
+	for _, hint := range hints {
+		if hint.kind == "use" {
+			seenUse[hint.scope] = true
+		}
+		if hint.kind == "force" {
+			seenForce[hint.scope] = true
+		}
+	}
+	for scope := range seenUse {
+		if seenForce[scope] {
+			return sqlFailure{1064, "42000", "USE INDEX and FORCE INDEX cannot be used together"}
+		}
+	}
+	return nil
 }
 
 func isJoinWord(text string) bool {
@@ -439,17 +606,23 @@ func (p *relationalSelectPlan) forEachSourceRow(yield relationRowYield) error {
 func (source relationalSource) rowIterator() relationRowIterator {
 	iterator := tableRowIterator(source.tables[0])
 	leftWidth := len(source.tables[0].columns)
+	leftTables := 1
 	for _, join := range source.joins {
-		iterator = joinedRowIterator(iterator, join, leftWidth)
+		iterator = joinedRowIterator(iterator, join, leftWidth, leftTables)
 		leftWidth += len(join.right.columns)
+		leftTables++
 	}
 	return iterator
 }
 
 func tableRowIterator(table relationalTableSource) relationRowIterator {
 	return func(yield relationRowYield) error {
-		for _, row := range table.table.Rows {
-			if err := yield(relationRow{values: append([]string(nil), row...)}); err != nil {
+		rows, err := indexScanRows(table)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if err := yield(relationRow{values: append([]string(nil), row.values...), lockKeys: []string{rowLockKey(row.values)}}); err != nil {
 				return err
 			}
 		}
@@ -457,7 +630,74 @@ func tableRowIterator(table relationalTableSource) relationRowIterator {
 	}
 }
 
-func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth int) relationRowIterator {
+type indexedRelationRow struct {
+	values []string
+	keys   []string
+}
+
+func indexScanRows(table relationalTableSource) ([]indexedRelationRow, error) {
+	if table.access == nil {
+		rows := make([]indexedRelationRow, len(table.table.Rows))
+		for index, values := range table.table.Rows {
+			rows[index] = indexedRelationRow{values: values}
+		}
+		return rows, nil
+	}
+	rows := make([]indexedRelationRow, len(table.table.Rows))
+	for number, values := range table.table.Rows {
+		keys, err := indexScanKeys(table, *table.access, values)
+		if err != nil {
+			return nil, err
+		}
+		rows[number] = indexedRelationRow{values: values, keys: keys}
+	}
+	sort.SliceStable(rows, func(left, right int) bool {
+		return orderedIndexRowBefore(rows[left], rows[right], *table.access)
+	})
+	return rows, nil
+}
+
+func indexScanKeys(table relationalTableSource, index catalog.Index, row []string) ([]string, error) {
+	keys := make([]string, len(index.Parts))
+	for number, part := range index.Parts {
+		key, err := indexScanPartKey(table, part, row)
+		if err != nil {
+			return nil, err
+		}
+		keys[number] = key
+	}
+	return keys, nil
+}
+
+func indexScanPartKey(table relationalTableSource, part catalog.IndexPart, row []string) (string, error) {
+	if part.Expression != "" {
+		value, err := evaluateRelationExpression(part.Expression, table.columns, relationRow{values: row})
+		if err != nil || value.isNull() {
+			return "", err
+		}
+		return indexPrefixKey(value.render(), part.PrefixLength), nil
+	}
+	column := tableColumnIndex(table.table.Columns, part.Column)
+	if column < 0 || row[column] == storedSQLNullValue {
+		return "", nil
+	}
+	return indexPrefixKey(constraintColumnKey(table.table, column, row[column]), part.PrefixLength), nil
+}
+
+func orderedIndexRowBefore(left, right indexedRelationRow, index catalog.Index) bool {
+	for number, key := range left.keys {
+		if key == right.keys[number] {
+			continue
+		}
+		if index.Parts[number].Descending {
+			return key > right.keys[number]
+		}
+		return key < right.keys[number]
+	}
+	return false
+}
+
+func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int) relationRowIterator {
 	return func(yield relationRowYield) error {
 		matchedRight := make([]bool, len(join.right.table.Rows))
 		if err := left(func(row relationRow) error {
@@ -468,14 +708,14 @@ func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth 
 		if join.kind != "right" {
 			return nil
 		}
-		return yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, yield)
+		return yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, leftTables, yield)
 	}
 }
 
 func yieldJoinedRows(left relationRow, join relationalJoin, matchedRight []bool, yield relationRowYield) error {
 	matched := false
 	for rightIndex, values := range join.right.table.Rows {
-		candidate := relationRow{values: append(append([]string(nil), left.values...), values...)}
+		candidate := relationRow{values: append(append([]string(nil), left.values...), values...), lockKeys: append(append([]string(nil), left.lockKeys...), rowLockKey(values))}
 		ok, err := joinCandidateMatches(join, candidate)
 		if err != nil {
 			return err
@@ -494,25 +734,27 @@ func yieldJoinedRows(left relationRow, join relationalJoin, matchedRight []bool,
 	return nil
 }
 
-func yieldUnmatchedRight(rows [][]string, matched []bool, leftWidth int, yield relationRowYield) error {
+func yieldUnmatchedRight(rows [][]string, matched []bool, leftWidth, leftTables int, yield relationRowYield) error {
 	for index, values := range rows {
 		if matched[index] {
 			continue
 		}
-		if err := yield(appendNullLeft(values, leftWidth)); err != nil {
+		if err := yield(appendNullLeft(values, leftWidth, leftTables)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func appendNullLeft(right []string, width int) relationRow {
+func appendNullLeft(right []string, width, leftTables int) relationRow {
 	values := make([]string, width, width+len(right))
 	for index := range values {
 		values[index] = storedSQLNullValue
 	}
 	values = append(values, right...)
-	return relationRow{values: values}
+	lockKeys := make([]string, leftTables, leftTables+1)
+	lockKeys = append(lockKeys, rowLockKey(right))
+	return relationRow{values: values, lockKeys: lockKeys}
 }
 
 func joinCandidateMatches(join relationalJoin, row relationRow) (bool, error) {
@@ -527,5 +769,6 @@ func appendNullRight(left relationRow, width int) relationRow {
 	for index := 0; index < width; index++ {
 		values = append(values, storedSQLNullValue)
 	}
-	return relationRow{values: values}
+	lockKeys := append(append([]string(nil), left.lockKeys...), "")
+	return relationRow{values: values, lockKeys: lockKeys}
 }
