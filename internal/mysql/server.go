@@ -3820,6 +3820,8 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	if err != nil {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
 	}
+	finishExplanation := s.recordPreparedExplanation(statement)
+	defer finishExplanation()
 	result, err := queries.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
@@ -3831,6 +3833,56 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 		return writePacket(connection, sequence, okPacket(result.affected))
 	}
 	return writeBinaryResult(connection, sequence, result, s.server.config.MaxAllowedPacket)
+}
+
+// recordPreparedExplanation plans a value-free copy of the prepared SQL. The
+// executable query can contain bound values, but the public document must not.
+func (s *preparedExecution) recordPreparedExplanation(statement *preparedStatement) func() {
+	if statement == nil || s.session == nil {
+		return func() {}
+	}
+	maskedValues := make([]string, statement.parameters)
+	for index := range maskedValues {
+		maskedValues[index] = "0"
+	}
+	maskedQuery, err := bindPreparedQuery(statement.query, maskedValues)
+	if err != nil {
+		return func() {}
+	}
+	started := time.Now()
+	planner := textStatementExecutor{session: s.session}
+	plan, err := planner.planExplanation(maskedQuery)
+	if err != nil {
+		return func() {}
+	}
+	plan.Timing.PlanningMS = float64(time.Since(started)) / float64(time.Millisecond)
+	plan.Statement.SQL = statement.query
+	plan.Statement.Parameters = preparedExplanationParameters(statement.types)
+	return s.server.explanations.begin(s.session.connectionID, plan, s.session)
+}
+
+func preparedExplanationParameters(types []preparedParameterType) []queryexplanation.Parameter {
+	parameters := make([]queryexplanation.Parameter, len(types))
+	for index, parameter := range types {
+		parameters[index] = queryexplanation.Parameter{Position: index + 1, Type: preparedExplanationType(parameter)}
+	}
+	return parameters
+}
+
+var preparedExplanationTypes = map[byte]string{
+	mysqlTypeTiny: "TINYINT", mysqlTypeShort: "SMALLINT",
+	mysqlTypeLong: "INT", mysqlTypeInt24: "INT", mysqlTypeLongLong: "BIGINT",
+	mysqlTypeFloat: "FLOAT", mysqlTypeDouble: "DOUBLE",
+	mysqlTypeDate: "DATE", mysqlTypeDatetime: "DATETIME", mysqlTypeTimestamp: "TIMESTAMP", mysqlTypeTime: "TIME",
+	mysqlTypeJSON: "JSON", mysqlTypeNewDecimal: "DECIMAL",
+	mysqlTypeBlob: "BLOB", mysqlTypeTinyBlob: "BLOB", mysqlTypeMediumBlob: "BLOB", mysqlTypeLongBlob: "BLOB",
+}
+
+func preparedExplanationType(parameter preparedParameterType) string {
+	if typeName, found := preparedExplanationTypes[parameter.typ]; found {
+		return typeName
+	}
+	return "VARCHAR"
 }
 
 func (s *preparedExecution) preparedValues(payload []byte, statement *preparedStatement) ([]string, error) {

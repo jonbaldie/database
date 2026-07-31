@@ -39,7 +39,7 @@ func SetOperation(operation string, all bool, left, right *Operator) *Operator {
 
 // MaterializedInput records a composed SELECT input and the SQL construct that
 // introduced it. The materialized input executes before its consumer.
-func MaterializedInput(primary, input *Operator, reason, clause, fragment string) *Operator {
+func MaterializedInput(primary, input *Operator, reason, clause, fragment string, runtimeKeys ...string) *Operator {
 	predicates := []Predicate{}
 	if clause != "" && fragment != "" {
 		predicates = append(predicates, Predicate{
@@ -47,7 +47,7 @@ func MaterializedInput(primary, input *Operator, reason, clause, fragment string
 			Sources: []PredicateSource{{Clause: clause, Fragment: fragment}},
 		})
 	}
-	return &Operator{
+	operator := &Operator{
 		Kind:       "materialize",
 		Summary:    "Materialize the composed query input for this statement.",
 		Operation:  materializeOperation{Reason: reason},
@@ -58,11 +58,13 @@ func MaterializedInput(primary, input *Operator, reason, clause, fragment string
 		},
 		Output: primary.Output, Warnings: []Warning{}, Children: []*Operator{input, primary},
 	}
+	operator.RuntimeKey = firstRuntimeKey(runtimeKeys)
+	return operator
 }
 
 // AdditionalMaterializedInput appends another pre-consumer materialization to
 // an existing composed-input sequence without reversing source order.
-func AdditionalMaterializedInput(primary, input *Operator, reason, clause, fragment string) *Operator {
+func AdditionalMaterializedInput(primary, input *Operator, reason, clause, fragment string, runtimeKeys ...string) *Operator {
 	predicates := []Predicate{}
 	if clause != "" && fragment != "" {
 		predicates = append(predicates, Predicate{
@@ -75,20 +77,29 @@ func AdditionalMaterializedInput(primary, input *Operator, reason, clause, fragm
 		Operation: materializeOperation{Reason: reason}, Predicates: predicates,
 		Estimates: input.Estimates, Output: input.Output, Warnings: []Warning{}, Children: []*Operator{input},
 	}
+	materialized.RuntimeKey = firstRuntimeKey(runtimeKeys)
 	insertExecutionInput(primary, materialized)
 	return primary
 }
 
 // ReusedInput records a read from an earlier statement-scoped materialization.
-func ReusedInput(primary *Operator, columns []string) *Operator {
+func ReusedInput(primary *Operator, columns []string, runtimeKeys ...string) *Operator {
 	reused := &Operator{
 		Kind: "materialize", Summary: "Read the statement-scoped materialized input.",
 		Operation: materializeOperation{Reason: "reuse"}, Estimates: Estimates{},
 		Output:   Output{Columns: append([]string(nil), columns...), Ordering: []OrderingTerm{}, UniqueKeys: [][]string{}},
 		Warnings: []Warning{}, Children: []*Operator{},
 	}
+	reused.RuntimeKey = firstRuntimeKey(runtimeKeys)
 	insertExecutionInput(primary, reused)
 	return primary
+}
+
+func firstRuntimeKey(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[0]
 }
 
 func insertExecutionInput(primary, input *Operator) {
@@ -102,12 +113,12 @@ func insertExecutionInput(primary, input *Operator) {
 }
 
 // DependentInput records a correlated subquery evaluated for each outer row.
-func DependentInput(primary, input *Operator, clause, fragment string) *Operator {
+func DependentInput(primary, input *Operator, clause, fragment string, runtimeKeys ...string) *Operator {
 	predicates := []Predicate{{
 		Role: "join", Expression: fragment,
 		Sources: []PredicateSource{{Clause: clause, Fragment: fragment}},
 	}}
-	return &Operator{
+	operator := &Operator{
 		Kind: "join", Summary: "Evaluate the correlated subquery for each outer row.",
 		Operation: joinOperation{JoinType: "left"}, Predicates: predicates,
 		Estimates: Estimates{
@@ -116,6 +127,8 @@ func DependentInput(primary, input *Operator, clause, fragment string) *Operator
 		},
 		Output: primary.Output, Warnings: []Warning{}, Children: []*Operator{primary, input},
 	}
+	operator.RuntimeKey = firstRuntimeKey(runtimeKeys)
+	return operator
 }
 
 // OrderedInput adds the global ORDER BY of a set expression.

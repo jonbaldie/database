@@ -128,6 +128,59 @@ func TestExplainAnalyzeReportsCompletedRuntimeEvidence(t *testing.T) {
 	}
 }
 
+func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testing.T) {
+	executor := explainExecutor(t)
+	for _, statement := range []string{
+		"CREATE TABLE customers (id BIGINT, name VARCHAR(20))",
+		"INSERT INTO customers (id, name) VALUES (7, 'Ada')",
+		"INSERT INTO orders (id, customer_id, total) VALUES (2, 7, 20)",
+	} {
+		if _, err := executor.execute(statement); err != nil {
+			t.Fatalf("seed %q: %v", statement, err)
+		}
+	}
+	queries := map[string]string{
+		"join":      "SELECT orders.id, customers.name FROM orders JOIN customers ON orders.customer_id = customers.id",
+		"aggregate": "SELECT customer_id, COUNT(*) AS order_count FROM orders GROUP BY customer_id HAVING COUNT(*) > 0",
+		"window":    "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS ordinal FROM orders",
+		"cte":       "WITH order_ids AS (SELECT id FROM orders) SELECT id FROM order_ids UNION SELECT id FROM orders",
+		"derived":   "SELECT id FROM (SELECT id FROM orders) AS nested UNION SELECT id FROM orders",
+		"subquery":  "SELECT id, (SELECT id FROM orders LIMIT 1) AS other_id FROM orders UNION SELECT id, id FROM orders",
+		"set":       "SELECT id FROM orders UNION SELECT id FROM orders UNION SELECT id FROM orders ORDER BY id DESC LIMIT 2",
+	}
+	for name, query := range queries {
+		t.Run(name, func(t *testing.T) {
+			result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON " + query)
+			if err != nil {
+				t.Fatalf("analyze: %v", err)
+			}
+			var document map[string]any
+			if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+				t.Fatalf("decode analysis: %v", err)
+			}
+			assertCompletedOperatorEvidence(t, document["plan"].(map[string]any))
+		})
+	}
+}
+
+func assertCompletedOperatorEvidence(t *testing.T, operator map[string]any) {
+	t.Helper()
+	actual, found := operator["actual"].(map[string]any)
+	if !found {
+		t.Fatalf("%s operator has no actual evidence: %#v", operator["kind"], operator)
+	}
+	if warnings, found := actual["warnings"].([]any); found {
+		for _, warning := range warnings {
+			if warning.(map[string]any)["code"] == "RUNTIME_OPERATOR_NOT_INVOKED" {
+				t.Fatalf("%s operator lacks observed evidence: %#v", operator["kind"], actual)
+			}
+		}
+	}
+	for _, child := range operator["children"].([]any) {
+		assertCompletedOperatorEvidence(t, child.(map[string]any))
+	}
+}
+
 func TestExplainAnalyzeRejectsWritesAndLockingReads(t *testing.T) {
 	executor := explainExecutor(t)
 	for _, query := range []string{

@@ -62,9 +62,20 @@ type SnapshotDetails struct {
 	CapturedAt   string `json:"captured_at"`
 }
 
+// OperatorIdentity holds the public tree identifier and its private executor
+// identity. Keeping them together prevents runtime bookkeeping from widening
+// the public operator model.
+type OperatorIdentity struct {
+	ID int `json:"id"`
+	// RuntimeKey is an executor-only identity. It is deliberately excluded from
+	// the public document so runtime evidence can be joined to this exact
+	// physical operator without exposing internal bookkeeping.
+	RuntimeKey string `json:"-"`
+}
+
 // Operator is one physical operator in the explanation tree.
 type Operator struct {
-	ID            int               `json:"id"`
+	OperatorIdentity
 	Kind          string            `json:"kind"`
 	Summary       string            `json:"summary"`
 	Operation     any               `json:"operation"`

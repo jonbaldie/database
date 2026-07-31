@@ -526,32 +526,45 @@ func nonNegativeLimitValue(text string) (int, error) {
 func maxIntValue() int { return int(^uint(0) >> 1) }
 
 func (p *relationalSelectPlan) shapeRows(rows []relationalResultRow) []relationalResultRow {
-	metrics := p.session.runtimeMetrics
 	if p.distinct {
 		started := time.Now()
 		input := len(rows)
 		rows = distinctRelationalRows(rows, true, p.projection, p.source.columns)
-		if metrics != nil {
-			metrics.Record("distinct", input, len(rows), input-len(rows), 0, 0, resultMemory(rows), time.Since(started))
+		if p.runtime != nil {
+			p.runtime.record(p.runtime.distinct, input, len(rows), input-len(rows), 0, 0, resultMemory(rows), time.Since(started))
 		}
 	}
 	if len(p.order) > 0 {
 		started := time.Now()
 		input := len(rows)
 		rows = sortRelationalRows(rows, p.order, p.source.columns)
-		if metrics != nil {
-			metrics.Record("sort", input, len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
+		if p.runtime != nil {
+			p.runtime.record(firstOperatorID(p.runtime.sorts), input, len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
 		}
 	}
 	if p.limit.present {
 		started := time.Now()
 		input := len(rows)
 		rows = limitRelationalRows(rows, p.limit)
-		if metrics != nil {
-			metrics.Record("limit", input, len(rows), input-len(rows), 0, 0, 0, time.Since(started))
+		if p.runtime != nil {
+			p.runtime.record(p.runtime.limit, input, len(rows), input-len(rows), 0, 0, 0, time.Since(started))
 		}
 	}
 	return rows
+}
+
+func firstOperatorID(ids []int) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	return ids[0]
+}
+
+func lastOperatorID(ids []int) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	return ids[len(ids)-1]
 }
 
 func sortRelationalRows(rows []relationalResultRow, orders []relationalOrder, columns []relationColumn) []relationalResultRow {

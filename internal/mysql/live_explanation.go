@@ -62,7 +62,7 @@ func (r *activeExplanationRegistry) snapshot(connectionID uint32) (*queryexplana
 	now := time.Now()
 	lockWait := time.Duration(0)
 	if entry.session != nil {
-		lockWait = entry.session.server.locks.waitDuration(entry.session, now)
+		lockWait = lockWaitDuration(entry.session.server.locks, entry.session, now)
 	}
 	return queryexplanation.SnapshotWithMetrics(entry.plan, connectionID, now, now.Sub(entry.started), lockWait, entry.metrics), true
 }

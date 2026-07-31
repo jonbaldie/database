@@ -11,7 +11,8 @@ import (
 type RuntimeMetrics struct {
 	mu          sync.RWMutex
 	operatorIDs map[string][]int
-	seen        map[string]int
+	predicates  map[string][]int
+	operatorKey map[string]int
 	operators   map[int]Actual
 	rootID      int
 }
@@ -20,14 +21,15 @@ type RuntimeMetrics struct {
 func NewRuntimeMetrics(plan *Document) *RuntimeMetrics {
 	metrics := &RuntimeMetrics{
 		operatorIDs: make(map[string][]int),
-		seen:        make(map[string]int),
+		predicates:  make(map[string][]int),
+		operatorKey: make(map[string]int),
 		operators:   make(map[int]Actual),
 	}
-	metrics.rootID = collectOperatorIDs(plan, metrics.operatorIDs)
+	metrics.rootID = collectOperatorIDs(plan, metrics.operatorIDs, metrics.predicates, metrics.operatorKey)
 	return metrics
 }
 
-func collectOperatorIDs(document *Document, operatorIDs map[string][]int) int {
+func collectOperatorIDs(document *Document, operatorIDs, predicates map[string][]int, operatorKey map[string]int) int {
 	if document == nil {
 		return 0
 	}
@@ -37,6 +39,12 @@ func collectOperatorIDs(document *Document, operatorIDs map[string][]int) int {
 			return
 		}
 		operatorIDs[operator.Kind] = append(operatorIDs[operator.Kind], operator.ID)
+		if operator.RuntimeKey != "" {
+			operatorKey[operator.RuntimeKey] = operator.ID
+		}
+		for _, predicate := range operator.Predicates {
+			predicates[predicate.Role] = append(predicates[predicate.Role], operator.ID)
+		}
 		for _, child := range operator.Children {
 			visit(child)
 		}
@@ -48,21 +56,46 @@ func collectOperatorIDs(document *Document, operatorIDs map[string][]int) int {
 	return document.Plan.ID
 }
 
-// Record adds observed evidence to the next physical operator of kind. The
-// executor calls it once for each measured pipeline stage.
-func (m *RuntimeMetrics) Record(kind string, inputRows, outputRows, filteredRows, logicalReads, bytesRead, peakMemoryBytes int, elapsed time.Duration) {
+// OperatorID returns the ID assigned to one planned executor identity.
+func (m *RuntimeMetrics) OperatorID(key string) int {
+	if m == nil || key == "" {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.operatorKey[key]
+}
+
+// OperatorIDs returns the physical operator IDs of kind in tree order.
+func (m *RuntimeMetrics) OperatorIDs(kind string) []int {
 	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]int(nil), m.operatorIDs[kind]...)
+}
+
+// PredicateOperatorIDs returns the physical filter or join IDs that use role,
+// in tree order.
+func (m *RuntimeMetrics) PredicateOperatorIDs(role string) []int {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]int(nil), m.predicates[role]...)
+}
+
+// RecordOperator adds evidence to one physical operator. Callers must retain
+// the ID selected while they build the matching executable plan. This avoids
+// assigning a repeated invocation to a different operator of the same kind.
+func (m *RuntimeMetrics) RecordOperator(id, inputRows, outputRows, filteredRows, logicalReads, bytesRead, peakMemoryBytes int, elapsed time.Duration) {
+	if m == nil || id == 0 {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	ids := m.operatorIDs[kind]
-	index := m.seen[kind]
-	if index >= len(ids) {
-		return
-	}
-	m.seen[kind] = index + 1
-	id := ids[index]
 	actual := m.operators[id]
 	actual.Invocations++
 	actual.InputRows += inputRows

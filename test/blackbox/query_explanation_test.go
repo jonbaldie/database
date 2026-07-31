@@ -131,7 +131,47 @@ func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	mustQueryResult(t, <-blocked, "blocked write after live explanation")
 	mustQuery(t, writer, "COMMIT")
 
+	preparedWriter := newWireClient(t, address, "admin", "explanation-secret")
+	defer preparedWriter.close()
+	mustQuery(t, preparedWriter, "USE explanation")
+	mustQuery(t, owner, "BEGIN")
+	mustQuery(t, owner, "SELECT id FROM orders WHERE id = 1 FOR UPDATE")
+	mustQuery(t, preparedWriter, "BEGIN")
+	prepared := preparedWriter.prepare("SELECT id FROM orders WHERE id = ? FOR UPDATE")
+	if prepared.err != "" {
+		t.Fatalf("prepare live statement: %#v", prepared)
+	}
+	defer preparedWriter.closePrepared(prepared.id)
+	preparedBlocked := executePreparedAsync(preparedWriter, prepared.id, []preparedParameter{{typ: 0x03, value: []byte{1, 0, 0, 0}}})
+	mustRemainBlocked(t, preparedBlocked)
+	preparedSnapshot := observer.query("EXPLAIN FORMAT=JSON FOR CONNECTION " + strconv.FormatUint(uint64(preparedWriter.connectionID), 10))
+	if preparedSnapshot.err != "" || len(preparedSnapshot.rows) != 1 {
+		t.Fatalf("prepared live explanation: %#v", preparedSnapshot)
+	}
+	var preparedDocument map[string]any
+	if err := json.Unmarshal([]byte(preparedSnapshot.rows[0][0]), &preparedDocument); err != nil {
+		t.Fatalf("decode prepared live explanation: %v", err)
+	}
+	preparedStatement := preparedDocument["statement"].(map[string]any)
+	if preparedStatement["sql"] != "SELECT id FROM orders WHERE id = ? FOR UPDATE" {
+		t.Fatalf("prepared explanation SQL: %#v", preparedStatement)
+	}
+	parameters := preparedStatement["parameters"].([]any)
+	if len(parameters) != 1 || parameters[0].(map[string]any)["position"] != float64(1) || parameters[0].(map[string]any)["type"] != "INT" {
+		t.Fatalf("prepared explanation parameters: %#v", parameters)
+	}
+	mustRemainBlocked(t, preparedBlocked)
+	mustQuery(t, owner, "COMMIT")
+	mustQueryResult(t, <-preparedBlocked, "blocked prepared read after live explanation")
+	mustQuery(t, preparedWriter, "COMMIT")
+
 	if result := observer.query("EXPLAIN FOR CONNECTION 999999"); result.errCode != 1094 {
 		t.Fatalf("missing live connection: %#v", result)
 	}
+}
+
+func executePreparedAsync(client *wireClient, id uint32, parameters []preparedParameter) <-chan wireResult {
+	completed := make(chan wireResult, 1)
+	go func() { completed <- client.executePreparedValues(id, parameters) }()
+	return completed
 }

@@ -31,8 +31,8 @@ func TestAnalyzeAddsCompleteRuntimeEvidence(t *testing.T) {
 func TestTabularRuntimeProjectionIncludesAllRequiredEvidence(t *testing.T) {
 	plan := PlanSelect("0.1.0", "SELECT id FROM orders", "app", Select{Table: ordersTable(), Columns: []string{"id"}})
 	metrics := NewRuntimeMetrics(plan)
-	metrics.Record("scan", 0, 3, 0, 3, 24, 0, time.Millisecond)
-	metrics.Record("project", 3, 3, 0, 0, 0, 72, time.Millisecond)
+	metrics.RecordOperator(metrics.OperatorIDs("scan")[0], 0, 3, 0, 3, 24, 0, time.Millisecond)
+	metrics.RecordOperator(metrics.OperatorIDs("project")[0], 3, 3, 0, 0, 0, 72, time.Millisecond)
 	metrics.SetRoot(3, 72, 2*time.Millisecond, 0, true)
 	tabular := RenderTabular(AnalyzeWithMetrics(plan, 2*time.Millisecond, metrics))
 

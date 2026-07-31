@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"strings"
+	"time"
 )
 
 // conversation owns one accepted connection from greeting through cleanup.
@@ -190,11 +191,13 @@ func (c *conversation) recordActiveExplanation(query string) func() {
 	if query == "" || c.session == nil {
 		return func() {}
 	}
+	started := time.Now()
 	planner := textStatementExecutor{session: c.session}
 	plan, err := planner.planExplanation(query)
 	if err != nil {
 		return func() {}
 	}
+	plan.Timing.PlanningMS = float64(time.Since(started)) / float64(time.Millisecond)
 	return c.server.explanations.begin(c.session.connectionID, plan, c.session)
 }
 

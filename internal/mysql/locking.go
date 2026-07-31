@@ -240,10 +240,13 @@ func (m *lockManager) release(session *session) {
 	m.mu.Unlock()
 }
 
-func (m *lockManager) waitDuration(session *session, now time.Time) time.Duration {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	started, waiting := m.waitingSince[session]
+func lockWaitDuration(manager *lockManager, session *session, now time.Time) time.Duration {
+	if manager == nil || session == nil {
+		return 0
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	started, waiting := manager.waitingSince[session]
 	if !waiting {
 		return 0
 	}

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/queryexplanation"
@@ -1251,6 +1252,7 @@ func windowOrderKey(orders []queryexplanation.Order) string {
 }
 
 func (p *relationalSelectPlan) applyWindowsToGroupedRows(rows []relationalResultRow) ([]relationalResultRow, error) {
+	started := time.Now()
 	if err := p.applyWindows(rows); err != nil {
 		return nil, err
 	}
@@ -1258,6 +1260,9 @@ func (p *relationalSelectPlan) applyWindowsToGroupedRows(rows []relationalResult
 		if err := p.projectAggregateOrderValues(rows[index].group, &rows[index]); err != nil {
 			return nil, err
 		}
+	}
+	if p.runtime != nil {
+		p.runtime.record(p.runtime.window, len(rows), len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
 	}
 	return rows, nil
 }
@@ -1272,8 +1277,11 @@ func (p *relationalSelectPlan) hasAggregate() bool {
 }
 
 func collectFilteredSourceRows(plan *relationalSelectPlan) ([]relationRow, error) {
+	started := time.Now()
+	inputRows := 0
 	rows := make([]relationRow, 0)
 	err := plan.forEachSourceRow(func(row relationRow) error {
+		inputRows++
 		if plan.where == nil {
 			rows = append(rows, row)
 			return nil
@@ -1284,10 +1292,14 @@ func collectFilteredSourceRows(plan *relationalSelectPlan) ([]relationRow, error
 		}
 		return err
 	})
+	if err == nil && plan.runtime != nil && plan.where != nil {
+		plan.runtime.record(plan.runtime.whereFilter, inputRows, len(rows), inputRows-len(rows), 0, 0, 0, time.Since(started))
+	}
 	return rows, err
 }
 
 func collectGroupedRows(plan *relationalSelectPlan, sourceRows []relationRow) ([]relationalResultRow, error) {
+	started := time.Now()
 	groups, err := groupSourceRows(plan, sourceRows)
 	if err != nil {
 		return nil, err
@@ -1305,6 +1317,13 @@ func collectGroupedRows(plan *relationalSelectPlan, sourceRows []relationRow) ([
 		if matched {
 			result = append(result, row)
 		}
+	}
+	if plan.runtime != nil {
+		plan.runtime.record(plan.runtime.aggregate, len(sourceRows), len(groups), 0, 0, 0, resultMemory(result), time.Since(started))
+		if plan.aggregation.having != "" {
+			plan.runtime.record(plan.runtime.havingFilter, len(groups), len(result), len(groups)-len(result), 0, 0, 0, time.Since(started))
+		}
+		plan.runtime.record(plan.runtime.project, len(result), len(result), 0, 0, 0, resultMemory(result), time.Since(started))
 	}
 	return result, nil
 }
@@ -1621,6 +1640,7 @@ func (p *relationalSelectPlan) projectAggregateOrderValues(group []relationRow, 
 }
 
 func collectWindowRows(plan *relationalSelectPlan, sourceRows []relationRow) ([]relationalResultRow, error) {
+	started := time.Now()
 	rows := make([]relationalResultRow, len(sourceRows))
 	for index, source := range sourceRows {
 		row, err := plan.projectWindowBaseRow(source)
@@ -1631,6 +1651,10 @@ func collectWindowRows(plan *relationalSelectPlan, sourceRows []relationRow) ([]
 	}
 	if err := plan.applyWindows(rows); err != nil {
 		return nil, err
+	}
+	if plan.runtime != nil {
+		plan.runtime.record(plan.runtime.window, len(sourceRows), len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
+		plan.runtime.record(plan.runtime.project, len(rows), len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
 	}
 	return rows, nil
 }
@@ -1745,10 +1769,14 @@ func (p *relationalSelectPlan) sortWindowPartitions(rows []relationalResultRow, 
 	if len(spec.order) == 0 {
 		return nil
 	}
+	started := time.Now()
 	for _, partition := range partitions {
 		if err := p.sortWindowPartition(rows, partition, spec); err != nil {
 			return err
 		}
+	}
+	if p.runtime != nil {
+		p.runtime.record(lastOperatorID(p.runtime.sorts), len(rows), len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
 	}
 	return nil
 }
