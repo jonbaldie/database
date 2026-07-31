@@ -340,8 +340,8 @@ func (r *connectionRegistry) revokeAccount(name string) {
 	}
 	r.mu.Unlock()
 	for _, conversation := range sessions {
-		conversation.revoked.Store(true)
-		if !conversation.running.Load() {
+		conversation.control.revoked.Store(true)
+		if !conversation.control.running.Load() {
 			_ = conversation.connection.Close()
 		}
 	}
@@ -914,10 +914,7 @@ func (s *textStatementExecutor) operationStatement(query, lower string) (*queryR
 		result, err := s.explainStatement(query)
 		return result, true, err
 	}
-	if strings.HasPrefix(lower, "show processlist") {
-		return &queryResult{columns: []string{"Id"}}, true, nil
-	}
-	return nil, false, nil
+	return s.sessionControlStatement(query, lower)
 }
 
 func (s *textStatementExecutor) transactionStatement(query, lower string) (*queryResult, bool, error) {

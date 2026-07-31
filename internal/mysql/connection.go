@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -20,10 +21,16 @@ type conversation struct {
 	execution         *preparedExecution
 	preparedLifecycle *preparedLifecycle
 	admitted          bool
-	watch             *statementWatch
 	connectionID      uint32
-	revoked           atomic.Bool
-	running           atomic.Bool
+	control           *conversationControl
+}
+
+type conversationControl struct {
+	watch       *statementWatch
+	watchMu     sync.Mutex
+	revoked     atomic.Bool
+	running     atomic.Bool
+	activeQuery atomic.Value
 }
 
 type pendingCommand struct {
@@ -32,8 +39,9 @@ type pendingCommand struct {
 }
 
 type statementWatch struct {
-	finished  chan *pendingCommand
-	cancelled chan struct{}
+	finished   chan *pendingCommand
+	cancelled  chan struct{}
+	cancelOnce sync.Once
 }
 
 const (
@@ -50,7 +58,10 @@ const (
 )
 
 func newConversation(server *Server, connection net.Conn) *conversation {
-	return &conversation{server: server, accepted: connection, connection: connection}
+	conversation := &conversation{server: server, accepted: connection, connection: connection,
+		control: &conversationControl{}}
+	conversation.control.activeQuery.Store("")
+	return conversation
 }
 
 func (c *conversation) serve() {
@@ -116,12 +127,10 @@ func newSession(server *Server, authentication authenticationResult, connectionI
 }
 
 func (c *conversation) acceptCommand() bool {
-	if c.revoked.Load() {
+	if c.control.revoked.Load() {
 		return false
 	}
-	if c.watch != nil {
-		watch := c.watch
-		c.watch = nil
+	if watch := c.control.takeWatch(); watch != nil {
 		pending := <-watch.finished
 		if pending == nil {
 			return false
@@ -186,11 +195,14 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	if !c.server.connections.beginStatement() {
 		return false
 	}
-	c.running.Store(true)
-	defer c.running.Store(false)
+	c.control.running.Store(true)
+	defer c.control.running.Store(false)
+	c.control.activeQuery.Store(query)
+	defer c.control.activeQuery.Store("")
 	finishExplanation := c.recordActiveExplanation(query)
 	defer finishExplanation()
 	watch := c.watchStatement()
+	c.control.setWatch(watch)
 	c.session.statementCancel = watch.cancelled
 	config := c.server.config
 	config.ResourceLimits = c.session.resourceLimits()
@@ -205,9 +217,31 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 		c.session.statementCancel = nil
 	}()
 	err := run()
-	c.watch = watch
 	c.server.connections.endStatement()
-	return err == nil && !c.revoked.Load()
+	return err == nil && !c.control.revoked.Load()
+}
+
+func (c *conversationControl) setWatch(watch *statementWatch) {
+	c.watchMu.Lock()
+	c.watch = watch
+	c.watchMu.Unlock()
+}
+
+func (c *conversationControl) takeWatch() *statementWatch {
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	watch := c.watch
+	c.watch = nil
+	return watch
+}
+
+func (c *conversationControl) cancelStatement() {
+	c.watchMu.Lock()
+	watch := c.watch
+	c.watchMu.Unlock()
+	if watch != nil {
+		watch.cancelOnce.Do(func() { close(watch.cancelled) })
+	}
 }
 
 func (c *conversation) recordActiveExplanation(query string) func() {
@@ -233,11 +267,11 @@ func (c *conversation) watchStatement() *statementWatch {
 	go func() {
 		sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
 		if err == nil && len(payload) > 0 {
-			close(watch.cancelled)
+			watch.cancelOnce.Do(func() { close(watch.cancelled) })
 			watch.finished <- &pendingCommand{sequence: sequence + 1, payload: payload}
 			return
 		}
-		close(watch.cancelled)
+		watch.cancelOnce.Do(func() { close(watch.cancelled) })
 		watch.finished <- nil
 	}()
 	return watch
