@@ -565,30 +565,27 @@ func (s *session) mutateTransactionCatalog(action func(*catalog.Definition) erro
 }
 
 func (s *session) mutateDurableCatalog(action func(*catalog.Definition) error) error {
-	definition, revision := s.server.config.Catalog.SnapshotWithRevision()
-	staged, err := catalog.Apply(definition, action)
-	if err != nil {
-		return err
-	}
-	if err := validateConstraintDefinition(definition, staged); err != nil {
-		return err
-	}
 	if err := s.checkStatementResources(); err != nil {
 		return err
 	}
-	if err := s.server.config.Catalog.ReplaceIfRevision(revision, staged); err != nil {
-		if errors.Is(err, catalog.ErrRevisionConflict) {
-			return sqlFailure{1213, "40001", "catalog changed concurrently; try restarting the transaction"}
+	return s.server.config.Catalog.ApplyDurable(func(base catalog.Definition) (catalog.Definition, error) {
+		if err := action(&base); err != nil {
+			return catalog.Definition{}, err
 		}
-		return err
-	}
-	return nil
+		if err := s.checkStatementResources(); err != nil {
+			return catalog.Definition{}, err
+		}
+		return base, nil
+	})
 }
 
 func catalogMutationFailure(err error, fallback sqlFailure) error {
 	var failure sqlFailure
 	if errors.As(err, &failure) {
 		return err
+	}
+	if strings.Contains(err.Error(), "duplicate key") {
+		return sqlFailure{1062, "23000", "Duplicate entry for key 'PRIMARY'"}
 	}
 	fallback.message = err.Error()
 	return fallback
@@ -623,7 +620,15 @@ func (s *transactionExecutor) commitWithPublicationBoundary(finalize bool) error
 		if err := s.checkStatementResources(); err != nil {
 			return err
 		}
-		if err := s.server.config.Catalog.ReplaceIfRevision(s.transactionRevision, s.transactionSnapshot); err != nil {
+		mutations := append([]func(*catalog.Definition) error(nil), s.transactionMutations...)
+		if err := s.server.config.Catalog.ApplyDurable(func(base catalog.Definition) (catalog.Definition, error) {
+			for _, mutation := range mutations {
+				if err := mutation(&base); err != nil {
+					return catalog.Definition{}, err
+				}
+			}
+			return base, nil
+		}); err != nil {
 			s.finishTransaction()
 			if errors.Is(err, catalog.ErrRevisionConflict) {
 				return sqlFailure{1213, "40001", "Deadlock found when trying to get lock; try restarting transaction"}

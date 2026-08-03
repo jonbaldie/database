@@ -32,7 +32,7 @@ import (
 // intentionally not part of the server configuration registry or public
 // compatibility profile; MaxConnections remains the session ceiling.
 const (
-	maximumPendingConnections = 16
+	maximumPendingConnections = 128
 	clientLongPassword        = 1
 	clientFoundRows           = 1 << 1
 	clientLongFlag            = 1 << 2
@@ -206,6 +206,7 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 			_ = listener.Close()
 			return nil, err
 		}
+		config.Catalog.SetPublishValidator(validateConstraintDefinition)
 	}
 	return &Server{
 		Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout),
@@ -528,10 +529,11 @@ type statementState struct {
 }
 
 type preparedStatement struct {
-	query      string
-	parameters int
-	types      []preparedParameterType
-	longData   map[uint16][]byte
+	query        string
+	parameters    int
+	types        []preparedParameterType
+	longData     map[uint16][]byte
+	explanation  *queryexplanation.Document
 }
 
 type preparedParameterType struct {
@@ -1724,11 +1726,14 @@ func mutateTableRows(definition *catalog.Definition, namespaceName, tableName st
 	if !found {
 		return errors.New("table does not exist")
 	}
+	previousLength := len(table.Rows)
+	previousIndex := table.PrimaryIndex
 	rows, err := transform(table)
 	if err != nil {
 		return err
 	}
-	table.Rows = cloneRows(rows)
+	table.Rows = rows
+	catalog.MaintainPrimaryIndex(&table, previousLength, previousIndex)
 	namespace.Tables[catalog.Key(tableName)] = table
 	definition.Namespaces[catalog.Key(namespaceName)] = namespace
 	return nil
@@ -1746,15 +1751,13 @@ func insertRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	_, affected, err := applyInsertPlan(plan)
-	if err != nil {
-		return 0, err
-	}
+	var affected uint64
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
 			currentPlan := plan
 			currentPlan.table = table
-			rows, _, err := applyInsertPlan(currentPlan)
+			rows, count, err := applyInsertPlan(currentPlan)
+			affected = count
 			return rows, err
 		})
 	}
@@ -2420,7 +2423,7 @@ func insertColumnIndexes(table catalog.Table, columns []string) ([]int, error) {
 }
 
 func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
-	rows := cloneRows(plan.table.Rows)
+	added := make([][]string, 0, len(plan.groups))
 	rowNumber := 1
 	for _, group := range plan.groups {
 		if len(group) != len(plan.columns) {
@@ -2435,10 +2438,16 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 			}
 			row[columnIndex] = canonical
 		}
-		rows = append(rows, row)
+		added = append(added, row)
 		rowNumber++
 	}
-	return rows, uint64(len(plan.groups)), nil
+	rows := plan.table.Rows
+	if cap(rows) < len(rows)+len(added) {
+		owned := make([][]string, len(rows), len(rows)+len(added)+256)
+		copy(owned, rows)
+		rows = owned
+	}
+	return append(rows, added...), uint64(len(added)), nil
 }
 
 func defaultTableRow(table catalog.Table) []string {
@@ -2582,7 +2591,13 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := s.acquireWriteLocks(matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)); err != nil {
+	locks := matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)
+	if plan.primaryKey != "" {
+		if row, ok := pointUpdateRow(plan); ok {
+			locks = []rowLockResource{{namespace: plan.namespace, table: plan.name, key: rowLockKey(row)}}
+		}
+	}
+	if err := s.acquireWriteLocks(locks); err != nil {
 		return 0, err
 	}
 	_, affected, err := applyUpdatePlan(plan)
@@ -2603,11 +2618,21 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	return affected, nil
 }
 
+func pointUpdateRow(plan updatePlan) ([]string, bool) {
+	index := catalog.EnsurePrimaryIndex(&plan.table)
+	position, ok := index[plan.primaryKey]
+	if !ok || position < 0 || position >= len(plan.table.Rows) {
+		return nil, false
+	}
+	return plan.table.Rows[position], true
+}
+
 type updatePlan struct {
 	namespace, name string
 	table           catalog.Table
 	updates         map[int]string
 	matcher         func([]string) bool
+	primaryKey      string
 	offsetMinutes   int
 }
 
@@ -2636,7 +2661,11 @@ func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
 	if err != nil {
 		return updatePlan{}, err
 	}
-	return updatePlan{namespace: namespace, name: name, table: table, updates: updates, matcher: matcher, offsetMinutes: offsetMinutes}, nil
+	primaryKey := ""
+	if column, value, ok := parseSimpleEqualityWhere(where); ok && primaryColumn(table) == column {
+		primaryKey = value
+	}
+	return updatePlan{namespace: namespace, name: name, table: table, updates: updates, matcher: matcher, primaryKey: primaryKey, offsetMinutes: offsetMinutes}, nil
 }
 
 func parseUpdateInput(query string) (string, string, string, error) {
@@ -2691,23 +2720,82 @@ func applyUpdatePlan(plan updatePlan) ([][]string, uint64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	rows, affected := cloneRows(plan.table.Rows), uint64(0)
-	for rowIndex, row := range rows {
-		if !plan.matcher(row) {
-			continue
+	if key, ok := pointUpdatePrimaryKey(plan); ok {
+		return applyPointUpdatePlan(plan, updates, key)
+	}
+	changed := make([]int, 0)
+	for rowIndex, row := range plan.table.Rows {
+		if plan.matcher(row) {
+			changed = append(changed, rowIndex)
 		}
-		changed := false
+	}
+	if len(changed) == 0 {
+		return plan.table.Rows, 0, nil
+	}
+	rows := make([][]string, len(plan.table.Rows))
+	copy(rows, plan.table.Rows)
+	affected := uint64(0)
+	for _, rowIndex := range changed {
+		next := append([]string(nil), rows[rowIndex]...)
+		rowChanged := false
 		for column, value := range updates {
-			if rows[rowIndex][column] != value {
-				changed = true
+			if next[column] != value {
+				rowChanged = true
 			}
-			rows[rowIndex][column] = value
+			next[column] = value
 		}
-		if changed {
+		rows[rowIndex] = next
+		if rowChanged {
 			affected++
 		}
 	}
 	return rows, affected, nil
+}
+
+func pointUpdatePrimaryKey(plan updatePlan) (string, bool) {
+	if plan.matcher == nil {
+		return "", false
+	}
+	primary := ""
+	for _, constraint := range plan.table.Constraints {
+		if constraint.Type == catalog.ConstraintTypePrimary && len(constraint.Columns) == 1 {
+			primary = constraint.Columns[0]
+			break
+		}
+	}
+	if primary == "" {
+		return "", false
+	}
+	// Matcher closures from WHERE id = const are not introspectable; probe the
+	// primary index by testing candidate keys from a tiny synthetic row when the
+	// caller attached an exact primary value through makeUpdatePlan.
+	if plan.primaryKey == "" {
+		return "", false
+	}
+	return plan.primaryKey, true
+}
+
+func applyPointUpdatePlan(plan updatePlan, updates map[int]string, key string) ([][]string, uint64, error) {
+	index := catalog.EnsurePrimaryIndex(&plan.table)
+	position, ok := index[key]
+	if !ok {
+		return plan.table.Rows, 0, nil
+	}
+	rows := make([][]string, len(plan.table.Rows))
+	copy(rows, plan.table.Rows)
+	next := append([]string(nil), rows[position]...)
+	changed := false
+	for column, value := range updates {
+		if next[column] != value {
+			changed = true
+		}
+		next[column] = value
+	}
+	rows[position] = next
+	if !changed {
+		return rows, 0, nil
+	}
+	return rows, 1, nil
 }
 
 // canonicalUpdates validates every assignment constant against its column type
@@ -3983,30 +4071,34 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	return writeBinaryResult(connection, sequence, result, s.server.config.MaxAllowedPacket)
 }
 
-// recordPreparedExplanation plans a value-free copy of the prepared SQL. The
-// executable query can contain bound values, but the public document must not.
+// recordPreparedExplanation plans a value-free copy of the prepared SQL once
+// per statement. The executable query can contain bound values, but the public
+// document must not.
 func (s *preparedExecution) recordPreparedExplanation(statement *preparedStatement) func() {
 	if statement == nil || s.session == nil {
 		return func() {}
 	}
-	maskedValues := make([]string, statement.parameters)
-	for index := range maskedValues {
-		maskedValues[index] = "0"
+	if statement.explanation == nil {
+		maskedValues := make([]string, statement.parameters)
+		for index := range maskedValues {
+			maskedValues[index] = "0"
+		}
+		maskedQuery, err := bindPreparedQuery(statement.query, maskedValues)
+		if err != nil {
+			return func() {}
+		}
+		started := time.Now()
+		planner := textStatementExecutor{session: s.session}
+		plan, err := planner.planExplanation(maskedQuery)
+		if err != nil {
+			return func() {}
+		}
+		plan.Timing.PlanningMS = float64(time.Since(started)) / float64(time.Millisecond)
+		plan.Statement.SQL = statement.query
+		plan.Statement.Parameters = preparedExplanationParameters(statement.types)
+		statement.explanation = plan
 	}
-	maskedQuery, err := bindPreparedQuery(statement.query, maskedValues)
-	if err != nil {
-		return func() {}
-	}
-	started := time.Now()
-	planner := textStatementExecutor{session: s.session}
-	plan, err := planner.planExplanation(maskedQuery)
-	if err != nil {
-		return func() {}
-	}
-	plan.Timing.PlanningMS = float64(time.Since(started)) / float64(time.Millisecond)
-	plan.Statement.SQL = statement.query
-	plan.Statement.Parameters = preparedExplanationParameters(statement.types)
-	return s.server.explanations.begin(s.session.connectionID, plan, s.session)
+	return s.server.explanations.begin(s.session.connectionID, statement.explanation, s.session)
 }
 
 func preparedExplanationParameters(types []preparedParameterType) []queryexplanation.Parameter {

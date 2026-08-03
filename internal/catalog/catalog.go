@@ -42,6 +42,7 @@ type Table struct {
 	Constraints      []Constraint      `json:"constraints,omitempty"`
 	Indexes          []Index           `json:"indexes,omitempty"`
 	Rows             [][]string        `json:"rows,omitempty"`
+	PrimaryIndex     map[string]int    `json:"-"`
 }
 
 // Index is one declared B-tree access path. Primary and unique constraints
@@ -112,17 +113,47 @@ func ColumnAttributeAt(t Table, index int) ColumnAttribute {
 }
 
 type Store struct {
-	mu         sync.Mutex
-	path       string
-	definition Definition
-	revision   uint64
+	mu                sync.Mutex
+	path              string
+	definition        Definition
+	revision          uint64
+	rows              rowEngine
+	writerOnce        sync.Once
+	writes            chan *writeRequest
+	publishValidator  func(previous, next Definition) error
+}
+
+// SetPublishValidator installs the SQL constraint check used before durable
+// publication. The catalog package only validates structural shape itself.
+func (s *Store) SetPublishValidator(validator func(previous, next Definition) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publishValidator = validator
+}
+
+// rowEngine is the durable row image used beside schema metadata.
+type rowEngine interface {
+	EnsureTable(namespace, name string, columns, primary []string, uniques [][]string) error
+	Begin() (rowTxn, error)
+	LookupPrimary(namespace, name, key string) ([]string, bool)
+	LookupUnique(namespace, name, column, key string) ([]string, bool)
+	SnapshotRows(namespace, name string) ([][]string, bool)
+	Close() error
+}
+
+type rowTxn interface {
+	Insert(namespace, name string, row []string) error
+	UpdatePrimary(namespace, name, primary string, row []string) error
+	DeletePrimary(namespace, name, primary string) error
+	Clear(namespace, name string) error
+	Commit() error
 }
 
 func Open(directory string) (*Store, error) {
 	s := &Store{path: filepath.Join(directory, "catalog.json"), definition: Definition{Namespaces: map[string]Namespace{}, Accounts: map[string]Account{}}}
 	b, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
-		return s, nil
+		return openWithRows(s, directory)
 	}
 	if err != nil {
 		return nil, err
@@ -139,7 +170,7 @@ func Open(directory string) (*Store, error) {
 	if err := validateDefinition(s.definition); err != nil {
 		return nil, fmt.Errorf("invalid catalog: %w", err)
 	}
-	return s, nil
+	return openWithRows(s, directory)
 }
 
 // Recover removes abandoned catalog snapshots left by an interrupted commit.
@@ -356,7 +387,11 @@ func cloneDefinition(source Definition) Definition {
 				ColumnAttributes: append([]ColumnAttribute(nil), definition.ColumnAttributes...),
 				Constraints:      CloneConstraints(definition.Constraints),
 				Indexes:          CloneIndexes(definition.Indexes),
-				Rows:             cloneRows(definition.Rows),
+				// Row images and primary indexes are immutable after publication.
+				// Snapshots share both so validators and point lookups stay O(1);
+				// writers copy the index before mutating it.
+				Rows:         sharedRowImage(definition.Rows),
+				PrimaryIndex: definition.PrimaryIndex,
 			}
 		}
 		copy.Namespaces[namespace] = cloned
@@ -396,6 +431,13 @@ func cloneRows(rows [][]string) [][]string {
 	return copy
 }
 
+func sharedRowImage(rows [][]string) [][]string {
+	if rows == nil {
+		return nil
+	}
+	return rows[:len(rows):len(rows)]
+}
+
 func (s *Store) mutate(action func(*Definition) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -406,29 +448,54 @@ func (s *Store) mutate(action func(*Definition) error) error {
 	if err := validateDefinition(staged); err != nil {
 		return fmt.Errorf("invalid catalog: %w", err)
 	}
+	if err := s.syncRowsLocked(s.definition, staged); err != nil {
+		return err
+	}
 	if err := s.persistLocked(staged); err != nil {
 		return err
 	}
+	warmPrimaryIndexes(staged)
 	s.definition = staged
 	s.revision++
 	return nil
 }
 
-func (s *Store) replaceLocked(definition Definition) error {
-	staged := cloneDefinition(definition)
-	if err := validateDefinition(staged); err != nil {
-		return fmt.Errorf("invalid catalog: %w", err)
+func sameSchema(left, right Definition) bool {
+	if len(left.Namespaces) != len(right.Namespaces) || len(left.Accounts) != len(right.Accounts) {
+		return false
 	}
-	if err := s.persistLocked(staged); err != nil {
-		return err
+	for key, namespace := range left.Namespaces {
+		other, ok := right.Namespaces[key]
+		if !ok || len(namespace.Tables) != len(other.Tables) {
+			return false
+		}
+		for tableKey, table := range namespace.Tables {
+			otherTable, ok := other.Tables[tableKey]
+			if !ok || !sameSchemaTable(table, otherTable) {
+				return false
+			}
+		}
 	}
-	s.definition = staged
-	s.revision++
-	return nil
+	return true
+}
+
+func sameSchemaTable(left, right Table) bool {
+	if len(left.Columns) != len(right.Columns) || len(left.ColumnTypes) != len(right.ColumnTypes) {
+		return false
+	}
+	if len(left.Constraints) != len(right.Constraints) || len(left.Indexes) != len(right.Indexes) {
+		return false
+	}
+	for index := range left.Columns {
+		if left.Columns[index] != right.Columns[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) persistLocked(definition Definition) error {
-	b, err := catalogJSON(definition)
+	b, err := catalogJSON(schemaOnly(definition))
 	if err != nil {
 		return err
 	}
@@ -441,6 +508,18 @@ func (s *Store) persistLocked(definition Definition) error {
 		return err
 	}
 	return syncCatalogDirectory(s.path)
+}
+
+func schemaOnly(definition Definition) Definition {
+	stripped := cloneDefinition(definition)
+	for namespaceKey, namespace := range stripped.Namespaces {
+		for tableKey, table := range namespace.Tables {
+			table.Rows = nil
+			namespace.Tables[tableKey] = table
+		}
+		stripped.Namespaces[namespaceKey] = namespace
+	}
+	return stripped
 }
 
 // Encode serializes one catalog definition in the durable on-disk JSON shape.

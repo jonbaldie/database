@@ -24,3 +24,30 @@ func TestRecoverRemovesAbandonedCatalogSnapshot(t *testing.T) {
 		t.Fatalf("abandoned catalog snapshot remains: %v", err)
 	}
 }
+
+func TestReplaceRowsClearAllowsReinsert(t *testing.T) {
+	directory := t.TempDir()
+	store, err := Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateNamespace("app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateTable("app", "items", []string{"id", "name"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Insert("app", "items", []string{"1", "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceRows("app", "items", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Insert("app", "items", []string{"1", "alpha"}); err != nil {
+		t.Fatalf("reinsert after clear: %v", err)
+	}
+	rows := store.Snapshot().Namespaces["app"].Tables["items"].Rows
+	if len(rows) != 1 || rows[0][0] != "1" {
+		t.Fatalf("rows after reinsert = %#v", rows)
+	}
+}

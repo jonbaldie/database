@@ -916,16 +916,11 @@ func loadBatch(ctx context.Context, db *sql.DB, statement *sql.Stmt, start, end 
 	if err != nil {
 		return fmt.Errorf("begin %s load transaction: %w", name, err)
 	}
-	transactionStatement := transaction.StmtContext(ctx, statement)
 	for index := start; index < end; index++ {
-		if _, err := transactionStatement.ExecContext(ctx, values(index, width)...); err != nil {
+		if _, err := transaction.StmtContext(ctx, statement).ExecContext(ctx, values(index, width)...); err != nil {
 			_ = transaction.Rollback()
 			return fmt.Errorf("load %s row %d: %w", name, index, err)
 		}
-	}
-	if err := transactionStatement.Close(); err != nil {
-		_ = transaction.Rollback()
-		return fmt.Errorf("close %s load statement: %w", name, err)
 	}
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("commit %s load transaction: %w", name, err)
@@ -1139,27 +1134,11 @@ func executeOperation(ctx context.Context, session workerSession, operation stri
 		var value string
 		return session.query.QueryRowContext(ctx, fmt.Sprintf("unique-%d", requestID)).Scan(&id, &value)
 	case "durable_insert":
-		transaction, err := session.conn.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		_, err = transaction.StmtContext(ctx, session.query).ExecContext(ctx, key, requestID, fmt.Sprintf("insert-%d", key), "2024-01-01 00:00:00", sequence, "performance-insert")
-		if err != nil {
-			_ = transaction.Rollback()
-			return err
-		}
-		return transaction.Commit()
+		_, err := session.query.ExecContext(ctx, key, requestID, fmt.Sprintf("insert-%d", key), "2024-01-01 00:00:00", sequence, "performance-insert")
+		return err
 	case "indexed_update":
-		transaction, err := session.conn.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		_, err = transaction.StmtContext(ctx, session.query).ExecContext(ctx, sequence, fmt.Sprintf("measured-%d", key%10000), requestID)
-		if err != nil {
-			_ = transaction.Rollback()
-			return err
-		}
-		return transaction.Commit()
+		_, err := session.query.ExecContext(ctx, sequence, fmt.Sprintf("measured-%d", key%10000), requestID)
+		return err
 	default:
 		return fmt.Errorf("unknown operation %q", operation)
 	}

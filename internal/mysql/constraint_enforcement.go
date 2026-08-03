@@ -17,7 +17,12 @@ func validateConstraintDefinition(previous, definition catalog.Definition) error
 		if namespaceName == "" {
 			namespaceName = namespaceKey
 		}
+		previousNamespace := previous.Namespaces[namespaceKey]
 		for tableKey, table := range namespace.Tables {
+			previousTable := previousNamespace.Tables[tableKey]
+			if samePublishedRows(previousTable.Rows, table.Rows) && sameTableShape(previousTable, table) {
+				continue
+			}
 			tableName := table.Name
 			if tableName == "" {
 				tableName = tableKey
@@ -28,6 +33,23 @@ func validateConstraintDefinition(previous, definition catalog.Definition) error
 		}
 	}
 	return nil
+}
+
+func samePublishedRows(left, right [][]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	if len(left) == 0 {
+		return true
+	}
+	return &left[0] == &right[0]
+}
+
+func sameTableShape(left, right catalog.Table) bool {
+	if len(left.Columns) != len(right.Columns) || len(left.Constraints) != len(right.Constraints) || len(left.Indexes) != len(right.Indexes) {
+		return false
+	}
+	return true
 }
 
 func validateTableConstraints(previous, definition catalog.Definition, namespaceName, tableName string, table catalog.Table) error {
@@ -41,8 +63,67 @@ func validateTableConstraints(previous, definition catalog.Definition, namespace
 	if err := validateConstraintDeclarations(previous, definition, namespaceName, tableName, table, indexes); err != nil {
 		return err
 	}
-	if err := validateUniqueIndexes(table, indexes); err != nil {
+	previousTable := previous.Namespaces[catalog.Key(namespaceName)].Tables[catalog.Key(tableName)]
+	if err := validateUniqueIndexesAgainstPrevious(previousTable, table, indexes); err != nil {
 		return err
+	}
+	return validateNotNullColumnsAgainstPrevious(previousTable, table, indexes)
+}
+
+func validateUniqueIndexesAgainstPrevious(previous, table catalog.Table, columns map[string]int) error {
+	for _, index := range table.Indexes {
+		if !index.Unique {
+			continue
+		}
+		if uniqueIndexUnchanged(previous, table, index, columns) {
+			continue
+		}
+		if err := validateUniqueIndex(table, index, columns); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func uniqueIndexUnchanged(previous, table catalog.Table, index catalog.Index, columns map[string]int) bool {
+	if len(previous.Rows) != len(table.Rows) {
+		return false
+	}
+	for rowIndex := range table.Rows {
+		if sameRowRef(previous.Rows[rowIndex], table.Rows[rowIndex]) {
+			continue
+		}
+		before, beforeNull, err := uniqueIndexRowKey(table, index, columns, previous.Rows[rowIndex])
+		if err != nil {
+			return false
+		}
+		after, afterNull, err := uniqueIndexRowKey(table, index, columns, table.Rows[rowIndex])
+		if err != nil || beforeNull != afterNull || before != after {
+			return false
+		}
+	}
+	return true
+}
+
+func validateNotNullColumnsAgainstPrevious(previous, table catalog.Table, indexes map[string]int) error {
+	if isAppendOnlyRows(previous.Rows, table.Rows) {
+		subset := table
+		subset.Rows = table.Rows[len(previous.Rows):]
+		return validateNotNullColumns(subset, indexes)
+	}
+	if len(previous.Rows) == len(table.Rows) {
+		changed := false
+		for index := range table.Rows {
+			if !sameRowRef(previous.Rows[index], table.Rows[index]) {
+				changed = true
+				if err := validateNotNullColumns(catalog.Table{Columns: table.Columns, ColumnAttributes: table.ColumnAttributes, Constraints: table.Constraints, Rows: [][]string{table.Rows[index]}}, indexes); err != nil {
+					return err
+				}
+			}
+		}
+		if changed {
+			return nil
+		}
 	}
 	return validateNotNullColumns(table, indexes)
 }
@@ -72,9 +153,10 @@ func validateConstraintDeclaration(seen map[string]bool, previous, definition ca
 }
 
 func validateConstraintRows(previous, definition catalog.Definition, namespaceName, tableName string, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
+	previousTable := previous.Namespaces[catalog.Key(namespaceName)].Tables[catalog.Key(tableName)]
 	switch constraint.Type {
 	case catalog.ConstraintTypePrimary, catalog.ConstraintTypeUnique:
-		return validateUniqueConstraint(table, constraint, indexes)
+		return validateUniqueConstraintAgainstPrevious(previousTable, table, constraint, indexes)
 	case catalog.ConstraintTypeCheck:
 		return validateCheckConstraint(namespaceName, tableName, table, constraint)
 	case catalog.ConstraintTypeForeignKey:
@@ -127,7 +209,7 @@ func validateNotNullColumns(table catalog.Table, indexes map[string]int) error {
 
 func validateUniqueConstraint(table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
 	columns := constraintIndexes(constraint.Columns, indexes)
-	seen := map[string]bool{}
+	seen := make(map[string]bool, len(table.Rows))
 	for _, row := range table.Rows {
 		key, nullable := constraintRowKey(table, row, columns)
 		if nullable && constraint.Type == catalog.ConstraintTypeUnique {
@@ -139,6 +221,127 @@ func validateUniqueConstraint(table catalog.Table, constraint catalog.Constraint
 		seen[key] = true
 	}
 	return nil
+}
+
+func validateUniqueConstraintAgainstPrevious(previous, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
+	if isAppendOnlyRows(previous.Rows, table.Rows) {
+		// The durable row engine rejects duplicate primary/unique keys when the
+		// batch is staged, so an O(n) rebuild here only burns publish latency.
+		return validateUniqueConstraintAppendNewKeys(previous, table, constraint, indexes)
+	}
+	if uniqueColumnsUnchanged(previous, table, constraint, indexes) {
+		return nil
+	}
+	return validateUniqueConstraint(table, constraint, indexes)
+}
+
+func validateUniqueConstraintAppendNewKeys(previous, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
+	columns := constraintIndexes(constraint.Columns, indexes)
+	seen := make(map[string]bool, len(table.Rows)-len(previous.Rows))
+	if constraint.Type == catalog.ConstraintTypePrimary {
+		primaryIndex := previous.PrimaryIndex
+		for _, row := range table.Rows[len(previous.Rows):] {
+			key, nullable := constraintRowKey(table, row, columns)
+			if nullable {
+				continue
+			}
+			if seen[key] {
+				return sqlFailure{1062, "23000", "Duplicate entry for key '" + constraint.Name + "'"}
+			}
+			if primaryIndex != nil {
+				if _, exists := primaryIndex[key]; exists {
+					return sqlFailure{1062, "23000", "Duplicate entry for key '" + constraint.Name + "'"}
+				}
+			}
+			seen[key] = true
+		}
+		return nil
+	}
+	existing := make(map[string]bool, len(previous.Rows))
+	for _, row := range previous.Rows {
+		key, nullable := constraintRowKey(table, row, columns)
+		if nullable {
+			continue
+		}
+		existing[key] = true
+	}
+	for _, row := range table.Rows[len(previous.Rows):] {
+		key, nullable := constraintRowKey(table, row, columns)
+		if nullable {
+			continue
+		}
+		if existing[key] || seen[key] {
+			return sqlFailure{1062, "23000", "Duplicate entry for key '" + constraint.Name + "'"}
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func uniqueColumnsUnchanged(previous, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) bool {
+	if len(previous.Rows) != len(table.Rows) {
+		return false
+	}
+	columns := constraintIndexes(constraint.Columns, indexes)
+	for index := range table.Rows {
+		if sameRowRef(previous.Rows[index], table.Rows[index]) {
+			continue
+		}
+		before, beforeNull := constraintRowKey(table, previous.Rows[index], columns)
+		after, afterNull := constraintRowKey(table, table.Rows[index], columns)
+		if beforeNull != afterNull || before != after {
+			return false
+		}
+	}
+	return true
+}
+
+func sameRowRef(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	if len(left) == 0 {
+		return true
+	}
+	return &left[0] == &right[0]
+}
+
+func isAppendOnlyRows(previous, next [][]string) bool {
+	if len(next) <= len(previous) {
+		return false
+	}
+	if len(previous) == 0 {
+		return true
+	}
+	// applyInsertPlan copy-on-write keeps every previous row reference in order.
+	// Checking the endpoints is enough for that path; other writers fall back.
+	if sameRowRef(previous[0], next[0]) && sameRowRef(previous[len(previous)-1], next[len(previous)-1]) {
+		return true
+	}
+	for index := range previous {
+		if !sameRowContents(previous[index], next[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameRowContents(left, right []string) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	if len(left) == 0 || len(right) == 0 || len(left) != len(right) {
+		return false
+	}
+	if &left[0] == &right[0] {
+		return true
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateUniqueIndexes(table catalog.Table, columns map[string]int) error {
