@@ -118,6 +118,12 @@ release judgment rule.
 | Upgrade without non-interactive confirmation | `TestOperatorUpgradeUsesMatchingOnlineBackup` |
 | Corrupt durable catalog without silent repair | `TestOperatorDataValidateFailsClosedWithoutRepair`, `TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop` |
 | Protocol and SQL failures that keep the session ready | `TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures`, `TestMySQLTextErrorsKeepWireConnectionReady` |
+| Read-only transactions reject mutations and locking reads | `TestMySQLTransactionsEnforceAutocommitReadOnlyAndAtomicErrors` |
+| Session and prepared-statement ceilings | `TestMySQLSessionCeilingRejectsAdditionalConnections`, `TestMySQLPreparedStatementCountIsBounded` |
+| Catalog visibility denied without namespace grants | `TestMySQLCatalogMetadataFollowsNamespaceGrants` |
+| Last account-manager protection | `TestMySQLAccountAdministrationPersistsAcrossRestart` |
+| Invalid values under strict type rules | `TestMySQLStrictNumericAndBitSemantics`, `TestMySQLEnforcesCharacterCollationAndIdentifierSemantics` |
+| Lock timeout, cancellation, and deadlock identities | `TestMySQLLockModesTimeoutCancellationAndDeadlock` |
 
 ## Final release audit
 
@@ -125,11 +131,11 @@ Audit date: 2026-08-03.
 
 Findings:
 
-1. Every Issue #1 story from 1 through 70 has a mapped public evidence pointer in this document.
-2. The previously recorded implementation gaps for online backup `--address` and `database shutdown` are closed and covered by black-box tests.
-3. Offline upgrade now accepts a matching online backup against a durable row-engine directory by comparing logical catalog schema and skipping live `rows/` engine files.
+1. Every Issue #1 story from 1 through 70 has a mapped public evidence pointer in this document and in `conformance-evidence.json`. `TestConformanceEvidenceMapCoversEveryIssueStory` checks that inventory for completeness and that each pointer names an existing black-box test or repository path.
+2. The previously recorded implementation gaps for online backup `--address` and `database shutdown` are closed on `main` and covered by black-box tests; this audit maps them.
+3. Offline upgrade now accepts a matching online backup against a durable row-engine directory by comparing catalog schema without live `rows/` engine files. That matcher change is required so story 62 has public executable evidence.
 4. Documentation uses the canonical domain vocabulary and states that v0.1 is experimental, with finite compatibility and support bounds in the linked contracts.
-5. Performance story 68 follows the maintainer judgment recorded on issue #72: a full Mac15,5 internal-SSD acceptance run is not required for this release audit; the harness and scenario remain the normative evidence path.
+5. Performance story 68 follows the maintainer judgment recorded on issue #72: a full Mac15,5 internal-SSD acceptance run is not required for this release audit; the harness and scenario remain the normative evidence path. This does not widen the published reference environment in `CONTEXT.md`.
 6. No unresolved conflict with recorded product decisions was found. Missing ADRs remain intentional: the final Issue #1 audit recorded none.
 
-Release judgment: **no unmapped normative claim and no unresolved product-decision conflict remain for v0.1 conformance evidence.**
+Release judgment: **no unmapped Issue #1 story or normative contract area remains, and no unresolved product-decision conflict remains for v0.1 conformance evidence.**

@@ -496,7 +496,7 @@ func sameSchemaTable(left, right Table) bool {
 }
 
 func (s *Store) persistLocked(definition Definition) error {
-	b, err := catalogJSON(schemaOnly(definition))
+	b, err := catalogJSON(SchemaOnly(definition))
 	if err != nil {
 		return err
 	}
@@ -523,10 +523,6 @@ func SchemaOnly(definition Definition) Definition {
 		stripped.Namespaces[namespaceKey] = namespace
 	}
 	return stripped
-}
-
-func schemaOnly(definition Definition) Definition {
-	return SchemaOnly(definition)
 }
 
 // Encode serializes one catalog definition in the durable on-disk JSON shape.

@@ -148,8 +148,14 @@ func TestMySQLTableLifecycleSupportsRenameTruncateAndDrop(t *testing.T) {
 	defer client.close()
 	mustQuery(t, client, "CREATE DATABASE app")
 	mustQuery(t, client, "USE app")
-	mustQuery(t, client, "CREATE TABLE items (id INT PRIMARY KEY, name VARCHAR(20))")
+	mustQuery(t, client, "CREATE TABLE items (id INT PRIMARY KEY, name VARCHAR(20) NOT NULL)")
 	mustQuery(t, client, "INSERT INTO items VALUES (1, 'a'), (2, 'b')")
+	mustQuery(t, client, "ALTER TABLE items ADD COLUMN note VARCHAR(10) NULL")
+	mustQuery(t, client, "UPDATE items SET note = 'ok' WHERE id = 1")
+	altered := client.query("SELECT id, name, note FROM items WHERE id = 1")
+	if altered.err != "" || len(altered.rows) != 1 || altered.rows[0][2] != "ok" {
+		t.Fatalf("alter result = %#v", altered)
+	}
 	mustQuery(t, client, "RENAME TABLE items TO goods")
 	mustQuery(t, client, "TRUNCATE TABLE goods")
 	truncated := client.query("SELECT COUNT(*) FROM goods")

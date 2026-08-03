@@ -18,7 +18,7 @@
     {"id": 13, "evidence": ["TestMySQLBTreeIndexesUseThePublicWireContract"]},
     {"id": 14, "evidence": ["TestMySQLStrictNumericAndBitSemantics"]},
     {"id": 15, "evidence": ["TestMySQLEnforcesCharacterCollationAndIdentifierSemantics"]},
-    {"id": 16, "evidence": ["TestMySQLReplaceUsesDeleteThenInsertAffectedRows", "TestMySQLInsertOnDuplicateKeyUpdatesAtomically", "TestMySQLInsertSelectSnapshotsTheSourceRows", "TestMySQLInsertAndReplaceSetForms", "TestMySQLExtendedMutationsRespectTransactionVisibility"]},
+    {"id": 16, "evidence": ["TestMySQLReplaceUsesDeleteThenInsertAffectedRows", "TestMySQLReplaceChecksForeignKeyDeletes", "TestMySQLInsertOnDuplicateKeyUpdatesAtomically", "TestMySQLInsertSelectSnapshotsTheSourceRows", "TestMySQLInsertAndReplaceSetForms", "TestMySQLExtendedMutationsRespectTransactionVisibility"]},
     {"id": 17, "evidence": ["TestMySQLRelationalShapingMatchesTextAndPreparedWirePaths", "TestMySQLComposedQueriesMatchTextAndPreparedWirePaths"]},
     {"id": 18, "evidence": ["TestMySQLAggregatesAndWindowsUseThePublicWireContract", "TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely"]},
     {"id": 19, "evidence": ["TestMySQLStrictNumericAndBitSemantics", "TestMySQLRelationalShapingMatchesTextAndPreparedWirePaths"]},
