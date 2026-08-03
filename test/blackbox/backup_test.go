@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jonbaldie/database/test/blackbox"
@@ -44,6 +45,7 @@ func TestOnlineBackupCreateCapturesCommittedStateWhileServerRuns(t *testing.T) {
 	if created.ExitCode != 0 {
 		t.Fatalf("online backup create: %#v", created)
 	}
+	assertOnlineBackupProgress(t, created.Stderr)
 	var createResult map[string]any
 	if err := json.Unmarshal([]byte(created.Stdout), &createResult); err != nil {
 		t.Fatalf("decode create result: %v stdout=%q", err, created.Stdout)
@@ -53,6 +55,9 @@ func TestOnlineBackupCreateCapturesCommittedStateWhileServerRuns(t *testing.T) {
 	}
 	if createResult["source_instance_id"] == "" || createResult["artifact_path"] == "" {
 		t.Fatalf("create details missing identity: %#v", createResult)
+	}
+	if createResult["backup_version"] == "" || createResult["created_at"] == "" || createResult["size_bytes"] == nil {
+		t.Fatalf("create details incomplete: %#v", createResult)
 	}
 
 	mustQuery(t, client, "COMMIT")
@@ -143,5 +148,31 @@ func TestOnlineBackupCreateAcceptsPasswordStdinAddressResultJSON(t *testing.T) {
 	}
 	if result["exit_class"] != "success" || result["complete"] != true {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func assertOnlineBackupProgress(t *testing.T, stderr string) {
+	t.Helper()
+	want := []string{"connecting", "capturing", "writing", "validating"}
+	dec := json.NewDecoder(strings.NewReader(stderr))
+	phases := make([]string, 0, len(want))
+	for dec.More() {
+		var record map[string]any
+		if err := dec.Decode(&record); err != nil {
+			t.Fatalf("decode progress: %v stderr=%q", err, stderr)
+		}
+		if record["schema"] != "database.operator.progress/v1" {
+			continue
+		}
+		phase, _ := record["phase"].(string)
+		phases = append(phases, phase)
+	}
+	if len(phases) != len(want) {
+		t.Fatalf("progress phases = %#v, want %#v", phases, want)
+	}
+	for index, phase := range want {
+		if phases[index] != phase {
+			t.Fatalf("progress phases = %#v, want %#v", phases, want)
+		}
 	}
 }

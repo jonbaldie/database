@@ -105,6 +105,21 @@ func TestBackupCreateRejectsOfflineDataDirectoryInput(t *testing.T) {
 	}, "backup create", "invalid_input", 2)
 }
 
+func TestBackupCreateRejectsExistingOutput(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	writeBackupFixture(t, archive, "existing")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	writeBackupFixture(t, passwordFile, "online-backup-secret")
+	assertOperatorFailure(t, []string{
+		"backup", "create",
+		"--address=127.0.0.1:1",
+		"--account=admin",
+		"--password-file", passwordFile,
+		"--output", archive,
+		"--result=json",
+	}, "backup create", "precondition", 3)
+}
+
 func TestBackupCreateRejectsMissingAccount(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "instance.tar")
 	passwordFile := filepath.Join(t.TempDir(), "password")

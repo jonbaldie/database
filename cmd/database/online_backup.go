@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"github.com/jonbaldie/database/internal/instance"
 )
 
 func createOnlineBackup(request onlineConnectionRequest, output string, reporter *operationReporter) (map[string]any, error, string) {
+	if err := rejectExistingBackupOutput(output); err != nil {
+		return nil, err, "precondition"
+	}
 	db, err, exitClass := connectOnlineBackup(request, reporter)
 	if err != nil {
 		return nil, err, exitClass
@@ -23,6 +27,15 @@ func createOnlineBackup(request onlineConnectionRequest, output string, reporter
 		return nil, err, onlineBackupExitClass(err)
 	}
 	return writeValidatedOnlineBackup(files, output, reporter)
+}
+
+func rejectExistingBackupOutput(output string) error {
+	if _, err := os.Stat(output); err == nil {
+		return errors.New("backup output must be a new path")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func connectOnlineBackup(request onlineConnectionRequest, reporter *operationReporter) (*sql.DB, error, string) {
@@ -117,9 +130,8 @@ func requireOnlineBackupFiles(files map[string][]byte) (map[string][]byte, error
 }
 
 func onlineBackupExitClass(err error) string {
-	message := err.Error()
-	if strings.Contains(message, "access denied") || strings.Contains(message, "Access denied") ||
-		strings.Contains(message, "Error 1045") || strings.Contains(message, "Error 1227") {
+	var mysqlError *mysqldriver.MySQLError
+	if errors.As(err, &mysqlError) && (mysqlError.Number == 1045 || mysqlError.Number == 1227) {
 		return "access"
 	}
 	return "operation_failed"
