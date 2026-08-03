@@ -170,26 +170,37 @@ func (s *textStatementExecutor) commitBeforeDefinition(dataDefinition bool) erro
 }
 
 func (s *textStatementExecutor) startStatementTransaction(dataDefinition, mutation bool) (bool, error) {
-	if s.transaction {
-		if s.transactionReadOnly && mutation {
-			return false, readOnlyTransactionFailure()
-		}
-		return false, nil
+	if started, err, handled := s.continueOpenTransaction(mutation); handled {
+		return started, err
 	}
 	if s.nextReadOnly && mutation {
 		return false, readOnlyTransactionFailure()
 	}
+	return s.beginAutocommitOrTransaction(dataDefinition, mutation), nil
+}
+
+func (s *textStatementExecutor) continueOpenTransaction(mutation bool) (bool, error, bool) {
+	if !s.transaction {
+		return false, nil, false
+	}
+	if s.transactionReadOnly && mutation {
+		return false, readOnlyTransactionFailure(), true
+	}
+	return false, nil, true
+}
+
+func (s *textStatementExecutor) beginAutocommitOrTransaction(dataDefinition, mutation bool) bool {
 	autocommit := !s.autocommitOff || dataDefinition
 	// Autocommit DML publishes through ApplyDurable directly. Starting a
 	// statement transaction would snapshot, stage, and re-apply the same
 	// mutation before the coalesced writer ever sees it.
 	if autocommit && mutation && !dataDefinition {
 		s.consumeNextCharacteristics()
-		return true, nil
+		return true
 	}
 	s.beginTransaction(s.nextIsolation, s.nextReadOnly)
 	s.consumeNextCharacteristics()
-	return autocommit, nil
+	return autocommit
 }
 
 func (e statementTransaction) finish(s *session, result *queryResult, err error) (*queryResult, error) {
