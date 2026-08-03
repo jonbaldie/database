@@ -301,7 +301,7 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 	}
 	config := mysql.Config{
 		Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash,
-		TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile,
+		Instance: metadata, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile,
 		MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount,
 		MaxAllowedPacket: opts.MaxAllowedPacket,
 		LockWaitTimeout:  millisecondsDuration(opts.LockWaitTimeoutMilliseconds),
