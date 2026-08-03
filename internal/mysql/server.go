@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/instance"
 	"github.com/jonbaldie/database/internal/queryexplanation"
 )
 
@@ -94,9 +95,11 @@ const (
 )
 
 type Config struct {
-	Catalog              *catalog.Store
-	Username             string
-	PasswordHash         string
+	Catalog      *catalog.Store
+	Username     string
+	PasswordHash string
+	// Instance is the durable instance identity copied into online backups.
+	Instance             instance.Metadata
 	Version              string
 	TLSCertFile          string
 	TLSKeyFile           string
@@ -958,14 +961,6 @@ func (s *textStatementExecutor) renderCurrentTime(kind temporalKind, precision i
 	instant := s.server.config.Clock().UTC()
 	local := instant.Add(time.Duration(offset) * time.Minute)
 	return currentTemporal(local, kind, precision), nil
-}
-
-func (s *textStatementExecutor) operationStatement(query, lower string) (*queryResult, bool, error) {
-	if strings.HasPrefix(lower, "explain ") {
-		result, err := s.explainStatement(query)
-		return result, true, err
-	}
-	return s.sessionControlStatement(query, lower)
 }
 
 func (s *textStatementExecutor) transactionStatement(query, lower string) (*queryResult, bool, error) {

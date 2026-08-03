@@ -59,73 +59,85 @@ func backupRestoreCommand(args []string, stdout, stderr io.Writer) int {
 		output.legacy = true
 	}
 	reporter := newOperationReporter(operation, output, stdout, stderr)
-	reportBackupRestoreProgress(reporter, operation)
-	err, exitClass := executeBackupRestore(filtered, reporter)
+	details, err, exitClass := executeBackupRestore(filtered, reporter)
 	if err != nil {
 		if reporter.output.legacy && strings.HasPrefix(operation, "backup inspect") && exitClass == "invalid_artifact" {
 			exitClass = "operation_failed"
 		}
 		return reporter.failure(exitClass, "", err.Error(), nil)
 	}
-	return reporter.success(nil)
+	return reporter.success(details)
+}
+
+func executeBackupRestore(args []string, reporter *operationReporter) (map[string]any, error, string) {
+	if len(args) == 0 {
+		return nil, errors.New("backup or restore requires an operation"), "invalid_input"
+	}
+	if args[0] == "restore" {
+		reportBackupRestoreProgress(reporter, "restore")
+		err, exitClass := restoreCommand(args[1:])
+		return nil, err, exitClass
+	}
+	details, err, exitClass := backupCommand(args[1:], reporter)
+	if err != nil && len(args) > 1 && args[1] == "inspect" && exitClass == "operation_failed" {
+		exitClass = "invalid_artifact"
+	}
+	return details, err, exitClass
 }
 
 func reportBackupRestoreProgress(reporter *operationReporter, operation string) {
 	progress := map[string][]string{
-		"backup inspect": {"reading"},
-		"backup create":  {"preflight", "capturing"},
-		"restore":        {"preflight", "restoring"},
+		"backup inspect": {"reading", "validating"},
+		"restore":        {"preflight", "restoring", "validating"},
 	}[operation]
 	for _, phase := range progress {
 		reporter.progress(phase)
 	}
 }
 
-func executeBackupRestore(args []string, reporter *operationReporter) (error, string) {
+func backupCommand(args []string, reporter *operationReporter) (map[string]any, error, string) {
 	if len(args) == 0 {
-		return errors.New("backup or restore requires an operation"), "invalid_input"
-	}
-	if args[0] == "restore" {
-		return restoreCommand(args[1:])
-	}
-	err, exitClass := backupCommand(args[1:])
-	if err != nil && len(args) > 1 && args[1] == "inspect" && exitClass == "operation_failed" {
-		exitClass = "invalid_artifact"
-	}
-	return err, exitClass
-}
-
-func backupCommand(args []string) (error, string) {
-	if len(args) == 0 {
-		return errors.New("backup requires create or inspect"), "invalid_input"
+		return nil, errors.New("backup requires create or inspect"), "invalid_input"
 	}
 	if args[0] == "create" {
-		return backupCreateCommand(args[1:])
+		return backupCreateCommand(args[1:], reporter)
 	}
 	if args[0] == "inspect" {
-		return backupInspectCommand(args[1:])
+		reportBackupRestoreProgress(reporter, "backup inspect")
+		err, exitClass := backupInspectCommand(args[1:])
+		return nil, err, exitClass
 	}
-	return fmt.Errorf("unsupported backup operation %q", args[0]), "invalid_input"
+	return nil, fmt.Errorf("unsupported backup operation %q", args[0]), "invalid_input"
 }
 
-func backupCreateCommand(args []string) (error, string) {
-	options, err := operatorOptions(args, "--data-dir", "--output")
+func backupCreateCommand(args []string, reporter *operationReporter) (map[string]any, error, string) {
+	request, remaining, err := parseOnlineConnectionRequest(args)
 	if err != nil {
-		return err, "invalid_input"
+		return nil, err, "invalid_input"
 	}
-	if options["--data-dir"] == "" || options["--output"] == "" {
-		return errors.New("backup create requires --data-dir and --output"), "invalid_input"
+	options, err := operatorOptions(remaining, "--output")
+	if err != nil {
+		return nil, err, "invalid_input"
 	}
-	return createBackup(options["--data-dir"], options["--output"]), "operation_failed"
+	if options["--output"] == "" {
+		return nil, errors.New("backup create requires --output"), "invalid_input"
+	}
+	return createOnlineBackup(request, options["--output"], reporter)
 }
 
 func backupInspectCommand(args []string) (error, string) {
-	options, err := operatorOptions(args, "--input")
+	options, err := operatorOptions(args, "--input", "--backup")
 	if err != nil {
 		return err, "invalid_input"
 	}
+	if options["--input"] != "" && options["--backup"] != "" {
+		return errors.New("backup inspect input may be specified once"), "invalid_input"
+	}
 	if options["--input"] == "" {
-		return errors.New("backup inspect requires --input"), "invalid_input"
+		options["--input"] = options["--backup"]
+	}
+	if options["--input"] == "" {
+		return errors.New("backup inspect requires --backup"), "invalid_input"
 	}
 	return inspectBackup(options["--input"]), "operation_failed"
 }

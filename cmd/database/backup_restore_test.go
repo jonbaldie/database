@@ -17,12 +17,13 @@ func TestBackupRestoreWorkflowCreatesAndRestoresCompleteArtifactWithTerminalConf
 	writeInstanceFixture(t, source)
 	writeBackupFixture(t, filepath.Join(source, ".database-state"), "running\n")
 	archive := filepath.Join(t.TempDir(), "instance.tar")
-
-	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
-	assertOperatorSuccess(t, []string{"backup", "inspect", "--input", archive}, "backup inspect")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatalf("create offline fixture backup: %v", err)
+	}
+	assertOperatorSuccess(t, []string{"backup", "inspect", "--backup", archive}, "backup inspect")
 
 	destination := filepath.Join(t.TempDir(), "restored")
-	assertOperatorSuccess(t, []string{"restore", "--input", archive, "--data-dir", destination}, "restore")
+	assertOperatorSuccess(t, []string{"restore", "--backup", archive, "--data-directory", destination}, "restore")
 	contents, err := os.ReadFile(filepath.Join(destination, "nested", "record.txt"))
 	if err != nil {
 		t.Fatalf("read restored artifact: %v", err)
@@ -51,58 +52,84 @@ func TestRestoreRejectsNonEmptyDestination(t *testing.T) {
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
 	writeInstanceFixture(t, source)
 	archive := filepath.Join(t.TempDir(), "instance.tar")
-	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatalf("create offline fixture backup: %v", err)
+	}
 
 	destination := t.TempDir()
 	writeBackupFixture(t, filepath.Join(destination, "existing.txt"), "existing")
-	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", destination}, "restore", "operation_failed", 1)
+	assertOperatorFailure(t, []string{"restore", "--backup", archive, "--data-directory", destination}, "restore", "operation_failed", 1)
 }
 
 func TestBackupInspectRejectsInvalidArtifact(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "invalid.tar")
 	writeBackupFixture(t, archive, "not a tar archive")
 
-	assertOperatorFailure(t, []string{"backup", "inspect", "--input", archive}, "backup inspect", "operation_failed", 1)
+	assertOperatorFailure(t, []string{"backup", "inspect", "--backup", archive}, "backup inspect", "operation_failed", 1)
 }
 
-func TestBackupCreateRejectsMissingSource(t *testing.T) {
+func TestBackupCreateAcceptsOnlineConnectionInputs(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "instance.tar")
-	missingSource := filepath.Join(t.TempDir(), "missing")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	writeBackupFixture(t, passwordFile, "online-backup-secret")
 
-	assertOperatorFailure(t, []string{"backup", "create", "--data-dir", missingSource, "--output", archive}, "backup create", "operation_failed", 1)
+	result, code := operatorResultForTest(t, []string{
+		"backup", "create",
+		"--address=127.0.0.1:1",
+		"--account=admin",
+		"--password-file", passwordFile,
+		"--output", archive,
+		"--result=json",
+	})
+	if result["exit_class"] == "invalid_input" {
+		t.Fatalf("online backup inputs rejected as invalid_input: %#v", result)
+	}
+	if code != 4 || result["exit_class"] != "access" {
+		t.Fatalf("unreachable address result = %#v code=%d, want access/4", result, code)
+	}
 	if _, err := os.Stat(archive); !os.IsNotExist(err) {
-		t.Fatalf("failed backup created artifact: %v", err)
+		t.Fatalf("failed online backup created artifact: %v", err)
 	}
 }
 
-func TestBackupCreateRejectsInvalidOutput(t *testing.T) {
+func TestBackupCreateRejectsOfflineDataDirectoryInput(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "instance.tar")
 	source := t.TempDir()
-	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
 	writeInstanceFixture(t, source)
-	output := t.TempDir()
 
-	assertOperatorFailure(t, []string{"backup", "create", "--data-dir", source, "--output", output}, "backup create", "operation_failed", 1)
-	entries, err := os.ReadDir(output)
-	if err != nil {
-		t.Fatalf("read invalid output directory: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("failed backup wrote output entries: %#v", entries)
-	}
+	assertOperatorFailure(t, []string{
+		"backup", "create",
+		"--data-dir", source,
+		"--output", archive,
+		"--result=json",
+	}, "backup create", "invalid_input", 2)
+}
+
+func TestBackupCreateRejectsMissingAccount(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	writeBackupFixture(t, passwordFile, "online-backup-secret")
+	assertOperatorFailure(t, []string{
+		"backup", "create",
+		"--address=127.0.0.1:3306",
+		"--password-file", passwordFile,
+		"--output", archive,
+		"--result=json",
+	}, "backup create", "invalid_input", 2)
 }
 
 func TestRestoreRejectsUnsafeArtifact(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "unsafe.tar")
 	writeUnsafeArchive(t, archive)
 
-	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", filepath.Join(t.TempDir(), "restored")}, "restore", "operation_failed", 1)
+	assertOperatorFailure(t, []string{"restore", "--backup", archive, "--data-directory", filepath.Join(t.TempDir(), "restored")}, "restore", "operation_failed", 1)
 }
 
 func TestRestoreRejectsMalformedArtifact(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "malformed.tar")
 	writeBackupFixture(t, archive, "not a tar archive")
 
-	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", filepath.Join(t.TempDir(), "restored")}, "restore", "operation_failed", 1)
+	assertOperatorFailure(t, []string{"restore", "--backup", archive, "--data-directory", filepath.Join(t.TempDir(), "restored")}, "restore", "operation_failed", 1)
 }
 
 func TestRestoreReportsExtractionFailure(t *testing.T) {
@@ -110,7 +137,7 @@ func TestRestoreReportsExtractionFailure(t *testing.T) {
 	writeExtractionFailureArchive(t, archive)
 	destination := filepath.Join(t.TempDir(), "restored")
 
-	assertOperatorFailure(t, []string{"restore", "--input", archive, "--data-dir", destination}, "restore", "operation_failed", 1)
+	assertOperatorFailure(t, []string{"restore", "--backup", archive, "--data-directory", destination}, "restore", "operation_failed", 1)
 	if _, err := os.Stat(filepath.Join(destination, "entry")); !os.IsNotExist(err) {
 		t.Fatalf("invalid restore left a usable entry: %v", err)
 	}
@@ -121,11 +148,14 @@ func TestBackupWorkflowReportsDistinctTerminalOperationIdentities(t *testing.T) 
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
 	writeInstanceFixture(t, source)
 	archive := filepath.Join(t.TempDir(), "instance.tar")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatalf("create offline fixture backup: %v", err)
+	}
 
-	createResult := assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
-	inspectResult := assertOperatorSuccess(t, []string{"backup", "inspect", "--input", archive}, "backup inspect")
-	if createResult["operation_id"] == inspectResult["operation_id"] {
-		t.Fatalf("workflow confirmations reused operation identity %q", createResult["operation_id"])
+	inspectFirst := assertOperatorSuccess(t, []string{"backup", "inspect", "--backup", archive}, "backup inspect")
+	inspectSecond := assertOperatorSuccess(t, []string{"backup", "inspect", "--backup", archive}, "backup inspect")
+	if inspectFirst["operation_id"] == inspectSecond["operation_id"] {
+		t.Fatalf("workflow confirmations reused operation identity %q", inspectFirst["operation_id"])
 	}
 }
 
@@ -134,7 +164,9 @@ func TestUpgradeWorkflowRequiresMatchingBackupAndCompletesForwardOnly(t *testing
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
 	writeInstanceFixture(t, source)
 	archive := filepath.Join(t.TempDir(), "instance.tar")
-	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatalf("create offline fixture backup: %v", err)
+	}
 
 	assertOperatorSuccess(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes"}, "upgrade")
 	metadata, err := instance.Load(source)
@@ -154,7 +186,9 @@ func TestUpgradeRejectsChangedSourceAndUnsupportedWorkflows(t *testing.T) {
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "before")
 	writeInstanceFixture(t, source)
 	archive := filepath.Join(t.TempDir(), "instance.tar")
-	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatalf("create offline fixture backup: %v", err)
+	}
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "after")
 
 	assertOperatorFailure(t, []string{"upgrade", "--data-directory", source, "--backup", archive, "--target-version", "0.1.1", "--yes"}, "upgrade", "precondition", 3)
@@ -167,7 +201,9 @@ func TestUpgradeResumesOnlyTheMarkedTarget(t *testing.T) {
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
 	writeInstanceFixture(t, source)
 	archive := filepath.Join(t.TempDir(), "instance.tar")
-	assertOperatorSuccess(t, []string{"backup", "create", "--data-dir", source, "--output", archive}, "backup create")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatalf("create offline fixture backup: %v", err)
+	}
 	metadata, err := instance.Load(source)
 	if err != nil {
 		t.Fatal(err)

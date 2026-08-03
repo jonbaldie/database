@@ -443,6 +443,11 @@ func (s *Store) persistLocked(definition Definition) error {
 	return syncCatalogDirectory(s.path)
 }
 
+// Encode serializes one catalog definition in the durable on-disk JSON shape.
+func Encode(definition Definition) ([]byte, error) {
+	return catalogJSON(definition)
+}
+
 func catalogJSON(definition Definition) ([]byte, error) {
 	b, err := json.MarshalIndent(definition, "", "  ")
 	if err != nil {
