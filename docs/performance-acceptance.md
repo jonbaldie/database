@@ -93,10 +93,12 @@ Measurement starts only after all of these conditions hold:
 - the server reports ready;
 - all 50 sessions are authenticated; and
 - an unmeasured five-minute warm-up has exercised the same operation across the
-  full keyspace.
+  full keyspace once for that gate.
 
 Each measured run lasts at least five minutes and completes at least 100,000
-operations; both minimums are required. Only operations submitted after
+operations; both minimums are required. The warm-up is not repeated between the
+five measured runs of the same gate; the corpus is restored to the fixed
+starting state before each measured write run. Only operations submitted after
 measurement begins and completed before it ends enter the latency distribution
 and throughput count. Operations still in flight at either boundary are
 reported separately.
@@ -163,15 +165,15 @@ alter an observable contract stated here.
 Run `make performance` to build the current executable, load the fixed corpus,
 restart the server, run each SQL-driver gate, measure clean starts, and write
 `dist/performance-evidence.json`. The command uses the default fixed contract:
-10 GB, 50 sessions, five-minute warm-up, five-minute measured runs, five
-repetitions, and ten clean starts. It returns a failure when the acceptance
-judgment is not accepted.
+10 GB, 50 sessions, one five-minute warm-up per gate, five-minute measured
+runs, five repetitions, and ten clean starts. It returns a failure when
+enforced thresholds are not met.
 
-For local troubleshooting, pass smaller values to `scripts/performance.sh`,
-such as `--logical-bytes`, `--warmup`, `--run`, or
-`--enforce-thresholds=false`. Use `--data-root` only when temporary data must
-be placed on a selected filesystem; a run on a different storage device is
-diagnostic evidence, not reference acceptance evidence. Each report records
-the OS, kernel, CPU, memory, driver, server identity, and data-root setting. A
-reduced run records `diagnostic_only` evidence and cannot support a release
-decision.
+Acceptance judgment requires all of: the fixed contract defaults, empty
+`--data-root` (reference internal storage), and the published Mac15,5
+reference host. Each report records the OS, kernel, machine model, CPU,
+memory, driver, server identity, data-root setting, and whether the host is
+the reference environment. Reduced flags, non-reference hosts, and
+non-default data roots record `diagnostic_only` evidence and cannot support a
+release decision. Use `--enforce-thresholds=false` only for local
+troubleshooting when a failing diagnostic run should still write evidence.

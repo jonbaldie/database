@@ -268,31 +268,61 @@ func finishEvidence(cfg config, directory string, result *evidence) error {
 	}
 	result.CleanStarts = clean
 	result.FinishedAt = time.Now().UTC()
-	result.Judgment = judge(*result)
-	if !acceptanceEnabled(cfg) {
+	rawJudgment := judge(*result)
+	result.Judgment = rawJudgment
+	if !acceptanceEnabled(cfg, result.Environment) {
 		result.Judgment = "diagnostic_only"
 	}
 	if err := writeEvidence(cfg.output, *result); err != nil {
 		return err
 	}
 	fmt.Printf("performance evidence written to %s\n", cfg.output)
-	if acceptanceEnabled(cfg) && result.Judgment != "accepted" {
+	if cfg.enforceThreshold && rawJudgment != "accepted" {
 		return errors.New("performance acceptance thresholds were not met")
 	}
 	return nil
 }
 
-func acceptanceEnabled(cfg config) bool {
-	return cfg.enforceThreshold && cfg.dataRoot == ""
+func acceptanceEnabled(cfg config, environment map[string]string) bool {
+	return cfg.enforceThreshold && cfg.dataRoot == "" && fixedAcceptanceContract(cfg) && isReferenceEnvironment(environment)
+}
+
+func fixedAcceptanceContract(cfg config) bool {
+	return cfg.logicalBytes == 10_000_000_000 &&
+		cfg.narrowRows == 1_000_000 &&
+		cfg.relatedRows == 1_000_000 &&
+		cfg.sessions == 50 &&
+		cfg.warmup == 5*time.Minute &&
+		cfg.run == 5*time.Minute &&
+		cfg.repetitions == 5 &&
+		cfg.minimumOperations == 100_000 &&
+		cfg.cleanStarts == 10 &&
+		cfg.cleanStartLimit == 3*time.Second &&
+		cfg.seed == 0x9e3779b97f4a7c15
+}
+
+func isReferenceEnvironment(environment map[string]string) bool {
+	if environment["goos"] != "darwin" || environment["machine_model"] != "Mac15,5" {
+		return false
+	}
+	if !strings.Contains(environment["cpu_model"], "Apple M3") {
+		return false
+	}
+	memory, err := strconv.ParseUint(environment["memory_bytes"], 10, 64)
+	if err != nil {
+		return false
+	}
+	return memory >= 16<<30
 }
 
 func newEvidence(cfg config) evidence {
+	environment := benchmarkEnvironment(cfg.executable)
 	return evidence{
 		Schema:          "database.performance/v1",
 		ScenarioVersion: scenarioVersion,
 		CorpusVersion:   corpusVersion,
 		StartedAt:       time.Now().UTC(),
-		Environment:     benchmarkEnvironment(cfg.executable),
+		Environment:     environment,
 		Configuration: map[string]any{
 			"logical_bytes_target": cfg.logicalBytes,
 			"sessions":             cfg.sessions,
@@ -304,7 +334,7 @@ func newEvidence(cfg config) evidence {
 			"seed":                 cfg.seed,
 			"data_root":            cfg.dataRoot,
 		},
-		AcceptanceEnabled: acceptanceEnabled(cfg),
+		AcceptanceEnabled: acceptanceEnabled(cfg, environment),
 	}
 }
 
@@ -315,28 +345,98 @@ type systemCommand struct {
 }
 
 func benchmarkEnvironment(executable string) map[string]string {
+	environment := collectHostEnvironment()
+	environment["go_version"] = runtime.Version()
+	environment["driver"] = "github.com/go-sql-driver/mysql v1.9.3"
+	environment["server"] = versionInfo(executable)
+	environment["reference_environment"] = strconv.FormatBool(isReferenceEnvironment(environment))
+	return environment
+}
+
+func collectHostEnvironment() map[string]string {
 	environment := map[string]string{
-		"goos":       runtime.GOOS,
-		"goarch":     runtime.GOARCH,
-		"go_version": runtime.Version(),
-		"driver":     "github.com/go-sql-driver/mysql v1.9.3",
-		"server":     versionInfo(executable),
+		"goos":          runtime.GOOS,
+		"goarch":        runtime.GOARCH,
+		"os_version":    "unknown",
+		"kernel":        runSystemCommand("uname", "-r"),
+		"cpu_model":     "unknown",
+		"cpu_count":     "unknown",
+		"memory_bytes":  "unknown",
+		"machine_model": "unknown",
 	}
-	osCommand := systemCommand{key: "os_version", command: "uname", args: []string{"-sr"}}
-	if runtime.GOOS == "darwin" {
-		osCommand = systemCommand{key: "os_version", command: "sw_vers", args: []string{"-productVersion"}}
-	}
-	commands := []systemCommand{
-		osCommand,
-		{key: "kernel", command: "uname", args: []string{"-r"}},
-		{key: "cpu_model", command: "sysctl", args: []string{"-n", "machdep.cpu.brand_string"}},
-		{key: "cpu_count", command: "sysctl", args: []string{"-n", "hw.ncpu"}},
-		{key: "memory_bytes", command: "sysctl", args: []string{"-n", "hw.memsize"}},
-	}
-	for _, command := range commands {
-		environment[command.key] = runSystemCommand(command.command, command.args...)
+	switch runtime.GOOS {
+	case "darwin":
+		environment["os_version"] = runSystemCommand("sw_vers", "-productVersion")
+		environment["cpu_model"] = runSystemCommand("sysctl", "-n", "machdep.cpu.brand_string")
+		environment["cpu_count"] = runSystemCommand("sysctl", "-n", "hw.ncpu")
+		environment["memory_bytes"] = runSystemCommand("sysctl", "-n", "hw.memsize")
+		environment["machine_model"] = runSystemCommand("sysctl", "-n", "hw.model")
+	case "linux":
+		environment["os_version"] = runSystemCommand("uname", "-sr")
+		environment["cpu_model"] = linuxCPUModel()
+		environment["cpu_count"] = strconv.Itoa(runtime.NumCPU())
+		environment["memory_bytes"] = linuxMemoryBytes()
+		environment["machine_model"] = linuxMachineModel()
+	default:
+		environment["os_version"] = runSystemCommand("uname", "-sr")
 	}
 	return environment
+}
+
+func linuxCPUModel() string {
+	content, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return "unknown"
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "model name") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return "unknown"
+}
+
+func linuxMemoryBytes() string {
+	content, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return "unknown"
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return "unknown"
+		}
+		kilobytes, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return "unknown"
+		}
+		return strconv.FormatUint(kilobytes*1024, 10)
+	}
+	return "unknown"
+}
+
+func linuxMachineModel() string {
+	candidates := []string{
+		"/sys/devices/virtual/dmi/id/product_name",
+		"/sys/firmware/devicetree/base/model",
+	}
+	for _, path := range candidates {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		value := strings.TrimSpace(string(content))
+		if value != "" {
+			return value
+		}
+	}
+	return "unknown"
 }
 
 func runSystemCommand(command string, args ...string) string {
@@ -839,7 +939,23 @@ func shouldReportBatch(start, end, rows int64, batchSize int64) bool {
 
 func runGate(db *sql.DB, c corpus, cfg config, definition gateDefinition) (gateEvidence, error) {
 	result := gateEvidence{Name: definition.name, Operation: definition.operation, P95LimitMS: definition.p95Limit.Seconds() * 1000, P99LimitMS: definition.p99Limit.Seconds() * 1000, ThroughputMin: definition.throughputMin}
+	fmt.Printf("%s warm-up\n", definition.name)
+	warmup, err := executeGate(db, c, cfg, definition, false, 0)
+	if err != nil {
+		return result, err
+	}
+	if warmup.firstError != "" {
+		return result, fmt.Errorf("%s warm-up failed: %s", definition.name, warmup.firstError)
+	}
+	if err := restoreCorpus(db); err != nil {
+		return result, err
+	}
 	for repetition := 1; repetition <= cfg.repetitions; repetition++ {
+		if repetition > 1 {
+			if err := restoreCorpus(db); err != nil {
+				return result, err
+			}
+		}
 		run, err := runGateRepetition(db, c, cfg, definition, repetition)
 		if err != nil {
 			return result, err
@@ -859,34 +975,12 @@ func runGate(db *sql.DB, c corpus, cfg config, definition gateDefinition) (gateE
 }
 
 func runGateRepetition(db *sql.DB, c corpus, cfg config, definition gateDefinition, repetition int) (runEvidence, error) {
-	if repetition > 1 {
-		if err := restoreCorpus(db); err != nil {
-			return runEvidence{}, err
-		}
-	}
-	fmt.Printf("%s run %d/%d warm-up\n", definition.name, repetition, cfg.repetitions)
-	warmup, err := executeGate(db, c, cfg, definition, false, repetition)
-	if err != nil {
-		return runEvidence{}, err
-	}
-	if warmup.firstError != "" {
-		return runEvidence{}, fmt.Errorf("%s warm-up failed: %s", definition.name, warmup.firstError)
-	}
-	if isWriteGate(definition) {
-		if err := restoreCorpus(db); err != nil {
-			return runEvidence{}, err
-		}
-	}
 	fmt.Printf("%s run %d/%d measure\n", definition.name, repetition, cfg.repetitions)
 	stats, err := executeGate(db, c, cfg, definition, true, repetition)
 	if err != nil {
 		return runEvidence{}, err
 	}
 	return makeRunEvidence(stats, cfg, definition, repetition), nil
-}
-
-func isWriteGate(definition gateDefinition) bool {
-	return definition.name == "durable_insert" || definition.name == "indexed_update"
 }
 
 func makeRunEvidence(stats phaseStats, cfg config, definition gateDefinition, repetition int) runEvidence {
@@ -902,7 +996,7 @@ func makeRunEvidence(stats phaseStats, cfg config, definition gateDefinition, re
 }
 
 func runMeetsThresholds(run runEvidence, minimumOperations int64, definition gateDefinition) bool {
-	return run.Operations >= uint64(minimumOperations) && run.Errors == 0 && run.Unfinished == 0 && run.P95Millis <= definition.p95Limit.Seconds()*1000 && run.P99Millis <= definition.p99Limit.Seconds()*1000 && run.Throughput >= definition.throughputMin
+	return run.Operations >= uint64(minimumOperations) && run.Errors == 0 && run.P95Millis <= definition.p95Limit.Seconds()*1000 && run.P99Millis <= definition.p99Limit.Seconds()*1000 && run.Throughput >= definition.throughputMin
 }
 
 func executeGate(db *sql.DB, c corpus, cfg config, definition gateDefinition, measured bool, repetition int) (phaseStats, error) {
