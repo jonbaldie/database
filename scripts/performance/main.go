@@ -621,6 +621,7 @@ func startServer(executable, directory string) (*runningServer, *sql.DB, time.Du
 	if err := command.Start(); err != nil {
 		return nil, nil, 0, fmt.Errorf("start server: %w", err)
 	}
+	started := time.Now()
 	server := &runningServer{command: command, address: address}
 	server.readDone.Add(2)
 	go func() {
@@ -631,7 +632,6 @@ func startServer(executable, directory string) (*runningServer, *sql.DB, time.Du
 		defer server.readDone.Done()
 		_, _ = ioCopyBuilder(&server.stderr, stderr)
 	}()
-	started := time.Now()
 	db, err := openRootDB(address)
 	if err != nil {
 		_ = server.stop()
@@ -1184,12 +1184,10 @@ func restoreCorpus(db *sql.DB) error {
 func measureCleanStarts(cfg config, directory string) (cleanStartEvidence, error) {
 	evidence := cleanStartEvidence{LimitMS: cfg.cleanStartLimit.Seconds() * 1000, Required: cfg.cleanStarts - 1}
 	for index := 0; index < cfg.cleanStarts; index++ {
-		started := time.Now()
-		server, db, _, err := startServer(cfg.executable, directory)
+		server, db, duration, err := startServer(cfg.executable, directory)
 		if err != nil {
 			return evidence, err
 		}
-		duration := time.Since(started)
 		evidence.Durations = append(evidence.Durations, duration.Seconds()*1000)
 		if duration <= cfg.cleanStartLimit {
 			evidence.Passing++
