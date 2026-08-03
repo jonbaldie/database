@@ -7,32 +7,52 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jonbaldie/database/internal/instance"
 )
 
 func createOnlineBackup(request onlineConnectionRequest, output string, reporter *operationReporter) (map[string]any, error, string) {
-	reporter.progress("connecting")
-	password, err := request.readPassword(os.Stdin)
+	db, err, exitClass := connectOnlineBackup(request, reporter)
 	if err != nil {
-		return nil, err, "invalid_input"
-	}
-	db, err := request.openDatabase(password)
-	if err != nil {
-		return nil, errors.New("connection failed"), "access"
+		return nil, err, exitClass
 	}
 	defer db.Close()
-	if err := db.Ping(); err != nil {
-		return nil, errors.New("connection failed"), "access"
-	}
-	if request.tlsMode == "disabled" {
-		if warning := onlineNonLoopbackWarning(request.address); warning != nil {
-			emitOnlineTLSWarning(reporter, warning)
-		}
-	}
 	reporter.progress("capturing")
 	files, err := captureOnlineBackupFiles(db)
 	if err != nil {
 		return nil, err, onlineBackupExitClass(err)
 	}
+	return writeValidatedOnlineBackup(files, output, reporter)
+}
+
+func connectOnlineBackup(request onlineConnectionRequest, reporter *operationReporter) (*sql.DB, error, string) {
+	reporter.progress("connecting")
+	password, err := readOnlinePassword(request, os.Stdin)
+	if err != nil {
+		return nil, err, "invalid_input"
+	}
+	db, err := openOnlineDatabase(request, password)
+	if err != nil {
+		return nil, errors.New("connection failed"), "access"
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, errors.New("connection failed"), "access"
+	}
+	warnOnlineNonTLS(request, reporter)
+	return db, nil, "success"
+}
+
+func warnOnlineNonTLS(request onlineConnectionRequest, reporter *operationReporter) {
+	if request.tlsMode != "disabled" {
+		return
+	}
+	if warning := onlineNonLoopbackWarning(request.address); warning != nil {
+		emitOnlineTLSWarning(reporter, warning)
+	}
+}
+
+func writeValidatedOnlineBackup(files map[string][]byte, output string, reporter *operationReporter) (map[string]any, error, string) {
 	metadata, err := decodeBackupMetadata(files["instance.json"])
 	if err != nil {
 		return nil, errors.New("backup capture returned invalid instance metadata"), "operation_failed"
@@ -47,6 +67,10 @@ func createOnlineBackup(request onlineConnectionRequest, output string, reporter
 		_ = os.Remove(output)
 		return nil, err, "operation_failed"
 	}
+	return onlineBackupDetails(output, metadata, manifest)
+}
+
+func onlineBackupDetails(output string, metadata instance.Metadata, manifest backupManifest) (map[string]any, error, string) {
 	info, err := os.Stat(output)
 	if err != nil {
 		return nil, err, "operation_failed"
@@ -79,6 +103,10 @@ func captureOnlineBackupFiles(db *sql.DB) (map[string][]byte, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	return requireOnlineBackupFiles(files)
+}
+
+func requireOnlineBackupFiles(files map[string][]byte) (map[string][]byte, error) {
 	if _, ok := files["instance.json"]; !ok {
 		return nil, errors.New("backup capture omitted instance metadata")
 	}

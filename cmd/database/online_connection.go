@@ -26,45 +26,47 @@ type onlineConnectionRequest struct {
 	tlsMode       string
 	tlsCAFile     string
 	tlsServerName string
-	addressSeen   bool
-	accountSeen   bool
-	tlsSeen       bool
-	tlsCASeen     bool
-	tlsServerSeen bool
+}
+
+type onlineConnectionParser struct {
+	request   onlineConnectionRequest
+	seen      map[string]bool
+	remaining []string
 }
 
 func parseOnlineConnectionRequest(args []string) (onlineConnectionRequest, []string, error) {
-	request := onlineConnectionRequest{address: defaultOnlineAddress, tlsMode: "disabled"}
-	remaining := make([]string, 0, len(args))
-	for index := 0; index < len(args); index++ {
-		name, value, hasValue := strings.Cut(args[index], "=")
-		if isOnlineBoolean(name) {
-			if err := setOnlineBoolean(&request, name, hasValue); err != nil {
-				return onlineConnectionRequest{}, nil, err
-			}
-			continue
-		}
-		if !isOnlineValueFlag(name) {
-			remaining = append(remaining, args[index])
-			continue
-		}
-		value, nextIndex, err := onlineFlagValue(args, index, name, value, hasValue)
+	parser := onlineConnectionParser{
+		request: onlineConnectionRequest{address: defaultOnlineAddress, tlsMode: "disabled"},
+		seen:    map[string]bool{},
+	}
+	argumentCount := len(args)
+	for index := 0; index < argumentCount; index++ {
+		nextIndex, err := parser.consume(args, index)
 		if err != nil {
-			return onlineConnectionRequest{}, nil, err
-		}
-		if err := setOnlineValue(&request, name, value); err != nil {
 			return onlineConnectionRequest{}, nil, err
 		}
 		index = nextIndex
 	}
-	if err := validateOnlineConnectionRequest(request); err != nil {
+	if err := validateOnlineConnectionRequest(parser.request); err != nil {
 		return onlineConnectionRequest{}, nil, err
 	}
-	return request, remaining, nil
+	return parser.request, parser.remaining, nil
 }
 
-func isOnlineBoolean(name string) bool {
-	return name == "--password-stdin"
+func (parser *onlineConnectionParser) consume(args []string, index int) (int, error) {
+	name, value, hasValue := strings.Cut(args[index], "=")
+	if name == "--password-stdin" {
+		return index, parser.setPasswordStdin(hasValue)
+	}
+	if !isOnlineValueFlag(name) {
+		parser.remaining = append(parser.remaining, args[index])
+		return index, nil
+	}
+	value, nextIndex, err := onlineFlagValue(args, index, name, value, hasValue)
+	if err != nil {
+		return index, err
+	}
+	return nextIndex, parser.setValue(name, value)
 }
 
 func isOnlineValueFlag(name string) bool {
@@ -76,17 +78,14 @@ func isOnlineValueFlag(name string) bool {
 	}
 }
 
-func setOnlineBoolean(request *onlineConnectionRequest, name string, hasValue bool) error {
+func (parser *onlineConnectionParser) setPasswordStdin(hasValue bool) error {
 	if hasValue {
-		return fmt.Errorf("%s does not take a value", name)
+		return errors.New("--password-stdin does not take a value")
 	}
-	if name != "--password-stdin" {
-		return fmt.Errorf("unknown flag %q", name)
-	}
-	if request.passwordFile != "" || request.passwordStdin {
+	if parser.request.passwordFile != "" || parser.request.passwordStdin {
 		return errors.New("password source may be specified once")
 	}
-	request.passwordStdin = true
+	parser.request.passwordStdin = true
 	return nil
 }
 
@@ -103,49 +102,46 @@ func onlineFlagValue(args []string, index int, name, value string, hasValue bool
 	return args[index+1], index + 1, nil
 }
 
-func setOnlineValue(request *onlineConnectionRequest, name, value string) error {
+func (parser *onlineConnectionParser) setValue(name, value string) error {
+	if parser.seen[name] {
+		return fmt.Errorf("%s may be specified once", name)
+	}
+	parser.seen[name] = true
 	switch name {
 	case "--address":
-		if request.addressSeen {
-			return errors.New("--address may be specified once")
-		}
-		request.addressSeen = true
-		request.address = value
+		parser.request.address = value
+		return nil
 	case "--account":
-		if request.accountSeen {
-			return errors.New("--account may be specified once")
-		}
-		request.accountSeen = true
-		request.account = value
+		parser.request.account = value
+		return nil
 	case "--password-file":
-		if request.passwordFile != "" || request.passwordStdin {
-			return errors.New("password source may be specified once")
-		}
-		request.passwordFile = value
+		return parser.setPasswordFile(value)
 	case "--tls":
-		if request.tlsSeen {
-			return errors.New("--tls may be specified once")
-		}
-		if value != "disabled" && value != "verify-full" {
-			return errors.New("--tls must be disabled or verify-full")
-		}
-		request.tlsSeen = true
-		request.tlsMode = value
+		return parser.setTLSMode(value)
 	case "--tls-ca-file":
-		if request.tlsCASeen {
-			return errors.New("--tls-ca-file may be specified once")
-		}
-		request.tlsCASeen = true
-		request.tlsCAFile = value
+		parser.request.tlsCAFile = value
+		return nil
 	case "--tls-server-name":
-		if request.tlsServerSeen {
-			return errors.New("--tls-server-name may be specified once")
-		}
-		request.tlsServerSeen = true
-		request.tlsServerName = value
+		parser.request.tlsServerName = value
+		return nil
 	default:
 		return fmt.Errorf("unknown flag %q", name)
 	}
+}
+
+func (parser *onlineConnectionParser) setPasswordFile(value string) error {
+	if parser.request.passwordFile != "" || parser.request.passwordStdin {
+		return errors.New("password source may be specified once")
+	}
+	parser.request.passwordFile = value
+	return nil
+}
+
+func (parser *onlineConnectionParser) setTLSMode(value string) error {
+	if value != "disabled" && value != "verify-full" {
+		return errors.New("--tls must be disabled or verify-full")
+	}
+	parser.request.tlsMode = value
 	return nil
 }
 
@@ -159,36 +155,25 @@ func validateOnlineConnectionRequest(request onlineConnectionRequest) error {
 	if request.tlsMode == "disabled" && (request.tlsCAFile != "" || request.tlsServerName != "") {
 		return errors.New("TLS trust options require --tls=verify-full")
 	}
-	if request.tlsMode == "verify-full" && request.address == "" {
-		return errors.New("--address is required")
-	}
 	return nil
 }
 
-func (request onlineConnectionRequest) readPassword(stdin io.Reader) (string, error) {
+func readOnlinePassword(request onlineConnectionRequest, stdin io.Reader) (string, error) {
 	if request.passwordStdin {
 		return instance.ReadPassword("", stdin)
 	}
 	return instance.ReadPassword(request.passwordFile, stdin)
 }
 
-func (request onlineConnectionRequest) openDatabase(password string) (*sql.DB, error) {
+func openOnlineDatabase(request onlineConnectionRequest, password string) (*sql.DB, error) {
 	config := mysqldriver.NewConfig()
 	config.User = request.account
 	config.Passwd = password
 	config.Net = "tcp"
 	config.Addr = request.address
 	config.Params = map[string]string{"allowCleartextPasswords": "false"}
-	if request.tlsMode == "verify-full" {
-		tlsConfig, err := onlineTLSConfig(request)
-		if err != nil {
-			return nil, err
-		}
-		name := "database-online-" + strings.ReplaceAll(request.address, ":", "-")
-		if err := mysqldriver.RegisterTLSConfig(name, tlsConfig); err != nil {
-			return nil, err
-		}
-		config.TLSConfig = name
+	if err := applyOnlineTLS(config, request); err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("mysql", config.FormatDSN())
 	if err != nil {
@@ -199,29 +184,60 @@ func (request onlineConnectionRequest) openDatabase(password string) (*sql.DB, e
 	return db, nil
 }
 
+func applyOnlineTLS(config *mysqldriver.Config, request onlineConnectionRequest) error {
+	if request.tlsMode != "verify-full" {
+		return nil
+	}
+	tlsConfig, err := onlineTLSConfig(request)
+	if err != nil {
+		return err
+	}
+	name := "database-online-" + strings.ReplaceAll(request.address, ":", "-")
+	if err := mysqldriver.RegisterTLSConfig(name, tlsConfig); err != nil {
+		return err
+	}
+	config.TLSConfig = name
+	return nil
+}
+
 func onlineTLSConfig(request onlineConnectionRequest) (*tls.Config, error) {
 	roots, err := x509.SystemCertPool()
 	if err != nil || roots == nil {
 		roots = x509.NewCertPool()
 	}
-	if request.tlsCAFile != "" {
-		pem, err := os.ReadFile(request.tlsCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read TLS CA file: %w", err)
-		}
-		if !roots.AppendCertsFromPEM(pem) {
-			return nil, errors.New("TLS CA file contains no certificates")
-		}
+	if err := appendOnlineCA(roots, request.tlsCAFile); err != nil {
+		return nil, err
 	}
-	serverName := request.tlsServerName
-	if serverName == "" {
-		host, _, err := net.SplitHostPort(request.address)
-		if err != nil {
-			return nil, fmt.Errorf("derive TLS server name: %w", err)
-		}
-		serverName = host
+	serverName, err := onlineTLSServerName(request)
+	if err != nil {
+		return nil, err
 	}
 	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: serverName}, nil
+}
+
+func appendOnlineCA(roots *x509.CertPool, path string) error {
+	if path == "" {
+		return nil
+	}
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read TLS CA file: %w", err)
+	}
+	if !roots.AppendCertsFromPEM(pem) {
+		return errors.New("TLS CA file contains no certificates")
+	}
+	return nil
+}
+
+func onlineTLSServerName(request onlineConnectionRequest) (string, error) {
+	if request.tlsServerName != "" {
+		return request.tlsServerName, nil
+	}
+	host, _, err := net.SplitHostPort(request.address)
+	if err != nil {
+		return "", fmt.Errorf("derive TLS server name: %w", err)
+	}
+	return host, nil
 }
 
 func onlineNonLoopbackWarning(address string) map[string]string {
