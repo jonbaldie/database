@@ -496,7 +496,7 @@ func sameSchemaTable(left, right Table) bool {
 }
 
 func (s *Store) persistLocked(definition Definition) error {
-	b, err := catalogJSON(schemaOnly(definition))
+	b, err := catalogJSON(SchemaOnly(definition))
 	if err != nil {
 		return err
 	}
@@ -511,7 +511,9 @@ func (s *Store) persistLocked(definition Definition) error {
 	return syncCatalogDirectory(s.path)
 }
 
-func schemaOnly(definition Definition) Definition {
+// SchemaOnly returns a catalog definition with table row images removed so
+// callers can compare durable schema snapshots with online backup captures.
+func SchemaOnly(definition Definition) Definition {
 	stripped := cloneDefinition(definition)
 	for namespaceKey, namespace := range stripped.Namespaces {
 		for tableKey, table := range namespace.Tables {

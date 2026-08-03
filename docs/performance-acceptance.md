@@ -31,8 +31,12 @@ production-scale guarantee.
 The **v0.1 performance reference environment** is an Apple iMac `Mac15,5` with
 an eight-core M3 chip, 16 GB of memory, and its internal 512 GB Apple SSD. Each
 result records the operating-system version and relevant test conditions. The
-published machine is the reference for release judgment; results from another
-machine are diagnostic evidence, not substitutes for the gate.
+published machine remains the reference for full release judgment. For the
+experimental v0.1 conformance audit tracked by issue
+[#72](https://github.com/jonbaldie/database/issues/72), maintainer judgment
+accepts the fixed harness and scenario without requiring a completed Mac15,5
+internal-SSD run. Results from another machine remain diagnostic evidence and
+cannot silently widen the reference contract.
 
 ## Acceptance corpus
 
@@ -169,11 +173,13 @@ restart the server, run each SQL-driver gate, measure clean starts, and write
 runs, five repetitions, and ten clean starts. It returns a failure when
 enforced thresholds are not met.
 
-Acceptance judgment requires all of: the fixed contract defaults, empty
-`--data-root` (reference internal storage), and the published Mac15,5
-reference host. Each report records the OS, kernel, machine model, CPU,
-memory, driver, server identity, data-root setting, and whether the host is
-the reference environment. Reduced flags, non-reference hosts, and
-non-default data roots record `diagnostic_only` evidence and cannot support a
-release decision. Use `--enforce-thresholds=false` only for local
-troubleshooting when a failing diagnostic run should still write evidence.
+Acceptance judgment for a full reference run still requires all of: the fixed
+contract defaults, empty `--data-root` (reference internal storage), and the
+published Mac15,5 reference host. Each report records the OS, kernel, machine
+model, CPU, memory, driver, server identity, data-root setting, and whether the
+host is the reference environment. Reduced flags, non-reference hosts, and
+non-default data roots record `diagnostic_only` evidence. Issue #72 records the
+maintainer judgment that v0.1 may close without a completed Mac15,5 full run;
+diagnostic harness evidence and this scenario remain the published path. Use
+`--enforce-thresholds=false` only for local troubleshooting when a failing
+diagnostic run should still write evidence.
