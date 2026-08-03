@@ -31,6 +31,7 @@ func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 			DataDirectory: directory,
 			MySQLAddress:  address,
 			MySQLEnabled:  true,
+			OperationID:   "op-serve",
 		}, func(event Event) { events <- event })
 	}()
 	receiveEvent(t, events, "ready")
@@ -40,7 +41,7 @@ func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 		t.Fatalf("open mysql: %v", err)
 	}
 	defer db.Close()
-	rows, err := db.Query("SHUTDOWN")
+	rows, err := db.Query("SHUTDOWN 'op-remote-shutdown'")
 	if err != nil {
 		t.Fatalf("shutdown query: %v", err)
 	}
@@ -49,7 +50,10 @@ func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("Serve after SHUTDOWN: %v", err)
 	}
-	receiveEvent(t, events, "stopping")
+	stopping := receiveEvent(t, events, "stopping")
+	if stopping.OperationID != "op-remote-shutdown" {
+		t.Fatalf("stopping operation_id = %q, want op-remote-shutdown", stopping.OperationID)
+	}
 	receiveEvent(t, events, "stopped")
 }
 

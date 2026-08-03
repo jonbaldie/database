@@ -230,6 +230,11 @@ func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server) {
 	case <-ctx.Done():
 	case <-signals:
 	case <-requested:
+		if mysqlServer != nil {
+			if operationID := mysqlServer.ShutdownOperationID(); operationID != "" {
+				s.options.OperationID = operationID
+			}
+		}
 	}
 	s.health.set("shutting_down")
 	s.emit(s.lifecycleEvent("stopping", "server.stopping", "info", "database shutdown started"))

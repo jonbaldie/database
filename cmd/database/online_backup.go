@@ -39,6 +39,10 @@ func rejectExistingBackupOutput(output string) error {
 }
 
 func connectOnlineBackup(request onlineConnectionRequest, reporter *operationReporter) (*sql.DB, error, string) {
+	return connectOnlineCommand(request, reporter)
+}
+
+func connectOnlineCommand(request onlineConnectionRequest, reporter *operationReporter) (*sql.DB, error, string) {
 	reporter.progress("connecting")
 	password, err := readOnlinePassword(request, os.Stdin)
 	if err != nil {
@@ -130,6 +134,10 @@ func requireOnlineBackupFiles(files map[string][]byte) (map[string][]byte, error
 }
 
 func onlineBackupExitClass(err error) string {
+	return onlineAccessExitClass(err)
+}
+
+func onlineAccessExitClass(err error) string {
 	var mysqlError *mysqldriver.MySQLError
 	if errors.As(err, &mysqlError) && (mysqlError.Number == 1045 || mysqlError.Number == 1227) {
 		return "access"
@@ -138,6 +146,6 @@ func onlineBackupExitClass(err error) string {
 }
 
 func emitOnlineTLSWarning(reporter *operationReporter, context map[string]string) {
-	fmt.Fprintf(reporter.stderr, "%s [UNSAFE_NON_TLS_CONNECTION]: non-loopback backup connection without TLS (address=%s tls=disabled)\n",
+	fmt.Fprintf(reporter.stderr, "%s [UNSAFE_NON_TLS_CONNECTION]: non-loopback online connection without TLS (address=%s tls=disabled)\n",
 		reporter.command, context["address"])
 }

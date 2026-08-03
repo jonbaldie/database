@@ -18,7 +18,7 @@ func TestShutdownRequiresOperationalControl(t *testing.T) {
 
 func TestShutdownRequestsServerStopAndReturnsIdentity(t *testing.T) {
 	executor := backupExecutor(t, "admin", nil)
-	result, err := executor.execute("SHUTDOWN")
+	result, err := executor.execute("SHUTDOWN 'op-shutdown-1'")
 	if err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
@@ -35,5 +35,8 @@ func TestShutdownRequestsServerStopAndReturnsIdentity(t *testing.T) {
 	case <-executor.server.ShutdownRequested():
 	case <-time.After(time.Second):
 		t.Fatal("shutdown was not requested")
+	}
+	if executor.server.ShutdownOperationID() != "op-shutdown-1" {
+		t.Fatalf("shutdown operation id = %q", executor.server.ShutdownOperationID())
 	}
 }

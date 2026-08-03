@@ -131,16 +131,17 @@ type ResourceLimits struct {
 }
 
 type Server struct {
-	Listener     net.Listener
-	config       Config
-	connections  *connectionRegistry
-	auth         authenticator
-	locks        *lockManager
-	resources    *resourceManager
-	explanations *activeExplanationRegistry
-	Diagnostics  ResourceDiagnostics
-	shutdown     chan struct{}
-	shutdownOnce sync.Once
+	Listener            net.Listener
+	config              Config
+	connections         *connectionRegistry
+	auth                authenticator
+	locks               *lockManager
+	resources           *resourceManager
+	explanations        *activeExplanationRegistry
+	Diagnostics         ResourceDiagnostics
+	shutdown            chan struct{}
+	shutdownOnce        sync.Once
+	shutdownOperationID string
 }
 
 // ResourceDiagnostics provides the non-sensitive server evidence that the

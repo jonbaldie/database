@@ -6,10 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"time"
-
-	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 type shutdownRequest struct {
@@ -21,10 +18,6 @@ func shutdownCommand(args []string, stdout, stderr io.Writer) int {
 	output, filtered, err := parseCommandOutput(args, true)
 	if err != nil {
 		return newOperationReporter("shutdown", commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", err.Error(), nil)
-	}
-	if !containsOutputControl(args) {
-		output.result = "json"
-		output.legacy = true
 	}
 	reporter := newOperationReporter("shutdown", output, stdout, stderr)
 	details, err, exitClass := executeShutdown(filtered, reporter)
@@ -64,15 +57,15 @@ func parseShutdownRequest(args []string) (shutdownRequest, error) {
 }
 
 func performShutdown(request shutdownRequest, reporter *operationReporter) (map[string]any, error, string) {
-	db, err, exitClass := connectOnlineShutdown(request, reporter)
+	db, err, exitClass := connectOnlineCommand(request.onlineConnectionRequest, reporter)
 	if err != nil {
 		return nil, err, exitClass
 	}
 	defer db.Close()
 	reporter.progress("requesting")
-	details, err := requestServerShutdown(db)
+	details, err := requestServerShutdown(db, reporter.id)
 	if err != nil {
-		return nil, errors.New("shutdown request failed"), shutdownExitClass(err)
+		return nil, errors.New("shutdown request failed"), onlineAccessExitClass(err)
 	}
 	reporter.progress("draining")
 	_ = db.Close()
@@ -85,30 +78,8 @@ func performShutdown(request shutdownRequest, reporter *operationReporter) (map[
 	return details, nil, "success"
 }
 
-func connectOnlineShutdown(request shutdownRequest, reporter *operationReporter) (*sql.DB, error, string) {
-	reporter.progress("connecting")
-	password, err := readOnlinePassword(request.onlineConnectionRequest, os.Stdin)
-	if err != nil {
-		return nil, err, "invalid_input"
-	}
-	db, err := openOnlineDatabase(request.onlineConnectionRequest, password)
-	if err != nil {
-		return nil, errors.New("connection failed"), "access"
-	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, errors.New("connection failed"), "access"
-	}
-	if request.tlsMode == "disabled" {
-		if warning := onlineNonLoopbackWarning(request.address); warning != nil {
-			emitShutdownTLSWarning(reporter, warning)
-		}
-	}
-	return db, nil, "success"
-}
-
-func requestServerShutdown(db *sql.DB) (map[string]any, error) {
-	rows, err := db.Query("SHUTDOWN")
+func requestServerShutdown(db *sql.DB, operationID string) (map[string]any, error) {
+	rows, err := db.Query("SHUTDOWN '" + escapeSQLString(operationID) + "'")
 	if err != nil {
 		return nil, err
 	}
@@ -133,28 +104,34 @@ func requestServerShutdown(db *sql.DB) (map[string]any, error) {
 	}, nil
 }
 
+func escapeSQLString(value string) string {
+	replaced := make([]byte, 0, len(value))
+	for _, character := range []byte(value) {
+		if character == '\'' {
+			replaced = append(replaced, '\'', '\'')
+			continue
+		}
+		replaced = append(replaced, character)
+	}
+	return string(replaced)
+}
+
 func waitForOnlineShutdown(address string) error {
 	deadline := time.Now().Add(30 * time.Second)
+	failures := 0
 	for time.Now().Before(deadline) {
 		connection, err := net.DialTimeout("tcp", address, 200*time.Millisecond)
 		if err != nil {
-			return nil
+			failures++
+			if failures >= 3 {
+				return nil
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
+		failures = 0
 		_ = connection.Close()
 		time.Sleep(50 * time.Millisecond)
 	}
 	return errors.New("server did not stop")
-}
-
-func shutdownExitClass(err error) string {
-	var mysqlError *mysqldriver.MySQLError
-	if errors.As(err, &mysqlError) && (mysqlError.Number == 1045 || mysqlError.Number == 1227) {
-		return "access"
-	}
-	return "operation_failed"
-}
-
-func emitShutdownTLSWarning(reporter *operationReporter, context map[string]string) {
-	fmt.Fprintf(reporter.stderr, "%s [UNSAFE_NON_TLS_CONNECTION]: non-loopback shutdown connection without TLS (address=%s tls=disabled)\n",
-		reporter.command, context["address"])
 }
