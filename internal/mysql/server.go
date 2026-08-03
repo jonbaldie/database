@@ -139,6 +139,8 @@ type Server struct {
 	resources    *resourceManager
 	explanations *activeExplanationRegistry
 	Diagnostics  ResourceDiagnostics
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 // ResourceDiagnostics provides the non-sensitive server evidence that the
@@ -204,7 +206,11 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 			return nil, err
 		}
 	}
-	return &Server{Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout), resources: resources, explanations: newActiveExplanationRegistry(), Diagnostics: ResourceDiagnostics{manager: resources}}, nil
+	return &Server{
+		Listener: listener, config: config, connections: registry, auth: auth, locks: newLockManager(config.LockWaitTimeout),
+		resources: resources, explanations: newActiveExplanationRegistry(), Diagnostics: ResourceDiagnostics{manager: resources},
+		shutdown: make(chan struct{}),
+	}, nil
 }
 
 func normalizedConfig(config Config) Config {

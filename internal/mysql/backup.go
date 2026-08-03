@@ -69,5 +69,8 @@ func (s *textStatementExecutor) operationStatement(query, lower string) (*queryR
 	if result, handled, err := s.backupInstanceStatement(lower); handled {
 		return result, true, err
 	}
+	if result, handled, err := s.shutdownStatement(lower); handled {
+		return result, true, err
+	}
 	return s.sessionControlStatement(query, lower)
 }
