@@ -34,13 +34,10 @@ func (r *activeExplanationRegistry) begin(connectionID uint32, plan *queryexplan
 	r.mu.Lock()
 	r.active[connectionID] = entry
 	r.mu.Unlock()
-	if session != nil {
-		session.runtimeMetrics = entry.metrics
-	}
+	// Do not attach entry.metrics to session.runtimeMetrics. That flag is reserved
+	// for EXPLAIN ANALYZE, which must walk full operators; prepared-statement live
+	// explanation must keep the point-lookup fast path.
 	return func() {
-		if session != nil && session.runtimeMetrics == entry.metrics {
-			session.runtimeMetrics = nil
-		}
 		r.mu.Lock()
 		if r.active[connectionID] == entry {
 			delete(r.active, connectionID)

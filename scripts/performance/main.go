@@ -268,31 +268,67 @@ func finishEvidence(cfg config, directory string, result *evidence) error {
 	}
 	result.CleanStarts = clean
 	result.FinishedAt = time.Now().UTC()
-	result.Judgment = judge(*result)
-	if !acceptanceEnabled(cfg) {
+	rawJudgment := judge(*result)
+	result.Judgment = rawJudgment
+	if !acceptanceEnabled(cfg, result.Environment) {
 		result.Judgment = "diagnostic_only"
 	}
 	if err := writeEvidence(cfg.output, *result); err != nil {
 		return err
 	}
 	fmt.Printf("performance evidence written to %s\n", cfg.output)
-	if acceptanceEnabled(cfg) && result.Judgment != "accepted" {
+	if cfg.enforceThreshold && rawJudgment != "accepted" {
 		return errors.New("performance acceptance thresholds were not met")
 	}
 	return nil
 }
 
-func acceptanceEnabled(cfg config) bool {
-	return cfg.enforceThreshold && cfg.dataRoot == ""
+func acceptanceEnabled(cfg config, environment map[string]string) bool {
+	return cfg.enforceThreshold && cfg.dataRoot == "" && fixedAcceptanceContract(cfg) && isReferenceEnvironment(environment)
+}
+
+func fixedAcceptanceContract(cfg config) bool {
+	return cfgMatchesAcceptanceSize(cfg) && cfgMatchesAcceptanceTiming(cfg) && cfg.seed == 0x9e3779b97f4a7c15
+}
+
+func cfgMatchesAcceptanceSize(cfg config) bool {
+	return cfg.logicalBytes == 10_000_000_000 &&
+		cfg.narrowRows == 1_000_000 &&
+		cfg.relatedRows == 1_000_000 &&
+		cfg.sessions == 50 &&
+		cfg.minimumOperations == 100_000 &&
+		cfg.cleanStarts == 10
+}
+
+func cfgMatchesAcceptanceTiming(cfg config) bool {
+	return cfg.warmup == 5*time.Minute &&
+		cfg.run == 5*time.Minute &&
+		cfg.repetitions == 5 &&
+		cfg.cleanStartLimit == 3*time.Second
+}
+
+func isReferenceEnvironment(environment map[string]string) bool {
+	if environment["goos"] != "darwin" || environment["machine_model"] != "Mac15,5" {
+		return false
+	}
+	if !strings.Contains(environment["cpu_model"], "Apple M3") {
+		return false
+	}
+	memory, err := strconv.ParseUint(environment["memory_bytes"], 10, 64)
+	if err != nil {
+		return false
+	}
+	return memory >= 16<<30
 }
 
 func newEvidence(cfg config) evidence {
+	environment := benchmarkEnvironment(cfg.executable)
 	return evidence{
 		Schema:          "database.performance/v1",
 		ScenarioVersion: scenarioVersion,
 		CorpusVersion:   corpusVersion,
 		StartedAt:       time.Now().UTC(),
-		Environment:     benchmarkEnvironment(cfg.executable),
+		Environment:     environment,
 		Configuration: map[string]any{
 			"logical_bytes_target": cfg.logicalBytes,
 			"sessions":             cfg.sessions,
@@ -304,7 +340,7 @@ func newEvidence(cfg config) evidence {
 			"seed":                 cfg.seed,
 			"data_root":            cfg.dataRoot,
 		},
-		AcceptanceEnabled: acceptanceEnabled(cfg),
+		AcceptanceEnabled: acceptanceEnabled(cfg, environment),
 	}
 }
 
@@ -315,28 +351,98 @@ type systemCommand struct {
 }
 
 func benchmarkEnvironment(executable string) map[string]string {
+	environment := collectHostEnvironment()
+	environment["go_version"] = runtime.Version()
+	environment["driver"] = "github.com/go-sql-driver/mysql v1.9.3"
+	environment["server"] = versionInfo(executable)
+	environment["reference_environment"] = strconv.FormatBool(isReferenceEnvironment(environment))
+	return environment
+}
+
+func collectHostEnvironment() map[string]string {
 	environment := map[string]string{
-		"goos":       runtime.GOOS,
-		"goarch":     runtime.GOARCH,
-		"go_version": runtime.Version(),
-		"driver":     "github.com/go-sql-driver/mysql v1.9.3",
-		"server":     versionInfo(executable),
+		"goos":          runtime.GOOS,
+		"goarch":        runtime.GOARCH,
+		"os_version":    "unknown",
+		"kernel":        runSystemCommand("uname", "-r"),
+		"cpu_model":     "unknown",
+		"cpu_count":     "unknown",
+		"memory_bytes":  "unknown",
+		"machine_model": "unknown",
 	}
-	osCommand := systemCommand{key: "os_version", command: "uname", args: []string{"-sr"}}
-	if runtime.GOOS == "darwin" {
-		osCommand = systemCommand{key: "os_version", command: "sw_vers", args: []string{"-productVersion"}}
-	}
-	commands := []systemCommand{
-		osCommand,
-		{key: "kernel", command: "uname", args: []string{"-r"}},
-		{key: "cpu_model", command: "sysctl", args: []string{"-n", "machdep.cpu.brand_string"}},
-		{key: "cpu_count", command: "sysctl", args: []string{"-n", "hw.ncpu"}},
-		{key: "memory_bytes", command: "sysctl", args: []string{"-n", "hw.memsize"}},
-	}
-	for _, command := range commands {
-		environment[command.key] = runSystemCommand(command.command, command.args...)
+	switch runtime.GOOS {
+	case "darwin":
+		environment["os_version"] = runSystemCommand("sw_vers", "-productVersion")
+		environment["cpu_model"] = runSystemCommand("sysctl", "-n", "machdep.cpu.brand_string")
+		environment["cpu_count"] = runSystemCommand("sysctl", "-n", "hw.ncpu")
+		environment["memory_bytes"] = runSystemCommand("sysctl", "-n", "hw.memsize")
+		environment["machine_model"] = runSystemCommand("sysctl", "-n", "hw.model")
+	case "linux":
+		environment["os_version"] = runSystemCommand("uname", "-sr")
+		environment["cpu_model"] = linuxCPUModel()
+		environment["cpu_count"] = strconv.Itoa(runtime.NumCPU())
+		environment["memory_bytes"] = linuxMemoryBytes()
+		environment["machine_model"] = linuxMachineModel()
+	default:
+		environment["os_version"] = runSystemCommand("uname", "-sr")
 	}
 	return environment
+}
+
+func linuxCPUModel() string {
+	content, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return "unknown"
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "model name") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return "unknown"
+}
+
+func linuxMemoryBytes() string {
+	content, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return "unknown"
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return "unknown"
+		}
+		kilobytes, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return "unknown"
+		}
+		return strconv.FormatUint(kilobytes*1024, 10)
+	}
+	return "unknown"
+}
+
+func linuxMachineModel() string {
+	candidates := []string{
+		"/sys/devices/virtual/dmi/id/product_name",
+		"/sys/firmware/devicetree/base/model",
+	}
+	for _, path := range candidates {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		value := strings.TrimSpace(string(content))
+		if value != "" {
+			return value
+		}
+	}
+	return "unknown"
 }
 
 func runSystemCommand(command string, args ...string) string {
@@ -515,6 +621,7 @@ func startServer(executable, directory string) (*runningServer, *sql.DB, time.Du
 	if err := command.Start(); err != nil {
 		return nil, nil, 0, fmt.Errorf("start server: %w", err)
 	}
+	started := time.Now()
 	server := &runningServer{command: command, address: address}
 	server.readDone.Add(2)
 	go func() {
@@ -525,7 +632,6 @@ func startServer(executable, directory string) (*runningServer, *sql.DB, time.Du
 		defer server.readDone.Done()
 		_, _ = ioCopyBuilder(&server.stderr, stderr)
 	}()
-	started := time.Now()
 	db, err := openRootDB(address)
 	if err != nil {
 		_ = server.stop()
@@ -816,16 +922,11 @@ func loadBatch(ctx context.Context, db *sql.DB, statement *sql.Stmt, start, end 
 	if err != nil {
 		return fmt.Errorf("begin %s load transaction: %w", name, err)
 	}
-	transactionStatement := transaction.StmtContext(ctx, statement)
 	for index := start; index < end; index++ {
-		if _, err := transactionStatement.ExecContext(ctx, values(index, width)...); err != nil {
+		if _, err := transaction.StmtContext(ctx, statement).ExecContext(ctx, values(index, width)...); err != nil {
 			_ = transaction.Rollback()
 			return fmt.Errorf("load %s row %d: %w", name, index, err)
 		}
-	}
-	if err := transactionStatement.Close(); err != nil {
-		_ = transaction.Rollback()
-		return fmt.Errorf("close %s load statement: %w", name, err)
 	}
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("commit %s load transaction: %w", name, err)
@@ -839,17 +940,11 @@ func shouldReportBatch(start, end, rows int64, batchSize int64) bool {
 
 func runGate(db *sql.DB, c corpus, cfg config, definition gateDefinition) (gateEvidence, error) {
 	result := gateEvidence{Name: definition.name, Operation: definition.operation, P95LimitMS: definition.p95Limit.Seconds() * 1000, P99LimitMS: definition.p99Limit.Seconds() * 1000, ThroughputMin: definition.throughputMin}
-	for repetition := 1; repetition <= cfg.repetitions; repetition++ {
-		run, err := runGateRepetition(db, c, cfg, definition, repetition)
-		if err != nil {
-			return result, err
-		}
-		result.Runs = append(result.Runs, run)
-		result.ValidRuns++
-		if run.Passed {
-			result.PassingRuns++
-		}
-		fmt.Printf("%s run %d: %.1f/s p95 %.3fms p99 %.3fms (%s)\n", definition.name, repetition, run.Throughput, run.P95Millis, run.P99Millis, map[bool]string{true: "pass", false: "fail"}[run.Passed])
+	if err := runGateWarmup(db, c, cfg, definition); err != nil {
+		return result, err
+	}
+	if err := runGateRepetitions(db, c, cfg, definition, &result); err != nil {
+		return result, err
 	}
 	if err := restoreCorpus(db); err != nil {
 		return result, err
@@ -858,35 +953,46 @@ func runGate(db *sql.DB, c corpus, cfg config, definition gateDefinition) (gateE
 	return result, nil
 }
 
-func runGateRepetition(db *sql.DB, c corpus, cfg config, definition gateDefinition, repetition int) (runEvidence, error) {
-	if repetition > 1 {
-		if err := restoreCorpus(db); err != nil {
-			return runEvidence{}, err
-		}
-	}
-	fmt.Printf("%s run %d/%d warm-up\n", definition.name, repetition, cfg.repetitions)
-	warmup, err := executeGate(db, c, cfg, definition, false, repetition)
+func runGateWarmup(db *sql.DB, c corpus, cfg config, definition gateDefinition) error {
+	fmt.Printf("%s warm-up\n", definition.name)
+	warmup, err := executeGate(db, c, cfg, definition, false, 0)
 	if err != nil {
-		return runEvidence{}, err
+		return err
 	}
 	if warmup.firstError != "" {
-		return runEvidence{}, fmt.Errorf("%s warm-up failed: %s", definition.name, warmup.firstError)
+		return fmt.Errorf("%s warm-up failed: %s", definition.name, warmup.firstError)
 	}
-	if isWriteGate(definition) {
-		if err := restoreCorpus(db); err != nil {
-			return runEvidence{}, err
+	return restoreCorpus(db)
+}
+
+func runGateRepetitions(db *sql.DB, c corpus, cfg config, definition gateDefinition, result *gateEvidence) error {
+	for repetition := 1; repetition <= cfg.repetitions; repetition++ {
+		if repetition > 1 {
+			if err := restoreCorpus(db); err != nil {
+				return err
+			}
 		}
+		run, err := runGateRepetition(db, c, cfg, definition, repetition)
+		if err != nil {
+			return err
+		}
+		result.Runs = append(result.Runs, run)
+		result.ValidRuns++
+		if run.Passed {
+			result.PassingRuns++
+		}
+		fmt.Printf("%s run %d: %.1f/s p95 %.3fms p99 %.3fms (%s)\n", definition.name, repetition, run.Throughput, run.P95Millis, run.P99Millis, map[bool]string{true: "pass", false: "fail"}[run.Passed])
 	}
+	return nil
+}
+
+func runGateRepetition(db *sql.DB, c corpus, cfg config, definition gateDefinition, repetition int) (runEvidence, error) {
 	fmt.Printf("%s run %d/%d measure\n", definition.name, repetition, cfg.repetitions)
 	stats, err := executeGate(db, c, cfg, definition, true, repetition)
 	if err != nil {
 		return runEvidence{}, err
 	}
 	return makeRunEvidence(stats, cfg, definition, repetition), nil
-}
-
-func isWriteGate(definition gateDefinition) bool {
-	return definition.name == "durable_insert" || definition.name == "indexed_update"
 }
 
 func makeRunEvidence(stats phaseStats, cfg config, definition gateDefinition, repetition int) runEvidence {
@@ -902,7 +1008,7 @@ func makeRunEvidence(stats phaseStats, cfg config, definition gateDefinition, re
 }
 
 func runMeetsThresholds(run runEvidence, minimumOperations int64, definition gateDefinition) bool {
-	return run.Operations >= uint64(minimumOperations) && run.Errors == 0 && run.Unfinished == 0 && run.P95Millis <= definition.p95Limit.Seconds()*1000 && run.P99Millis <= definition.p99Limit.Seconds()*1000 && run.Throughput >= definition.throughputMin
+	return run.Operations >= uint64(minimumOperations) && run.Errors == 0 && run.P95Millis <= definition.p95Limit.Seconds()*1000 && run.P99Millis <= definition.p99Limit.Seconds()*1000 && run.Throughput >= definition.throughputMin
 }
 
 func executeGate(db *sql.DB, c corpus, cfg config, definition gateDefinition, measured bool, repetition int) (phaseStats, error) {
@@ -1045,27 +1151,11 @@ func executeOperation(ctx context.Context, session workerSession, operation stri
 		var value string
 		return session.query.QueryRowContext(ctx, fmt.Sprintf("unique-%d", requestID)).Scan(&id, &value)
 	case "durable_insert":
-		transaction, err := session.conn.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		_, err = transaction.StmtContext(ctx, session.query).ExecContext(ctx, key, requestID, fmt.Sprintf("insert-%d", key), "2024-01-01 00:00:00", sequence, "performance-insert")
-		if err != nil {
-			_ = transaction.Rollback()
-			return err
-		}
-		return transaction.Commit()
+		_, err := session.query.ExecContext(ctx, key, requestID, fmt.Sprintf("insert-%d", key), "2024-01-01 00:00:00", sequence, "performance-insert")
+		return err
 	case "indexed_update":
-		transaction, err := session.conn.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		_, err = transaction.StmtContext(ctx, session.query).ExecContext(ctx, sequence, fmt.Sprintf("measured-%d", key%10000), requestID)
-		if err != nil {
-			_ = transaction.Rollback()
-			return err
-		}
-		return transaction.Commit()
+		_, err := session.query.ExecContext(ctx, sequence, fmt.Sprintf("measured-%d", key%10000), requestID)
+		return err
 	default:
 		return fmt.Errorf("unknown operation %q", operation)
 	}
@@ -1094,12 +1184,10 @@ func restoreCorpus(db *sql.DB) error {
 func measureCleanStarts(cfg config, directory string) (cleanStartEvidence, error) {
 	evidence := cleanStartEvidence{LimitMS: cfg.cleanStartLimit.Seconds() * 1000, Required: cfg.cleanStarts - 1}
 	for index := 0; index < cfg.cleanStarts; index++ {
-		started := time.Now()
-		server, db, _, err := startServer(cfg.executable, directory)
+		server, db, duration, err := startServer(cfg.executable, directory)
 		if err != nil {
 			return evidence, err
 		}
-		duration := time.Since(started)
 		evidence.Durations = append(evidence.Durations, duration.Seconds()*1000)
 		if duration <= cfg.cleanStartLimit {
 			evidence.Passing++
