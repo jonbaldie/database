@@ -155,7 +155,7 @@ func (s *server) serve(ctx context.Context) error {
 		return err
 	}
 	s.reportReady(state.recovered, runtime.diagnosticsAddress)
-	s.awaitStop(ctx)
+	s.awaitStop(ctx, runtime.mysql)
 	if err := runtime.closeGracefully(); err != nil {
 		s.emit(s.lifecycleEvent("failed", "server.stop_failed", "error", "database shutdown failed"))
 		return fmt.Errorf("graceful shutdown: %w", err)
@@ -218,13 +218,23 @@ func listenerIsLoopback(address string) bool {
 	return ip != nil && (ip.IsLoopback() || ip.To4() != nil && ip.To4().IsLoopback())
 }
 
-func (s *server) awaitStop(ctx context.Context) {
+func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
+	var requested <-chan struct{}
+	if mysqlServer != nil {
+		requested = mysqlServer.ShutdownRequested()
+	}
 	select {
 	case <-ctx.Done():
 	case <-signals:
+	case <-requested:
+		if mysqlServer != nil {
+			if operationID := mysqlServer.ShutdownOperationID(); operationID != "" {
+				s.options.OperationID = operationID
+			}
+		}
 	}
 	s.health.set("shutting_down")
 	s.emit(s.lifecycleEvent("stopping", "server.stopping", "info", "database shutdown started"))

@@ -36,6 +36,9 @@ func operatorCommand(args []string, stdout, stderr io.Writer) int {
 	if args[0] == "backup" || args[0] == "restore" {
 		return backupRestoreCommand(args, stdout, stderr)
 	}
+	if args[0] == "shutdown" {
+		return shutdownCommand(args[1:], stdout, stderr)
+	}
 	if args[0] == "upgrade" {
 		if len(args) == 1 {
 			return unsupportedSimpleOperatorCommand(args, stdout, stderr, operation)
@@ -55,7 +58,7 @@ func unsupportedOperatorCommand(args []string, stdout, stderr io.Writer, operati
 	if args[0] == "data" {
 		return unsupportedDataCommand(args, stdout, stderr, operation)
 	}
-	if args[0] == "upgrade" || args[0] == "shutdown" {
+	if args[0] == "upgrade" {
 		return unsupportedSimpleOperatorCommand(args, stdout, stderr, operation)
 	}
 	return newOperationReporter(operation, commandOutput{result: "json", progress: "none", legacy: true}, stdout, stderr).failure("invalid_input", "", fmt.Sprintf("unsupported operator command %q", args[0]), nil)
@@ -213,6 +216,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  init      create a stopped database server instance")
 	fmt.Fprintln(w, "  version   report the executable and compatibility identity")
 	fmt.Fprintln(w, "  serve     run the process and optional diagnostics listener")
+	fmt.Fprintln(w, "  shutdown  request graceful stop of a running instance")
 	fmt.Fprintln(w, "  config    validate the closed server configuration")
 	fmt.Fprintln(w, "Use 'database <command> --help' for command-specific options.")
 }

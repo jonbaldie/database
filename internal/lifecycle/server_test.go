@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net"
@@ -13,9 +14,59 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
+
 	"github.com/jonbaldie/database/internal/instance"
 	"github.com/jonbaldie/database/internal/mysql"
 )
+
+func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
+	directory := initializedDirectory(t)
+	address := freeLocalAddress(t)
+	ctx := context.Background()
+	events := make(chan Event, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, Options{
+			DataDirectory: directory,
+			MySQLAddress:  address,
+			MySQLEnabled:  true,
+			OperationID:   "op-serve",
+		}, func(event Event) { events <- event })
+	}()
+	receiveEvent(t, events, "ready")
+
+	db, err := sql.Open("mysql", "admin:test-password@tcp("+address+")/")
+	if err != nil {
+		t.Fatalf("open mysql: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query("SHUTDOWN 'op-remote-shutdown'")
+	if err != nil {
+		t.Fatalf("shutdown query: %v", err)
+	}
+	_ = rows.Close()
+
+	if err := <-done; err != nil {
+		t.Fatalf("Serve after SHUTDOWN: %v", err)
+	}
+	stopping := receiveEvent(t, events, "stopping")
+	if stopping.OperationID != "op-remote-shutdown" {
+		t.Fatalf("stopping operation_id = %q, want op-remote-shutdown", stopping.OperationID)
+	}
+	receiveEvent(t, events, "stopped")
+}
+
+func freeLocalAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+	return address
+}
 
 func TestServeRejectsDamagedInitializedDirectory(t *testing.T) {
 	directory := initializedDirectory(t)
