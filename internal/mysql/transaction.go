@@ -621,7 +621,8 @@ func (s *transactionExecutor) commitWithPublicationBoundary(finalize bool) error
 			return err
 		}
 		mutations := append([]func(*catalog.Definition) error(nil), s.transactionMutations...)
-		if err := s.server.config.Catalog.ApplyDurable(func(base catalog.Definition) (catalog.Definition, error) {
+		expected := s.transactionRevision
+		if err := s.server.config.Catalog.ApplyDurableIfRevision(expected, func(base catalog.Definition) (catalog.Definition, error) {
 			for _, mutation := range mutations {
 				if err := mutation(&base); err != nil {
 					return catalog.Definition{}, err

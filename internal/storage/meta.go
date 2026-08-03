@@ -45,7 +45,9 @@ func rebuildIndexes(current *table) {
 			current.rows[index] = padded
 			row = padded
 		}
-		current.primaryIdx[current.primaryKey(row)] = index
+		if len(current.primary) > 0 {
+			current.primaryIdx[current.primaryKey(row)] = index
+		}
 		for _, unique := range current.uniques {
 			indexKey := strings.Join(unique, "\x00")
 			current.uniqueIdx[indexKey][rowKey(row, current.columnIndexes(unique))] = index

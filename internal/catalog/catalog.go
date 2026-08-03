@@ -113,14 +113,14 @@ func ColumnAttributeAt(t Table, index int) ColumnAttribute {
 }
 
 type Store struct {
-	mu                sync.Mutex
-	path              string
-	definition        Definition
-	revision          uint64
-	rows              rowEngine
-	writerOnce        sync.Once
-	writes            chan *writeRequest
-	publishValidator  func(previous, next Definition) error
+	mu               sync.Mutex
+	path             string
+	definition       Definition
+	revision         uint64
+	rows             rowEngine
+	writerOnce       sync.Once
+	writes           chan *writeRequest
+	publishValidator func(previous, next Definition) error
 }
 
 // SetPublishValidator installs the SQL constraint check used before durable
@@ -366,6 +366,7 @@ func (s *Store) ReplaceIfRevision(expected uint64, definition Definition) error 
 // Transaction sessions use this to keep uncommitted work private.
 func Apply(definition Definition, action func(*Definition) error) (Definition, error) {
 	staged := cloneDefinition(definition)
+	detachPrimaryIndexes(staged)
 	if err := action(&staged); err != nil {
 		return Definition{}, err
 	}
@@ -442,6 +443,7 @@ func (s *Store) mutate(action func(*Definition) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	staged := cloneDefinition(s.definition)
+	detachPrimaryIndexes(staged)
 	if err := action(&staged); err != nil {
 		return err
 	}
@@ -454,7 +456,6 @@ func (s *Store) mutate(action func(*Definition) error) error {
 	if err := s.persistLocked(staged); err != nil {
 		return err
 	}
-	warmPrimaryIndexes(staged)
 	s.definition = staged
 	s.revision++
 	return nil

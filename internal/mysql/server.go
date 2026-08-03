@@ -529,11 +529,11 @@ type statementState struct {
 }
 
 type preparedStatement struct {
-	query        string
-	parameters    int
-	types        []preparedParameterType
-	longData     map[uint16][]byte
-	explanation  *queryexplanation.Document
+	query       string
+	parameters  int
+	types       []preparedParameterType
+	longData    map[uint16][]byte
+	explanation *queryexplanation.Document
 }
 
 type preparedParameterType struct {

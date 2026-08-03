@@ -42,6 +42,10 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 	if err != nil {
 		return err
 	}
+	if len(overlay.base.primary) == 0 {
+		overlay.inserts = append(overlay.inserts, append([]string(nil), row...))
+		return nil
+	}
 	key := overlay.base.primaryKey(row)
 	if !overlay.clear {
 		if _, exists := overlay.base.primaryIdx[key]; exists && !overlay.deletes[key] {
@@ -58,7 +62,11 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 	}
 	if !overlay.clear {
 		for _, unique := range overlay.base.uniques {
-			uniqueKey := rowKey(row, overlay.base.columnIndexes(unique))
+			indexes := overlay.base.columnIndexes(unique)
+			if uniqueKeyNullable(row, indexes) {
+				continue
+			}
+			uniqueKey := rowKey(row, indexes)
 			indexKey := strings.Join(unique, "\x00")
 			if position, exists := overlay.base.uniqueIdx[indexKey][uniqueKey]; exists {
 				existing := overlay.base.primaryKey(overlay.base.rows[position])
@@ -67,16 +75,26 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 				}
 			}
 			for _, staged := range overlay.inserts {
-				if rowKey(staged, overlay.base.columnIndexes(unique)) == uniqueKey {
+				if uniqueKeyNullable(staged, indexes) {
+					continue
+				}
+				if rowKey(staged, indexes) == uniqueKey {
 					return errDuplicateKey
 				}
 			}
 		}
 	} else {
 		for _, unique := range overlay.base.uniques {
-			uniqueKey := rowKey(row, overlay.base.columnIndexes(unique))
+			indexes := overlay.base.columnIndexes(unique)
+			if uniqueKeyNullable(row, indexes) {
+				continue
+			}
+			uniqueKey := rowKey(row, indexes)
 			for _, staged := range overlay.inserts {
-				if rowKey(staged, overlay.base.columnIndexes(unique)) == uniqueKey {
+				if uniqueKeyNullable(staged, indexes) {
+					continue
+				}
+				if rowKey(staged, indexes) == uniqueKey {
 					return errDuplicateKey
 				}
 			}

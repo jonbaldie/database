@@ -4,6 +4,7 @@ import "fmt"
 
 func (s *Store) replaceLocked(definition Definition) error {
 	staged := cloneDefinition(definition)
+	detachPrimaryIndexes(staged)
 	if err := validateDefinition(staged); err != nil {
 		return fmt.Errorf("invalid catalog: %w", err)
 	}
@@ -16,23 +17,9 @@ func (s *Store) replaceLocked(definition Definition) error {
 			return err
 		}
 	}
-	warmPrimaryIndexes(staged)
 	s.definition = staged
 	s.revision++
 	return nil
-}
-
-func warmPrimaryIndexes(definition Definition) {
-	for namespaceKey, namespace := range definition.Namespaces {
-		for tableKey, table := range namespace.Tables {
-			if table.PrimaryIndex != nil {
-				continue
-			}
-			RebuildPrimaryIndex(&table)
-			namespace.Tables[tableKey] = table
-		}
-		definition.Namespaces[namespaceKey] = namespace
-	}
 }
 
 type preparedRowSync struct {
@@ -81,6 +68,17 @@ func (s *Store) stageTableRows(namespace, name string, previous, next [][]string
 	if err != nil {
 		return nil, err
 	}
+	if len(primary) == 0 {
+		if err := txn.Clear(namespace, name); err != nil {
+			return nil, err
+		}
+		for _, row := range next {
+			if err := txn.Insert(namespace, name, row); err != nil {
+				return nil, err
+			}
+		}
+		return txn, nil
+	}
 	if appendOnlyRowImage(previous, next) {
 		for index := len(previous); index < len(next); index++ {
 			if err := txn.Insert(namespace, name, next[index]); err != nil {
@@ -95,7 +93,7 @@ func (s *Store) stageTableRows(namespace, name string, previous, next [][]string
 			if sameRowRef(previous[index], next[index]) || rowEqual(previous[index], next[index]) {
 				continue
 			}
-			key := rowKey(next[index], primaryIndexes)
+			key := rowKey(previous[index], primaryIndexes)
 			if err := txn.UpdatePrimary(namespace, name, key, next[index]); err != nil {
 				return nil, err
 			}

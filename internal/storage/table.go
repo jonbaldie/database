@@ -9,12 +9,20 @@ import (
 )
 
 func (t *table) appendRow(row []string) error {
+	if len(t.primary) == 0 {
+		t.rows = append(t.rows, append([]string(nil), row...))
+		return nil
+	}
 	key := t.primaryKey(row)
 	if _, exists := t.primaryIdx[key]; exists {
 		return errDuplicateKey
 	}
 	for _, unique := range t.uniques {
-		uniqueKey := rowKey(row, t.columnIndexes(unique))
+		indexes := t.columnIndexes(unique)
+		if uniqueKeyNullable(row, indexes) {
+			continue
+		}
+		uniqueKey := rowKey(row, indexes)
 		indexKey := strings.Join(unique, "\x00")
 		if _, exists := t.uniqueIdx[indexKey][uniqueKey]; exists {
 			return errDuplicateKey
@@ -24,11 +32,26 @@ func (t *table) appendRow(row []string) error {
 	t.rows = append(t.rows, append([]string(nil), row...))
 	t.primaryIdx[key] = position
 	for _, unique := range t.uniques {
+		indexes := t.columnIndexes(unique)
+		if uniqueKeyNullable(row, indexes) {
+			continue
+		}
 		indexKey := strings.Join(unique, "\x00")
-		t.uniqueIdx[indexKey][rowKey(row, t.columnIndexes(unique))] = position
+		t.uniqueIdx[indexKey][rowKey(row, indexes)] = position
 	}
 	return nil
 }
+
+func uniqueKeyNullable(row []string, indexes []int) bool {
+	for _, index := range indexes {
+		if index < 0 || index >= len(row) || row[index] == storedNullValue {
+			return true
+		}
+	}
+	return false
+}
+
+const storedNullValue = "\x00database-sql-null"
 
 func clearTable(current *table) {
 	current.rows = nil

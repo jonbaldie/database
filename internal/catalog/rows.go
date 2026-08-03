@@ -93,7 +93,14 @@ func (s *Store) hydrateRowsFromEngine() error {
 				return err
 			}
 			rows, ok := s.rows.SnapshotRows(namespaceName, tableName)
-			if !ok {
+			if !ok || len(rows) == 0 {
+				if len(table.Rows) > 0 {
+					if err := s.seedRowsLocked(namespaceName, tableName, table); err != nil {
+						return err
+					}
+				}
+				RebuildPrimaryIndex(&table)
+				namespace.Tables[tableKey] = table
 				continue
 			}
 			table.Rows = rows
@@ -103,6 +110,22 @@ func (s *Store) hydrateRowsFromEngine() error {
 		s.definition.Namespaces[namespaceKey] = namespace
 	}
 	return nil
+}
+
+func (s *Store) seedRowsLocked(namespace, name string, table Table) error {
+	txn, err := s.rows.Begin()
+	if err != nil {
+		return err
+	}
+	if err := txn.Clear(namespace, name); err != nil {
+		return err
+	}
+	for _, row := range table.Rows {
+		if err := txn.Insert(namespace, name, row); err != nil {
+			return err
+		}
+	}
+	return txn.Commit()
 }
 
 func (s *Store) ensureRowTable(namespace string, table Table) error {
@@ -139,9 +162,6 @@ func tableKeyColumns(table Table) ([]string, [][]string) {
 		if columns != nil {
 			uniques = append(uniques, columns)
 		}
-	}
-	if len(primary) == 0 && len(table.Columns) > 0 {
-		primary = []string{table.Columns[0]}
 	}
 	return primary, dedupeKeyLists(uniques)
 }

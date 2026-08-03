@@ -12,15 +12,24 @@ import (
 // image. mutateCatalog calls it before a transaction snapshot or catalog file
 // becomes visible, so a failed write or DDL change is atomic.
 func validateConstraintDefinition(previous, definition catalog.Definition) error {
+	changed := map[string]bool{}
+	for namespaceKey, namespace := range definition.Namespaces {
+		previousNamespace := previous.Namespaces[namespaceKey]
+		for tableKey, table := range namespace.Tables {
+			previousTable := previousNamespace.Tables[tableKey]
+			if samePublishedRows(previousTable.Rows, table.Rows) && sameTableShape(previousTable, table) {
+				continue
+			}
+			changed[namespaceKey+"\x00"+tableKey] = true
+		}
+	}
 	for namespaceKey, namespace := range definition.Namespaces {
 		namespaceName := namespace.Name
 		if namespaceName == "" {
 			namespaceName = namespaceKey
 		}
-		previousNamespace := previous.Namespaces[namespaceKey]
 		for tableKey, table := range namespace.Tables {
-			previousTable := previousNamespace.Tables[tableKey]
-			if samePublishedRows(previousTable.Rows, table.Rows) && sameTableShape(previousTable, table) {
+			if !changed[namespaceKey+"\x00"+tableKey] && !foreignKeyDependsOnChanged(namespaceKey, table, changed) {
 				continue
 			}
 			tableName := table.Name
@@ -33,6 +42,22 @@ func validateConstraintDefinition(previous, definition catalog.Definition) error
 		}
 	}
 	return nil
+}
+
+func foreignKeyDependsOnChanged(namespaceKey string, table catalog.Table, changed map[string]bool) bool {
+	for _, constraint := range table.Constraints {
+		if constraint.Type != catalog.ConstraintTypeForeignKey {
+			continue
+		}
+		referencedNamespace := catalog.Key(constraint.ReferencedNamespace)
+		if referencedNamespace == "" {
+			referencedNamespace = namespaceKey
+		}
+		if changed[referencedNamespace+"\x00"+catalog.Key(constraint.ReferencedTable)] {
+			return true
+		}
+	}
+	return false
 }
 
 func samePublishedRows(left, right [][]string) bool {
@@ -229,10 +254,19 @@ func validateUniqueConstraintAgainstPrevious(previous, table catalog.Table, cons
 		// batch is staged, so an O(n) rebuild here only burns publish latency.
 		return validateUniqueConstraintAppendNewKeys(previous, table, constraint, indexes)
 	}
-	if uniqueColumnsUnchanged(previous, table, constraint, indexes) {
+	if constraintExists(previous, constraint) && uniqueColumnsUnchanged(previous, table, constraint, indexes) {
 		return nil
 	}
 	return validateUniqueConstraint(table, constraint, indexes)
+}
+
+func constraintExists(table catalog.Table, constraint catalog.Constraint) bool {
+	for _, candidate := range table.Constraints {
+		if candidate.Name == constraint.Name && candidate.Type == constraint.Type {
+			return true
+		}
+	}
+	return false
 }
 
 func validateUniqueConstraintAppendNewKeys(previous, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {

@@ -3,8 +3,10 @@ package catalog
 import "time"
 
 type writeRequest struct {
-	apply  func(Definition) (Definition, error)
-	result chan error
+	apply            func(Definition) (Definition, error)
+	expectedRevision uint64
+	requireRevision  bool
+	result           chan error
 }
 
 func (s *Store) ensureWriter() {
@@ -17,8 +19,18 @@ func (s *Store) ensureWriter() {
 // ApplyDurable applies one isolated catalog mutation through the coalesced
 // writer so concurrent commits can share a single durable sync.
 func (s *Store) ApplyDurable(apply func(Definition) (Definition, error)) error {
+	return s.applyDurable(false, 0, apply)
+}
+
+// ApplyDurableIfRevision is ApplyDurable that fails with ErrRevisionConflict
+// when the catalog moved past expected before publication.
+func (s *Store) ApplyDurableIfRevision(expected uint64, apply func(Definition) (Definition, error)) error {
+	return s.applyDurable(true, expected, apply)
+}
+
+func (s *Store) applyDurable(requireRevision bool, expected uint64, apply func(Definition) (Definition, error)) error {
 	s.ensureWriter()
-	req := &writeRequest{apply: apply, result: make(chan error, 1)}
+	req := &writeRequest{apply: apply, expectedRevision: expected, requireRevision: requireRevision, result: make(chan error, 1)}
 	s.writes <- req
 	return <-req.result
 }
@@ -59,9 +71,20 @@ func (s *Store) publishWriteBatch(batch []*writeRequest) {
 	s.mu.Lock()
 	staged := cloneDefinition(s.definition)
 	previous := s.definition
+	revision := s.revision
 	s.mu.Unlock()
+	detachPrimaryIndexes(staged)
 	successful := make([]*writeRequest, 0, len(batch))
+	claimedRevisions := map[uint64]bool{}
 	for _, req := range batch {
+		if req.requireRevision {
+			if req.expectedRevision != revision || claimedRevisions[req.expectedRevision] {
+				req.result <- ErrRevisionConflict
+				close(req.result)
+				continue
+			}
+			claimedRevisions[req.expectedRevision] = true
+		}
 		next, err := req.apply(staged)
 		if err != nil {
 			req.result <- err
@@ -87,7 +110,6 @@ func (s *Store) publishWriteBatch(batch []*writeRequest) {
 		failWriteBatch(successful, err)
 		return
 	}
-	warmPrimaryIndexesFrom(previous, staged)
 	s.mu.Lock()
 	schemaChanged := !sameSchema(s.definition, staged)
 	if schemaChanged {
@@ -104,50 +126,6 @@ func (s *Store) publishWriteBatch(batch []*writeRequest) {
 		req.result <- nil
 		close(req.result)
 	}
-}
-
-func warmPrimaryIndexesFrom(previous, next Definition) {
-	for namespaceKey, namespace := range next.Namespaces {
-		previousNamespace := previous.Namespaces[namespaceKey]
-		for tableKey, table := range namespace.Tables {
-			if table.PrimaryIndex != nil {
-				continue
-			}
-			previousTable := previousNamespace.Tables[tableKey]
-			if appendOnlyRowImage(previousTable.Rows, table.Rows) {
-				// Append-only publishes keep the catalog PK index cold; point
-				// lookups and duplicate checks use the durable row engine.
-				continue
-			}
-			if extendPrimaryIndex(&table, previousTable) {
-				namespace.Tables[tableKey] = table
-				continue
-			}
-			RebuildPrimaryIndex(&table)
-			namespace.Tables[tableKey] = table
-		}
-		next.Namespaces[namespaceKey] = namespace
-	}
-}
-
-func extendPrimaryIndex(table *Table, previous Table) bool {
-	if previous.PrimaryIndex == nil || !appendOnlyRowImage(previous.Rows, table.Rows) {
-		return false
-	}
-	primary, _ := tableKeyColumns(*table)
-	if len(primary) == 0 {
-		return false
-	}
-	nextIndex := make(map[string]int, len(previous.PrimaryIndex)+len(table.Rows)-len(previous.Rows))
-	for key, value := range previous.PrimaryIndex {
-		nextIndex[key] = value
-	}
-	indexes := columnPositions(*table, primary)
-	for rowIndex := len(previous.Rows); rowIndex < len(table.Rows); rowIndex++ {
-		nextIndex[rowKey(table.Rows[rowIndex], indexes)] = rowIndex
-	}
-	table.PrimaryIndex = nextIndex
-	return true
 }
 
 func failWriteBatch(batch []*writeRequest, err error) {

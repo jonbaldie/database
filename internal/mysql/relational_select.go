@@ -315,8 +315,10 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 	if err != nil {
 		return nil, err
 	}
-	if rows, ok := tryPointLookup(plan); ok {
-		return plan.result(rows), nil
+	if plan.session == nil || plan.session.runtimeMetrics == nil {
+		if rows, ok := tryPointLookup(plan); ok {
+			return plan.result(rows), nil
+		}
 	}
 	if plan.supportsSpillSort() {
 		return plan.spilledSortResult()

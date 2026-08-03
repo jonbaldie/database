@@ -76,10 +76,10 @@ func TestAcceptanceEnabledRequiresFixedContractReferenceHostAndDefaultStorage(t 
 		t.Fatal(err)
 	}
 	reference := map[string]string{
-		"goos":                 "darwin",
-		"machine_model":        "Mac15,5",
-		"cpu_model":            "Apple M3",
-		"memory_bytes":         "17179869184",
+		"goos":                  "darwin",
+		"machine_model":         "Mac15,5",
+		"cpu_model":             "Apple M3",
+		"memory_bytes":          "17179869184",
 		"reference_environment": "true",
 	}
 	if !acceptanceEnabled(cfg, reference) {
