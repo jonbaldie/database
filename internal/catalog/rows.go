@@ -81,35 +81,47 @@ func (s *Store) hydrateRowsFromEngine() error {
 	}
 	for namespaceKey, namespace := range s.definition.Namespaces {
 		for tableKey, table := range namespace.Tables {
-			namespaceName := namespace.Name
-			if namespaceName == "" {
-				namespaceName = namespaceKey
-			}
-			tableName := table.Name
-			if tableName == "" {
-				tableName = tableKey
-			}
-			if err := s.ensureRowTable(namespaceName, table); err != nil {
+			namespaceName, tableName := resolvedTableNames(namespaceKey, namespace, tableKey, table)
+			updated, err := s.hydrateTableRows(namespaceName, tableName, table)
+			if err != nil {
 				return err
 			}
-			rows, ok := s.rows.SnapshotRows(namespaceName, tableName)
-			if !ok || len(rows) == 0 {
-				if len(table.Rows) > 0 {
-					if err := s.seedRowsLocked(namespaceName, tableName, table); err != nil {
-						return err
-					}
-				}
-				RebuildPrimaryIndex(&table)
-				namespace.Tables[tableKey] = table
-				continue
-			}
-			table.Rows = rows
-			RebuildPrimaryIndex(&table)
-			namespace.Tables[tableKey] = table
+			namespace.Tables[tableKey] = updated
 		}
 		s.definition.Namespaces[namespaceKey] = namespace
 	}
 	return nil
+}
+
+func resolvedTableNames(namespaceKey string, namespace Namespace, tableKey string, table Table) (string, string) {
+	namespaceName := namespace.Name
+	if namespaceName == "" {
+		namespaceName = namespaceKey
+	}
+	tableName := table.Name
+	if tableName == "" {
+		tableName = tableKey
+	}
+	return namespaceName, tableName
+}
+
+func (s *Store) hydrateTableRows(namespaceName, tableName string, table Table) (Table, error) {
+	if err := s.ensureRowTable(namespaceName, table); err != nil {
+		return table, err
+	}
+	rows, ok := s.rows.SnapshotRows(namespaceName, tableName)
+	if !ok || len(rows) == 0 {
+		if len(table.Rows) > 0 {
+			if err := s.seedRowsLocked(namespaceName, tableName, table); err != nil {
+				return table, err
+			}
+		}
+		RebuildPrimaryIndex(&table)
+		return table, nil
+	}
+	table.Rows = rows
+	RebuildPrimaryIndex(&table)
+	return table, nil
 }
 
 func (s *Store) seedRowsLocked(namespace, name string, table Table) error {
@@ -137,6 +149,12 @@ func (s *Store) ensureRowTable(namespace string, table Table) error {
 }
 
 func tableKeyColumns(table Table) ([]string, [][]string) {
+	primary, uniques := constraintKeyColumns(table)
+	uniques = append(uniques, uniqueIndexKeyColumns(table)...)
+	return primary, dedupeKeyLists(uniques)
+}
+
+func constraintKeyColumns(table Table) ([]string, [][]string) {
 	primary := []string{}
 	uniques := [][]string{}
 	for _, constraint := range table.Constraints {
@@ -147,23 +165,32 @@ func tableKeyColumns(table Table) ([]string, [][]string) {
 			uniques = append(uniques, append([]string(nil), constraint.Columns...))
 		}
 	}
+	return primary, uniques
+}
+
+func uniqueIndexKeyColumns(table Table) [][]string {
+	uniques := [][]string{}
 	for _, index := range table.Indexes {
 		if !index.Unique || len(index.Parts) == 0 {
 			continue
 		}
-		columns := make([]string, 0, len(index.Parts))
-		for _, part := range index.Parts {
-			if part.Column == "" {
-				columns = nil
-				break
-			}
-			columns = append(columns, part.Column)
-		}
+		columns := uniqueIndexColumns(index)
 		if columns != nil {
 			uniques = append(uniques, columns)
 		}
 	}
-	return primary, dedupeKeyLists(uniques)
+	return uniques
+}
+
+func uniqueIndexColumns(index Index) []string {
+	columns := make([]string, 0, len(index.Parts))
+	for _, part := range index.Parts {
+		if part.Column == "" {
+			return nil
+		}
+		columns = append(columns, part.Column)
+	}
+	return columns
 }
 
 func dedupeKeyLists(values [][]string) [][]string {

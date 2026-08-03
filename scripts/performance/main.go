@@ -288,17 +288,23 @@ func acceptanceEnabled(cfg config, environment map[string]string) bool {
 }
 
 func fixedAcceptanceContract(cfg config) bool {
+	return cfgMatchesAcceptanceSize(cfg) && cfgMatchesAcceptanceTiming(cfg) && cfg.seed == 0x9e3779b97f4a7c15
+}
+
+func cfgMatchesAcceptanceSize(cfg config) bool {
 	return cfg.logicalBytes == 10_000_000_000 &&
 		cfg.narrowRows == 1_000_000 &&
 		cfg.relatedRows == 1_000_000 &&
 		cfg.sessions == 50 &&
-		cfg.warmup == 5*time.Minute &&
+		cfg.minimumOperations == 100_000 &&
+		cfg.cleanStarts == 10
+}
+
+func cfgMatchesAcceptanceTiming(cfg config) bool {
+	return cfg.warmup == 5*time.Minute &&
 		cfg.run == 5*time.Minute &&
 		cfg.repetitions == 5 &&
-		cfg.minimumOperations == 100_000 &&
-		cfg.cleanStarts == 10 &&
-		cfg.cleanStartLimit == 3*time.Second &&
-		cfg.seed == 0x9e3779b97f4a7c15
+		cfg.cleanStartLimit == 3*time.Second
 }
 
 func isReferenceEnvironment(environment map[string]string) bool {
@@ -934,26 +940,41 @@ func shouldReportBatch(start, end, rows int64, batchSize int64) bool {
 
 func runGate(db *sql.DB, c corpus, cfg config, definition gateDefinition) (gateEvidence, error) {
 	result := gateEvidence{Name: definition.name, Operation: definition.operation, P95LimitMS: definition.p95Limit.Seconds() * 1000, P99LimitMS: definition.p99Limit.Seconds() * 1000, ThroughputMin: definition.throughputMin}
-	fmt.Printf("%s warm-up\n", definition.name)
-	warmup, err := executeGate(db, c, cfg, definition, false, 0)
-	if err != nil {
+	if err := runGateWarmup(db, c, cfg, definition); err != nil {
 		return result, err
 	}
-	if warmup.firstError != "" {
-		return result, fmt.Errorf("%s warm-up failed: %s", definition.name, warmup.firstError)
+	if err := runGateRepetitions(db, c, cfg, definition, &result); err != nil {
+		return result, err
 	}
 	if err := restoreCorpus(db); err != nil {
 		return result, err
 	}
+	result.Passed = result.PassingRuns >= 4 && result.ValidRuns == cfg.repetitions
+	return result, nil
+}
+
+func runGateWarmup(db *sql.DB, c corpus, cfg config, definition gateDefinition) error {
+	fmt.Printf("%s warm-up\n", definition.name)
+	warmup, err := executeGate(db, c, cfg, definition, false, 0)
+	if err != nil {
+		return err
+	}
+	if warmup.firstError != "" {
+		return fmt.Errorf("%s warm-up failed: %s", definition.name, warmup.firstError)
+	}
+	return restoreCorpus(db)
+}
+
+func runGateRepetitions(db *sql.DB, c corpus, cfg config, definition gateDefinition, result *gateEvidence) error {
 	for repetition := 1; repetition <= cfg.repetitions; repetition++ {
 		if repetition > 1 {
 			if err := restoreCorpus(db); err != nil {
-				return result, err
+				return err
 			}
 		}
 		run, err := runGateRepetition(db, c, cfg, definition, repetition)
 		if err != nil {
-			return result, err
+			return err
 		}
 		result.Runs = append(result.Runs, run)
 		result.ValidRuns++
@@ -962,11 +983,7 @@ func runGate(db *sql.DB, c corpus, cfg config, definition gateDefinition) (gateE
 		}
 		fmt.Printf("%s run %d: %.1f/s p95 %.3fms p99 %.3fms (%s)\n", definition.name, repetition, run.Throughput, run.P95Millis, run.P99Millis, map[bool]string{true: "pass", false: "fail"}[run.Passed])
 	}
-	if err := restoreCorpus(db); err != nil {
-		return result, err
-	}
-	result.Passed = result.PassingRuns >= 4 && result.ValidRuns == cfg.repetitions
-	return result, nil
+	return nil
 }
 
 func runGateRepetition(db *sql.DB, c corpus, cfg config, definition gateDefinition, repetition int) (runEvidence, error) {

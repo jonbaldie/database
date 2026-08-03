@@ -1,10 +1,6 @@
 package storage
 
 import (
-	"encoding/binary"
-	"hash/crc32"
-	"io"
-	"os"
 	"strings"
 )
 
@@ -46,7 +42,26 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 		overlay.inserts = append(overlay.inserts, append([]string(nil), row...))
 		return nil
 	}
+	if err := overlay.rejectDuplicateInsert(row); err != nil {
+		return err
+	}
 	key := overlay.base.primaryKey(row)
+	if overlay.deletes != nil {
+		delete(overlay.deletes, key)
+	}
+	overlay.inserts = append(overlay.inserts, append([]string(nil), row...))
+	return nil
+}
+
+func (overlay *tableOverlay) rejectDuplicateInsert(row []string) error {
+	key := overlay.base.primaryKey(row)
+	if err := overlay.rejectDuplicatePrimary(key); err != nil {
+		return err
+	}
+	return overlay.rejectDuplicateUniques(row)
+}
+
+func (overlay *tableOverlay) rejectDuplicatePrimary(key string) error {
 	if !overlay.clear {
 		if _, exists := overlay.base.primaryIdx[key]; exists && !overlay.deletes[key] {
 			return errDuplicateKey
@@ -60,50 +75,41 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 	if _, exists := overlay.updates[key]; exists {
 		return errDuplicateKey
 	}
+	return nil
+}
+
+func (overlay *tableOverlay) rejectDuplicateUniques(row []string) error {
+	for _, unique := range overlay.base.uniques {
+		if err := overlay.rejectDuplicateUnique(row, unique); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (overlay *tableOverlay) rejectDuplicateUnique(row, unique []string) error {
+	indexes := overlay.base.columnIndexes(unique)
+	if uniqueKeyNullable(row, indexes) {
+		return nil
+	}
+	uniqueKey := rowKey(row, indexes)
 	if !overlay.clear {
-		for _, unique := range overlay.base.uniques {
-			indexes := overlay.base.columnIndexes(unique)
-			if uniqueKeyNullable(row, indexes) {
-				continue
-			}
-			uniqueKey := rowKey(row, indexes)
-			indexKey := strings.Join(unique, "\x00")
-			if position, exists := overlay.base.uniqueIdx[indexKey][uniqueKey]; exists {
-				existing := overlay.base.primaryKey(overlay.base.rows[position])
-				if !overlay.deletes[existing] {
-					return errDuplicateKey
-				}
-			}
-			for _, staged := range overlay.inserts {
-				if uniqueKeyNullable(staged, indexes) {
-					continue
-				}
-				if rowKey(staged, indexes) == uniqueKey {
-					return errDuplicateKey
-				}
-			}
-		}
-	} else {
-		for _, unique := range overlay.base.uniques {
-			indexes := overlay.base.columnIndexes(unique)
-			if uniqueKeyNullable(row, indexes) {
-				continue
-			}
-			uniqueKey := rowKey(row, indexes)
-			for _, staged := range overlay.inserts {
-				if uniqueKeyNullable(staged, indexes) {
-					continue
-				}
-				if rowKey(staged, indexes) == uniqueKey {
-					return errDuplicateKey
-				}
+		indexKey := strings.Join(unique, "\x00")
+		if position, exists := overlay.base.uniqueIdx[indexKey][uniqueKey]; exists {
+			existing := overlay.base.primaryKey(overlay.base.rows[position])
+			if !overlay.deletes[existing] {
+				return errDuplicateKey
 			}
 		}
 	}
-	if overlay.deletes != nil {
-		delete(overlay.deletes, key)
+	for _, staged := range overlay.inserts {
+		if uniqueKeyNullable(staged, indexes) {
+			continue
+		}
+		if rowKey(staged, indexes) == uniqueKey {
+			return errDuplicateKey
+		}
 	}
-	overlay.inserts = append(overlay.inserts, append([]string(nil), row...))
 	return nil
 }
 
@@ -200,27 +206,51 @@ func (txn *Transaction) Commit() error {
 	if txn.finished {
 		return errFinishedTxn
 	}
-	txn.engine.mu.Lock()
-	if txn.engine.closed {
-		txn.engine.mu.Unlock()
+	if err := txn.engine.writeTransactionOverlays(txn); err != nil {
+		return err
+	}
+	if err := txn.engine.syncWAL(); err != nil {
+		return err
+	}
+	return txn.engine.applyTransactionOverlays(txn)
+}
+
+func (e *Engine) writeTransactionOverlays(txn *Transaction) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.wal == nil {
 		return errClosed
 	}
 	for _, overlay := range txn.overlays {
 		if err := txn.writeOverlay(overlay); err != nil {
-			txn.engine.mu.Unlock()
 			return err
 		}
 	}
-	txn.engine.mu.Unlock()
-	if err := txn.engine.awaitGroupSync(); err != nil {
-		return err
-	}
-	txn.engine.mu.Lock()
-	defer txn.engine.mu.Unlock()
-	if txn.engine.closed {
+	return nil
+}
+
+func (e *Engine) syncWAL() error {
+	e.mu.RLock()
+	file := e.wal
+	closed := e.closed
+	e.mu.RUnlock()
+	if closed || file == nil {
 		return errClosed
 	}
-	for _, overlay := range txn.overlays {
+	return file.Sync()
+}
+
+func (e *Engine) applyTransactionOverlays(txn *Transaction) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errClosed
+	}
+	for key, overlay := range txn.overlays {
+		current, ok := e.tables[key]
+		if !ok || current != overlay.base {
+			return errMissingTable
+		}
 		if err := applyOverlay(overlay); err != nil {
 			return err
 		}
@@ -274,69 +304,4 @@ func applyOverlay(overlay *tableOverlay) error {
 		}
 	}
 	return nil
-}
-
-func (e *Engine) replayWAL() error {
-	file, err := os.Open(e.walPath())
-	if errorsIsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	for {
-		var length uint32
-		if err := binary.Read(file, binary.LittleEndian, &length); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-		var checksum uint32
-		if err := binary.Read(file, binary.LittleEndian, &checksum); err != nil {
-			return err
-		}
-		payload := make([]byte, length)
-		if _, err := io.ReadFull(file, payload); err != nil {
-			return err
-		}
-		if crc32.ChecksumIEEE(payload) != checksum {
-			return io.ErrUnexpectedEOF
-		}
-		if err := e.applyWALPayload(payload); err != nil {
-			return err
-		}
-	}
-}
-
-func (e *Engine) applyWALPayload(payload []byte) error {
-	kind, namespace, name, row, err := decodePayload(payload)
-	if err != nil {
-		return err
-	}
-	current, ok := e.tables[tableKey(namespace, name)]
-	if !ok {
-		return errMissingTable
-	}
-	switch kind {
-	case walInsert:
-		return current.appendRow(row)
-	case walUpdate:
-		position, ok := current.primaryIdx[current.primaryKey(row)]
-		if !ok {
-			return current.appendRow(row)
-		}
-		return current.replaceRow(position, row)
-	case walClear:
-		clearTable(current)
-		return nil
-	case walDelete:
-		if len(row) == 0 {
-			return io.ErrUnexpectedEOF
-		}
-		return current.deletePrimary(row[0])
-	default:
-		return io.ErrUnexpectedEOF
-	}
 }

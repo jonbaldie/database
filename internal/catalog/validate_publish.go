@@ -39,8 +39,10 @@ func validateChangedRows(previous, next Definition) error {
 }
 
 func validateTableRowsFrom(tableName string, table Table, start int) error {
-	for rowIndex := start; rowIndex < len(table.Rows); rowIndex++ {
-		if len(table.Rows[rowIndex]) != len(table.Columns) {
+	rowCount := len(table.Rows)
+	columnCount := len(table.Columns)
+	for rowIndex := start; rowIndex < rowCount; rowIndex++ {
+		if len(table.Rows[rowIndex]) != columnCount {
 			return fmt.Errorf("table %q row %d has an invalid column count", tableName, rowIndex)
 		}
 	}

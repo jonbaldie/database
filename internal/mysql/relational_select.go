@@ -315,15 +315,17 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 	if err != nil {
 		return nil, err
 	}
-	if plan.session == nil || plan.session.runtimeMetrics == nil {
-		if rows, ok := tryPointLookup(plan); ok {
-			return plan.result(rows), nil
-		}
+	return executeRelationalSelectPlan(plan, s.streamRows)
+}
+
+func executeRelationalSelectPlan(plan *relationalSelectPlan, streamRows bool) (*queryResult, error) {
+	if result, ok := tryRelationalPointLookup(plan); ok {
+		return result, nil
 	}
 	if plan.supportsSpillSort() {
 		return plan.spilledSortResult()
 	}
-	if s.streamRows && plan.source.locking == nil && !plan.requiresMaterialization() {
+	if streamRows && plan.source.locking == nil && !plan.requiresMaterialization() {
 		return plan.streamingResult(), nil
 	}
 	if plan.source.locking != nil {
@@ -334,6 +336,17 @@ func executeRelationalSelectContext(s *relationExecutor, query string, outer *ou
 		return nil, err
 	}
 	return plan.result(plan.shapeRows(resultRows)), nil
+}
+
+func tryRelationalPointLookup(plan *relationalSelectPlan) (*queryResult, bool) {
+	if plan.session != nil && plan.session.runtimeMetrics != nil {
+		return nil, false
+	}
+	rows, ok := tryPointLookup(plan)
+	if !ok {
+		return nil, false
+	}
+	return plan.result(rows), true
 }
 
 func executeLockingRelationalSelect(plan *relationalSelectPlan) (*queryResult, error) {

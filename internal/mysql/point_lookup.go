@@ -7,13 +7,7 @@ import (
 )
 
 func tryPointLookup(plan *relationalSelectPlan) ([]relationalResultRow, bool) {
-	if plan == nil || plan.session == nil || plan.session.server.config.Catalog == nil {
-		return nil, false
-	}
-	if len(plan.source.tables) != 1 || len(plan.source.joins) != 0 || plan.source.locking != nil {
-		return nil, false
-	}
-	if plan.hasAggregateOrWindow() || plan.distinct || len(plan.order) > 0 {
+	if !pointLookupEligible(plan) {
 		return nil, false
 	}
 	column, value, ok := parseSimpleEqualityWhere(plan.whereText)
@@ -25,6 +19,20 @@ func tryPointLookup(plan *relationalSelectPlan) ([]relationalResultRow, bool) {
 	if !ok {
 		return nil, false
 	}
+	return projectPointLookup(plan, row)
+}
+
+func pointLookupEligible(plan *relationalSelectPlan) bool {
+	if plan == nil || plan.session == nil || plan.session.server.config.Catalog == nil {
+		return false
+	}
+	if len(plan.source.tables) != 1 || len(plan.source.joins) != 0 || plan.source.locking != nil {
+		return false
+	}
+	return !plan.hasAggregateOrWindow() && !plan.distinct && len(plan.order) == 0
+}
+
+func projectPointLookup(plan *relationalSelectPlan, row []string) ([]relationalResultRow, bool) {
 	result := relationRow{values: row}
 	if plan.where != nil {
 		matched, err := predicateMatches(plan.where, result)
@@ -78,7 +86,8 @@ func uniqueColumn(table catalog.Table) string {
 
 func parseSimpleEqualityWhere(where string) (string, string, bool) {
 	where = strings.TrimSpace(where)
-	if where == "" || strings.Contains(strings.ToLower(where), " and ") || strings.Contains(strings.ToLower(where), " or ") {
+	lower := strings.ToLower(where)
+	if where == "" || strings.Contains(lower, " and ") || strings.Contains(lower, " or ") {
 		return "", "", false
 	}
 	parts := strings.SplitN(where, "=", 2)
@@ -86,14 +95,18 @@ func parseSimpleEqualityWhere(where string) (string, string, bool) {
 		return "", "", false
 	}
 	column := stripIdentifier(strings.TrimSpace(parts[0]))
-	value := strings.TrimSpace(parts[1])
+	value := decodeWhereLiteral(strings.TrimSpace(parts[1]))
 	if column == "" || value == "" {
 		return "", "", false
 	}
-	if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") && len(value) >= 2 {
-		value = strings.ReplaceAll(value[1:len(value)-1], "''", "'")
-	}
 	return column, value, true
+}
+
+func decodeWhereLiteral(value string) string {
+	if strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'") && len(value) >= 2 {
+		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+	}
+	return value
 }
 
 func stripIdentifier(value string) string {

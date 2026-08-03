@@ -179,9 +179,17 @@ func (s *textStatementExecutor) startStatementTransaction(dataDefinition, mutati
 	if s.nextReadOnly && mutation {
 		return false, readOnlyTransactionFailure()
 	}
+	autocommit := !s.autocommitOff || dataDefinition
+	// Autocommit DML publishes through ApplyDurable directly. Starting a
+	// statement transaction would snapshot, stage, and re-apply the same
+	// mutation before the coalesced writer ever sees it.
+	if autocommit && mutation && !dataDefinition {
+		s.consumeNextCharacteristics()
+		return true, nil
+	}
 	s.beginTransaction(s.nextIsolation, s.nextReadOnly)
 	s.consumeNextCharacteristics()
-	return !s.autocommitOff || dataDefinition, nil
+	return autocommit, nil
 }
 
 func (e statementTransaction) finish(s *session, result *queryResult, err error) (*queryResult, error) {
@@ -191,17 +199,31 @@ func (e statementTransaction) finish(s *session, result *queryResult, err error)
 	if !e.autocommit {
 		return result, nil
 	}
-	if err := (&transactionExecutor{s}).commit(); err != nil {
-		return nil, err
+	if s.transaction {
+		if err := (&transactionExecutor{s}).commitAutocommit(); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
+	releaseSessionLocks(s)
 	return result, nil
 }
 
 func (e statementTransaction) abort(s *session, err error) (*queryResult, error) {
 	if e.autocommit || isDeadlock(err) || isCancellation(err) {
-		_ = rollbackTransaction(s)
+		if s.transaction {
+			_ = rollbackTransaction(s)
+		} else {
+			releaseSessionLocks(s)
+		}
 	}
 	return nil, err
+}
+
+func releaseSessionLocks(s *session) {
+	if s != nil && s.server != nil && s.server.locks != nil {
+		s.server.locks.release(s)
+	}
 }
 
 func isDeadlock(err error) bool {
@@ -609,7 +631,18 @@ func (s *transactionExecutor) commitTransactionControl() error {
 	return s.commitWithPublicationBoundary(true)
 }
 
+// commitAutocommit publishes one statement's staged mutations against the latest
+// catalog without an optimistic revision gate. Concurrent autocommit writers that
+// started at the same snapshot must all succeed when their keys do not conflict.
+func (s *transactionExecutor) commitAutocommit() error {
+	return s.commitPublishedMutations(false, false)
+}
+
 func (s *transactionExecutor) commitWithPublicationBoundary(finalize bool) error {
+	return s.commitPublishedMutations(true, finalize)
+}
+
+func (s *transactionExecutor) commitPublishedMutations(requireRevision, finalize bool) error {
 	if !s.transaction {
 		return nil
 	}
@@ -617,30 +650,44 @@ func (s *transactionExecutor) commitWithPublicationBoundary(finalize bool) error
 		return err
 	}
 	if s.transactionDirty && s.server.config.Catalog != nil {
-		if err := s.checkStatementResources(); err != nil {
+		if err := s.publishTransactionMutations(requireRevision, finalize); err != nil {
 			return err
-		}
-		mutations := append([]func(*catalog.Definition) error(nil), s.transactionMutations...)
-		expected := s.transactionRevision
-		if err := s.server.config.Catalog.ApplyDurableIfRevision(expected, func(base catalog.Definition) (catalog.Definition, error) {
-			for _, mutation := range mutations {
-				if err := mutation(&base); err != nil {
-					return catalog.Definition{}, err
-				}
-			}
-			return base, nil
-		}); err != nil {
-			s.finishTransaction()
-			if errors.Is(err, catalog.ErrRevisionConflict) {
-				return sqlFailure{1213, "40001", "Deadlock found when trying to get lock; try restarting transaction"}
-			}
-			return sqlFailure{1105, "HY000", err.Error()}
-		}
-		if finalize {
-			finalizeStatementResources(s.resources)
 		}
 	}
 	s.finishTransaction()
+	return nil
+}
+
+func (s *transactionExecutor) publishTransactionMutations(requireRevision, finalize bool) error {
+	if err := s.checkStatementResources(); err != nil {
+		return err
+	}
+	mutations := append([]func(*catalog.Definition) error(nil), s.transactionMutations...)
+	expected := s.transactionRevision
+	publish := func(base catalog.Definition) (catalog.Definition, error) {
+		for _, mutation := range mutations {
+			if err := mutation(&base); err != nil {
+				return catalog.Definition{}, err
+			}
+		}
+		return base, nil
+	}
+	var err error
+	if requireRevision {
+		err = s.server.config.Catalog.ApplyDurableIfRevision(expected, publish)
+	} else {
+		err = s.server.config.Catalog.ApplyDurable(publish)
+	}
+	if err != nil {
+		s.finishTransaction()
+		if errors.Is(err, catalog.ErrRevisionConflict) {
+			return sqlFailure{1213, "40001", "Deadlock found when trying to get lock; try restarting transaction"}
+		}
+		return catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+	}
+	if finalize {
+		finalizeStatementResources(s.resources)
+	}
 	return nil
 }
 

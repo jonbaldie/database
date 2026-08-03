@@ -33,34 +33,40 @@ func (s *Store) prepareRowSync(previous, next Definition) (*preparedRowSync, err
 	}
 	prepared := &preparedRowSync{store: s}
 	for namespaceKey, namespace := range next.Namespaces {
-		namespaceName := namespace.Name
-		if namespaceName == "" {
-			namespaceName = namespaceKey
-		}
-		previousNamespace := previous.Namespaces[namespaceKey]
-		for tableKey, table := range namespace.Tables {
-			tableName := table.Name
-			if tableName == "" {
-				tableName = tableKey
-			}
-			if err := s.ensureRowTable(namespaceName, table); err != nil {
-				return nil, err
-			}
-			previousTable := previousNamespace.Tables[tableKey]
-			if sameRowSlice(previousTable.Rows, table.Rows) {
-				continue
-			}
-			primary, _ := tableKeyColumns(table)
-			txn, err := s.stageTableRows(namespaceName, tableName, previousTable.Rows, table.Rows, table, primary)
-			if err != nil {
-				return nil, err
-			}
-			if txn != nil {
-				prepared.txns = append(prepared.txns, txn)
-			}
+		if err := s.prepareNamespaceRowSync(prepared, previous.Namespaces[namespaceKey], namespace, namespaceKey); err != nil {
+			return nil, err
 		}
 	}
 	return prepared, nil
+}
+
+func (s *Store) prepareNamespaceRowSync(prepared *preparedRowSync, previousNamespace, namespace Namespace, namespaceKey string) error {
+	namespaceName := namespace.Name
+	if namespaceName == "" {
+		namespaceName = namespaceKey
+	}
+	for tableKey, table := range namespace.Tables {
+		tableName := table.Name
+		if tableName == "" {
+			tableName = tableKey
+		}
+		if err := s.ensureRowTable(namespaceName, table); err != nil {
+			return err
+		}
+		previousTable := previousNamespace.Tables[tableKey]
+		if sameRowSlice(previousTable.Rows, table.Rows) {
+			continue
+		}
+		primary, _ := tableKeyColumns(table)
+		txn, err := s.stageTableRows(namespaceName, tableName, previousTable.Rows, table.Rows, table, primary)
+		if err != nil {
+			return err
+		}
+		if txn != nil {
+			prepared.txns = append(prepared.txns, txn)
+		}
+	}
+	return nil
 }
 
 func (s *Store) stageTableRows(namespace, name string, previous, next [][]string, table Table, primary []string) (rowTxn, error) {
@@ -68,53 +74,49 @@ func (s *Store) stageTableRows(namespace, name string, previous, next [][]string
 	if err != nil {
 		return nil, err
 	}
-	if len(primary) == 0 {
-		if err := txn.Clear(namespace, name); err != nil {
-			return nil, err
-		}
-		for _, row := range next {
-			if err := txn.Insert(namespace, name, row); err != nil {
-				return nil, err
-			}
-		}
-		return txn, nil
+	switch {
+	case len(primary) == 0:
+		return txn, replaceAllRows(txn, namespace, name, next)
+	case appendOnlyRowImage(previous, next):
+		return txn, appendRows(txn, namespace, name, next[len(previous):])
+	case inPlaceRowUpdates(previous, next, table, primary):
+		return txn, updateChangedRows(txn, namespace, name, previous, next, table, primary)
+	case len(next) == 0:
+		return txn, txn.Clear(namespace, name)
+	default:
+		return txn, replaceAllRows(txn, namespace, name, next)
 	}
-	if appendOnlyRowImage(previous, next) {
-		for index := len(previous); index < len(next); index++ {
-			if err := txn.Insert(namespace, name, next[index]); err != nil {
-				return nil, err
-			}
-		}
-		return txn, nil
-	}
-	if inPlaceRowUpdates(previous, next) {
-		primaryIndexes := columnPositions(table, primary)
-		for index := range previous {
-			if sameRowRef(previous[index], next[index]) || rowEqual(previous[index], next[index]) {
-				continue
-			}
-			key := rowKey(previous[index], primaryIndexes)
-			if err := txn.UpdatePrimary(namespace, name, key, next[index]); err != nil {
-				return nil, err
-			}
-		}
-		return txn, nil
-	}
-	if len(next) == 0 {
-		if err := txn.Clear(namespace, name); err != nil {
-			return nil, err
-		}
-		return txn, nil
-	}
+}
+
+func replaceAllRows(txn rowTxn, namespace, name string, rows [][]string) error {
 	if err := txn.Clear(namespace, name); err != nil {
-		return nil, err
+		return err
 	}
-	for _, row := range next {
+	return appendRows(txn, namespace, name, rows)
+}
+
+func appendRows(txn rowTxn, namespace, name string, rows [][]string) error {
+	for _, row := range rows {
 		if err := txn.Insert(namespace, name, row); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return txn, nil
+	return nil
+}
+
+func updateChangedRows(txn rowTxn, namespace, name string, previous, next [][]string, table Table, primary []string) error {
+	primaryIndexes := columnPositions(table, primary)
+	limit := len(previous)
+	for index := 0; index < limit; index++ {
+		if sameRowRef(previous[index], next[index]) || rowEqual(previous[index], next[index]) {
+			continue
+		}
+		key := rowKey(previous[index], primaryIndexes)
+		if err := txn.UpdatePrimary(namespace, name, key, next[index]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func appendOnlyRowImage(previous, next [][]string) bool {
@@ -124,10 +126,12 @@ func appendOnlyRowImage(previous, next [][]string) bool {
 	if len(previous) == 0 {
 		return true
 	}
-	if sameRowRef(previous[0], next[0]) && sameRowRef(previous[len(previous)-1], next[len(previous)-1]) {
+	last := len(previous) - 1
+	if sameRowRef(previous[0], next[0]) && sameRowRef(previous[last], next[last]) {
 		return true
 	}
-	for index := range previous {
+	previousLen := len(previous)
+	for index := 0; index < previousLen; index++ {
 		if !sameRowRef(previous[index], next[index]) && !rowEqual(previous[index], next[index]) {
 			return false
 		}
@@ -135,9 +139,16 @@ func appendOnlyRowImage(previous, next [][]string) bool {
 	return true
 }
 
-func inPlaceRowUpdates(previous, next [][]string) bool {
-	if len(previous) != len(next) {
+func inPlaceRowUpdates(previous, next [][]string, table Table, primary []string) bool {
+	if len(previous) != len(next) || len(primary) == 0 {
 		return false
+	}
+	indexes := columnPositions(table, primary)
+	previousLen := len(previous)
+	for index := 0; index < previousLen; index++ {
+		if rowKey(previous[index], indexes) != rowKey(next[index], indexes) {
+			return false
+		}
 	}
 	return true
 }

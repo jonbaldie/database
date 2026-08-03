@@ -2723,15 +2723,24 @@ func applyUpdatePlan(plan updatePlan) ([][]string, uint64, error) {
 	if key, ok := pointUpdatePrimaryKey(plan); ok {
 		return applyPointUpdatePlan(plan, updates, key)
 	}
+	changed := changedUpdateRows(plan)
+	if len(changed) == 0 {
+		return plan.table.Rows, 0, nil
+	}
+	return applyChangedUpdateRows(plan, updates, changed)
+}
+
+func changedUpdateRows(plan updatePlan) []int {
 	changed := make([]int, 0)
 	for rowIndex, row := range plan.table.Rows {
 		if plan.matcher(row) {
 			changed = append(changed, rowIndex)
 		}
 	}
-	if len(changed) == 0 {
-		return plan.table.Rows, 0, nil
-	}
+	return changed
+}
+
+func applyChangedUpdateRows(plan updatePlan, updates map[int]string, changed []int) ([][]string, uint64, error) {
 	rows := make([][]string, len(plan.table.Rows))
 	copy(rows, plan.table.Rows)
 	affected := uint64(0)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -90,15 +89,15 @@ func (e *Engine) persistMetaLocked() error {
 		}
 		builder.WriteByte('\n')
 	}
-	temporary := e.metaPath() + ".tmp"
+	temporary := rowsMetaPath(e.directory) + ".tmp"
 	if err := os.WriteFile(temporary, []byte(builder.String()), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(temporary, e.metaPath())
+	return os.Rename(temporary, rowsMetaPath(e.directory))
 }
 
 func (e *Engine) loadMeta() error {
-	content, err := os.ReadFile(e.metaPath())
+	content, err := os.ReadFile(rowsMetaPath(e.directory))
 	if errorsIsNotExist(err) {
 		return nil
 	}
@@ -127,7 +126,7 @@ func (e *Engine) loadMeta() error {
 
 func (e *Engine) loadCheckpoints() error {
 	for _, current := range e.tables {
-		path := e.checkpointPath(current.namespace, current.name)
+		path := rowsCheckpointPath(e.directory, current.namespace, current.name)
 		file, err := os.Open(path)
 		if errorsIsNotExist(err) {
 			continue
@@ -144,10 +143,6 @@ func (e *Engine) loadCheckpoints() error {
 		}
 	}
 	return nil
-}
-
-func (e *Engine) checkpointPath(namespace, name string) string {
-	return filepath.Join(e.directory, "rows", namespace+"."+name+".chk")
 }
 
 func loadCheckpoint(reader io.Reader, current *table) error {

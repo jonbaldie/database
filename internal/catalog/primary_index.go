@@ -40,7 +40,8 @@ func MaintainPrimaryIndex(table *Table, previousLength int, previous map[string]
 		return
 	}
 	indexes := columnPositions(*table, primary)
-	for rowIndex := previousLength; rowIndex < len(table.Rows); rowIndex++ {
+	limit := len(table.Rows)
+	for rowIndex := previousLength; rowIndex < limit; rowIndex++ {
 		table.PrimaryIndex[rowKey(table.Rows[rowIndex], indexes)] = rowIndex
 	}
 }

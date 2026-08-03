@@ -12,6 +12,11 @@ import (
 // image. mutateCatalog calls it before a transaction snapshot or catalog file
 // becomes visible, so a failed write or DDL change is atomic.
 func validateConstraintDefinition(previous, definition catalog.Definition) error {
+	changed := changedPublishedTables(previous, definition)
+	return validateChangedTableConstraints(previous, definition, changed)
+}
+
+func changedPublishedTables(previous, definition catalog.Definition) map[string]bool {
 	changed := map[string]bool{}
 	for namespaceKey, namespace := range definition.Namespaces {
 		previousNamespace := previous.Namespaces[namespaceKey]
@@ -23,6 +28,10 @@ func validateConstraintDefinition(previous, definition catalog.Definition) error
 			changed[namespaceKey+"\x00"+tableKey] = true
 		}
 	}
+	return changed
+}
+
+func validateChangedTableConstraints(previous, definition catalog.Definition, changed map[string]bool) error {
 	for namespaceKey, namespace := range definition.Namespaces {
 		namespaceName := namespace.Name
 		if namespaceName == "" {
@@ -271,35 +280,38 @@ func constraintExists(table catalog.Table, constraint catalog.Constraint) bool {
 
 func validateUniqueConstraintAppendNewKeys(previous, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) error {
 	columns := constraintIndexes(constraint.Columns, indexes)
-	seen := make(map[string]bool, len(table.Rows)-len(previous.Rows))
+	newRows := table.Rows[len(previous.Rows):]
 	if constraint.Type == catalog.ConstraintTypePrimary {
-		primaryIndex := previous.PrimaryIndex
-		for _, row := range table.Rows[len(previous.Rows):] {
-			key, nullable := constraintRowKey(table, row, columns)
-			if nullable {
-				continue
-			}
-			if seen[key] {
-				return sqlFailure{1062, "23000", "Duplicate entry for key '" + constraint.Name + "'"}
-			}
-			if primaryIndex != nil {
-				if _, exists := primaryIndex[key]; exists {
-					return sqlFailure{1062, "23000", "Duplicate entry for key '" + constraint.Name + "'"}
-				}
-			}
-			seen[key] = true
-		}
-		return nil
+		return validateAppendPrimaryKeys(previous, table, constraint, columns, newRows)
 	}
-	existing := make(map[string]bool, len(previous.Rows))
-	for _, row := range previous.Rows {
+	return validateAppendUniqueKeys(previous, table, constraint, columns, newRows)
+}
+
+func validateAppendPrimaryKeys(previous, table catalog.Table, constraint catalog.Constraint, columns []int, newRows [][]string) error {
+	seen := make(map[string]bool, len(newRows))
+	primaryIndex := previous.PrimaryIndex
+	for _, row := range newRows {
 		key, nullable := constraintRowKey(table, row, columns)
 		if nullable {
 			continue
 		}
-		existing[key] = true
+		if seen[key] {
+			return sqlFailure{1062, "23000", "Duplicate entry for key '" + constraint.Name + "'"}
+		}
+		if primaryIndex != nil {
+			if _, exists := primaryIndex[key]; exists {
+				return sqlFailure{1062, "23000", "Duplicate entry for key '" + constraint.Name + "'"}
+			}
+		}
+		seen[key] = true
 	}
-	for _, row := range table.Rows[len(previous.Rows):] {
+	return nil
+}
+
+func validateAppendUniqueKeys(previous, table catalog.Table, constraint catalog.Constraint, columns []int, newRows [][]string) error {
+	seen := make(map[string]bool, len(newRows))
+	existing := existingUniqueKeys(previous, table, columns)
+	for _, row := range newRows {
 		key, nullable := constraintRowKey(table, row, columns)
 		if nullable {
 			continue
@@ -310,6 +322,18 @@ func validateUniqueConstraintAppendNewKeys(previous, table catalog.Table, constr
 		seen[key] = true
 	}
 	return nil
+}
+
+func existingUniqueKeys(previous, table catalog.Table, columns []int) map[string]bool {
+	existing := make(map[string]bool, len(previous.Rows))
+	for _, row := range previous.Rows {
+		key, nullable := constraintRowKey(table, row, columns)
+		if nullable {
+			continue
+		}
+		existing[key] = true
+	}
+	return existing
 }
 
 func uniqueColumnsUnchanged(previous, table catalog.Table, constraint catalog.Constraint, indexes map[string]int) bool {

@@ -15,8 +15,6 @@ type Engine struct {
 	tables    map[string]*table
 	wal       *os.File
 	closed    bool
-	syncOnce  sync.Once
-	syncQueue chan *syncRequest
 }
 
 type table struct {
@@ -64,7 +62,7 @@ func Open(directory string) (*Engine, error) {
 	if err := engine.replayWAL(); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(engine.walPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := os.OpenFile(rowsWalPath(engine.directory), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -96,12 +94,16 @@ func tableKey(namespace, name string) string {
 	return namespace + "\x00" + name
 }
 
-func (e *Engine) walPath() string {
-	return filepath.Join(e.directory, "rows", "wal.log")
+func rowsWalPath(directory string) string {
+	return filepath.Join(directory, "rows", "wal.log")
 }
 
-func (e *Engine) metaPath() string {
-	return filepath.Join(e.directory, "rows", "tables.meta")
+func rowsMetaPath(directory string) string {
+	return filepath.Join(directory, "rows", "tables.meta")
+}
+
+func rowsCheckpointPath(directory, namespace, name string) string {
+	return filepath.Join(directory, "rows", namespace+"."+name+".chk")
 }
 
 const ioSeekEnd = 2

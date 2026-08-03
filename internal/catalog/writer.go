@@ -41,49 +41,78 @@ func (s *Store) writeLoop() {
 		if !ok {
 			return
 		}
-		batch := []*writeRequest{first}
-		timer := time.NewTimer(200 * time.Microsecond)
-	collect:
-		for len(batch) < 64 {
-			select {
-			case req, ok := <-s.writes:
-				if !ok {
-					timer.Stop()
-					s.publishWriteBatch(batch)
-					return
-				}
-				batch = append(batch, req)
-			case <-timer.C:
-				break collect
-			}
+		s.publishWriteBatch(collectWriteBatch(first, s.writes))
+	}
+}
+
+const maxWriteBatch = 64
+
+func collectWriteBatch(first *writeRequest, writes <-chan *writeRequest) []*writeRequest {
+	batch := []*writeRequest{first}
+	timer := time.NewTimer(1 * time.Millisecond)
+	defer drainTimer(timer)
+	for {
+		if len(batch) >= maxWriteBatch {
+			return batch
 		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
+		select {
+		case req, ok := <-writes:
+			if !ok {
+				return batch
 			}
+			batch = append(batch, req)
+		case <-timer.C:
+			return batch
 		}
-		s.publishWriteBatch(batch)
+	}
+}
+
+func drainTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
 	}
 }
 
 func (s *Store) publishWriteBatch(batch []*writeRequest) {
+	staged, previous, revision := s.beginWriteBatch()
+	successful, staged := applyWriteRequests(batch, staged, revision)
+	if len(successful) == 0 {
+		return
+	}
+	if err := s.commitWriteBatch(previous, staged); err != nil {
+		failWriteBatch(successful, err)
+		return
+	}
+	for _, req := range successful {
+		req.result <- nil
+		close(req.result)
+	}
+}
+
+func (s *Store) beginWriteBatch() (Definition, Definition, uint64) {
 	s.mu.Lock()
 	staged := cloneDefinition(s.definition)
 	previous := s.definition
 	revision := s.revision
 	s.mu.Unlock()
 	detachPrimaryIndexes(staged)
+	return staged, previous, revision
+}
+
+func applyWriteRequests(batch []*writeRequest, staged Definition, revision uint64) ([]*writeRequest, Definition) {
 	successful := make([]*writeRequest, 0, len(batch))
-	claimedRevisions := map[uint64]bool{}
+	claimed := map[uint64]bool{}
 	for _, req := range batch {
+		if req.requireRevision && (req.expectedRevision != revision || claimed[req.expectedRevision]) {
+			req.result <- ErrRevisionConflict
+			close(req.result)
+			continue
+		}
 		if req.requireRevision {
-			if req.expectedRevision != revision || claimedRevisions[req.expectedRevision] {
-				req.result <- ErrRevisionConflict
-				close(req.result)
-				continue
-			}
-			claimedRevisions[req.expectedRevision] = true
+			claimed[req.expectedRevision] = true
 		}
 		next, err := req.apply(staged)
 		if err != nil {
@@ -94,38 +123,30 @@ func (s *Store) publishWriteBatch(batch []*writeRequest) {
 		staged = next
 		successful = append(successful, req)
 	}
-	if len(successful) == 0 {
-		return
-	}
+	return successful, staged
+}
+
+func (s *Store) commitWriteBatch(previous, staged Definition) error {
 	if err := validatePublishedDefinition(s, previous, staged); err != nil {
-		failWriteBatch(successful, err)
-		return
+		return err
 	}
 	prepared, err := s.prepareRowSync(previous, staged)
 	if err != nil {
-		failWriteBatch(successful, err)
-		return
+		return err
 	}
 	if err := prepared.commit(); err != nil {
-		failWriteBatch(successful, err)
-		return
+		return err
 	}
 	s.mu.Lock()
-	schemaChanged := !sameSchema(s.definition, staged)
-	if schemaChanged {
+	defer s.mu.Unlock()
+	if !sameSchema(s.definition, staged) {
 		if err := s.persistLocked(staged); err != nil {
-			s.mu.Unlock()
-			failWriteBatch(successful, err)
-			return
+			return err
 		}
 	}
 	s.definition = staged
 	s.revision++
-	s.mu.Unlock()
-	for _, req := range successful {
-		req.result <- nil
-		close(req.result)
-	}
+	return nil
 }
 
 func failWriteBatch(batch []*writeRequest, err error) {
