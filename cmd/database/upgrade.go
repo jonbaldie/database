@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jonbaldie/database/internal/buildinfo"
+	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/instance"
 )
 
@@ -406,19 +407,67 @@ func validateBackupMetadata(backupMetadata, current instance.Metadata, resuming 
 
 func compareBackupFiles(directory string, files map[string][]byte) error {
 	currentFiles, err := readSourceFiles(directory)
-	if err != nil || len(currentFiles) != len(files) {
+	if err != nil {
 		return errors.New("backup does not match the current data directory")
 	}
-	for path, contents := range files {
+	currentLogical := logicalBackupSourceFiles(currentFiles)
+	backupLogical := logicalBackupSourceFiles(files)
+	if len(currentLogical) != len(backupLogical) {
+		return errors.New("backup does not match the current data directory")
+	}
+	for path, contents := range backupLogical {
 		if path == "instance.json" {
 			continue
 		}
-		current, ok := currentFiles[path]
-		if !ok || !equalBytes(current, contents) {
+		current, ok := currentLogical[path]
+		if !ok || !backupSourceFileMatches(path, current, contents) {
 			return errors.New("backup does not match the current data directory")
 		}
 	}
 	return nil
+}
+
+// logicalBackupSourceFiles drops durable row-engine files. Online backups carry
+// committed rows inside the catalog snapshot; on-disk rows/ is the live engine.
+func logicalBackupSourceFiles(files map[string][]byte) map[string][]byte {
+	logical := make(map[string][]byte, len(files))
+	for path, contents := range files {
+		if durableRowStoragePath(path) {
+			continue
+		}
+		logical[path] = contents
+	}
+	return logical
+}
+
+func durableRowStoragePath(path string) bool {
+	return path == "rows" || strings.HasPrefix(path, "rows/")
+}
+
+func backupSourceFileMatches(path string, current, backup []byte) bool {
+	if path == "catalog.json" {
+		return catalogSchemaMatches(current, backup)
+	}
+	return equalBytes(current, backup)
+}
+
+func catalogSchemaMatches(current, backup []byte) bool {
+	var currentDefinition, backupDefinition catalog.Definition
+	if err := json.Unmarshal(current, &currentDefinition); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(backup, &backupDefinition); err != nil {
+		return false
+	}
+	currentBytes, err := catalog.Encode(catalog.SchemaOnly(currentDefinition))
+	if err != nil {
+		return false
+	}
+	backupBytes, err := catalog.Encode(catalog.SchemaOnly(backupDefinition))
+	if err != nil {
+		return false
+	}
+	return equalBytes(currentBytes, backupBytes)
 }
 
 func equalBytes(left, right []byte) bool {

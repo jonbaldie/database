@@ -511,7 +511,9 @@ func (s *Store) persistLocked(definition Definition) error {
 	return syncCatalogDirectory(s.path)
 }
 
-func schemaOnly(definition Definition) Definition {
+// SchemaOnly returns a catalog definition with table row images removed so
+// callers can compare durable schema snapshots with online backup captures.
+func SchemaOnly(definition Definition) Definition {
 	stripped := cloneDefinition(definition)
 	for namespaceKey, namespace := range stripped.Namespaces {
 		for tableKey, table := range namespace.Tables {
@@ -521,6 +523,10 @@ func schemaOnly(definition Definition) Definition {
 		stripped.Namespaces[namespaceKey] = namespace
 	}
 	return stripped
+}
+
+func schemaOnly(definition Definition) Definition {
+	return SchemaOnly(definition)
 }
 
 // Encode serializes one catalog definition in the durable on-disk JSON shape.

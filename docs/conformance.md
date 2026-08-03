@@ -35,3 +35,8 @@ The [distribution evidence](distribution.md) records the finite native and OCI
 runtime contract, the reproducible release build, and the tested examples. It
 keeps tested products and machines separate from the supported runtime
 boundaries.
+
+The [conformance evidence map](conformance-evidence.md) is the release audit
+that maps every Issue #1 story and normative contract area to public black-box
+evidence. `docs/conformance-evidence.json` is the machine-readable inventory
+checked by `TestConformanceEvidenceMapCoversEveryIssueStory`.
