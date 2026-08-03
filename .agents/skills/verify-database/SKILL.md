@@ -202,12 +202,6 @@ not escalate to a name-based `pkill`.
 
 ## Helpers
 
-This skill is stored in `.agents/skills/verify-database/`, and
-`.claude/skills/verify-database` is a relative symlink to it. Either path works
-for every command above; the `.agents` path is canonical. `control.sh` resolves
-its own real location, so it finds the repository root and the `sqlclient`
-package the same way through both.
-
 Both helpers live in `.agents/skills/verify-database/helpers/` and are
 executable.
 
@@ -229,10 +223,9 @@ executable.
   blank lines and `--` comments are skipped). Exit `0` when every statement
   succeeded, `1` when any failed, `2` on a usage error.
 
-  It sits under `.agents/`, which the Go tool excludes from `./...` patterns,
-  so it is invisible to `make build`, `make test`, and `make messgo`. Confirm
-  with `go list ./... | grep -cE 'agents|claude'`, which must print `0`. Give
-  `go run` the `.agents` path, not the `.claude` symlink.
+  Give `go run` the `.agents/` path shown above. That directory starts with a
+  dot, so the Go tool excludes it from `./...` patterns and it stays out of
+  `make build`, `make test`, and `make messgo`.
 
 ## Feature map
 
