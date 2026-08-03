@@ -1,3 +1,5 @@
+Only report to me in ASD-STE100 Simplified Technical English.
+
 ## Agent skills
 
 ### Issue tracker
@@ -11,6 +13,10 @@ The repository uses the five default triage labels. See `docs/agents/triage-labe
 ### Domain docs
 
 This is a single-context project using root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
+### Verification
+
+Use the `verify-database` skill to launch the server and prove user-visible behavior with evidence. Read `.agents/skills/verify-database/features/README.md` before you drive the product.
 
 ### Cleanup / litterbug rule
 
