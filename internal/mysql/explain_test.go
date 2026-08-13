@@ -36,7 +36,7 @@ func explainExecutor(t *testing.T) *textStatementExecutor {
 
 func TestExplainTraditionalProjection(t *testing.T) {
 	executor := explainExecutor(t)
-	result, err := executor.execute("EXPLAIN SELECT id FROM orders WHERE customer_id = '7'")
+	result, err := executeStatement(executor, "EXPLAIN SELECT id FROM orders WHERE customer_id = '7'")
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestExplainTraditionalProjection(t *testing.T) {
 
 func TestExplainJSONDocument(t *testing.T) {
 	executor := explainExecutor(t)
-	result, err := executor.execute("EXPLAIN FORMAT=JSON SELECT * FROM orders")
+	result, err := executeStatement(executor, "EXPLAIN FORMAT=JSON SELECT * FROM orders")
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestExplainJSONDocument(t *testing.T) {
 
 func TestExplainWriteJSON(t *testing.T) {
 	executor := explainExecutor(t)
-	result, err := executor.execute("EXPLAIN FORMAT=JSON INSERT INTO orders (id, customer_id, total) VALUES ('2','9','25')")
+	result, err := executeStatement(executor, "EXPLAIN FORMAT=JSON INSERT INTO orders (id, customer_id, total) VALUES ('2','9','25')")
 	if err != nil {
 		t.Fatalf("explain insert: %v", err)
 	}
@@ -101,14 +101,14 @@ func TestExplainWriteJSON(t *testing.T) {
 
 func TestExplainRejectsUnsupportedModes(t *testing.T) {
 	executor := explainExecutor(t)
-	if _, err := executor.execute("EXPLAIN SELECT * FROM missing_table"); err == nil {
+	if _, err := executeStatement(executor, "EXPLAIN SELECT * FROM missing_table"); err == nil {
 		t.Error("EXPLAIN of unknown table was accepted")
 	}
 }
 
 func TestExplainAnalyzeReportsCompletedRuntimeEvidence(t *testing.T) {
 	executor := explainExecutor(t)
-	result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON SELECT * FROM orders")
+	result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON SELECT * FROM orders")
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestExplainAnalyzeReportsSpillEvidence(t *testing.T) {
 		executor.session.resources = nil
 	}()
 
-	result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON SELECT total FROM orders ORDER BY total DESC")
+	result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON SELECT total FROM orders ORDER BY total DESC")
 	if err != nil {
 		t.Fatalf("analyze spill: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 		"INSERT INTO customers (id, name) VALUES (7, 'Ada')",
 		"INSERT INTO orders (id, customer_id, total) VALUES (2, 7, 20)",
 	} {
-		if _, err := executor.execute(statement); err != nil {
+		if _, err := executeStatement(executor, statement); err != nil {
 			t.Fatalf("seed %q: %v", statement, err)
 		}
 	}
@@ -198,7 +198,7 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 	}
 	for name, query := range queries {
 		t.Run(name, func(t *testing.T) {
-			result, err := executor.execute("EXPLAIN ANALYZE FORMAT=JSON " + query)
+			result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON "+query)
 			if err != nil {
 				t.Fatalf("analyze: %v", err)
 			}
@@ -287,11 +287,11 @@ func TestExplainAnalyzeRejectsWritesAndLockingReads(t *testing.T) {
 		"EXPLAIN ANALYZE INSERT INTO orders (id, customer_id, total) VALUES ('2', '8', '20')",
 		"EXPLAIN ANALYZE SELECT * FROM orders FOR UPDATE",
 	} {
-		if _, err := executor.execute(query); !isFailureCode(err, 1235) {
+		if _, err := executeStatement(executor, query); !isFailureCode(err, 1235) {
 			t.Errorf("%q error = %v, want unsupported analysis error", query, err)
 		}
 	}
-	result, err := executor.execute("SELECT * FROM orders")
+	result, err := executeStatement(executor, "SELECT * FROM orders")
 	if err != nil || len(result.rows) != 1 {
 		t.Fatalf("rejected analysis changed rows: result=%#v err=%v", result, err)
 	}
@@ -299,7 +299,7 @@ func TestExplainAnalyzeRejectsWritesAndLockingReads(t *testing.T) {
 
 func TestExplainScalarSubstringFromSyntax(t *testing.T) {
 	executor := explainExecutor(t)
-	result, err := executor.execute("EXPLAIN SELECT SUBSTRING('abcdef' FROM 2 FOR 3)")
+	result, err := executeStatement(executor, "EXPLAIN SELECT SUBSTRING('abcdef' FROM 2 FOR 3)")
 	if err != nil {
 		t.Fatalf("explain substring: %v", err)
 	}
@@ -321,8 +321,8 @@ func TestExplainMatchesExecutorAcceptance(t *testing.T) {
 	}
 	for _, statement := range rejected {
 		executor := explainExecutor(t)
-		explainResult, explainErr := executor.execute(statement)
-		runResult, runErr := executor.execute(statement[len("EXPLAIN "):])
+		explainResult, explainErr := executeStatement(executor, statement)
+		runResult, runErr := executeStatement(executor, statement[len("EXPLAIN "):])
 		if explainErr == nil {
 			t.Errorf("%q produced a plan but the executor result was %v/%v", statement, runResult, runErr)
 		}

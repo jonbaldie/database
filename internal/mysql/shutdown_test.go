@@ -9,7 +9,7 @@ import (
 
 func TestShutdownRequiresOperationalControl(t *testing.T) {
 	executor := backupExecutor(t, "reader", []catalog.Grant{{Privilege: "OPERATIONAL_OBSERVATION"}})
-	_, err := executor.execute("SHUTDOWN")
+	_, err := executeStatement(executor, "SHUTDOWN")
 	failure, ok := err.(sqlFailure)
 	if !ok || failure.code != 1227 {
 		t.Fatalf("expected access denied, got %#v", err)
@@ -18,7 +18,7 @@ func TestShutdownRequiresOperationalControl(t *testing.T) {
 
 func TestShutdownRequestsServerStopAndReturnsIdentity(t *testing.T) {
 	executor := backupExecutor(t, "admin", nil)
-	result, err := executor.execute("SHUTDOWN 'op-shutdown-1'")
+	result, err := executeStatement(executor, "SHUTDOWN 'op-shutdown-1'")
 	if err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}

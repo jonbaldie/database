@@ -43,7 +43,7 @@ func TestCurrentTimeRendersThroughFixedOffset(t *testing.T) {
 		"SELECT CURDATE()":         "2026-07-19",
 	}
 	for query, want := range cases {
-		result, err := executor.execute(query)
+		result, err := executeStatement(executor, query)
 		if err != nil {
 			t.Fatalf("execute(%q) error: %v", query, err)
 		}
@@ -56,7 +56,7 @@ func TestCurrentTimeRendersThroughFixedOffset(t *testing.T) {
 func TestCurrentTimeAtUTCIsStableWithinAStatement(t *testing.T) {
 	instant := time.Date(2026, 7, 18, 14, 5, 6, 0, time.UTC)
 	executor := currentTimeExecutor(t, "UTC", instant)
-	result, err := executor.execute("SELECT CURRENT_TIMESTAMP")
+	result, err := executeStatement(executor, "SELECT CURRENT_TIMESTAMP")
 	if err != nil {
 		t.Fatalf("execute error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestCurrentTimeResultsExposeTemporalMetadata(t *testing.T) {
 		"SELECT CURRENT_TIMESTAMP": {kind: temporalDatetime, wire: mysqlTypeDatetime},
 	}
 	for query, want := range cases {
-		result, err := executor.execute(query)
+		result, err := executeStatement(executor, query)
 		if err != nil {
 			t.Fatalf("execute(%q) error: %v", query, err)
 		}
@@ -107,7 +107,7 @@ func TestCurrentTimePreservesRequestedFractionalPrecision(t *testing.T) {
 		"SELECT CURTIME(0)":           "03:30:00",
 	}
 	for query, want := range cases {
-		result, err := executor.execute(query)
+		result, err := executeStatement(executor, query)
 		if err != nil {
 			t.Fatalf("execute(%q) error: %v", query, err)
 		}
@@ -119,50 +119,50 @@ func TestCurrentTimePreservesRequestedFractionalPrecision(t *testing.T) {
 
 func TestTimestampSessionOffsetAppliesToWritePredicateAndRead(t *testing.T) {
 	executor := currentTimeExecutor(t, "+05:30", time.Date(2026, 7, 18, 22, 0, 0, 0, time.UTC))
-	if _, err := executor.execute("CREATE TABLE events (at TIMESTAMP)"); err != nil {
+	if _, err := executeStatement(executor, "CREATE TABLE events (at TIMESTAMP)"); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	if _, err := executor.execute("INSERT INTO events VALUES ('2021-01-02 03:04:05')"); err != nil {
+	if _, err := executeStatement(executor, "INSERT INTO events VALUES ('2021-01-02 03:04:05')"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	stored := executor.server.config.Catalog.Snapshot().Namespaces["app"].Tables["events"].Rows[0][0]
 	if stored != "2021-01-01 21:34:05" {
 		t.Fatalf("stored TIMESTAMP = %q, want UTC instant", stored)
 	}
-	result, err := executor.execute("SELECT at FROM events WHERE at = '2021-01-02 03:04:05'")
+	result, err := executeStatement(executor, "SELECT at FROM events WHERE at = '2021-01-02 03:04:05'")
 	if err != nil {
 		t.Fatalf("select: %v", err)
 	}
 	if len(result.rows) != 1 || result.rows[0][0] != "2021-01-02 03:04:05" {
 		t.Fatalf("selected TIMESTAMP = %#v, want session-local value", result.rows)
 	}
-	if _, err := executor.execute("SELECT at FROM events WHERE at = 'not-a-timestamp'"); err == nil {
+	if _, err := executeStatement(executor, "SELECT at FROM events WHERE at = 'not-a-timestamp'"); err == nil {
 		t.Fatal("malformed temporal predicate was silently treated as no match")
 	}
-	if _, err := executor.execute("INSERT INTO events VALUES (NULL)"); err != nil {
+	if _, err := executeStatement(executor, "INSERT INTO events VALUES (NULL)"); err != nil {
 		t.Fatalf("insert NULL: %v", err)
 	}
-	result, err = executor.execute("SELECT at FROM events")
+	result, err = executeStatement(executor, "SELECT at FROM events")
 	if err != nil || len(result.rows) != 2 || len(result.nulls) != 2 || !result.nulls[1][0] {
 		t.Fatalf("temporal NULL result = %#v err %v", result, err)
 	}
-	if result, err = executor.execute("SELECT at FROM events WHERE at = NULL"); err != nil || len(result.rows) != 0 {
+	if result, err = executeStatement(executor, "SELECT at FROM events WHERE at = NULL"); err != nil || len(result.rows) != 0 {
 		t.Fatalf("temporal NULL predicate = %#v err %v", result, err)
 	}
-	if _, err := executor.execute("SELECT at FROM events WHERE at = 'NULL'"); err == nil {
+	if _, err := executeStatement(executor, "SELECT at FROM events WHERE at = 'NULL'"); err == nil {
 		t.Fatal("quoted NULL was accepted as a temporal value")
 	}
 }
 
 func TestTableResultsDistinguishNullText(t *testing.T) {
 	executor := currentTimeExecutor(t, "UTC", time.Date(2026, 7, 18, 22, 0, 0, 0, time.UTC))
-	if _, err := executor.execute("CREATE TABLE labels (value VARCHAR(4))"); err != nil {
+	if _, err := executeStatement(executor, "CREATE TABLE labels (value VARCHAR(4))"); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	if _, err := executor.execute("INSERT INTO labels VALUES ('NULL'), (NULL)"); err != nil {
+	if _, err := executeStatement(executor, "INSERT INTO labels VALUES ('NULL'), (NULL)"); err != nil {
 		t.Fatalf("insert values: %v", err)
 	}
-	result, err := executor.execute("SELECT value FROM labels")
+	result, err := executeStatement(executor, "SELECT value FROM labels")
 	if err != nil || len(result.rows) != 2 || len(result.nulls) != 2 {
 		t.Fatalf("NULL/text result = %#v err %v", result, err)
 	}
@@ -176,29 +176,29 @@ func TestTableResultsDistinguishNullText(t *testing.T) {
 
 func TestTimestampOffsetBelongsToTheSession(t *testing.T) {
 	executor := currentTimeExecutor(t, "UTC", time.Date(2021, 1, 2, 3, 4, 5, 0, time.UTC))
-	if result, err := executor.execute("SELECT @@time_zone"); err != nil || result.rows[0][0] != "+00:00" {
+	if result, err := executeStatement(executor, "SELECT @@time_zone"); err != nil || result.rows[0][0] != "+00:00" {
 		t.Fatalf("initial session time zone = %#v err %v", result, err)
 	}
-	if _, err := executor.execute("SET time_zone = '+05:30'"); err != nil {
+	if _, err := executeStatement(executor, "SET time_zone = '+05:30'"); err != nil {
 		t.Fatalf("set time zone: %v", err)
 	}
-	if result, err := executor.execute("SELECT CURRENT_TIMESTAMP"); err != nil || result.rows[0][0] != "2021-01-02 08:34:05" {
+	if result, err := executeStatement(executor, "SELECT CURRENT_TIMESTAMP"); err != nil || result.rows[0][0] != "2021-01-02 08:34:05" {
 		t.Fatalf("session current timestamp = %#v err %v", result, err)
 	}
-	if _, err := executor.execute("CREATE TABLE events (at TIMESTAMP)"); err != nil {
+	if _, err := executeStatement(executor, "CREATE TABLE events (at TIMESTAMP)"); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	if _, err := executor.execute("INSERT INTO events VALUES ('2021-01-02 08:34:05')"); err != nil {
+	if _, err := executeStatement(executor, "INSERT INTO events VALUES ('2021-01-02 08:34:05')"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	stored := executor.server.config.Catalog.Snapshot().Namespaces["app"].Tables["events"].Rows[0][0]
 	if stored != "2021-01-02 03:04:05" {
 		t.Fatalf("session-adjusted TIMESTAMP storage = %q", stored)
 	}
-	if _, err := executor.execute("SET time_zone = DEFAULT"); err != nil {
+	if _, err := executeStatement(executor, "SET time_zone = DEFAULT"); err != nil {
 		t.Fatalf("reset time zone: %v", err)
 	}
-	if result, err := executor.execute("SELECT at FROM events WHERE at = '2021-01-02 03:04:05'"); err != nil || len(result.rows) != 1 {
+	if result, err := executeStatement(executor, "SELECT at FROM events WHERE at = '2021-01-02 03:04:05'"); err != nil || len(result.rows) != 1 {
 		t.Fatalf("default-zone TIMESTAMP read/predicate = %#v err %v", result, err)
 	}
 }

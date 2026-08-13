@@ -38,7 +38,7 @@ func TestSelectExpressionThroughSQL(t *testing.T) {
 		"SELECT COALESCE(NULL, 'last')": "last",
 	}
 	for query, want := range cases {
-		result, err := executor.execute(query)
+		result, err := executeStatement(executor, query)
 		if err != nil {
 			t.Fatalf("execute(%q) error: %v", query, err)
 		}
@@ -70,7 +70,7 @@ func TestSelectExtendedExpressionRegistryThroughSQL(t *testing.T) {
 		"SELECT LOCATE('B', 'abc')":               "2",
 	}
 	for query, want := range cases {
-		result, err := executor.execute(query)
+		result, err := executeStatement(executor, query)
 		if err != nil {
 			t.Fatalf("execute(%q) error: %v", query, err)
 		}
@@ -78,7 +78,7 @@ func TestSelectExtendedExpressionRegistryThroughSQL(t *testing.T) {
 			t.Errorf("execute(%q) = %#v, want single row %q", query, result.rows, want)
 		}
 	}
-	nullResult, err := executor.execute("SELECT POWER(NULL, 2)")
+	nullResult, err := executeStatement(executor, "SELECT POWER(NULL, 2)")
 	if err != nil {
 		t.Fatalf("execute NULL expression: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestSelectExtendedExpressionRegistryFailsClosedThroughSQL(t *testing.T) {
 		"SELECT REPLACE('abc', 1, 'x')",
 		"SELECT LOCATE('a', 'abc', '1')",
 	} {
-		if _, err := executor.execute(query); err == nil {
+		if _, err := executeStatement(executor, query); err == nil {
 			t.Errorf("execute(%q) expected an error", query)
 		}
 	}
@@ -110,7 +110,7 @@ func TestSelectExpressionFailsClosedThroughSQL(t *testing.T) {
 		"SELECT NOSUCHFN(1)",
 		"SELECT 'a' + 1",
 	} {
-		if _, err := executor.execute(query); err == nil {
+		if _, err := executeStatement(executor, query); err == nil {
 			t.Errorf("execute(%q) expected an error", query)
 		}
 	}
@@ -118,7 +118,7 @@ func TestSelectExpressionFailsClosedThroughSQL(t *testing.T) {
 
 func TestSelectNullExpressionReportsNull(t *testing.T) {
 	executor := expressionExecutor(t)
-	result, err := executor.execute("SELECT NULLIF(1, 1)")
+	result, err := executeStatement(executor, "SELECT NULLIF(1, 1)")
 	if err != nil {
 		t.Fatalf("execute error: %v", err)
 	}

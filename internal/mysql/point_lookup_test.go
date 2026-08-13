@@ -28,7 +28,7 @@ func TestLiveExplanationDoesNotDisablePointLookup(t *testing.T) {
 		"CREATE TABLE items (id INT PRIMARY KEY, label VARCHAR(32) NOT NULL)",
 		"INSERT INTO items VALUES (7, 'grace')",
 	} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("setup %q: %v", query, err)
 		}
 	}
