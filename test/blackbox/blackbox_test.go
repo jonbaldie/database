@@ -1444,6 +1444,7 @@ func TestServeEmitsTerminalOperatorResult(t *testing.T) {
 type wireResult struct {
 	columns  []string
 	rows     [][]string
+	nulls    [][]bool
 	metadata []wireColumn
 	affected uint64
 	errCode  uint16
@@ -1817,16 +1818,20 @@ func (c *wireClient) readResult() wireResult {
 			break
 		}
 		values := make([]string, 0, columnCount)
+		nulls := make([]bool, 0, columnCount)
 		offset := 0
 		for i := 0; i < columnCount; i++ {
+			isNull := offset < len(row) && row[offset] == 0xfb
 			value, next, valid := readLengthString(row, offset)
 			if !valid {
 				return wireResult{err: fmt.Sprintf("malformed row %x", row)}
 			}
 			values = append(values, value)
+			nulls = append(nulls, isNull)
 			offset = next
 		}
 		result.rows = append(result.rows, values)
+		result.nulls = append(result.nulls, nulls)
 	}
 	return result
 }

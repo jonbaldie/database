@@ -16,7 +16,9 @@ var operatorKinds = []string{
 	"sort", "limit", "distinct", "set_operation", "materialize", "lock", "constraint_check", "mutation",
 }
 
-func TestPublishedContractExamples(t *testing.T) {
+// TestQueryExplanationDocumentationExamplesAreConsistent checks published documents only.
+// It does not prove query behaviour from the database executable.
+func TestQueryExplanationDocumentationExamplesAreConsistent(t *testing.T) {
 	contract := filepath.Join(repositoryRoot(t), "docs", "query-explanation")
 	schema := readJSONObject(t, filepath.Join(contract, "explain-v1.schema.json"))
 	if got := schema["$id"]; got != "https://github.com/jonbaldie/database/query-explanation/explain-v1.schema.json" {
