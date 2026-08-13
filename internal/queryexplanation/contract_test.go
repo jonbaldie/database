@@ -40,7 +40,7 @@ func TestQueryExplanationDocumentationExamplesAreConsistent(t *testing.T) {
 		if document["format_version"] != float64(1) || document["mode"] != want.mode || document["partial"] != want.partial {
 			t.Fatalf("%s has incompatible envelope: %#v", name, document)
 		}
-		if violations := semanticViolations(document); len(violations) > 0 {
+		if violations := documentationSemanticViolations(document); len(violations) > 0 {
 			t.Errorf("%s violates semantic rules: %s", name, strings.Join(violations, "; "))
 		}
 		assertOperator(t, document["plan"], name)
@@ -58,25 +58,28 @@ func TestQueryExplanationDocumentationExamplesAreConsistent(t *testing.T) {
 	}
 }
 
-func TestSemanticRulesRejectInvalidDocuments(t *testing.T) {
+// TestQueryExplanationDocumentationSemanticRulesRejectInvalidDocuments checks
+// the test-only semantic validator for published documents. It does not prove
+// query behaviour from the database executable.
+func TestQueryExplanationDocumentationSemanticRulesRejectInvalidDocuments(t *testing.T) {
 	contract := filepath.Join(repositoryRoot(t), "docs", "query-explanation", "examples")
 
 	plan := cloneDocument(t, readJSONObject(t, filepath.Join(contract, "plan.json")))
 	plan["plan"].(map[string]any)["actual"] = map[string]any{}
-	if got := semanticViolations(plan); len(got) == 0 {
+	if got := documentationSemanticViolations(plan); len(got) == 0 {
 		t.Fatal("plan runtime evidence was accepted")
 	}
 
 	analyze := cloneDocument(t, readJSONObject(t, filepath.Join(contract, "analyze.json")))
 	delete(analyze["plan"].(map[string]any), "actual")
-	if got := semanticViolations(analyze); len(got) == 0 {
+	if got := documentationSemanticViolations(analyze); len(got) == 0 {
 		t.Fatal("analyzed plan without runtime evidence was accepted")
 	}
 
 	duplicateID := cloneDocument(t, readJSONObject(t, filepath.Join(contract, "plan.json")))
 	root := duplicateID["plan"].(map[string]any)
 	root["children"].([]any)[0].(map[string]any)["id"] = root["id"]
-	if got := semanticViolations(duplicateID); len(got) == 0 {
+	if got := documentationSemanticViolations(duplicateID); len(got) == 0 {
 		t.Fatal("duplicate operator ID was accepted")
 	}
 }
@@ -153,7 +156,7 @@ func assertOperator(t *testing.T, value any, document string) {
 	}
 }
 
-func semanticViolations(document map[string]any) []string {
+func documentationSemanticViolations(document map[string]any) []string {
 	mode, _ := document["mode"].(string)
 	seenIDs := map[float64]struct{}{}
 	violations := []string{}
