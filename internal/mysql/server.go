@@ -828,7 +828,7 @@ func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
 	if lower == "" {
 		return nil, sqlFailure{1065, "42000", "query was empty"}
 	}
-	return s.executeWithTransaction(query, lower)
+	return newStatementExecutionPolicy(s).execute(query, lower)
 }
 
 // stripLeadingSQLComments removes comments that clients use to annotate an
