@@ -66,7 +66,7 @@ func relationalSelectExecutor(t *testing.T) *textStatementExecutor {
 
 func TestRelationalSelectUsesCanonicalCaselessIdentifiers(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT café.café + 1 AS résumé FROM unicode_rows AS café ORDER BY résumé")
+	result, err := executeStatement(executor, "SELECT café.café + 1 AS résumé FROM unicode_rows AS café ORDER BY résumé")
 	if err != nil {
 		t.Fatalf("canonical identifier query: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRelationalSelectUsesCanonicalCaselessIdentifiers(t *testing.T) {
 		t.Fatalf("rows = %#v", result.rows)
 	}
 
-	result, err = executor.execute("SELECT café.* FROM unicode_rows AS café JOIN unicode_other AS other USING (café)")
+	result, err = executeStatement(executor, "SELECT café.* FROM unicode_rows AS café JOIN unicode_other AS other USING (café)")
 	if err != nil {
 		t.Fatalf("canonical wildcard/USING query: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRelationalSelectUsesCanonicalCaselessIdentifiers(t *testing.T) {
 		t.Fatalf("wildcard rows = %#v", result.rows)
 	}
 
-	result, err = executor.execute("SELECT `café`.`café` + 1 AS `résumé` FROM unicode_rows AS `café` ORDER BY `résumé`")
+	result, err = executeStatement(executor, "SELECT `café`.`café` + 1 AS `résumé` FROM unicode_rows AS `café` ORDER BY `résumé`")
 	if err != nil {
 		t.Fatalf("quoted computed identifier query: %v", err)
 	}
@@ -90,12 +90,12 @@ func TestRelationalSelectUsesCanonicalCaselessIdentifiers(t *testing.T) {
 		t.Fatalf("quoted computed rows = %#v", result.rows)
 	}
 
-	result, err = executor.execute("SELECT `café`.* FROM unicode_rows AS `café`")
+	result, err = executeStatement(executor, "SELECT `café`.* FROM unicode_rows AS `café`")
 	if err != nil || !reflect.DeepEqual(result.rows, [][]string{{"7"}}) {
 		t.Fatalf("quoted wildcard rows = %#v, err = %v", result.rows, err)
 	}
 
-	_, err = executor.execute("SELECT * FROM authors AS café JOIN posts AS café ON 1 = 1")
+	_, err = executeStatement(executor, "SELECT * FROM authors AS café JOIN posts AS café ON 1 = 1")
 	if !isFailureCode(err, 1066) {
 		t.Fatalf("canonical duplicate alias error = %v", err)
 	}
@@ -108,7 +108,7 @@ func TestRelationalSelectRejectsOverlongAliases(t *testing.T) {
 		"SELECT * FROM authors AS " + alias,
 		"SELECT id AS " + alias + " FROM authors",
 	} {
-		if _, err := executor.execute(query); !isFailureCode(err, 1059) {
+		if _, err := executeStatement(executor, query); !isFailureCode(err, 1059) {
 			t.Errorf("execute(%q) error = %v", query, err)
 		}
 	}
@@ -116,7 +116,7 @@ func TestRelationalSelectRejectsOverlongAliases(t *testing.T) {
 
 func TestRelationalSelectExplanationTracesUsingClause(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("EXPLAIN FORMAT=JSON SELECT * FROM authors a JOIN author_labels l USING (id)")
+	result, err := executeStatement(executor, "EXPLAIN FORMAT=JSON SELECT * FROM authors a JOIN author_labels l USING (id)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestRelationalSelectExplanationTracesUsingClause(t *testing.T) {
 
 func TestRelationalSelectUsingCoalescesColumns(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT * FROM authors a LEFT JOIN author_labels l USING (id) ORDER BY id")
+	result, err := executeStatement(executor, "SELECT * FROM authors a LEFT JOIN author_labels l USING (id) ORDER BY id")
 	if err != nil {
 		t.Fatalf("using join: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestRelationalSelectUsingCoalescesColumns(t *testing.T) {
 		t.Fatalf("columns/rows = %#v/%#v, want %#v/%#v", result.columns, result.rows, wantColumns, wantRows)
 	}
 
-	result, err = executor.execute("SELECT * FROM author_labels l RIGHT JOIN authors a USING (id) ORDER BY id")
+	result, err = executeStatement(executor, "SELECT * FROM author_labels l RIGHT JOIN authors a USING (id) ORDER BY id")
 	if err != nil {
 		t.Fatalf("right using join: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestRelationalSelectUsingPreservesQuotedIdentifiers(t *testing.T) {
 		}
 	}
 	query := "SELECT * FROM quoted_left AS `l.alias` JOIN quoted_right AS `r``alias` USING (`odd.name`)"
-	result, err := executor.execute(query)
+	result, err := executeStatement(executor, query)
 	if err != nil {
 		t.Fatalf("quoted USING: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRelationalSelectUsingPreservesQuotedIdentifiers(t *testing.T) {
 
 func TestRelationalSelectJoinsAndOrderedShape(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT a.name, p.title FROM authors AS a INNER JOIN posts AS p ON a.id = p.author_id WHERE p.score >= 10 ORDER BY p.id DESC LIMIT 2")
+	result, err := executeStatement(executor, "SELECT a.name, p.title FROM authors AS a INNER JOIN posts AS p ON a.id = p.author_id WHERE p.score >= 10 ORDER BY p.id DESC LIMIT 2")
 	if err != nil {
 		t.Fatalf("join select: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestRelationalSelectJoinsAndOrderedShape(t *testing.T) {
 
 func TestRelationalSelectEvaluatesRowBoundExpressions(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT p.score + 1 AS adjusted FROM posts p WHERE p.score * 2 >= 30 ORDER BY adjusted DESC")
+	result, err := executeStatement(executor, "SELECT p.score + 1 AS adjusted FROM posts p WHERE p.score * 2 >= 30 ORDER BY adjusted DESC")
 	if err != nil {
 		t.Fatalf("row expression: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestRelationalSelectEvaluatesRowBoundExpressions(t *testing.T) {
 
 func TestRelationalSelectOrdersByRowExpression(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT p.title FROM posts p ORDER BY p.score + 1 DESC")
+	result, err := executeStatement(executor, "SELECT p.title FROM posts p ORDER BY p.score + 1 DESC")
 	if err != nil {
 		t.Fatalf("ORDER BY expression: %v", err)
 	}
@@ -209,14 +209,14 @@ func TestRelationalSelectOrdersByRowExpression(t *testing.T) {
 		t.Fatalf("rows = %#v", result.rows)
 	}
 
-	if _, err := executor.execute("SELECT DISTINCT p.title FROM posts p ORDER BY p.score + 1"); !isFailureCode(err, 3065) {
+	if _, err := executeStatement(executor, "SELECT DISTINCT p.title FROM posts p ORDER BY p.score + 1"); !isFailureCode(err, 3065) {
 		t.Fatalf("DISTINCT non-projected ORDER BY error = %v", err)
 	}
 }
 
 func TestRelationalSelectComputedMetadataIsStableAndNullable(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT p.score + 1 AS adjusted FROM posts p")
+	result, err := executeStatement(executor, "SELECT p.score + 1 AS adjusted FROM posts p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestRelationalSelectComputedMetadataIsStableAndNullable(t *testing.T) {
 
 func TestRelationalSelectComputedMetadataIgnoresSyntheticDomains(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT SQRT(p.score - 2) AS rooted FROM posts p WHERE p.score >= 5")
+	result, err := executeStatement(executor, "SELECT SQRT(p.score - 2) AS rooted FROM posts p WHERE p.score >= 5")
 	if err != nil {
 		t.Fatalf("domain-independent metadata: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestRelationalSelectComputedMetadataIgnoresSyntheticDomains(t *testing.T) {
 		t.Fatalf("SQRT metadata = %#v", result.metadata[0])
 	}
 
-	result, err = executor.execute("SELECT UPPER(a.name) AS upper_name FROM authors a JOIN posts p ON a.id = p.author_id")
+	result, err = executeStatement(executor, "SELECT UPPER(a.name) AS upper_name FROM authors a JOIN posts p ON a.id = p.author_id")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestRelationalSelectPreparedMetadataSupportsMixedParameterDomains(t *testin
 
 func TestRelationalSelectAliasHidesOriginalTableName(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	if _, err := executor.execute("SELECT authors.name FROM authors AS a"); !isFailureCode(err, 1054) {
+	if _, err := executeStatement(executor, "SELECT authors.name FROM authors AS a"); !isFailureCode(err, 1054) {
 		t.Fatalf("hidden original table name error = %v", err)
 	}
 }
@@ -276,7 +276,7 @@ func TestRelationalSelectAliasHidesOriginalTableName(t *testing.T) {
 func TestRelationalSelectJoinOnCannotReferenceLaterTable(t *testing.T) {
 	executor := relationalSelectExecutor(t)
 	query := "SELECT a.name FROM authors a JOIN posts p ON l.id = a.id JOIN author_labels l ON l.id = a.id"
-	if _, err := executor.execute(query); !isFailureCode(err, 1054) {
+	if _, err := executeStatement(executor, query); !isFailureCode(err, 1054) {
 		t.Fatalf("later-table ON reference error = %v", err)
 	}
 }
@@ -284,7 +284,7 @@ func TestRelationalSelectJoinOnCannotReferenceLaterTable(t *testing.T) {
 func TestRelationalSelectStreamsFromStatementSnapshot(t *testing.T) {
 	executor := relationalSelectExecutor(t)
 	executor.streamRows = true
-	result, err := executor.execute("SELECT id FROM authors WHERE id >= 1 LIMIT 2")
+	result, err := executeStatement(executor, "SELECT id FROM authors WHERE id >= 1 LIMIT 2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,13 +316,13 @@ func TestRelationalSelectMemoryLimitAbortsOnlyTheStatement(t *testing.T) {
 	}}
 	resources := newStatementResources(newResourceManager(config), config, nil)
 	executor.session.resources = resources
-	if _, err := executor.execute("SELECT name FROM authors"); !isFailureCode(err, 1114) {
+	if _, err := executeStatement(executor, "SELECT name FROM authors"); !isFailureCode(err, 1114) {
 		t.Fatalf("memory-limited SELECT error = %v", err)
 	}
 	closeStatementResources(resources)
 	executor.session.resources = nil
 
-	result, err := executor.execute("SELECT name FROM authors LIMIT 1")
+	result, err := executeStatement(executor, "SELECT name FROM authors LIMIT 1")
 	if err != nil {
 		t.Fatalf("session did not remain usable after memory exhaustion: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestRelationalSelectSpillsOrderedRowsWithinTheTemporaryBudget(t *testing.T)
 		closeStatementResources(resources)
 		executor.session.resources = nil
 	}()
-	result, err := executor.execute("SELECT name FROM authors ORDER BY name DESC")
+	result, err := executeStatement(executor, "SELECT name FROM authors ORDER BY name DESC")
 	if err != nil {
 		t.Fatalf("execute ordered SELECT: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestRelationalSpillSortCoalescesRunsWithBoundedFanIn(t *testing.T) {
 		executor.session.resources = nil
 	}()
 
-	result, err := executor.execute("SELECT id FROM authors WHERE id >= 4 ORDER BY name, id")
+	result, err := executeStatement(executor, "SELECT id FROM authors WHERE id >= 4 ORDER BY name, id")
 	if err != nil {
 		t.Fatalf("execute multi-run ordered SELECT: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestRelationalSpillSortAppliesLimitWithoutAFlush(t *testing.T) {
 		closeStatementResources(resources)
 		executor.session.resources = nil
 	}()
-	result, err := executor.execute("SELECT name FROM authors ORDER BY name DESC LIMIT 2")
+	result, err := executeStatement(executor, "SELECT name FROM authors ORDER BY name DESC LIMIT 2")
 	if err != nil {
 		t.Fatalf("execute ordered LIMIT SELECT: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestRelationalSelectTemporaryStorageExhaustionLeavesTheSessionUsable(t *tes
 	}}
 	resources := newStatementResources(newResourceManager(config), config, nil)
 	executor.session.resources = resources
-	if _, err := executor.execute("SELECT name FROM authors ORDER BY name DESC"); !isFailureCode(err, 1114) {
+	if _, err := executeStatement(executor, "SELECT name FROM authors ORDER BY name DESC"); !isFailureCode(err, 1114) {
 		t.Fatalf("temporary-storage failure = %v", err)
 	}
 	if snapshot := statementResourceSnapshot(resources); snapshot.failure != "temporary_storage_exhausted" {
@@ -449,7 +449,7 @@ func TestRelationalSelectTemporaryStorageExhaustionLeavesTheSessionUsable(t *tes
 	closeStatementResources(resources)
 	executor.session.resources = nil
 
-	result, err := executor.execute("SELECT name FROM authors LIMIT 1")
+	result, err := executeStatement(executor, "SELECT name FROM authors LIMIT 1")
 	if err != nil {
 		t.Fatalf("session did not remain usable after temporary exhaustion: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestRelationalSelectTemporaryStorageExhaustionLeavesTheSessionUsable(t *tes
 
 func TestRelationalSelectOuterJoinDistinctAndNulls(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("SELECT DISTINCT a.name, p.title FROM authors a LEFT JOIN posts p ON a.id = p.author_id ORDER BY a.name ASC, p.title ASC")
+	result, err := executeStatement(executor, "SELECT DISTINCT a.name, p.title FROM authors a LEFT JOIN posts p ON a.id = p.author_id ORDER BY a.name ASC, p.title ASC")
 	if err != nil {
 		t.Fatalf("left join: %v", err)
 	}
@@ -476,14 +476,14 @@ func TestRelationalSelectOuterJoinDistinctAndNulls(t *testing.T) {
 
 func TestRelationalSelectRejectsDistinctOrderOutsideProjection(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	if _, err := executor.execute("SELECT DISTINCT a.name FROM authors a JOIN posts p ON a.id = p.author_id ORDER BY p.id"); err == nil {
+	if _, err := executeStatement(executor, "SELECT DISTINCT a.name FROM authors a JOIN posts p ON a.id = p.author_id ORDER BY p.id"); err == nil {
 		t.Fatal("DISTINCT accepted ORDER BY outside the projection")
 	}
 }
 
 func TestRelationalSelectExplanationTracesOperators(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("EXPLAIN FORMAT=JSON SELECT DISTINCT a.name FROM authors a JOIN posts p ON a.id = p.author_id ORDER BY a.name DESC LIMIT 1")
+	result, err := executeStatement(executor, "EXPLAIN FORMAT=JSON SELECT DISTINCT a.name FROM authors a JOIN posts p ON a.id = p.author_id ORDER BY a.name DESC LIMIT 1")
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -509,7 +509,7 @@ func TestRelationalSelectExplanationTracesOperators(t *testing.T) {
 
 func TestRelationalSelectExplanationTracesProjectionExpression(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	result, err := executor.execute("EXPLAIN FORMAT=JSON SELECT p.score + 1 AS adjusted FROM posts p")
+	result, err := executeStatement(executor, "EXPLAIN FORMAT=JSON SELECT p.score + 1 AS adjusted FROM posts p")
 	if err != nil {
 		t.Fatal(err)
 	}

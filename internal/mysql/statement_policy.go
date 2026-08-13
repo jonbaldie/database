@@ -27,7 +27,7 @@ func normalizeStatement(query string) (normalizedStatement, error) {
 }
 
 func normalizeStatementText(query string) normalizedStatement {
-	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	query = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(query), ";"))
 	query = stripLeadingSQLComments(query)
 	return normalizedStatement{query: query, lower: strings.ToLower(query)}
 }

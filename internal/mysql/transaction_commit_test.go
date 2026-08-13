@@ -28,7 +28,7 @@ func TestConcurrentAutocommitInsertsDoNotDeadlock(t *testing.T) {
 		"USE app",
 		"CREATE TABLE items (id INT PRIMARY KEY, label VARCHAR(32) NOT NULL)",
 	} {
-		if _, err := setup.execute(query); err != nil {
+		if _, err := executeStatement(setup, query); err != nil {
 			t.Fatalf("setup %q: %v", query, err)
 		}
 	}
@@ -45,7 +45,7 @@ func TestConcurrentAutocommitInsertsDoNotDeadlock(t *testing.T) {
 				timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{},
 			}}
 			query := fmt.Sprintf("INSERT INTO items VALUES (%d, 'row-%d')", id+1, id+1)
-			if _, err := executor.execute(query); err != nil {
+			if _, err := executeStatement(executor, query); err != nil {
 				errors <- err
 			}
 		}(worker)
@@ -56,7 +56,7 @@ func TestConcurrentAutocommitInsertsDoNotDeadlock(t *testing.T) {
 		t.Fatalf("concurrent autocommit insert: %v", err)
 	}
 
-	result, err := setup.execute("SELECT COUNT(*) FROM items")
+	result, err := executeStatement(setup, "SELECT COUNT(*) FROM items")
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -84,17 +84,17 @@ func TestAutocommitInsertUsesDirectDurablePublication(t *testing.T) {
 		"USE app",
 		"CREATE TABLE items (id INT PRIMARY KEY, label VARCHAR(32) NOT NULL)",
 	} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("setup %q: %v", query, err)
 		}
 	}
-	if _, err := executor.execute("INSERT INTO items VALUES (1, 'ada')"); err != nil {
+	if _, err := executeStatement(executor, "INSERT INTO items VALUES (1, 'ada')"); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	if executor.session.transaction {
 		t.Fatal("autocommit insert left an open transaction")
 	}
-	result, err := executor.execute("SELECT label FROM items WHERE id = 1")
+	result, err := executeStatement(executor, "SELECT label FROM items WHERE id = 1")
 	if err != nil || len(result.rows) != 1 || result.rows[0][0] != "ada" {
 		t.Fatalf("rows = %#v err=%v", result, err)
 	}

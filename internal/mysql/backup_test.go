@@ -47,7 +47,7 @@ func TestBackupInstanceCapturesCommittedCatalogSnapshot(t *testing.T) {
 	if err := executor.server.config.Catalog.ReplaceRows("app", "items", [][]string{{"7"}}); err != nil {
 		t.Fatalf("replace rows: %v", err)
 	}
-	result, err := executor.execute("BACKUP INSTANCE")
+	result, err := executeStatement(executor, "BACKUP INSTANCE")
 	if err != nil {
 		t.Fatalf("backup instance: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestBackupInstanceCapturesCommittedCatalogSnapshot(t *testing.T) {
 
 func TestBackupInstanceRequiresOperationalControl(t *testing.T) {
 	executor := backupExecutor(t, "reader", []catalog.Grant{{Privilege: "OPERATIONAL_OBSERVATION"}})
-	_, err := executor.execute("BACKUP INSTANCE")
+	_, err := executeStatement(executor, "BACKUP INSTANCE")
 	failure, ok := err.(sqlFailure)
 	if !ok || failure.code != 1227 {
 		t.Fatalf("expected access denied, got %#v", err)

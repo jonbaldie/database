@@ -32,32 +32,32 @@ func TestTableDefinitionEvolutionThroughSQL(t *testing.T) {
 		"ALTER TABLE users RENAME COLUMN name TO display_name",
 		"ALTER TABLE users MODIFY COLUMN id BIGINT",
 	} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("execute %q: %v", query, err)
 		}
 	}
-	result, err := executor.execute("SELECT id, display_name FROM users")
+	result, err := executeStatement(executor, "SELECT id, display_name FROM users")
 	if err != nil || len(result.rows) != 1 || !equalRows(result.rows, [][]string{{"1", "Ada"}}) {
 		t.Fatalf("evolved rows = %#v, err = %v", result, err)
 	}
-	if _, err := executor.execute("TRUNCATE TABLE users"); err != nil {
+	if _, err := executeStatement(executor, "TRUNCATE TABLE users"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
-	result, err = executor.execute("SELECT * FROM users")
+	result, err = executeStatement(executor, "SELECT * FROM users")
 	if err != nil || len(result.rows) != 0 {
 		t.Fatalf("truncated rows = %#v, err = %v", result.rows, err)
 	}
 	for _, query := range []string{"RENAME TABLE users TO accounts", "DROP TABLE accounts", "DROP TABLE IF EXISTS accounts"} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("execute %q: %v", query, err)
 		}
 	}
 	for _, query := range []string{"CREATE DATABASE scratch", "USE scratch", "CREATE TABLE entries (id INT)", "DROP DATABASE scratch", "DROP DATABASE IF EXISTS scratch"} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("execute %q: %v", query, err)
 		}
 	}
-	if _, err := executor.execute("USE scratch"); err == nil {
+	if _, err := executeStatement(executor, "USE scratch"); err == nil {
 		t.Fatal("dropped database remains selectable")
 	}
 }
@@ -65,14 +65,14 @@ func TestTableDefinitionEvolutionThroughSQL(t *testing.T) {
 func TestTableDefinitionEvolutionFailureLeavesCatalogUnchanged(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{"CREATE TABLE users (id INT)", "INSERT INTO users VALUES (2)"} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("execute %q: %v", query, err)
 		}
 	}
-	if _, err := executor.execute("ALTER TABLE users MODIFY COLUMN id TINYINT"); err != nil {
+	if _, err := executeStatement(executor, "ALTER TABLE users MODIFY COLUMN id TINYINT"); err != nil {
 		t.Fatalf("valid narrowing alter: %v", err)
 	}
-	if _, err := executor.execute("ALTER TABLE users MODIFY COLUMN id BIT(1)"); err == nil {
+	if _, err := executeStatement(executor, "ALTER TABLE users MODIFY COLUMN id BIT(1)"); err == nil {
 		t.Fatal("invalid existing value accepted")
 	}
 	definition := executor.server.config.Catalog.Snapshot()
@@ -85,11 +85,11 @@ func TestTableDefinitionEvolutionFailureLeavesCatalogUnchanged(t *testing.T) {
 func TestTableDefinitionRejectsUnsupportedColumnPosition(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{"CREATE TABLE users (id INT)", "INSERT INTO users VALUES (2)"} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("execute %q: %v", query, err)
 		}
 	}
-	if _, err := executor.execute("ALTER TABLE users ADD COLUMN name VARCHAR(32) AFTER id"); err == nil {
+	if _, err := executeStatement(executor, "ALTER TABLE users ADD COLUMN name VARCHAR(32) AFTER id"); err == nil {
 		t.Fatal("unsupported column position accepted")
 	}
 	table := executor.server.config.Catalog.Snapshot().Namespaces["app"].Tables["users"]

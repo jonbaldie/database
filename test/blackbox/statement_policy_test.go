@@ -34,6 +34,15 @@ func TestMySQLTextReadKeepsWireContract(t *testing.T) {
 	if len(read.metadata) != 2 || read.metadata[0].name != "id" || read.metadata[1].name != "name" {
 		t.Fatalf("text read metadata = %#v", read.metadata)
 	}
+	spacedTerminator := client.query("SET autocommit = 1;   ")
+	if spacedTerminator.err != "" {
+		t.Fatalf("text statement with spaced terminator = %#v", spacedTerminator)
+	}
+	mustQuery(t, client, "BEGIN")
+	spacedBeforeTerminator := client.query("COMMIT ;   ")
+	if spacedBeforeTerminator.err != "" {
+		t.Fatalf("text statement with space before terminator = %#v", spacedBeforeTerminator)
+	}
 
 	missing := client.query("SELECT * FROM missing")
 	if missing.err == "" || missing.errCode != 1146 {

@@ -116,7 +116,7 @@ func TestStatementAdmissionAppliesDeadlineToSettingsAndMutations(t *testing.T) {
 	settings := newStatementResources(newResourceManager(config), config, nil)
 	settings.deadline = time.Now().Add(-time.Nanosecond)
 	executor.session.resources = settings
-	if _, err := executor.execute("SET time_zone = '+01:00'"); !isFailureCode(err, 3024) {
+	if _, err := executeStatement(executor, "SET time_zone = '+01:00'"); !isFailureCode(err, 3024) {
 		t.Fatalf("expired setting statement error = %v", err)
 	}
 	closeStatementResources(settings)
@@ -124,13 +124,13 @@ func TestStatementAdmissionAppliesDeadlineToSettingsAndMutations(t *testing.T) {
 	mutation := newStatementResources(newResourceManager(config), config, nil)
 	mutation.deadline = time.Now().Add(-time.Nanosecond)
 	executor.session.resources = mutation
-	if _, err := executor.execute("INSERT INTO authors VALUES (4, 'Margaret')"); !isFailureCode(err, 3024) {
+	if _, err := executeStatement(executor, "INSERT INTO authors VALUES (4, 'Margaret')"); !isFailureCode(err, 3024) {
 		t.Fatalf("expired mutation statement error = %v", err)
 	}
 	closeStatementResources(mutation)
 	executor.session.resources = nil
 
-	result, err := executor.execute("SELECT name FROM authors WHERE id = 4")
+	result, err := executeStatement(executor, "SELECT name FROM authors WHERE id = 4")
 	if err != nil {
 		t.Fatalf("read after rejected mutation: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestExplicitCommitMakesPublicationTheStatementBoundary(t *testing.T) {
 		"INSERT INTO authors VALUES (4, 'Margaret')",
 		"COMMIT",
 	} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("execute %q: %v", query, err)
 		}
 	}
@@ -174,7 +174,7 @@ func TestImplicitPreDefinitionCommitKeepsResourceChecksActive(t *testing.T) {
 		"INSERT INTO authors VALUES (4, 'Margaret')",
 		"CREATE TABLE drafts (id INT)",
 	} {
-		if _, err := executor.execute(query); err != nil {
+		if _, err := executeStatement(executor, query); err != nil {
 			t.Fatalf("execute %q: %v", query, err)
 		}
 	}

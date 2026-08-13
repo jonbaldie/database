@@ -791,7 +791,13 @@ var informationSchemaViews = []informationSchemaView{
 }
 
 func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
-	result, err := s.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	statement, err := normalizeStatement(query)
+	if err != nil {
+		return writePacket(connection, sequence, mysqlError(err))
+	}
+	executor := s.statements
+	executor.streamRows = true
+	result, err := newStatementExecutionPolicy(&executor).execute(statement)
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
@@ -804,29 +810,11 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 	return writeResult(connection, sequence, result, s.statements.server.config.MaxAllowedPacket)
 }
 
-func (s *queryExecutor) execute(query string) (*queryResult, error) {
-	return s.statements.execute(query)
-}
-
-func (s *queryExecutor) executeProtocol(query string) (*queryResult, error) {
-	executor := s.statements
-	executor.streamRows = true
-	return executor.execute(query)
-}
-
 func (s *queryExecutor) useDatabase(name string) { s.statements.useDatabase(name) }
 
 func (s *queryExecutor) databaseExists(name string) error {
 	selector := databaseSelector{s.statements.session}
 	return selector.databaseExists(name)
-}
-
-func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
-	statement, err := normalizeStatement(query)
-	if err != nil {
-		return nil, err
-	}
-	return newStatementExecutionPolicy(s).execute(statement)
 }
 
 // stripLeadingSQLComments removes comments that clients use to annotate an
@@ -4028,13 +4016,22 @@ func (s *preparedPreparation) queryColumns(query string, preserveMetadata bool) 
 		}
 		return metadata, nil
 	}
-	result, err := newQueryExecutor(s.session).execute(query)
+	statement, err := normalizeStatement(query)
+	if err != nil {
+		return nil, err
+	}
+	executor := textStatementExecutor{session: s.session}
+	result, err := newStatementExecutionPolicy(&executor).execute(statement)
 	if err != nil {
 		return nil, err
 	}
 	if result == nil {
 		return nil, nil
 	}
+	return preparedResultMetadata(result, preserveMetadata), nil
+}
+
+func preparedResultMetadata(result *queryResult, preserveMetadata bool) []columnMetadata {
 	metadata := make([]columnMetadata, len(result.columns))
 	for index, name := range result.columns {
 		metadata[index] = columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetUTF8MB40900AICI, typ: mysqlTypeVarString}
@@ -4042,7 +4039,7 @@ func (s *preparedPreparation) queryColumns(query string, preserveMetadata bool) 
 			metadata[index] = result.metadata[index]
 		}
 	}
-	return metadata, nil
+	return metadata
 }
 
 func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
