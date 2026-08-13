@@ -175,3 +175,112 @@ func TestMySQLDataChangesAndTransactionsKeepWireContract(t *testing.T) {
 		t.Fatalf("durable data changes = %#v", rows)
 	}
 }
+
+// TestMySQLSettingsAndAccountChangesKeepWireContract proves that the
+// statement execution policy preserves immediate session-setting changes and
+// durable database-account changes.
+func TestMySQLSettingsAndAccountChangesKeepWireContract(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory)
+	firstProcess := process
+	defer func() { _ = firstProcess.Stop(); _ = firstProcess.Wait() }()
+	admin := newWireClient(t, address, "admin", "lifecycle-secret")
+
+	setting := admin.prepare("/* application setting */ SET time_zone = ?")
+	if setting.err != "" {
+		t.Fatalf("prepare session setting = %#v", setting)
+	}
+	if result := admin.executePreparedValues(setting.id, []preparedParameter{stringPreparedParameter("+05:30")}); result.err != "" {
+		t.Fatalf("prepared session setting = %#v", result)
+	}
+	admin.closePrepared(setting.id)
+	if result := admin.query("SELECT @@time_zone"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"+05:30"}}) {
+		t.Fatalf("immediate session setting = %#v", result)
+	}
+	unsupportedSetting := admin.prepare("SET foreign_key_checks = ?")
+	if unsupportedSetting.err != "" {
+		t.Fatalf("prepare unsupported session setting = %#v", unsupportedSetting)
+	}
+	if result := admin.executePreparedValues(unsupportedSetting.id, []preparedParameter{stringPreparedParameter("0")}); result.errCode != 1193 || result.errState != "HY000" {
+		t.Fatalf("unsupported session setting = %#v", result)
+	}
+	admin.closePrepared(unsupportedSetting.id)
+
+	for _, statement := range []string{
+		"CREATE DATABASE policy_accounts",
+		"USE policy_accounts",
+		"CREATE TABLE entries (id INT PRIMARY KEY)",
+		"INSERT INTO entries VALUES (1)",
+		"BEGIN",
+		"INSERT INTO entries VALUES (2)",
+	} {
+		mustQuery(t, admin, statement)
+	}
+	createAccount := admin.prepare("/* application account */ CREATE USER ? IDENTIFIED BY ?")
+	if createAccount.err != "" {
+		t.Fatalf("prepare account creation = %#v", createAccount)
+	}
+	if result := admin.executePreparedValues(createAccount.id, []preparedParameter{
+		stringPreparedParameter("reader"),
+		stringPreparedParameter("reader-policy-secret"),
+	}); result.err != "" {
+		t.Fatalf("prepared account creation = %#v", result)
+	}
+	admin.closePrepared(createAccount.id)
+	mustQuery(t, admin, "ROLLBACK")
+	if result := admin.query("SELECT id FROM entries ORDER BY id"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"1"}, {"2"}}) {
+		t.Fatalf("account change implicit commit = %#v", result)
+	}
+	mustQuery(t, admin, "GRANT DATA_READ ON policy_accounts.* TO 'reader'")
+	unsupportedGrant := admin.prepare("GRANT UNSUPPORTED ON *.* TO ?")
+	if unsupportedGrant.err != "" {
+		t.Fatalf("prepare unsupported account grant = %#v", unsupportedGrant)
+	}
+	if result := admin.executePreparedValues(unsupportedGrant.id, []preparedParameter{stringPreparedParameter("reader")}); result.errCode != 1064 || result.errState != "42000" {
+		t.Fatalf("unsupported account grant = %#v", result)
+	}
+	admin.closePrepared(unsupportedGrant.id)
+
+	reader := newWireClient(t, address, "reader", "reader-policy-secret")
+	mustQuery(t, reader, "USE policy_accounts")
+	if result := reader.query("SELECT id FROM entries ORDER BY id"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"1"}, {"2"}}) {
+		t.Fatalf("authorized database account read = %#v", result)
+	}
+	deniedAccount := reader.prepare("CREATE USER ? IDENTIFIED BY ?")
+	if deniedAccount.err != "" {
+		t.Fatalf("prepare denied account change = %#v", deniedAccount)
+	}
+	if result := reader.executePreparedValues(deniedAccount.id, []preparedParameter{
+		stringPreparedParameter("denied"),
+		stringPreparedParameter("denied-policy-secret"),
+	}); result.errCode != 1227 || result.errState != "42000" {
+		t.Fatalf("denied account change = %#v", result)
+	}
+	reader.closePrepared(deniedAccount.id)
+	if err := reader.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstProcess.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := firstProcess.Wait(); result.ExitCode != 0 {
+		t.Fatalf("account durability shutdown = %#v", result)
+	}
+
+	process, address = startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	reader = newWireClient(t, address, "reader", "reader-policy-secret")
+	defer reader.close()
+	mustQuery(t, reader, "USE policy_accounts")
+	if result := reader.query("SELECT id FROM entries ORDER BY id"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"1"}, {"2"}}) {
+		t.Fatalf("durable database account grant = %#v", result)
+	}
+}
+
+func stringPreparedParameter(value string) preparedParameter {
+	return preparedParameter{typ: 0xfd, value: []byte(value)}
+}

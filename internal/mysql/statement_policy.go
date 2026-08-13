@@ -19,12 +19,17 @@ func newStatementExecutionPolicy(executor *textStatementExecutor) statementExecu
 }
 
 func normalizeStatement(query string) (normalizedStatement, error) {
-	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
-	query = stripLeadingSQLComments(query)
-	if query == "" {
+	statement := normalizeStatementText(query)
+	if statement.query == "" {
 		return normalizedStatement{}, sqlFailure{1065, "42000", "query was empty"}
 	}
-	return normalizedStatement{query: query, lower: strings.ToLower(query)}, nil
+	return statement, nil
+}
+
+func normalizeStatementText(query string) normalizedStatement {
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	query = stripLeadingSQLComments(query)
+	return normalizedStatement{query: query, lower: strings.ToLower(query)}
 }
 
 func (p statementExecutionPolicy) execute(statement normalizedStatement) (*queryResult, error) {
