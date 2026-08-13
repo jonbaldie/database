@@ -3,11 +3,99 @@ package blackbox_test
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 
 	"github.com/jonbaldie/database/test/blackbox"
 )
+
+func TestMySQLPlannedExplanationUsesTheWireContract(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "explanation-secret")
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+
+	admin := newWireClient(t, address, "admin", "explanation-secret")
+	defer admin.close()
+	for _, query := range []string{
+		"CREATE DATABASE explanation",
+		"USE explanation",
+		"CREATE TABLE orders (id INT PRIMARY KEY, value INT)",
+		"INSERT INTO orders VALUES (1, 10)",
+	} {
+		mustQuery(t, admin, query)
+	}
+
+	jsonResult := admin.query("EXPLAIN FORMAT=JSON SELECT id FROM orders WHERE id = 1")
+	if jsonResult.err != "" || !slices.Equal(jsonResult.columns, []string{"EXPLAIN"}) || len(jsonResult.rows) != 1 || len(jsonResult.rows[0]) != 1 {
+		t.Fatalf("JSON planned explanation: %#v", jsonResult)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(jsonResult.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode JSON planned explanation: %v", err)
+	}
+	if document["format_version"] != float64(1) || document["mode"] != "plan" || document["partial"] != false {
+		t.Fatalf("JSON planned explanation envelope: %#v", document)
+	}
+	statement, ok := document["statement"].(map[string]any)
+	if !ok || statement["kind"] != "select" || statement["current_database"] != "explanation" || statement["read_only"] != true || statement["locking_read"] != false {
+		t.Fatalf("JSON planned explanation statement: %#v", document["statement"])
+	}
+	assertPublicPlan(t, document["plan"], false)
+	plan := document["plan"].(map[string]any)
+	if plan["kind"] != "project" {
+		t.Fatalf("JSON planned explanation root: %#v", plan)
+	}
+	filter := plan["children"].([]any)[0].(map[string]any)
+	if filter["kind"] != "filter" {
+		t.Fatalf("JSON planned explanation filter: %#v", filter)
+	}
+	scan := filter["children"].([]any)[0].(map[string]any)
+	strategy, ok := scan["strategy"].(map[string]any)
+	if scan["kind"] != "scan" || !ok || strategy["name"] != "btree_covering_index_scan" {
+		t.Fatalf("JSON planned explanation scan: %#v", scan)
+	}
+
+	tabular := admin.query("EXPLAIN SELECT id FROM orders WHERE id = 1")
+	wantColumns := []string{
+		"id", "select_type", "table", "partitions", "type", "possible_keys", "key", "key_len", "ref", "rows", "filtered", "Extra",
+		"operator_id", "parent_operator_id", "operator", "strategy", "estimated_cost", "estimated_memory_bytes", "actual_rows", "loops", "first_row_ms", "total_ms", "actual_input_rows", "actual_filtered_rows", "actual_peak_memory_bytes", "actual_logical_reads", "actual_physical_reads", "actual_bytes_read", "actual_lock_ms", "actual_other_ms", "actual_rows_vs_estimate_ratio", "actual_warnings", "summary", "warnings",
+	}
+	if tabular.err != "" || !slices.Equal(tabular.columns, wantColumns) || len(tabular.rows) == 0 || len(tabular.nulls) != len(tabular.rows) {
+		t.Fatalf("tabular planned explanation: %#v", tabular)
+	}
+	actualRows := slices.Index(tabular.columns, "actual_rows")
+	if actualRows < 0 || !tabular.nulls[0][actualRows] {
+		t.Fatalf("tabular plan runtime evidence must be NULL: %#v", tabular)
+	}
+}
+
+func assertPublicPlan(t *testing.T, value any, hasRuntimeEvidence bool) {
+	t.Helper()
+	plan, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("public plan node: %#v", value)
+	}
+	for _, field := range []string{"id", "kind", "summary", "operation", "estimates", "output", "warnings", "children"} {
+		if _, found := plan[field]; !found {
+			t.Errorf("public plan node %v lacks %q: %#v", plan["id"], field, plan)
+		}
+	}
+	_, hasActual := plan["actual"]
+	if hasActual != hasRuntimeEvidence {
+		t.Errorf("public plan node %v runtime evidence: %#v", plan["id"], plan)
+	}
+	children, ok := plan["children"].([]any)
+	if !ok {
+		t.Errorf("public plan node %v children: %#v", plan["id"], plan)
+		return
+	}
+	for _, child := range children {
+		assertPublicPlan(t, child, hasRuntimeEvidence)
+	}
+}
 
 func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
