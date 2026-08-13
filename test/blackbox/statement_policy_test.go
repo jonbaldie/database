@@ -2,6 +2,7 @@ package blackbox_test
 
 import (
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/jonbaldie/database/test/blackbox"
@@ -279,6 +280,82 @@ func TestMySQLSettingsAndAccountChangesKeepWireContract(t *testing.T) {
 	if result := reader.query("SELECT id FROM entries ORDER BY id"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"1"}, {"2"}}) {
 		t.Fatalf("durable database account grant = %#v", result)
 	}
+}
+
+// TestMySQLLocksResourcesCancellationAndExplanationKeepWireContract proves
+// that statement policy keeps concurrent Query behaviour and its evidence.
+func TestMySQLLocksResourcesCancellationAndExplanationKeepWireContract(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory, "--lock-wait-timeout-ms=1000")
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+
+	owner := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer owner.close()
+	worker := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer worker.close()
+	observer := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer observer.close()
+	for _, statement := range []string{
+		"CREATE DATABASE policy_concurrency",
+		"USE policy_concurrency",
+		"CREATE TABLE entries (id INT PRIMARY KEY, value INT)",
+		"INSERT INTO entries VALUES (1, 10), (2, 10)",
+	} {
+		mustQuery(t, owner, statement)
+	}
+	for _, client := range []*wireClient{worker, observer} {
+		mustQuery(t, client, "USE policy_concurrency")
+	}
+
+	mustQuery(t, owner, "BEGIN")
+	mustQuery(t, owner, "SELECT id FROM entries WHERE id = 1 FOR UPDATE")
+	lockingRead := worker.prepare("SELECT id FROM entries WHERE id = ? FOR UPDATE NOWAIT")
+	if lockingRead.err != "" {
+		t.Fatalf("prepare locking read = %#v", lockingRead)
+	}
+	if result := worker.executePreparedValues(lockingRead.id, []preparedParameter{{typ: 0x03, value: []byte{1, 0, 0, 0}}}); result.errCode != 3572 || result.errState != "HY000" {
+		t.Fatalf("prepared locking read = %#v", result)
+	}
+	worker.closePrepared(lockingRead.id)
+
+	mustQuery(t, worker, "BEGIN")
+	mustQuery(t, worker, "UPDATE entries SET value = 20 WHERE id = 2")
+	mustQuery(t, worker, "SET statement_timeout_ms = 25")
+	if result := worker.query("UPDATE entries SET value = 20 WHERE id = 1"); result.errCode != 3024 || result.errState != "HY000" {
+		t.Fatalf("statement resource limit = %#v", result)
+	}
+	mustQuery(t, worker, "SET statement_timeout_ms = 1000")
+	mustQuery(t, worker, "COMMIT")
+	if result := observer.query("SELECT id, value FROM entries ORDER BY id"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"1", "10"}, {"2", "20"}}) {
+		t.Fatalf("transaction after resource failure = %#v", result)
+	}
+
+	mustQuery(t, worker, "BEGIN")
+	mustQuery(t, worker, "UPDATE entries SET value = 30 WHERE id = 2")
+	blockedSQL := "/* application update */ UPDATE entries SET value = 30 WHERE id = 1"
+	blocked := queryAsync(worker, blockedSQL)
+	waitForProcessListQuery(t, observer, worker.connectionID)
+	snapshot := liveQueryExplanation(t, observer, worker.connectionID)
+	statement := snapshot["statement"].(map[string]any)
+	actual := snapshot["plan"].(map[string]any)["actual"].(map[string]any)
+	if statement["sql"] != "UPDATE entries SET value = 30 WHERE id = 1" || statement["kind"] != "update" || actual["wait"].(map[string]any)["lock_ms"].(float64) <= 0 {
+		t.Fatalf("live Query explanation execution = %#v", snapshot)
+	}
+	mustQuery(t, observer, "KILL QUERY "+strconv.FormatUint(uint64(worker.connectionID), 10))
+	if result := <-blocked; result.errCode != 1317 || result.errState != "70100" {
+		t.Fatalf("cancelled statement = %#v", result)
+	}
+	if result := worker.query("SELECT 1"); result.err != "" {
+		t.Fatalf("session after cancellation = %#v", result)
+	}
+	if result := worker.query("SELECT value FROM entries WHERE id = 2"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"20"}}) {
+		t.Fatalf("cancelled transaction state = %#v", result)
+	}
+	if result := observer.query("SELECT id, value FROM entries ORDER BY id"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"1", "10"}, {"2", "20"}}) {
+		t.Fatalf("transaction after cancellation = %#v", result)
+	}
+	mustQuery(t, owner, "COMMIT")
 }
 
 func stringPreparedParameter(value string) preparedParameter {

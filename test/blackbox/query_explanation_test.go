@@ -193,14 +193,7 @@ func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	blocked := queryAsync(writer, "UPDATE orders SET value = 20 WHERE id = 1")
 	mustRemainBlocked(t, blocked)
 
-	snapshotResult := observer.query("EXPLAIN FORMAT=JSON FOR CONNECTION " + strconv.FormatUint(uint64(writer.connectionID), 10))
-	if snapshotResult.err != "" || len(snapshotResult.rows) != 1 {
-		t.Fatalf("live explanation: %#v", snapshotResult)
-	}
-	var snapshot map[string]any
-	if err := json.Unmarshal([]byte(snapshotResult.rows[0][0]), &snapshot); err != nil {
-		t.Fatalf("decode live explanation: %v", err)
-	}
+	snapshot := liveQueryExplanation(t, observer, writer.connectionID)
 	if snapshot["mode"] != "snapshot" || snapshot["partial"] != true {
 		t.Fatalf("snapshot envelope: %#v", snapshot)
 	}
@@ -232,14 +225,7 @@ func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	defer preparedWriter.closePrepared(prepared.id)
 	preparedBlocked := executePreparedAsync(preparedWriter, prepared.id, []preparedParameter{{typ: 0x03, value: []byte{1, 0, 0, 0}}})
 	mustRemainBlocked(t, preparedBlocked)
-	preparedSnapshot := observer.query("EXPLAIN FORMAT=JSON FOR CONNECTION " + strconv.FormatUint(uint64(preparedWriter.connectionID), 10))
-	if preparedSnapshot.err != "" || len(preparedSnapshot.rows) != 1 {
-		t.Fatalf("prepared live explanation: %#v", preparedSnapshot)
-	}
-	var preparedDocument map[string]any
-	if err := json.Unmarshal([]byte(preparedSnapshot.rows[0][0]), &preparedDocument); err != nil {
-		t.Fatalf("decode prepared live explanation: %v", err)
-	}
+	preparedDocument := liveQueryExplanation(t, observer, preparedWriter.connectionID)
 	preparedStatement := preparedDocument["statement"].(map[string]any)
 	if preparedStatement["sql"] != "SELECT id FROM orders WHERE id = ? FOR UPDATE" {
 		t.Fatalf("prepared explanation SQL: %#v", preparedStatement)
@@ -256,6 +242,19 @@ func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	if result := observer.query("EXPLAIN FOR CONNECTION 999999"); result.errCode != 1094 {
 		t.Fatalf("missing live connection: %#v", result)
 	}
+}
+
+func liveQueryExplanation(t *testing.T, client *wireClient, connectionID uint32) map[string]any {
+	t.Helper()
+	result := client.query("EXPLAIN FORMAT=JSON FOR CONNECTION " + strconv.FormatUint(uint64(connectionID), 10))
+	if result.err != "" || len(result.rows) != 1 {
+		t.Fatalf("live Query explanation: %#v", result)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode live Query explanation: %v", err)
+	}
+	return document
 }
 
 func executePreparedAsync(client *wireClient, id uint32, parameters []preparedParameter) <-chan wireResult {
