@@ -1,4 +1,4 @@
-package blackbox_test
+package qualitygate_test
 
 import (
 	"encoding/json"
@@ -18,8 +18,13 @@ type conformanceEvidenceInventory struct {
 	} `json:"stories"`
 }
 
-func TestConformanceEvidenceMapCoversEveryIssueStory(t *testing.T) {
-	root := repositoryRoot()
+const conformanceEvidenceDocumentationCheck = "TestConformanceEvidenceDocumentationMapCoversEveryIssueStory"
+
+// TestConformanceEvidenceDocumentationMapCoversEveryIssueStory checks the
+// conformance evidence documentation inventory. It proves that each Issue #1
+// story has an evidence pointer. It does not prove database query behaviour.
+func TestConformanceEvidenceDocumentationMapCoversEveryIssueStory(t *testing.T) {
+	root := repositoryRoot(t)
 	inventoryPath := filepath.Join(root, "docs", "conformance-evidence.json")
 	documentPath := filepath.Join(root, "docs", "conformance-evidence.md")
 	if _, err := os.Stat(documentPath); err != nil {
@@ -38,7 +43,7 @@ func TestConformanceEvidenceMapCoversEveryIssueStory(t *testing.T) {
 		t.Fatalf("inventory schema = %q", inventory.Schema)
 	}
 
-	tests := blackboxTestNames(t, filepath.Join(root, "test", "blackbox"))
+	tests := conformanceTestNames(t, root)
 	seen := map[int]bool{}
 	for _, story := range inventory.Stories {
 		if story.ID < 1 || story.ID > 70 {
@@ -71,22 +76,22 @@ func assertEvidenceExists(t *testing.T, root string, tests map[string]bool, item
 	if _, err := os.Stat(path); err == nil {
 		return
 	}
-	t.Fatalf("evidence %q is not a black-box test or repository path", item)
+	t.Fatalf("evidence %q is not a conformance test or repository path", item)
 }
 
-func blackboxTestNames(t *testing.T, directory string) map[string]bool {
+func conformanceTestNames(t *testing.T, root string) map[string]bool {
 	t.Helper()
-	entries, err := os.ReadDir(directory)
+	fileSet := token.NewFileSet()
+	names := map[string]bool{conformanceEvidenceDocumentationCheck: true}
+	entries, err := os.ReadDir(filepath.Join(root, "test", "blackbox"))
 	if err != nil {
 		t.Fatalf("read blackbox tests: %v", err)
 	}
-	fileSet := token.NewFileSet()
-	names := map[string]bool{}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".go" {
 			continue
 		}
-		path := filepath.Join(directory, entry.Name())
+		path := filepath.Join(root, "test", "blackbox", entry.Name())
 		file, err := parser.ParseFile(fileSet, path, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)

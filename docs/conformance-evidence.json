@@ -71,7 +71,7 @@
     {"id": 66, "evidence": ["TestExecutableVersionAndLifecycleArePublic", "TestServeEmitsTerminalOperatorResult", "TestDiagnosticsHTTPContractIsObservableEndToEnd"]},
     {"id": 67, "evidence": ["scripts/build-release.sh", "scripts/verify-release.sh", "docs/distribution.md"]},
     {"id": 68, "evidence": ["scripts/performance.sh", "docs/performance-acceptance.md"]},
-    {"id": 69, "evidence": ["docs/conformance-evidence.md", "TestConformanceEvidenceMapCoversEveryIssueStory"]},
+    {"id": 69, "evidence": ["docs/conformance-evidence.md", "TestConformanceEvidenceDocumentationMapCoversEveryIssueStory"]},
     {"id": 70, "evidence": ["LICENSE", "CONTRIBUTING.md", "GOVERNANCE.md"]}
   ]
 }

@@ -87,7 +87,7 @@ release judgment rule.
 | --- | --- | --- |
 | 67: fixed native and OCI support | [distribution evidence](distribution.md) | `scripts/build-release.sh`, `scripts/verify-release.sh`, and the published tested examples in `distribution.md` |
 | 68: fixed reference performance acceptance | [performance acceptance](performance-acceptance.md) | `make performance` / `scripts/performance.sh` write `dist/performance-evidence.json`. Maintainer judgment for issue #72 accepts the harness and published scenario as the release evidence path; a full Mac15,5 internal-SSD run is not required to close v0.1. |
-| 69: every normative promise maps to public evidence | This document and [conformance guidance](conformance.md) | `TestConformanceEvidenceMapCoversEveryIssueStory` and this audit |
+| 69: every normative promise maps to public evidence | This document and [conformance guidance](conformance.md) | Documentation quality check `TestConformanceEvidenceDocumentationMapCoversEveryIssueStory` and this audit |
 | 70: Apache-2.0 and maintainer-led contribution | [LICENSE](../LICENSE), [contribution rules](../CONTRIBUTING.md), and [governance](../GOVERNANCE.md) | Repository documents and pull-request review history |
 
 ## Normative contract inventory
@@ -131,7 +131,7 @@ Audit date: 2026-08-03.
 
 Findings:
 
-1. Every Issue #1 story from 1 through 70 has a mapped public evidence pointer in this document and in `conformance-evidence.json`. `TestConformanceEvidenceMapCoversEveryIssueStory` checks that inventory for completeness and that each pointer names an existing black-box test or repository path.
+1. Every Issue #1 story from 1 through 70 has a mapped public evidence pointer in this document and in `conformance-evidence.json`. The documentation quality check `TestConformanceEvidenceDocumentationMapCoversEveryIssueStory` checks that inventory for completeness and that each pointer names an existing black-box test, this documentation quality check, or a repository path. It does not prove database query behaviour.
 2. The previously recorded implementation gaps for online backup `--address` and `database shutdown` are closed on `main` and covered by black-box tests; this audit maps them.
 3. Offline upgrade now accepts a matching online backup against a durable row-engine directory by comparing catalog schema without live `rows/` engine files. That matcher change is required so story 62 has public executable evidence.
 4. Documentation uses the canonical domain vocabulary and states that v0.1 is experimental, with finite compatibility and support bounds in the linked contracts.
