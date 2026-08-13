@@ -34,7 +34,7 @@ func TestMessgoGateIsPinnedAndRunsWithQuality(t *testing.T) {
 	if !strings.Contains(workflow, "run: make quality") {
 		t.Error("CI does not run make quality")
 	}
-	if !strings.Contains(workflow, "go-version: 1.26.3") {
+	if !strings.Contains(workflow, "go-version: 1.26.5") {
 		t.Error("CI does not pin the Go version required to build messgo")
 	}
 	if !strings.Contains(workflow, "run: make mutation") || !strings.Contains(workflow, "GITHUB_BASE_SHA") {
@@ -56,6 +56,34 @@ func TestMessgoGateIsPinnedAndRunsWithQuality(t *testing.T) {
 	} {
 		if strings.Contains(ruleset, forbidden) {
 			t.Errorf("messgo ruleset weakens its default rules with %q", forbidden)
+		}
+	}
+}
+
+func TestGovulncheckIsPinnedAndRunsOnPullRequests(t *testing.T) {
+	root := repositoryRoot(t)
+	makefile := readFile(t, filepath.Join(root, "Makefile"))
+	workflow := readFile(t, filepath.Join(root, ".github", "workflows", "security.yml"))
+
+	for _, want := range []string{
+		"GOVULNCHECK_VERSION := v1.1.4",
+		"GOVULNCHECK_MODULE := golang.org/x/vuln/cmd/govulncheck",
+		"quality: fmt-check vet test build messgo vulncheck",
+		"vulncheck:",
+		"$(GO) run $(GOVULNCHECK_MODULE)@$(GOVULNCHECK_VERSION) ./...",
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("Makefile does not contain %q", want)
+		}
+	}
+	for _, want := range []string{
+		"name: Security",
+		"pull_request:\n    branches: [main]",
+		"govulncheck:",
+		"run: make vulncheck",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Errorf("security workflow does not contain %q", want)
 		}
 	}
 }

@@ -183,11 +183,12 @@ back open transactions before exit.
 ```sh
 make build      # bin/database
 make test       # go test -race ./...
-make quality    # fmt-check, vet, test, build, messgo
+make quality    # fmt-check, vet, test, build, messgo, vulncheck
 ```
 
-`make quality` is the project quality gate. It includes a pinned `messgo`
-full-production analysis on every non-test Go source file. Pull requests also
+`make quality` is the project quality gate. It includes pinned `messgo`
+full-production analysis on every non-test Go source file and pinned
+`govulncheck` dependency analysis. Pull requests also
 enforce mutation testing on changed production Go functions with an 80% minimum
 score. The [performance acceptance scenario](docs/performance-acceptance.md) is
 a release gate for v0.1, not an automated CI benchmark.

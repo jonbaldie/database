@@ -17,9 +17,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          # messgo v0.2.0 declares Go 1.26. Pin its toolchain so both its
-          # install and full production analysis are reproducible.
-          go-version: 1.26.3
+          # Go 1.26.5 fixes reachable standard-library vulnerabilities. It
+          # also supports messgo v0.2.0 and makes quality results reproducible.
+          go-version: 1.26.5
           cache: true
       - name: Production quality gate
         run: make quality
