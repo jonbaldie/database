@@ -3,7 +3,6 @@ package mysql
 import (
 	"encoding/binary"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -245,13 +244,16 @@ func (c *conversationControl) cancelStatement() {
 }
 
 func (c *conversation) recordActiveExplanation(query string) func() {
-	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
-	if query == "" || c.session == nil {
+	if c.session == nil {
+		return func() {}
+	}
+	statement, err := normalizeStatement(query)
+	if err != nil {
 		return func() {}
 	}
 	started := time.Now()
 	planner := textStatementExecutor{session: c.session}
-	plan, err := planner.planExplanation(query)
+	plan, err := planner.planExplanation(statement.query)
 	if err != nil {
 		return func() {}
 	}
