@@ -5,9 +5,11 @@ LDFLAGS = -s -w -X github.com/jonbaldie/database/internal/buildinfo.ProductVersi
 MESSGO_VERSION := v0.2.0
 MESSGO_MODULE := github.com/quality-gates/messgo/cmd/messgo
 MESSGO_RULESET := config/messgo.xml
+GOVULNCHECK_VERSION := v1.1.4
+GOVULNCHECK_MODULE := golang.org/x/vuln/cmd/govulncheck
 MESSGO_PATHS := $(shell $(GO) list -f '{{.Dir}}' ./... | tr '\n' ',' | sed 's/,$$//')
 
-.PHONY: build test vet fmt-check validate-query-explanation quality messgo mutation performance release release-smoke
+.PHONY: build test vet fmt-check validate-query-explanation quality messgo vulncheck mutation performance release release-smoke
 
 build:
 	mkdir -p bin
@@ -25,10 +27,13 @@ fmt-check:
 validate-query-explanation:
 	./scripts/validate-query-explanation-schema.sh
 
-quality: fmt-check vet test build messgo
+quality: fmt-check vet test build messgo vulncheck
 
 messgo:
 	$(GO) run $(MESSGO_MODULE)@$(MESSGO_VERSION) $(MESSGO_PATHS) text $(MESSGO_RULESET) --ignore-tests
+
+vulncheck:
+	$(GO) run $(GOVULNCHECK_MODULE)@$(GOVULNCHECK_VERSION) ./...
 
 mutation:
 	./scripts/mutation-threshold.sh

@@ -28,7 +28,7 @@ but cannot withdraw an established supported environment.
 
 ## Reproducible artifacts
 
-The release build uses Go `1.26.3`, `CGO_ENABLED=0`, `-trimpath`,
+The release build uses Go `1.26.5`, `CGO_ENABLED=0`, `-trimpath`,
 `-buildvcs=false`, fixed product and build identity linker values, and a
 recorded `SOURCE_DATE_EPOCH`. It writes three versioned native binaries, an
 OCI layout archive, `SHA256SUMS`, and `release-manifest.json` under `dist/`.
