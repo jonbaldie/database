@@ -16,7 +16,7 @@ if (getenv('DATABASE_COMPAT_TLS') === '1') {
 
 $pdo = new PDO($dsn, $user, $password, $pdoOptions);
 $version = (string) $pdo->query('SELECT VERSION()')->fetchColumn();
-if ($version !== '8.4.11-database-0.1.0-dev') {
+if ($version !== '8.4.11-database-0.2.0-dev') {
     throw new RuntimeException("unexpected version {$version}");
 }
 $pdo->exec('CREATE DATABASE IF NOT EXISTS compatibility');
@@ -49,7 +49,7 @@ if (!$mysqli || !$mysqli->real_connect($host, $user, $password, null, (int) $por
 $mysqli->query('CREATE DATABASE IF NOT EXISTS compatibility');
 $mysqli->select_db('compatibility');
 $result = $mysqli->query('SELECT VERSION()');
-if (!$result || $result->fetch_row()[0] !== '8.4.11-database-0.1.0-dev') {
+if (!$result || $result->fetch_row()[0] !== '8.4.11-database-0.2.0-dev') {
     throw new RuntimeException('mysqli version query failed');
 }
 $statement = $mysqli->prepare('SELECT ? AS name, NULL AS empty, 7 AS number');

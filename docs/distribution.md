@@ -1,6 +1,6 @@
-# v0.1 distribution evidence
+# v0.2.0 distribution evidence
 
-This document separates the v0.1 runtime contract from the environments used
+This document separates the v0.2.0 runtime contract from the environments used
 to test the release artifacts. A test on one machine is evidence for that
 artifact; it does not widen or replace the support contract.
 
@@ -23,7 +23,7 @@ its userspace, so host userspace is not part of the OCI contract. Docker,
 Podman, containerd, Kubernetes, and other named products are test examples,
 not separate compatibility promises.
 
-These boundaries remain stable within `0.1.x`. A later release may widen them
+These boundaries remain stable within `0.2.x`. A later release may widen them
 but cannot withdraw an established supported environment.
 
 ## Reproducible artifacts
@@ -36,16 +36,16 @@ The manifest is `database.release/v1` and records each target, baseline, and
 digest.
 
 ```sh
-VERSION=0.1.0 BUILD_IDENTITY=release ./scripts/build-release.sh
+VERSION=0.2.0 BUILD_IDENTITY=release ./scripts/build-release.sh
 ./scripts/verify-release.sh
 ```
 
 The build produces:
 
-- `database-0.1.0-darwin-arm64`;
-- `database-0.1.0-linux-amd64`;
-- `database-0.1.0-linux-arm64`; and
-- `database-0.1.0-oci.tar`, an OCI image index with both Linux platforms.
+- `database-0.2.0-darwin-arm64`;
+- `database-0.2.0-linux-amd64`;
+- `database-0.2.0-linux-arm64`; and
+- `database-0.2.0-oci.tar`, an OCI image index with both Linux platforms.
 
 The verification script checks the manifest and all digests, inspects the OCI
 index, runs the macOS binary on a matching host, runs both Linux binaries in

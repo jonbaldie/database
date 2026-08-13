@@ -40,8 +40,8 @@ func TestMySQLSessionSettingsUseTheWireContract(t *testing.T) {
 		"SELECT @@statement_timeout_ms":          "1000",
 		"SELECT @@execution_memory_limit_bytes":  "1024",
 		"SELECT @@temporary_storage_limit_bytes": "1024",
-		"SELECT @@version":                       "8.4.11-database-0.1.0-dev",
-		"SELECT VERSION()":                       "8.4.11-database-0.1.0-dev",
+		"SELECT @@version":                       "8.4.11-database-0.2.0-dev",
+		"SELECT VERSION()":                       "8.4.11-database-0.2.0-dev",
 	} {
 		result := client.query(query)
 		if result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{want}}) {

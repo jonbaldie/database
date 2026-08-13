@@ -45,7 +45,7 @@ func TestGoDriverCompatibilityProfile(t *testing.T) {
 		t.Fatalf("select compatibility schema: %v", err)
 	}
 
-	assertSingleValue(t, db, ctx, "SELECT VERSION()", "8.4.11-database-0.1.0-dev")
+	assertSingleValue(t, db, ctx, "SELECT VERSION()", "8.4.11-database-0.2.0-dev")
 	assertSingleValue(t, db, ctx, "SELECT @@time_zone", "+00:00")
 	if _, err := db.ExecContext(ctx, "SET time_zone = '+05:30'"); err != nil {
 		t.Fatalf("set session variable: %v", err)

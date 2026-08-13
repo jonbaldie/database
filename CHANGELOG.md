@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-13
+
+### Added
+
+- MySQL wire tests for text and prepared statements, settings, accounts,
+  transactions, locks, cancellation, restart durability, and Query explanation.
+- Required vulnerability checks and a required Go Report Card A+ check.
+
+### Changed
+
+- Replaced the first-page project description with a developer trial that uses
+  a supported Go client, a prepared query, and Query explanation.
+- Routed text, prepared, settings, account, and Query explanation work through
+  one normalized statement policy. Removed the old statement execution paths.
+- Updated the Go toolchain and dependencies to remove known reachable Go
+  standard library vulnerabilities.
+- Clarified the Query explanation documentation checks and the classification
+  of conformance evidence.
+
+### Notes
+
+- v0.2.0 is experimental. It does not claim production readiness or complete
+  MySQL compatibility beyond the documented contracts.
+- Data and backup compatibility remain `0.1.x`. The MySQL application
+  compatibility profile remains `0.1`. This release does not require a data
+  upgrade.
+
 ## [0.1.0] - 2026-08-03
 
 ### Added
@@ -35,4 +62,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.0]: https://github.com/jonbaldie/database/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jonbaldie/database/releases/tag/v0.1.0

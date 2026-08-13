@@ -5,7 +5,7 @@
 database releases follow [Semantic Versioning](https://semver.org/). The
 project changelog follows [Keep a Changelog](https://keepachangelog.com/).
 
-## v0.1 compatibility
+## 0.x compatibility
 
 During `0.x`, patch releases preserve documented public compatibility. Minor
 releases may make breaking public changes. A breaking `0.x` change requires a
