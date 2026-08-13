@@ -174,7 +174,7 @@ type connectionRegistry struct {
 // New retains a small unauthenticated protocol probe seam for callers that do
 // not attach an initialized instance. A serving database uses NewWithConfig.
 func New(address string) (*Server, error) {
-	return NewWithConfig(address, Config{Version: "0.1.0-dev"})
+	return NewWithConfig(address, Config{Version: "0.2.0-dev"})
 }
 
 func NewWithConfig(address string, config Config) (*Server, error) {
@@ -217,7 +217,7 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 
 func normalizedConfig(config Config) Config {
 	if config.Version == "" {
-		config.Version = "0.1.0-dev"
+		config.Version = "0.2.0-dev"
 	}
 	if config.MaxPreparedStmtCount == 0 {
 		config.MaxPreparedStmtCount = 4096

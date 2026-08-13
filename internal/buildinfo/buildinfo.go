@@ -7,12 +7,12 @@ import "runtime"
 // These values are replaced by the release build with -ldflags. Keeping
 // useful development defaults makes local builds and tests self-describing.
 var (
-	ProductVersion = "0.1.0-dev"
+	ProductVersion = "0.2.0-dev"
 	BuildIdentity  = "development"
 )
 
 // Info is the machine-readable version contract. New fields may be added in a
-// later schema version, but existing fields keep their meaning within 0.1.x.
+// later schema version, but existing fields keep their meaning within schema v1.
 type Info struct {
 	Schema                               string `json:"schema"`
 	ProductVersion                       string `json:"product_version"`

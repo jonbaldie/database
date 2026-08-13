@@ -1,83 +1,271 @@
 # database
 
-**database** is an experimental single-node relational database server written
-in Go. It speaks the MySQL classic wire protocol, so ordinary MySQL client
-libraries can connect to it.
+**database** is an experimental relational database for application developers
+who want to inspect and test query behaviour with familiar MySQL clients and
+SQL.
 
-It is built for application developers who need to understand and test query
-behaviour. Plans and runtime evidence are available through a stable
-[query explanation](docs/query-explanation/README.md) contract
-(`EXPLAIN` / `EXPLAIN ANALYZE`), not only through logs.
+## Why try it?
 
-> **v0.1.0 is experimental.** It is not a drop-in MySQL replacement and does
-> not claim production readiness. Supported behaviour is the finite surface
-> documented under [`docs/`](docs/).
+- **See what a query does.** A query explanation shows the selected work,
+  estimates, runtime evidence, resource use, and active progress. It is
+  available as stable JSON or as a table.
+- **Use a familiar client.** The server uses the MySQL classic wire
+  protocol. The project tests real Go, PHP, Node.js, Python, and Java clients.
+- **Know the limits before you depend on it.** The project has a finite SQL
+  contract, named client tests, and public test evidence from product
+  interfaces.
 
-## Quick start
+> **v0.2.0 is experimental.** Do not use it as a production database. It is a
+> single-node server and is not a drop-in MySQL replacement. The supported
+> behaviour is the finite surface under [`docs/`](docs/).
 
-Put `database` on your `PATH` (release binary) or use `./bin/database` after
-`make build`. Examples below use `database`.
+## Try it
 
-```sh
-# 1. Create a data directory and a password file for the first database account.
-mkdir -p ~/database-data
-printf 'change-me-now!!' > /tmp/admin-password
-chmod 600 /tmp/admin-password
+This trial starts one local instance. It uses the Go MySQL driver to create
+data, run a prepared query, and get a query explanation.
 
-# 2. Initialize a stopped instance (default database account name: admin).
-database init \
-  --data-directory ~/database-data \
-  --initial-account admin \
-  --initial-password-file /tmp/admin-password
+The `database` executable is a server and operator command. It does not include
+a SQL client.
 
-# 3. Start the server and optional diagnostics listener.
-database serve \
-  --data-directory ~/database-data \
-  --mysql-listen-address=127.0.0.1:3306 \
-  --diagnostics-listen-address=127.0.0.1:8080
+### 1. Install one binary
 
-# 4. Connect with any MySQL client that supports caching_sha2_password.
-#    Example DSN for github.com/go-sql-driver/mysql:
-#    admin:change-me-now!!@tcp(127.0.0.1:3306)/
-```
+Download the v0.2.0 file for your system from
+[GitHub Releases](https://github.com/jonbaldie/database/releases/tag/v0.2.0):
 
-Passwords must be 12–1024 UTF-8 bytes. Inline `--password=...` is rejected on
-purpose. For `init`, use exactly one of `--initial-password-file` or
-`--initial-password-stdin`. Online commands use `--password-file` or
-`--password-stdin`.
-
-One live `serve` process owns one data directory. A second `serve` on the same
-directory fails with “already in use”. Stop with `SIGINT` / `SIGTERM`, or with
-`database shutdown`.
-
-## Install
-
-### Prebuilt binaries
-
-Download a release from
-[GitHub Releases](https://github.com/jonbaldie/database/releases/tag/v0.1.0):
-
-| Platform | Artifact |
+| System | File |
 | --- | --- |
-| macOS Apple Silicon | `database-0.1.0-darwin-arm64` |
-| Linux x86_64 | `database-0.1.0-linux-amd64` |
-| Linux arm64 | `database-0.1.0-linux-arm64` |
+| Apple Silicon macOS | `database-0.2.0-darwin-arm64` |
+| x86-64 Linux | `database-0.2.0-linux-amd64` |
+| ARM64 Linux | `database-0.2.0-linux-arm64` |
+
+Rename the file to `database`, make it executable, and put it on your `PATH`.
 
 ```sh
-curl -fsSL -o database \
-  https://github.com/jonbaldie/database/releases/download/v0.1.0/database-0.1.0-darwin-arm64
 chmod +x database
 ./database version
-# optional: move onto PATH, e.g. sudo mv database /usr/local/bin/
 ```
 
-Verify digests with the release `SHA256SUMS` file. Supported runtime baselines
-are in [docs/distribution.md](docs/distribution.md).
+### 2. Initialize and start the server
 
-### From source
+Use a separate terminal for the server. This password is only for the local
+trial.
 
-Needs a recent Go toolchain (`go.mod` pins the module version; `GOTOOLCHAIN=auto`
-fetches a newer toolchain when required).
+```sh
+mkdir -p database-trial/data
+printf 'change-me-now!!' > database-trial/admin-password
+chmod 600 database-trial/admin-password
+
+./database init \
+  --data-directory "$PWD/database-trial/data" \
+  --initial-account admin \
+  --initial-password-file "$PWD/database-trial/admin-password"
+
+./database serve \
+  --data-directory "$PWD/database-trial/data" \
+  --mysql-listen-address=127.0.0.1:3306 \
+  --diagnostics-listen-address=127.0.0.1:8080
+```
+
+One live `serve` process owns one data directory. A second process cannot use
+the same directory.
+
+### 3. Run a query and inspect it
+
+In another terminal, create a small Go program:
+
+```sh
+mkdir database-client
+cd database-client
+go mod init database-client
+go get github.com/go-sql-driver/mysql@v1.9.3
+```
+
+Save this file as `main.go`:
+
+```go
+package main
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+func main() {
+	ctx := context.Background()
+	db, err := sql.Open("mysql", "admin:change-me-now!!@tcp(127.0.0.1:3306)/")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	statements := []string{
+		"CREATE DATABASE trial",
+		"USE trial",
+		"CREATE TABLE tasks (id BIGINT PRIMARY KEY, title VARCHAR(100) NOT NULL, priority INT NOT NULL)",
+		"INSERT INTO tasks VALUES (1, 'read the plan', 1), (2, 'test query behaviour', 2)",
+	}
+	for _, statement := range statements {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	rows, err := conn.QueryContext(ctx,
+		"SELECT id, title FROM tasks WHERE priority >= ? ORDER BY id", 2)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for rows.Next() {
+		var id int64
+		var title string
+		if err := rows.Scan(&id, &title); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("%d: %s\n", id, title)
+	}
+	if err := rows.Err(); err != nil {
+		log.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		log.Fatal(err)
+	}
+
+	var explanation string
+	err = conn.QueryRowContext(ctx,
+		"EXPLAIN ANALYZE FORMAT=JSON SELECT id, title FROM tasks WHERE priority >= 2 ORDER BY id",
+	).Scan(&explanation)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(explanation)
+}
+```
+
+Run it:
+
+```sh
+go run .
+```
+
+The first line is the query result:
+
+```text
+2: test query behaviour
+```
+
+The next line is the query explanation JSON. It includes the format version,
+the physical operator tree, estimates, actual row counts, elapsed time, memory,
+reads, and warnings. See the
+[checked example](docs/query-explanation/examples/analyze.json) and the
+[query explanation contract](docs/query-explanation/README.md).
+
+Stop the server with `Ctrl-C`. The server finishes current statements and
+rolls back open transactions before it exits.
+
+## Is it a fit?
+
+Try database if you want to:
+
+- inspect query behaviour in application tests;
+- test a new local relational database through a supported MySQL client;
+- inspect planned, completed, or active query work;
+- test transactions, locks, limits, and failure results; or
+- examine a small database server written in Go.
+
+Do not use database if you need:
+
+- a production service;
+- complete MySQL compatibility;
+- more than one server node;
+- an unsupported operating system or processor; or
+- an undocumented SQL or protocol feature.
+
+## Supported application surface
+
+### MySQL clients
+
+The tested client profiles use:
+
+- Go `go-sql-driver/mysql`;
+- PHP PDO and mysqli;
+- Node.js `mysql2`;
+- Python Connector/Python;
+- Java Connector/J; and
+- the MySQL command-line client.
+
+The project tests exact client versions and connection forms. This list does
+not mean that every MySQL client or MySQL feature works. See the
+[compatibility evidence](docs/compatibility-evidence.md).
+
+### SQL
+
+The SQL contract has a finite subset that is based on MySQL 8.4.11. It includes:
+
+- database namespaces, tables, indexes, and constraints;
+- insert, replace, update, delete, and select;
+- joins, subqueries, common table expressions, and set operations;
+- aggregates and windows;
+- transactions, savepoints, row locks, and read-only transactions;
+- catalog metadata through supported `SHOW` statements and
+  `information_schema` views; and
+- database accounts and grants.
+
+The server returns explicit errors for unsupported input. See the complete
+[MySQL SQL behaviour contract](docs/mysql-sql-behaviour.md).
+
+### Query explanation
+
+Use these forms to inspect query behaviour:
+
+```sql
+EXPLAIN FORMAT=JSON SELECT ...;
+EXPLAIN ANALYZE FORMAT=JSON SELECT ...;
+EXPLAIN FORMAT=JSON FOR CONNECTION <connection_id>;
+```
+
+`EXPLAIN` shows planned work without execution. `EXPLAIN ANALYZE` runs a
+non-locking `SELECT` and adds complete runtime evidence. `EXPLAIN FOR
+CONNECTION` gives a non-blocking partial view of an active query.
+
+The JSON document has a versioned contract. The table form has a stable column
+set. The contract keeps the format stable within version 1. It does not promise
+that the selected plan will never change.
+
+## Operate one local instance
+
+The same executable supports:
+
+- graceful shutdown;
+- online backup creation and backup inspection;
+- restore into a new or empty data directory;
+- offline upgrade;
+- configuration validation;
+- data validation and inspection; and
+- version reports.
+
+Automation can request versioned JSON results and progress. The diagnostics
+listener supplies `/live`, `/ready`, and `/metrics`.
+
+See the [operator automation contract](docs/operator-automation.md), the
+[server configuration registry](docs/server-configuration.md), and the
+[session settings registry](docs/session-settings.md).
+
+## Other installation methods
+
+### Build from source
+
+To build from source, use the Go version in `go.mod`. `GOTOOLCHAIN=auto`
+downloads a newer toolchain when a quality tool needs it.
 
 ```sh
 git clone https://github.com/jonbaldie/database.git
@@ -88,129 +276,41 @@ make build
 
 ### OCI image
 
-The release also ships `database-0.1.0-oci.tar`, a multi-arch OCI image index
-(`linux/amd64`, `linux/arm64/v8`). Load it with your preferred OCI runtime, then
-run `init` / `serve` inside the container the same way as a native binary.
+The v0.2.0 release includes `database-0.2.0-oci.tar`. It contains
+`linux/amd64` and `linux/arm64/v8` images. Load it with an OCI runtime, then use
+the same `init` and `serve` commands.
 
-## How to use it
+See the complete [distribution evidence](docs/distribution.md).
 
-### Operator commands
+## Help and contribution
 
-| Command | Purpose |
-| --- | --- |
-| `database init` | Create a stopped instance and initial database account |
-| `database serve` | Run the MySQL listener (and optional diagnostics) |
-| `database shutdown` | Request a graceful stop of a running instance |
-| `database backup create` / `inspect` | Online backup workflows |
-| `database restore` | Restore a backup into a new or empty data directory |
-| `database upgrade` | Offline data-directory upgrade |
-| `database config validate` | Validate server configuration without starting |
-| `database data validate` / `inspect` | Offline data checks |
-| `database version` | Print product and compatibility identity |
+The project does not yet publish a separate support channel. Use
+[GitHub Issues](https://github.com/jonbaldie/database/issues) to report a
+defect or request a feature. Include the database version, the client and its
+version, the SQL statement, and the complete MySQL error number and SQLSTATE
+when they are available.
 
-Beyond the [Quick start](#quick-start) `init` / `serve` sequence:
+Before you contribute, read [CONTRIBUTING.md](CONTRIBUTING.md) and
+[GOVERNANCE.md](GOVERNANCE.md).
+
+Run the project quality checks before you send a change:
 
 ```sh
-database version --format=json
-# or automation form: database version --result=json
-
-database shutdown \
-  --address 127.0.0.1:3306 \
-  --account admin \
-  --password-file /path/to/password \
-  --yes
+make quality
 ```
 
-`serve` accepts `--format=json` for lifecycle events on standard output.
-Automation-oriented terminal results use `--result=json` and optional
-`--progress=json`.
+## Evidence and policy
 
-The full operator command family contract is in
-[docs/operator-automation.md](docs/operator-automation.md). Server startup
-settings are in [docs/server-configuration.md](docs/server-configuration.md).
-Session settings are in [docs/session-settings.md](docs/session-settings.md).
-
-### Connect from an application
-
-The server uses MySQL 8.4 classic protocol and `caching_sha2_password`.
-Tested client paths include Go’s `github.com/go-sql-driver/mysql` (plaintext and
-TLS). Point the driver at the `serve` listen address with the database account
-created during `init`.
-
-```go
-import (
-    "database/sql"
-    _ "github.com/go-sql-driver/mysql"
-)
-
-db, err := sql.Open("mysql", "admin:change-me-now!!@tcp(127.0.0.1:3306)/")
-```
-
-### SQL and query explanation
-
-v0.1 documents a finite MySQL 8.4.11-shaped SQL subset: namespaces, tables,
-indexes, constraints, CRUD, joins, subqueries, CTEs, set operations, aggregates,
-windows, transactions, catalog metadata, and account administration. See
-[docs/mysql-sql-behaviour.md](docs/mysql-sql-behaviour.md).
-
-Inspect plans without guessing:
-
-```sql
-EXPLAIN FORMAT=JSON SELECT ...;
-EXPLAIN ANALYZE FORMAT=JSON SELECT ...;
-EXPLAIN FORMAT=JSON FOR CONNECTION <id>;
-```
-
-The stable JSON and tabular shapes are defined in
-[docs/query-explanation/README.md](docs/query-explanation/README.md).
-
-### Diagnostics
-
-When `--diagnostics-listen-address` is set, the process exposes:
-
-| Path | Meaning |
+| Document | Contents |
 | --- | --- |
-| `GET /live` | Process is up |
-| `GET /ready` | Ready to accept work |
-| `GET /metrics` | Operational metrics |
-
-`serve` also emits structured `database.lifecycle/v1` events. On
-`SIGINT` / `SIGTERM` it refuses new work, finishes current statements, and rolls
-back open transactions before exit.
-
-### Develop and verify this repository
-
-```sh
-make build      # bin/database
-make test       # go test -race ./...
-make quality       # fmt-check, vet, test, build, messgo, vulncheck
-make goreportcard  # report-card score; requires A+
-```
-
-`make quality` is the project quality gate. It includes pinned `messgo`
-full-production analysis on every non-test Go source file and pinned
-`govulncheck` dependency analysis. `make goreportcard` uses pinned tools to
-calculate the Go Report Card score. Pull requests also enforce an A+ Go Report
-Card grade and mutation testing on changed production Go functions with an 80%
-minimum score. The [performance acceptance scenario](docs/performance-acceptance.md) is
-a release gate for v0.1, not an automated CI benchmark.
-
-## Project docs and policy
-
-| Doc | Contents |
-| --- | --- |
+| [docs/conformance-evidence.md](docs/conformance-evidence.md) | Public test evidence for each product surface |
+| [docs/compatibility-evidence.md](docs/compatibility-evidence.md) | Tested MySQL clients and journeys |
+| [docs/mysql-sql-behaviour.md](docs/mysql-sql-behaviour.md) | Supported SQL behaviour |
+| [docs/query-explanation/README.md](docs/query-explanation/README.md) | Query explanation formats and meanings |
+| [docs/operator-automation.md](docs/operator-automation.md) | Operator command inputs and results |
+| [docs/distribution.md](docs/distribution.md) | Supported systems and release artifacts |
+| [docs/performance-acceptance.md](docs/performance-acceptance.md) | Experimental performance release gate |
+| [COMPATIBILITY.md](COMPATIBILITY.md) | Public compatibility policy |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |
-| [COMPATIBILITY.md](COMPATIBILITY.md) | Compatibility commitments |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution terms |
-| [GOVERNANCE.md](GOVERNANCE.md) | Project decision-making |
-| [LICENSE](LICENSE) | Apache License 2.0 |
-| [docs/operator-automation.md](docs/operator-automation.md) | Operator command contract |
-| [docs/server-configuration.md](docs/server-configuration.md) | Startup settings registry |
-| [docs/session-settings.md](docs/session-settings.md) | Session settings registry |
-| [docs/mysql-sql-behaviour.md](docs/mysql-sql-behaviour.md) | SQL behaviour contract |
-| [docs/query-explanation/README.md](docs/query-explanation/README.md) | Query explanation contract |
-| [docs/performance-acceptance.md](docs/performance-acceptance.md) | v0.1 performance release gate |
-| [docs/distribution.md](docs/distribution.md) | Supported runtimes and artifacts |
-| [docs/](docs/) | Full normative contract set |
 
-Licensed under the [Apache License 2.0](LICENSE), including its patent grant.
+database uses the [Apache License 2.0](LICENSE), including its patent grant.

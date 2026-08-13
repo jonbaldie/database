@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST_DIR=${DIST_DIR:-"$ROOT/dist"}
-VERSION=${VERSION:-0.1.0}
+VERSION=${VERSION:-0.2.0}
 BUILD_IDENTITY=${BUILD_IDENTITY:-release}
 OCI_IMAGE=${OCI_IMAGE:-database}
 OCI_TAG=${OCI_TAG:-$VERSION}
