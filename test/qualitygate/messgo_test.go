@@ -88,6 +88,34 @@ func TestGovulncheckIsPinnedAndRunsOnPullRequests(t *testing.T) {
 	}
 }
 
+func TestGoReportCardEnforcesAPlusOnPullRequests(t *testing.T) {
+	root := repositoryRoot(t)
+	makefile := readFile(t, filepath.Join(root, "Makefile"))
+	workflow := readFile(t, filepath.Join(root, ".github", "workflows", "goreportcard.yml"))
+
+	for _, requiredMakefileText := range []string{
+		"GOCYCLO_VERSION := v0.6.0",
+		"INEFFASSIGN_VERSION := v0.2.0",
+		"goreportcard:",
+		"scripts/goreportcard.py",
+	} {
+		if !strings.Contains(makefile, requiredMakefileText) {
+			t.Errorf("Makefile does not contain %q", requiredMakefileText)
+		}
+	}
+	for _, requiredWorkflowText := range []string{
+		"name: Go Report Card",
+		"pull_request:",
+		"report-card:",
+		"name: Enforce A+ grade",
+		"run: make goreportcard",
+	} {
+		if !strings.Contains(workflow, requiredWorkflowText) {
+			t.Errorf("Go Report Card workflow does not contain %q", requiredWorkflowText)
+		}
+	}
+}
+
 func TestMessgoReportsDesignViolations(t *testing.T) {
 	root := repositoryRoot(t)
 	fixture := filepath.Join(root, "test", "qualitygate", "testdata", "goto_violation_test.go")

@@ -183,14 +183,16 @@ back open transactions before exit.
 ```sh
 make build      # bin/database
 make test       # go test -race ./...
-make quality    # fmt-check, vet, test, build, messgo, vulncheck
+make quality       # fmt-check, vet, test, build, messgo, vulncheck
+make goreportcard  # report-card score; requires A+
 ```
 
 `make quality` is the project quality gate. It includes pinned `messgo`
 full-production analysis on every non-test Go source file and pinned
-`govulncheck` dependency analysis. Pull requests also
-enforce mutation testing on changed production Go functions with an 80% minimum
-score. The [performance acceptance scenario](docs/performance-acceptance.md) is
+`govulncheck` dependency analysis. `make goreportcard` uses pinned tools to
+calculate the Go Report Card score. Pull requests also enforce an A+ Go Report
+Card grade and mutation testing on changed production Go functions with an 80%
+minimum score. The [performance acceptance scenario](docs/performance-acceptance.md) is
 a release gate for v0.1, not an automated CI benchmark.
 
 ## Project docs and policy
