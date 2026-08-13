@@ -822,13 +822,11 @@ func (s *queryExecutor) databaseExists(name string) error {
 }
 
 func (s *textStatementExecutor) execute(query string) (*queryResult, error) {
-	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
-	query = stripLeadingSQLComments(query)
-	lower := strings.ToLower(query)
-	if lower == "" {
-		return nil, sqlFailure{1065, "42000", "query was empty"}
+	statement, err := normalizeStatement(query)
+	if err != nil {
+		return nil, err
 	}
-	return newStatementExecutionPolicy(s).execute(query, lower)
+	return newStatementExecutionPolicy(s).execute(statement)
 }
 
 // stripLeadingSQLComments removes comments that clients use to annotate an
@@ -4048,7 +4046,6 @@ func (s *preparedPreparation) queryColumns(query string, preserveMetadata bool) 
 }
 
 func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
-	queries := newQueryExecutor(s.session)
 	if len(payload) < 5 {
 		return writePacket(connection, sequence, errorPacket(1210, "HY000", "malformed prepared statement"))
 	}
@@ -4057,17 +4054,14 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	if !ok {
 		return writePacket(connection, sequence, errorPacket(1243, "HY000", "unknown prepared statement handler"))
 	}
-	params, err := s.preparedValues(payload, statement)
+	boundStatement, err := s.boundStatement(payload, statement)
 	if err != nil {
-		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
-	}
-	query, err := bindPreparedQuery(statement.query, params)
-	if err != nil {
-		return writePacket(connection, sequence, errorPacket(1210, "HY000", err.Error()))
+		return writePacket(connection, sequence, mysqlError(preparedStatementError(err)))
 	}
 	finishExplanation := s.recordPreparedExplanation(statement)
 	defer finishExplanation()
-	result, err := queries.executeProtocol(strings.TrimSpace(strings.TrimSuffix(query, ";")))
+	executor := textStatementExecutor{session: s.session, streamRows: true}
+	result, err := newStatementExecutionPolicy(&executor).execute(boundStatement)
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
@@ -4078,6 +4072,28 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 		return writePacket(connection, sequence, okPacket(result.affected))
 	}
 	return writeBinaryResult(connection, sequence, result, s.server.config.MaxAllowedPacket)
+}
+
+// boundStatement makes the common policy input only after the prepared values
+// have been decoded and bound into the SQL text.
+func (s *preparedExecution) boundStatement(payload []byte, statement *preparedStatement) (normalizedStatement, error) {
+	params, err := s.preparedValues(payload, statement)
+	if err != nil {
+		return normalizedStatement{}, preparedStatementError(err)
+	}
+	query, err := bindPreparedQuery(statement.query, params)
+	if err != nil {
+		return normalizedStatement{}, preparedStatementError(err)
+	}
+	return normalizeStatement(query)
+}
+
+func preparedStatementError(err error) error {
+	var failure sqlFailure
+	if errors.As(err, &failure) {
+		return err
+	}
+	return sqlFailure{code: 1210, state: "HY000", message: err.Error()}
 }
 
 // recordPreparedExplanation plans a value-free copy of the prepared SQL once

@@ -130,7 +130,11 @@ func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*query
 	metrics := queryexplanation.NewRuntimeMetrics(document)
 	runner.session.runtimeMetrics = metrics
 	defer func() { runner.session.runtimeMetrics = nil }()
-	result, err := newStatementExecutionPolicy(&runner).execute(inner, strings.ToLower(inner))
+	statement, err := normalizeStatement(inner)
+	if err != nil {
+		return nil, err
+	}
+	result, err := newStatementExecutionPolicy(&runner).execute(statement)
 	if err != nil {
 		return nil, err
 	}
