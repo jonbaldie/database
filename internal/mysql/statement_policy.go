@@ -1,16 +1,35 @@
 package mysql
 
+import "strings"
+
 // statementExecutionPolicy owns the common rules for one SQL statement. The
 // protocol-facing text query adapter enters this module before a statement
 // implementation runs.
 type statementExecutionPolicy struct{ executor *textStatementExecutor }
 
+// normalizedStatement is the common policy input for text and prepared SQL.
+// Prepared values become SQL text before this value is made.
+type normalizedStatement struct {
+	query string
+	lower string
+}
+
 func newStatementExecutionPolicy(executor *textStatementExecutor) statementExecutionPolicy {
 	return statementExecutionPolicy{executor: executor}
 }
 
-func (p statementExecutionPolicy) execute(query, lower string) (*queryResult, error) {
+func normalizeStatement(query string) (normalizedStatement, error) {
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	query = stripLeadingSQLComments(query)
+	if query == "" {
+		return normalizedStatement{}, sqlFailure{1065, "42000", "query was empty"}
+	}
+	return normalizedStatement{query: query, lower: strings.ToLower(query)}, nil
+}
+
+func (p statementExecutionPolicy) execute(statement normalizedStatement) (*queryResult, error) {
 	s := p.executor
+	query, lower := statement.query, statement.lower
 	if err := s.session.checkStatementResources(); err != nil {
 		return nil, err
 	}
