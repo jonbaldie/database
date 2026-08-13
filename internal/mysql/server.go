@@ -3842,8 +3842,8 @@ func preparedParameterMetadata(index int) columnMetadata {
 }
 
 func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, error) {
-	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
-	lower := strings.ToLower(query)
+	statement := normalizeStatementText(query)
+	query, lower := statement.query, statement.lower
 	if !isPreparedStatement(lower) {
 		return nil, sqlFailure{1064, "42000", "unsupported prepared statement"}
 	}
@@ -3865,7 +3865,7 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 }
 
 func isPreparedStatement(lower string) bool {
-	if isComposedSelectStatement(lower) {
+	if isComposedSelectStatement(lower) || isSettingControl(lower) || accountAdministrationStatement(lower) {
 		return true
 	}
 	for _, prefix := range []string{"select ", "with ", "insert into ", "replace ", "update ", "delete from "} {
