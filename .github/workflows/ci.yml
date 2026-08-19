@@ -17,9 +17,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          # Go 1.26.5 fixes reachable standard-library vulnerabilities. It
+          # Go 1.26.6 fixes reachable standard-library vulnerabilities. It
           # also supports messgo v0.2.0 and makes quality results reproducible.
-          go-version: 1.26.5
+          go-version: 1.26.6
           cache: true
       - name: Production quality gate
         run: make quality
