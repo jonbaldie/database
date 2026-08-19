@@ -26,7 +26,7 @@ Before stopping or handing off, delete disposable artifacts created by your work
 
 This is a single-binary Go database server (MySQL wire protocol). All standard commands live in the `Makefile` and `README.md`; use those rather than duplicating them here.
 
-- Toolchain: `go.mod` pins `go 1.26.5`, which also meets the `messgo` quality tool requirement of `go >= 1.26`. With `GOTOOLCHAIN=auto`, Go downloads that toolchain when required. The first `make messgo` or `make quality` run also needs network access to fetch `messgo@v0.2.0`.
+- Toolchain: `go.mod` pins `go 1.26.6`, which also meets the `messgo` quality tool requirement of `go >= 1.26`. With `GOTOOLCHAIN=auto`, Go downloads that toolchain when required. The first `make messgo` or `make quality` run also needs network access to fetch `messgo@v0.2.0`.
 - Quality gate: `make quality` = `fmt-check vet test build messgo vulncheck`. `make test` runs with `-race`; the `test/qualitygate` suite dominates runtime (~80s), so the full `make test` takes ~90s.
 - Running the server (see `README.md`): first `bin/database init <data-dir> --password-file <file>` (or `--password-stdin`; an inline `--password=` is intentionally rejected), then `bin/database serve --data-directory <data-dir> --mysql-listen-address=... --diagnostics-listen-address=...`. A data directory is owned exclusively by one live `serve` process; a second `serve` on the same directory fails with "already in use".
 - Diagnostics listener exposes `/live`, `/ready`, and `/metrics`. `serve` emits `database.lifecycle/v1` JSON to stdout and shuts down gracefully on `SIGINT`/`SIGTERM`.

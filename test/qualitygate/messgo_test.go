@@ -34,7 +34,7 @@ func TestMessgoGateIsPinnedAndRunsWithQuality(t *testing.T) {
 	if !strings.Contains(workflow, "run: make quality") {
 		t.Error("CI does not run make quality")
 	}
-	if !strings.Contains(workflow, "go-version: 1.26.5") {
+	if !strings.Contains(workflow, "go-version: 1.26.6") {
 		t.Error("CI does not pin the Go version required to build messgo")
 	}
 	if !strings.Contains(workflow, "run: make mutation") || !strings.Contains(workflow, "GITHUB_BASE_SHA") {
