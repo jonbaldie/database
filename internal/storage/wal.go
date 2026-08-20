@@ -83,6 +83,18 @@ func (e *Engine) applyWALPayload(payload []byte) error {
 }
 
 func applyWALUpdate(current *table, row []string) error {
+	if len(row) == len(current.columns)+1 {
+		previousPrimary := row[0]
+		nextRow := row[1:]
+		position, ok := current.primaryIdx[previousPrimary]
+		if !ok {
+			return errMissingRow
+		}
+		return current.replaceRow(position, nextRow)
+	}
+	if err := current.validateRow(row); err != nil {
+		return err
+	}
 	position, ok := current.primaryIdx[current.primaryKey(row)]
 	if !ok {
 		return current.appendRow(row)

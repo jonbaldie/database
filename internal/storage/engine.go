@@ -33,6 +33,7 @@ var (
 	errDuplicateKey = errString("duplicate key")
 	errMissingTable = errString("table does not exist")
 	errMissingRow   = errString("row does not exist")
+	errInvalidRow   = errString("row has invalid column count")
 	errFinishedTxn  = errString("transaction is finished")
 )
 
