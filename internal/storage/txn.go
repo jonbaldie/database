@@ -1,6 +1,9 @@
 package storage
 
 import (
+	"io"
+	"os"
+	"sort"
 	"strings"
 )
 
@@ -38,9 +41,8 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 	if err != nil {
 		return err
 	}
-	if len(overlay.base.primary) == 0 {
-		overlay.inserts = append(overlay.inserts, append([]string(nil), row...))
-		return nil
+	if err := overlay.base.validateRow(row); err != nil {
+		return err
 	}
 	if err := overlay.rejectDuplicateInsert(row); err != nil {
 		return err
@@ -62,6 +64,9 @@ func (overlay *tableOverlay) rejectDuplicateInsert(row []string) error {
 }
 
 func (overlay *tableOverlay) rejectDuplicatePrimary(key string) error {
+	if len(overlay.base.primary) == 0 {
+		return nil
+	}
 	if !overlay.clear {
 		if _, exists := overlay.base.primaryIdx[key]; exists && !overlay.deletes[key] {
 			return errDuplicateKey
@@ -120,6 +125,9 @@ func (txn *Transaction) UpdatePrimary(namespace, name, primary string, row []str
 	}
 	overlay, err := txn.overlay(namespace, name)
 	if err != nil {
+		return err
+	}
+	if err := overlay.base.validateRow(row); err != nil {
 		return err
 	}
 	if overlay.clear {
@@ -201,105 +209,155 @@ func (txn *Transaction) overlay(namespace, name string) (*tableOverlay, error) {
 	return staged, nil
 }
 
-// Commit publishes staged mutations and durable-syncs the WAL.
+// Commit validates and applies all staged mutations before publishing them and
+// durable-syncing the WAL. A rejected overlay must never leave a replayable
+// record behind.
 func (txn *Transaction) Commit() error {
 	if txn.finished {
 		return errFinishedTxn
 	}
-	if err := txn.engine.writeTransactionOverlays(txn); err != nil {
+
+	engine := txn.engine
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if err := ensureCommitReady(engine); err != nil {
 		return err
 	}
-	if err := txn.engine.syncWAL(); err != nil {
+
+	keys := changedOverlayKeys(txn.overlays)
+	if len(keys) == 0 {
+		txn.finished = true
+		return nil
+	}
+	staged, err := stageOverlays(engine, txn.overlays, keys)
+	if err != nil {
 		return err
 	}
-	return txn.engine.applyTransactionOverlays(txn)
-}
-
-func (e *Engine) writeTransactionOverlays(txn *Transaction) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.wal == nil {
-		return errClosed
+	if err := appendTransactionWAL(engine.wal, txn.overlays, keys); err != nil {
+		return err
 	}
-	for _, overlay := range txn.overlays {
-		if err := txn.writeOverlay(overlay); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (e *Engine) syncWAL() error {
-	e.mu.RLock()
-	file := e.wal
-	closed := e.closed
-	e.mu.RUnlock()
-	if closed || file == nil {
-		return errClosed
-	}
-	return file.Sync()
-}
-
-func (e *Engine) applyTransactionOverlays(txn *Transaction) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed {
-		return errClosed
-	}
-	for key, overlay := range txn.overlays {
-		current, ok := e.tables[key]
-		if !ok || current != overlay.base {
-			return errMissingTable
-		}
-		if err := applyOverlay(overlay); err != nil {
-			return err
-		}
-	}
+	publishStagedTables(engine, staged)
 	txn.finished = true
 	return nil
 }
 
-func (txn *Transaction) writeOverlay(overlay *tableOverlay) error {
-	if overlay.clear {
-		if err := writeWALRecord(txn.engine.wal, walClear, overlay.base.namespace, overlay.base.name, nil); err != nil {
+func ensureCommitReady(engine *Engine) error {
+	if engine.closed || engine.wal == nil {
+		return errClosed
+	}
+	return nil
+}
+
+func stageOverlays(engine *Engine, overlays map[string]*tableOverlay, keys []string) (map[string]*table, error) {
+	staged := make(map[string]*table, len(keys))
+	for _, key := range keys {
+		overlay := overlays[key]
+		current, ok := engine.tables[key]
+		if !ok || current != overlay.base {
+			return nil, errMissingTable
+		}
+		copy := cloneTable(current)
+		if err := applyOverlay(copy, overlay); err != nil {
+			return nil, err
+		}
+		staged[key] = copy
+	}
+	return staged, nil
+}
+
+func appendTransactionWAL(file *os.File, overlays map[string]*tableOverlay, keys []string) error {
+	start, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := writeOverlay(file, overlays[key]); err != nil {
+			_ = file.Truncate(start)
+			_, _ = file.Seek(0, io.SeekEnd)
 			return err
 		}
 	}
-	for primary := range overlay.deletes {
-		if err := writeWALRecord(txn.engine.wal, walDelete, overlay.base.namespace, overlay.base.name, []string{primary}); err != nil {
+	return file.Sync()
+}
+
+func publishStagedTables(engine *Engine, staged map[string]*table) {
+	for key, copy := range staged {
+		engine.tables[key] = copy
+	}
+}
+
+func changedOverlayKeys(overlays map[string]*tableOverlay) []string {
+	keys := make([]string, 0, len(overlays))
+	for key, overlay := range overlays {
+		if overlayChanged(overlay) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func overlayChanged(overlay *tableOverlay) bool {
+	return overlay.clear || len(overlay.inserts) > 0 || len(overlay.updates) > 0 || len(overlay.deletes) > 0
+}
+
+func writeOverlay(file *os.File, overlay *tableOverlay) error {
+	if overlay.clear {
+		if err := writeWALRecord(file, walClear, overlay.base.namespace, overlay.base.name, nil); err != nil {
+			return err
+		}
+	}
+	for _, primary := range sortedKeys(overlay.deletes) {
+		if err := writeWALRecord(file, walDelete, overlay.base.namespace, overlay.base.name, []string{primary}); err != nil {
 			return err
 		}
 	}
 	for _, row := range overlay.inserts {
-		if err := writeWALRecord(txn.engine.wal, walInsert, overlay.base.namespace, overlay.base.name, row); err != nil {
+		if err := writeWALRecord(file, walInsert, overlay.base.namespace, overlay.base.name, row); err != nil {
 			return err
 		}
 	}
-	for _, row := range overlay.updates {
-		if err := writeWALRecord(txn.engine.wal, walUpdate, overlay.base.namespace, overlay.base.name, row); err != nil {
+	for _, primary := range sortedKeys(overlay.updates) {
+		row := overlay.updates[primary]
+		update := make([]string, 0, len(row)+1)
+		update = append(update, primary)
+		update = append(update, row...)
+		if err := writeWALRecord(file, walUpdate, overlay.base.namespace, overlay.base.name, update); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func applyOverlay(overlay *tableOverlay) error {
-	if overlay.clear {
-		clearTable(overlay.base)
+func sortedKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
 	}
-	for primary := range overlay.deletes {
-		if err := overlay.base.deletePrimary(primary); err != nil {
+	sort.Strings(keys)
+	return keys
+}
+
+func applyOverlay(target *table, overlay *tableOverlay) error {
+	if overlay.clear {
+		clearTable(target)
+	}
+	for _, primary := range sortedKeys(overlay.deletes) {
+		if err := target.deletePrimary(primary); err != nil {
 			return err
 		}
 	}
-	for primary, row := range overlay.updates {
-		position := overlay.base.primaryIdx[primary]
-		if err := overlay.base.replaceRow(position, row); err != nil {
+	for _, primary := range sortedKeys(overlay.updates) {
+		position, ok := target.primaryIdx[primary]
+		if !ok {
+			return errMissingRow
+		}
+		if err := target.replaceRow(position, overlay.updates[primary]); err != nil {
 			return err
 		}
 	}
 	for _, row := range overlay.inserts {
-		if err := overlay.base.appendRow(row); err != nil {
+		if err := target.appendRow(row); err != nil {
 			return err
 		}
 	}

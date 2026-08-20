@@ -49,6 +49,10 @@ func rebuildIndexes(current *table) {
 		}
 		for _, unique := range current.uniques {
 			indexKey := strings.Join(unique, "\x00")
+			indexes := current.columnIndexes(unique)
+			if uniqueKeyNullable(row, indexes) {
+				continue
+			}
 			current.uniqueIdx[indexKey][rowKey(row, current.columnIndexes(unique))] = index
 		}
 	}

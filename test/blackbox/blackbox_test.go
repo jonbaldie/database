@@ -380,6 +380,65 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	}
 }
 
+func TestMySQLDurabilityPreservesControlBytes(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() {
+		if process != nil {
+			_ = process.Stop()
+			_ = process.Wait()
+		}
+	}()
+
+	client := newWireClient(t, address, "admin", "lifecycle-secret")
+	value := []byte("left\x01right")
+	if result := client.query("CREATE DATABASE controls"); result.err != "" {
+		t.Fatalf("create database: %#v", result)
+	}
+	if result := client.query("USE controls"); result.err != "" {
+		t.Fatalf("use database: %#v", result)
+	}
+	if result := client.query("CREATE TABLE items (id INT PRIMARY KEY, value VARCHAR(64))"); result.err != "" {
+		t.Fatalf("create table: %#v", result)
+	}
+	statement := client.prepare("INSERT INTO items VALUES (?, ?)")
+	if statement.err != "" {
+		t.Fatalf("prepare insert: %#v", statement)
+	}
+	result := client.executePreparedValues(statement.id, []preparedParameter{
+		{typ: 0x03, value: []byte{1, 0, 0, 0}},
+		{typ: 0xfd, value: value},
+	})
+	client.closePrepared(statement.id)
+	if result.err != "" || result.affected != 1 {
+		t.Fatalf("insert control bytes: %#v", result)
+	}
+	if result := client.query("SELECT value FROM items"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != string(value) {
+		t.Fatalf("control bytes before restart: %#v", result)
+	}
+	if err := client.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.ExitCode != 0 {
+		t.Fatalf("stop: %#v", result)
+	}
+	process = nil
+
+	process, address = startMySQLServer(t, runner, directory)
+	reopened := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer reopened.close()
+	if result := reopened.query("USE controls"); result.err != "" {
+		t.Fatalf("use database after restart: %#v", result)
+	}
+	if result := reopened.query("SELECT value FROM items"); result.err != "" || len(result.rows) != 1 || result.rows[0][0] != string(value) {
+		t.Fatalf("control bytes after restart: %#v", result)
+	}
+}
+
 func TestMySQLTransactionsProvideIsolationAndReadYourOwnWrites(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
