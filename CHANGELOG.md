@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-20
+
+### Fixed
+
+- Bounded scalar-expression parser recursion (nested parentheses, `NOT`
+  chains, and unary `+`/`-` runs) to stop an unrecoverable stack-overflow
+  crash from a single query, reachable within the default `max_allowed_packet`
+  size. Excessive nesting now fails with the MySQL
+  `ER_STACK_OVERRUN_NEED_MORE` (1436) error identity instead of crashing the
+  server.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added
@@ -62,5 +73,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.1]: https://github.com/jonbaldie/database/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jonbaldie/database/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jonbaldie/database/releases/tag/v0.1.0
