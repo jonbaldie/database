@@ -147,3 +147,11 @@ func scalarMetadata(name, rendered string, value exprValue) columnMetadata {
 func unsupportedExpression() error {
 	return sqlFailure{1064, "42000", "unsupported expression"}
 }
+
+// expressionTooDeep reports that an expression's parenthesisation, NOT
+// chain, or unary sign run exceeded maxExpressionDepth. MySQL's own error
+// for this situation is ER_STACK_OVERRUN_NEED_MORE (1436); we reuse its code
+// and SQLSTATE here.
+func expressionTooDeep() error {
+	return sqlFailure{1436, "HY000", "expression is too deeply nested"}
+}
