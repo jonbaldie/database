@@ -27,17 +27,19 @@ type exprParser struct {
 // takes down the whole server, not just the offending connection.
 const maxExpressionDepth = 4000
 
-// enterDepth records one more level of recursive descent, failing once the
-// nesting limit is reached. Callers pair it with leaveDepth via defer.
-func (p *exprParser) enterDepth() error {
+// depthGuard runs fn one level deeper in the recursive descent, failing
+// closed once maxExpressionDepth is exceeded instead of growing the stack
+// further. Every self- or mutually-recursive entry point (parseExpression,
+// parseNot, parseUnary) routes its recursive call through this single
+// choke point rather than each managing its own counter.
+func depthGuard(p *exprParser, fn func() (exprValue, error)) (exprValue, error) {
 	p.depth++
+	defer func() { p.depth-- }()
 	if p.depth > maxExpressionDepth {
-		return expressionTooDeep()
+		return exprValue{}, expressionTooDeep()
 	}
-	return nil
+	return fn()
 }
-
-func (p *exprParser) leaveDepth() { p.depth-- }
 
 func (p *exprParser) atEnd() bool { return p.pos >= len(p.tokens) }
 
@@ -72,11 +74,7 @@ func (p *exprParser) peekOperator() (string, bool) {
 // arguments, CAST/CONVERT targets) recurses back through, so bounding its
 // depth here bounds all of them.
 func (p *exprParser) parseExpression() (exprValue, error) {
-	if err := p.enterDepth(); err != nil {
-		return exprValue{}, err
-	}
-	defer p.leaveDepth()
-	return p.parseOr()
+	return depthGuard(p, p.parseOr)
 }
 
 func (p *exprParser) parseOr() (exprValue, error) {
@@ -114,12 +112,8 @@ func parseLogical(p *exprParser, keyword string, operand func() (exprValue, erro
 func (p *exprParser) parseNot() (exprValue, error) {
 	if p.matchKeyword("NOT") {
 		// NOT recurses on itself rather than through parseExpression, so a
-		// long NOT NOT NOT ... chain needs its own depth check.
-		if err := p.enterDepth(); err != nil {
-			return exprValue{}, err
-		}
-		defer p.leaveDepth()
-		operand, err := p.parseNot()
+		// long NOT NOT NOT ... chain needs its own depth guard.
+		operand, err := depthGuard(p, p.parseNot)
 		if err != nil {
 			return exprValue{}, err
 		}
@@ -243,12 +237,8 @@ func (p *exprParser) parseUnary() (exprValue, error) {
 		p.advance()
 		// Unary minus recurses on itself rather than through
 		// parseExpression, so a long run of minus signs needs its own
-		// depth check.
-		if err := p.enterDepth(); err != nil {
-			return exprValue{}, err
-		}
-		defer p.leaveDepth()
-		operand, err := p.parseUnary()
+		// depth guard.
+		operand, err := depthGuard(p, p.parseUnary)
 		if err != nil {
 			return exprValue{}, err
 		}
@@ -256,11 +246,7 @@ func (p *exprParser) parseUnary() (exprValue, error) {
 	}
 	if ok && symbol == "+" {
 		p.advance()
-		if err := p.enterDepth(); err != nil {
-			return exprValue{}, err
-		}
-		defer p.leaveDepth()
-		return parseUnaryPlus(p)
+		return depthGuard(p, func() (exprValue, error) { return parseUnaryPlus(p) })
 	}
 	return parsePrimary(p)
 }
