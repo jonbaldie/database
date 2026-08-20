@@ -15,7 +15,7 @@ SQL.
   contract, named client tests, and public test evidence from product
   interfaces.
 
-> **v0.2.0 is experimental.** Do not use it as a production database. It is a
+> **database is experimental.** Do not use it as a production database. It is a
 > single-node server and is not a drop-in MySQL replacement. The supported
 > behaviour is the finite surface under [`docs/`](docs/).
 
@@ -29,14 +29,14 @@ a SQL client.
 
 ### 1. Install one binary
 
-Download the v0.2.0 file for your system from
-[GitHub Releases](https://github.com/jonbaldie/database/releases/tag/v0.2.0):
+Download the file for your system from the
+[latest GitHub Release](https://github.com/jonbaldie/database/releases/latest):
 
 | System | File |
 | --- | --- |
-| Apple Silicon macOS | `database-0.2.0-darwin-arm64` |
-| x86-64 Linux | `database-0.2.0-linux-amd64` |
-| ARM64 Linux | `database-0.2.0-linux-arm64` |
+| Apple Silicon macOS | `database-<version>-darwin-arm64` |
+| x86-64 Linux | `database-<version>-linux-amd64` |
+| ARM64 Linux | `database-<version>-linux-arm64` |
 
 Rename the file to `database`, make it executable, and put it on your `PATH`.
 
@@ -276,7 +276,7 @@ make build
 
 ### OCI image
 
-The v0.2.0 release includes `database-0.2.0-oci.tar`. It contains
+Each release includes a `database-<version>-oci.tar` artifact containing
 `linux/amd64` and `linux/arm64/v8` images. Load it with an OCI runtime, then use
 the same `init` and `serve` commands.
 
