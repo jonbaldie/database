@@ -7,7 +7,7 @@ import "runtime"
 // These values are replaced by the release build with -ldflags. Keeping
 // useful development defaults makes local builds and tests self-describing.
 var (
-	ProductVersion = "0.2.2-dev"
+	ProductVersion = "0.2.3-dev"
 	BuildIdentity  = "development"
 )
 
