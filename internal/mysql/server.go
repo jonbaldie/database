@@ -2538,6 +2538,21 @@ func isTypedLiteralSpelling(raw string) bool {
 	return strings.HasPrefix(lower, "b'") || strings.HasPrefix(lower, "0b") || strings.HasPrefix(lower, "x'") || strings.HasPrefix(lower, "0x")
 }
 
+func tableSchemaResolver(table catalog.Table) func(string) (exprValue, error) {
+	indexes, err := tableColumnIndexes(table)
+	if err != nil {
+		return func(string) (exprValue, error) {
+			return exprValue{}, err
+		}
+	}
+	return func(name string) (exprValue, error) {
+		if _, found := indexes[catalog.Key(name)]; !found {
+			return exprValue{}, unknownColumnError(name)
+		}
+		return stringValue(""), nil
+	}
+}
+
 func tableRowResolver(table catalog.Table, row []string) func(string) (exprValue, error) {
 	if row == nil {
 		return nil
@@ -2899,9 +2914,10 @@ func applyPointUpdatePlan(plan updatePlan, key string) ([][]string, uint64, erro
 // a source row, so a rejected UPDATE leaves the table untouched even when no
 // row matches.
 func validateUpdateAssignments(plan updatePlan) error {
+	resolve := tableSchemaResolver(plan.table)
 	for column, value := range plan.updates {
-		_, err := assignCanonicalColumnValue(plan.table, column, value, 1, plan.offsetMinutes, nil)
-		if err != nil && !isUnknownColumnAssignment(err) {
+		_, err := assignCanonicalColumnValue(plan.table, column, value, 1, plan.offsetMinutes, resolve)
+		if isUnknownColumnAssignment(err) {
 			return err
 		}
 	}

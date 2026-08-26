@@ -19,6 +19,21 @@ func TestInsertEvaluatesScalarExpressions(t *testing.T) {
 	}
 }
 
+func TestUpdateRejectsUnknownAssignmentColumn(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE items (id INT PRIMARY KEY, note VARCHAR(32) NOT NULL)",
+		"INSERT INTO items VALUES (1, 'keep')",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	if _, err := executeStatement(executor, "UPDATE items SET note = missing WHERE id = 99"); !isFailureCode(err, 1054) {
+		t.Fatalf("missing assignment column: %v", err)
+	}
+}
+
 func TestInsertAcceptsBitLiteral(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{
