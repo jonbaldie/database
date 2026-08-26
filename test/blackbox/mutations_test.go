@@ -333,3 +333,29 @@ func TestMySQLExtendedMutationsRespectTransactionVisibility(t *testing.T) {
 		t.Fatalf("rolled-back replace became visible: %#v", result)
 	}
 }
+
+func TestMySQLReplaceThenPointUpdateChangesTheReplacedRow(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer client.close()
+
+	for _, query := range []string{
+		"CREATE DATABASE app",
+		"USE app",
+		"CREATE TABLE items (id INT PRIMARY KEY, note VARCHAR(32) NOT NULL)",
+		"INSERT INTO items VALUES (1, 'n1'), (2, 'n2')",
+		"REPLACE INTO items VALUES (1, 'r2')",
+		"UPDATE items SET note = 'updated' WHERE id = 1",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("query %q: %#v", query, result)
+		}
+	}
+	result := client.query("SELECT id, note FROM items ORDER BY id")
+	if result.err != "" || len(result.rows) != 2 || strings.Join(result.rows[0], ",") != "1,updated" || strings.Join(result.rows[1], ",") != "2,n2" {
+		t.Fatalf("replace then point update: %#v", result)
+	}
+}

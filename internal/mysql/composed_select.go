@@ -887,6 +887,9 @@ func parseCTEName(localNames map[string]bool, text string) (string, string, erro
 	if !ok {
 		return "", "", sqlFailure{1064, "42000", "malformed CTE name"}
 	}
+	if err := validateIdentifierLength(name); err != nil {
+		return "", "", err
+	}
 	if localNames[catalog.Key(name)] {
 		return "", "", sqlFailure{1060, "42S21", "duplicate CTE name '" + name + "'"}
 	}

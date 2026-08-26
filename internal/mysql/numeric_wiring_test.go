@@ -75,7 +75,7 @@ func TestMatcherValue(t *testing.T) {
 	if got := matcherValue(table, 1, "'text'"); got != "text" {
 		t.Errorf("typeless predicate literal = %q, want text", got)
 	}
-	if got := matcherValue(table, 0, "abc"); got != "abc" {
-		t.Errorf("malformed numeric predicate literal = %q, want raw fallback abc", got)
+	if _, err := matcherValueAtOffsetChecked(table, 0, "abc", 0); err == nil {
+		t.Fatal("malformed numeric predicate literal accepted")
 	}
 }

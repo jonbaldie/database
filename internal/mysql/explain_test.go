@@ -36,7 +36,7 @@ func explainExecutor(t *testing.T) *textStatementExecutor {
 
 func TestExplainTraditionalProjection(t *testing.T) {
 	executor := explainExecutor(t)
-	result, err := executeStatement(executor, "EXPLAIN SELECT id FROM orders WHERE customer_id = '7'")
+	result, err := executeStatement(executor, "EXPLAIN SELECT id FROM orders WHERE customer_id = 7")
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}

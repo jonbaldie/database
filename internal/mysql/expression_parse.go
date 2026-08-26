@@ -160,6 +160,9 @@ func (p *exprParser) parseComparison() (exprValue, error) {
 	if err != nil {
 		return exprValue{}, err
 	}
+	if matched, negate := matchLikeOperator(p); matched {
+		return parseLikeComparison(p, left, negate)
+	}
 	symbol, ok := p.peekOperator()
 	if !ok || !comparisonOperators[symbol] {
 		return left, nil
@@ -170,6 +173,44 @@ func (p *exprParser) parseComparison() (exprValue, error) {
 		return exprValue{}, err
 	}
 	return compareValues(symbol, left, right)
+}
+
+func matchLikeOperator(p *exprParser) (bool, bool) {
+	if p.matchKeyword("LIKE") {
+		return true, false
+	}
+	token, ok := p.peek()
+	if !ok || token.kind != tokenIdent || !strings.EqualFold(token.text, "NOT") {
+		return false, false
+	}
+	if p.pos+1 >= len(p.tokens) || p.tokens[p.pos+1].kind != tokenIdent || !strings.EqualFold(p.tokens[p.pos+1].text, "LIKE") {
+		return false, false
+	}
+	p.advance()
+	p.advance()
+	return true, true
+}
+
+func parseLikeComparison(p *exprParser, left exprValue, negate bool) (exprValue, error) {
+	right, err := p.parseAdditive()
+	if err != nil {
+		return exprValue{}, err
+	}
+	escape := "\\"
+	if p.matchKeyword("ESCAPE") {
+		value, escapeErr := p.parseAdditive()
+		if escapeErr != nil {
+			return exprValue{}, escapeErr
+		}
+		if value.isNull() {
+			return nullValue(), nil
+		}
+		escape = value.render()
+		if escape == "" {
+			return exprValue{}, unsupportedExpression()
+		}
+	}
+	return evalLike(left, right, escape, negate)
 }
 
 func (p *exprParser) parseAdditive() (exprValue, error) {

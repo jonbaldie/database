@@ -37,7 +37,12 @@ var prefixTransactionCommands = []struct {
 	{"release savepoint ", releaseSavepointCommand},
 }
 
+func compactSQLKeywords(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
 func findTransactionHandler(lower string) (transactionCommand, bool) {
+	lower = compactSQLKeywords(lower)
 	if command := exactTransactionCommands[lower]; command != nil {
 		return command, true
 	}
@@ -62,7 +67,7 @@ func rollbackTransactionCommand(s *session, _ string) error {
 }
 
 func savepointCommand(s *session, query string) error {
-	return (&transactionExecutor{s}).save(query[len("SAVEPOINT "):])
+	return (&transactionExecutor{s}).save(stripTransactionKeywords(query, "SAVEPOINT"))
 }
 
 func rollbackToSavepointCommand(s *session, query string) error {
@@ -83,7 +88,20 @@ func rollbackToSavepointCommand(s *session, query string) error {
 }
 
 func releaseSavepointCommand(s *session, query string) error {
-	return (&transactionExecutor{s}).release(query[len("RELEASE SAVEPOINT "):])
+	return (&transactionExecutor{s}).release(stripTransactionKeywords(query, "RELEASE", "SAVEPOINT"))
+}
+
+func stripTransactionKeywords(query string, keywords ...string) string {
+	fields := strings.Fields(query)
+	if len(fields) < len(keywords) {
+		return strings.TrimSpace(query)
+	}
+	for index, keyword := range keywords {
+		if !strings.EqualFold(fields[index], keyword) {
+			return strings.TrimSpace(query)
+		}
+	}
+	return strings.Join(fields[len(keywords):], " ")
 }
 
 type statementTransaction struct {
@@ -384,7 +402,7 @@ func transactionStartOptions(query string, defaultIsolation isolationLevel, defa
 }
 
 func transactionStartSuffix(query string) (string, bool) {
-	lower := strings.ToLower(strings.TrimSpace(query))
+	lower := compactSQLKeywords(strings.ToLower(query))
 	if lower == "begin" || lower == "start transaction" {
 		return "", true
 	}
@@ -751,6 +769,9 @@ func parseSavepointName(value string) (string, error) {
 	name, remainder, ok := consumeIdentifier(value)
 	if !ok || strings.TrimSpace(remainder) != "" {
 		return "", sqlFailure{1064, "42000", "invalid savepoint name"}
+	}
+	if err := validateIdentifierLength(name); err != nil {
+		return "", err
 	}
 	return name, nil
 }

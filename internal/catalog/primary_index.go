@@ -27,7 +27,10 @@ func EnsurePrimaryIndex(table *Table) map[string]int {
 // Callers must pass an exclusive index map (see detachPrimaryIndexes) when
 // appending so this can update the map in place without racing readers.
 func MaintainPrimaryIndex(table *Table, previousLength int, previous map[string]int) {
-	if previous == nil || len(table.Rows) < previousLength {
+	// A same-length rewrite (REPLACE delete-then-append, or an in-place
+	// primary-key change) can move or rekey existing rows. Only a strict
+	// suffix append can reuse the previous map.
+	if previous == nil || len(table.Rows) <= previousLength {
 		RebuildPrimaryIndex(table)
 		return
 	}

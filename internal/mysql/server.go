@@ -983,8 +983,8 @@ func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryRes
 
 func showCatalog(s *catalogExecutor, query, lower string) (*queryResult, bool, error) {
 	switch {
-	case lower == "show databases":
-		return s.showDatabases(), true, nil
+	case lower == "show databases" || strings.HasPrefix(lower, "show databases like "):
+		return filterShowLike(s.showDatabases(), query, lower), true, nil
 	case strings.HasPrefix(lower, "show create database ") || strings.HasPrefix(lower, "show create schema "):
 		result, err := s.showCreateDatabase(query)
 		return result, true, err
@@ -994,12 +994,38 @@ func showCatalog(s *catalogExecutor, query, lower string) (*queryResult, bool, e
 	case showIndexTarget(query) != "":
 		result, err := s.showIndexes(query)
 		return result, true, err
-	case lower == "show tables":
+	case lower == "show tables" || strings.HasPrefix(lower, "show tables like "):
 		result, err := s.showTables()
-		return result, true, err
+		return filterShowLike(result, query, lower), true, err
 	default:
 		return nil, false, nil
 	}
+}
+
+func filterShowLike(result *queryResult, query, lower string) *queryResult {
+	if result == nil {
+		return result
+	}
+	pattern, ok := showLikePattern(query, lower)
+	if !ok {
+		return result
+	}
+	rows := make([][]string, 0, len(result.rows))
+	for _, row := range result.rows {
+		if len(row) > 0 && mysqlLike(row[0], pattern) {
+			rows = append(rows, row)
+		}
+	}
+	result.rows = rows
+	return result
+}
+
+func showLikePattern(query, lower string) (string, bool) {
+	index := strings.Index(lower, " like ")
+	if index < 0 {
+		return "", false
+	}
+	return scalar(strings.TrimSpace(query[index+len(" like "):])), true
 }
 
 func (s *catalogExecutor) showDatabases() *queryResult {
@@ -2457,10 +2483,17 @@ func canonicalColumnValue(table catalog.Table, columnIndex int, raw string, row 
 }
 
 func canonicalColumnValueAtOffset(table catalog.Table, columnIndex int, raw string, row, offsetMinutes int) (string, error) {
-	if isSQLNullLiteral(raw) {
+	return assignCanonicalColumnValue(table, columnIndex, raw, row, offsetMinutes, nil)
+}
+
+func assignCanonicalColumnValue(table catalog.Table, columnIndex int, raw string, row, offsetMinutes int, resolve func(string) (exprValue, error)) (string, error) {
+	value, isNull, err := evaluatedAssignmentText(raw, resolve)
+	if err != nil {
+		return "", err
+	}
+	if isNull {
 		return storedSQLNullValue, nil
 	}
-	value := scalar(raw)
 	preparedWire, preparedValue, prepared := decodePreparedTemporalLiteral(value)
 	if prepared {
 		value = preparedValue
@@ -2472,11 +2505,88 @@ func canonicalColumnValueAtOffset(table catalog.Table, columnIndex int, raw stri
 	if err := rejectQuotedTemporalNull(typeName, value, table.Columns[columnIndex], row); err != nil {
 		return "", err
 	}
-	value, err := normalizePreparedDate(typeName, value, preparedWire, prepared, table.Columns[columnIndex], row)
+	value, err = normalizePreparedDate(typeName, value, preparedWire, prepared, table.Columns[columnIndex], row)
 	if err != nil {
 		return "", err
 	}
 	return canonicalTypedValueAtOffset(typeName, value, table.Columns[columnIndex], row, offsetMinutes)
+}
+
+func evaluatedAssignmentText(raw string, resolve func(string) (exprValue, error)) (string, bool, error) {
+	if isSQLNullLiteral(raw) {
+		return storedSQLNullValue, true, nil
+	}
+	evaluated, err := evaluateScalarWithResolver(raw, resolve)
+	if err != nil {
+		if !isTypedLiteralSpelling(raw) {
+			return "", false, err
+		}
+		return scalar(raw), false, nil
+	}
+	if evaluated.isNull() {
+		return storedSQLNullValue, true, nil
+	}
+	return evaluated.render(), false, nil
+}
+
+func isTypedLiteralSpelling(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if len(raw) < 3 {
+		return false
+	}
+	lower := strings.ToLower(raw)
+	return strings.HasPrefix(lower, "b'") || strings.HasPrefix(lower, "0b") || strings.HasPrefix(lower, "x'") || strings.HasPrefix(lower, "0x")
+}
+
+func tableSchemaResolver(table catalog.Table) func(string) (exprValue, error) {
+	indexes, err := tableColumnIndexes(table)
+	if err != nil {
+		return func(string) (exprValue, error) {
+			return exprValue{}, err
+		}
+	}
+	return func(name string) (exprValue, error) {
+		if _, found := indexes[catalog.Key(name)]; !found {
+			return exprValue{}, unknownColumnError(name)
+		}
+		return stringValue(""), nil
+	}
+}
+
+func tableRowResolver(table catalog.Table, row []string) func(string) (exprValue, error) {
+	if row == nil {
+		return nil
+	}
+	indexes, err := tableColumnIndexes(table)
+	if err != nil {
+		return func(name string) (exprValue, error) {
+			return exprValue{}, err
+		}
+	}
+	return func(name string) (exprValue, error) {
+		index, found := indexes[catalog.Key(name)]
+		if !found || index >= len(row) {
+			return exprValue{}, unknownColumnError(name)
+		}
+		return storedAssignmentValue(table, index, row[index])
+	}
+}
+
+func storedAssignmentValue(table catalog.Table, index int, raw string) (exprValue, error) {
+	if raw == storedSQLNullValue {
+		return nullValue(), nil
+	}
+	typeName, known := table.ColumnType(index)
+	if known {
+		typ, err := parseNumericType(typeName)
+		if err != nil {
+			return exprValue{}, err
+		}
+		if typ.kind != numericNone {
+			return evaluateScalar(raw)
+		}
+	}
+	return stringValue(raw), nil
 }
 
 func rejectQuotedTemporalNull(typeName, value, column string, row int) error {
@@ -2696,24 +2806,23 @@ func assignmentValues(value string, indexes map[string]int) (map[int]string, err
 		if !found || seen[index] {
 			return nil, sqlFailure{1054, "42S22", "unknown or duplicate column '" + column + "'"}
 		}
-		seen[index], updates[index] = true, scalar(rawValue)
+		seen[index], updates[index] = true, strings.TrimSpace(rawValue)
 	}
 	return updates, nil
 }
 
 func applyUpdatePlan(plan updatePlan) ([][]string, uint64, error) {
-	updates, err := canonicalUpdates(plan)
-	if err != nil {
+	if err := validateUpdateAssignments(plan); err != nil {
 		return nil, 0, err
 	}
 	if key, ok := pointUpdatePrimaryKey(plan); ok {
-		return applyPointUpdatePlan(plan, updates, key)
+		return applyPointUpdatePlan(plan, key)
 	}
 	changed := changedUpdateRows(plan)
 	if len(changed) == 0 {
 		return plan.table.Rows, 0, nil
 	}
-	return applyChangedUpdateRows(plan, updates, changed)
+	return applyChangedUpdateRows(plan, changed)
 }
 
 func changedUpdateRows(plan updatePlan) []int {
@@ -2726,14 +2835,18 @@ func changedUpdateRows(plan updatePlan) []int {
 	return changed
 }
 
-func applyChangedUpdateRows(plan updatePlan, updates map[int]string, changed []int) ([][]string, uint64, error) {
+func applyChangedUpdateRows(plan updatePlan, changed []int) ([][]string, uint64, error) {
 	rows := make([][]string, len(plan.table.Rows))
 	copy(rows, plan.table.Rows)
 	affected := uint64(0)
 	for _, rowIndex := range changed {
 		next := append([]string(nil), rows[rowIndex]...)
+		assigned, err := assignUpdateRow(plan, next, rowIndex+1)
+		if err != nil {
+			return nil, 0, err
+		}
 		rowChanged := false
-		for column, value := range updates {
+		for column, value := range assigned {
 			if next[column] != value {
 				rowChanged = true
 			}
@@ -2770,7 +2883,7 @@ func pointUpdatePrimaryKey(plan updatePlan) (string, bool) {
 	return plan.primaryKey, true
 }
 
-func applyPointUpdatePlan(plan updatePlan, updates map[int]string, key string) ([][]string, uint64, error) {
+func applyPointUpdatePlan(plan updatePlan, key string) ([][]string, uint64, error) {
 	index := catalog.EnsurePrimaryIndex(&plan.table)
 	position, ok := index[key]
 	if !ok {
@@ -2779,8 +2892,12 @@ func applyPointUpdatePlan(plan updatePlan, updates map[int]string, key string) (
 	rows := make([][]string, len(plan.table.Rows))
 	copy(rows, plan.table.Rows)
 	next := append([]string(nil), rows[position]...)
+	assigned, err := assignUpdateRow(plan, next, position+1)
+	if err != nil {
+		return nil, 0, err
+	}
 	changed := false
-	for column, value := range updates {
+	for column, value := range assigned {
 		if next[column] != value {
 			changed = true
 		}
@@ -2793,18 +2910,36 @@ func applyPointUpdatePlan(plan updatePlan, updates map[int]string, key string) (
 	return rows, 1, nil
 }
 
-// canonicalUpdates validates every assignment constant against its column type
-// before any row changes, so a rejected UPDATE leaves the table untouched.
-func canonicalUpdates(plan updatePlan) (map[int]string, error) {
+// validateUpdateAssignments type-checks assignment expressions that do not need
+// a source row, so a rejected UPDATE leaves the table untouched even when no
+// row matches.
+func validateUpdateAssignments(plan updatePlan) error {
+	resolve := tableSchemaResolver(plan.table)
+	for column, value := range plan.updates {
+		_, err := assignCanonicalColumnValue(plan.table, column, value, 1, plan.offsetMinutes, resolve)
+		if isUnknownColumnAssignment(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func assignUpdateRow(plan updatePlan, row []string, rowNumber int) (map[int]string, error) {
+	resolve := tableRowResolver(plan.table, row)
 	updates := make(map[int]string, len(plan.updates))
 	for column, value := range plan.updates {
-		canonical, err := canonicalColumnValueAtOffset(plan.table, column, value, 1, plan.offsetMinutes)
+		canonical, err := assignCanonicalColumnValue(plan.table, column, value, rowNumber, plan.offsetMinutes, resolve)
 		if err != nil {
 			return nil, err
 		}
 		updates[column] = canonical
 	}
 	return updates, nil
+}
+
+func isUnknownColumnAssignment(err error) bool {
+	var failure sqlFailure
+	return errors.As(err, &failure) && failure.code == 1054
 }
 
 func deleteRows(s *relationExecutor, query string) (uint64, error) {
@@ -3149,25 +3284,61 @@ func matcherValueAtOffset(table catalog.Table, index int, value string, offsetMi
 }
 
 func matcherValueAtOffsetChecked(table catalog.Table, index int, value string, offsetMinutes int) (string, error) {
-	raw := scalar(value)
+	evaluated, isNull, err := evaluatedAssignmentText(value, nil)
+	if err != nil {
+		return "", err
+	}
+	if isNull {
+		return evaluated, nil
+	}
+	raw := evaluated
 	_, want, _ := decodePreparedTemporalLiteral(raw)
 	typeName, known := table.ColumnType(index)
 	if !known {
 		return want, nil
 	}
-	if isSQLNullSpelling(want) && !isSQLNullLiteral(value) {
-		typ, err := parseTemporalType(typeName)
-		if err != nil {
-			return want, err
-		}
-		if typ.kind != temporalNone {
-			return want, incorrectTemporal(temporalLabel(typ.kind), table.Columns[index], want, 1)
-		}
+	if err := rejectCrossFamilyPredicate(typeName, value); err != nil {
+		return "", err
+	}
+	if err := rejectQuotedTemporalMatcherNull(typeName, value, want, table.Columns[index]); err != nil {
+		return "", err
 	}
 	if canonical, ok := canonicalMatcherNumeric(typeName, want, table.Columns[index]); ok {
 		return canonical, nil
 	}
 	return canonicalMatcherTemporal(typeName, want, raw, table.Columns[index], offsetMinutes)
+}
+
+func rejectQuotedTemporalMatcherNull(typeName, raw, want, column string) error {
+	if !isSQLNullSpelling(want) || isSQLNullLiteral(raw) {
+		return nil
+	}
+	typ, err := parseTemporalType(typeName)
+	if err != nil {
+		return err
+	}
+	if typ.kind == temporalNone {
+		return nil
+	}
+	return incorrectTemporal(temporalLabel(typ.kind), column, want, 1)
+}
+
+func rejectCrossFamilyPredicate(typeName, raw string) error {
+	evaluated, err := evaluateScalar(raw)
+	if err != nil {
+		return nil
+	}
+	return rejectCrossFamilyValue(typeName, evaluated)
+}
+
+func columnIsNumeric(typeName string) bool {
+	typ, err := parseNumericType(typeName)
+	return err == nil && typ.kind != numericNone
+}
+
+func columnIsCharacter(typeName string) bool {
+	typ, err := parseCharacterType(typeName)
+	return err == nil && typ.kind == characterText
 }
 
 func canonicalMatcherNumeric(typeName, value, column string) (string, bool) {
