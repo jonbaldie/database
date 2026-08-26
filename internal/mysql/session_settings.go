@@ -439,26 +439,3 @@ func showVariableLike(query, lower string) string {
 	}
 	return strings.ToLower(scalar(strings.TrimSpace(query[index+len(" like "):])))
 }
-
-func mysqlLike(value, pattern string) bool {
-	value, pattern = strings.ToLower(value), strings.ToLower(pattern)
-	if !strings.Contains(pattern, "%") {
-		return value == pattern
-	}
-	parts := strings.Split(pattern, "%")
-	if !strings.HasPrefix(pattern, "%") && !strings.HasPrefix(value, parts[0]) {
-		return false
-	}
-	position := 0
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		index := strings.Index(value[position:], part)
-		if index < 0 {
-			return false
-		}
-		position += index + len(part)
-	}
-	return strings.HasSuffix(pattern, "%") || position == len(value)
-}

@@ -296,21 +296,40 @@ func compileRelationOperandContext(text string, columns []relationColumn, sessio
 }
 
 func coerceRelationLiterals(left, right relationOperand, columns []relationColumn, session *session) (relationOperand, relationOperand, error) {
-	switch {
-	case left.isColumn && !right.isColumn && !right.bound:
-		value, err := typedRelationLiteral(right, left.definition, session)
-		if err != nil {
-			return relationOperand{}, relationOperand{}, err
-		}
-		right.value = value
-	case right.isColumn && !left.isColumn && !left.bound:
-		value, err := typedRelationLiteral(left, right.definition, session)
-		if err != nil {
-			return relationOperand{}, relationOperand{}, err
-		}
-		left.value = value
+	var err error
+	if left.isColumn && !right.isColumn && !right.bound {
+		right, err = bindLiteralToColumn(right, left.definition, session)
 	}
-	return left, right, nil
+	if err == nil && right.isColumn && !left.isColumn && !left.bound {
+		left, err = bindLiteralToColumn(left, right.definition, session)
+	}
+	return left, right, err
+}
+
+func bindLiteralToColumn(literal relationOperand, column relationColumn, session *session) (relationOperand, error) {
+	if err := rejectCrossFamilyValue(column.typeName, literal.value); err != nil {
+		return relationOperand{}, err
+	}
+	value, err := typedRelationLiteral(literal, column, session)
+	if err != nil {
+		return relationOperand{}, err
+	}
+	literal.value = value
+	return literal, nil
+}
+
+func rejectCrossFamilyValue(typeName string, value exprValue) error {
+	if value.isNull() {
+		return nil
+	}
+	if columnIsCharacter(typeName) && isNumericExprKind(value.kind) || columnIsNumeric(typeName) && value.kind == valueString {
+		return strictConversionError()
+	}
+	return nil
+}
+
+func isNumericExprKind(kind valueKind) bool {
+	return kind == valueInt || kind == valueUint || kind == valueDecimal || kind == valueDouble
 }
 
 func typedRelationLiteral(operand relationOperand, column relationColumn, session *session) (exprValue, error) {

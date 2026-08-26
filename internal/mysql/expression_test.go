@@ -270,3 +270,24 @@ func TestExtendedFunctionsRejectInvalidBoundsAndCeilings(t *testing.T) {
 		t.Fatalf("REPLACE expanded scalar was not rejected: %v", err)
 	}
 }
+
+func TestEvaluateLike(t *testing.T) {
+	cases := map[string]string{
+		"'abc' LIKE 'abc'":           "1",
+		"'abc' LIKE 'a%'":            "1",
+		"'abc' LIKE '%c'":            "1",
+		"'abc' LIKE 'a_c'":           "1",
+		"'abc' LIKE 'A%'":            "1",
+		"'abc' LIKE 'x%'":            "0",
+		"'a%c' LIKE 'a\\%c'":         "1",
+		"'abc' NOT LIKE 'x%'":        "1",
+		"'abc' LIKE 'a%' ESCAPE '#'": "1",
+	}
+	for expression, want := range cases {
+		if got := evalRender(t, expression); got != want {
+			t.Errorf("evaluateScalar(%q) = %q, want %q", expression, got, want)
+		}
+	}
+	evalNull(t, "NULL LIKE 'a%'")
+	evalNull(t, "'abc' LIKE NULL")
+}
