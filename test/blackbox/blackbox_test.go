@@ -1275,8 +1275,18 @@ func TestMySQLMetadataIsHonestEscapedAndCommittedConsistent(t *testing.T) {
 		t.Fatalf("use information_schema: %#v", result)
 	}
 	views := client.query("SHOW TABLES")
-	if views.err != "" || len(views.rows) != 3 || views.rows[0][0] != "schemata" || views.rows[1][0] != "tables" || views.rows[2][0] != "columns" {
+	wantViews := []string{
+		"schemata", "tables", "columns", "statistics", "table_constraints", "key_column_usage",
+		"referential_constraints", "check_constraints", "character_sets", "collations",
+		"accounts", "account_grants", "processlist",
+	}
+	if views.err != "" || len(views.rows) != len(wantViews) {
 		t.Fatalf("information_schema views: %#v", views)
+	}
+	for index, name := range wantViews {
+		if views.rows[index][0] != name {
+			t.Fatalf("information_schema views: %#v", views)
+		}
 	}
 	if result := client.query("CREATE TABLE rejected (id INT)"); result.err == "" || !strings.Contains(result.err, "read-only") {
 		t.Fatalf("information_schema mutation: %#v", result)

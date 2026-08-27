@@ -53,6 +53,29 @@ func TestCurrentTimeRendersThroughFixedOffset(t *testing.T) {
 	}
 }
 
+func TestCurrentTimeAndIdentityFunctionsInExpressions(t *testing.T) {
+	instant := time.Date(2026, 7, 18, 22, 0, 0, 0, time.UTC)
+	executor := currentTimeExecutor(t, "+05:30", instant)
+	if _, err := executeStatement(executor, "CREATE TABLE nums (id INT)"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO nums VALUES (1)"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	result, err := executeStatement(executor, "SELECT NOW(), 1")
+	if err != nil || len(result.rows) != 1 || result.rows[0][0] != "2026-07-19 03:30:00" || result.rows[0][1] != "1" {
+		t.Fatalf("SELECT NOW(), 1 = %#v, %v", result, err)
+	}
+	result, err = executeStatement(executor, "SELECT NOW() FROM nums")
+	if err != nil || len(result.rows) != 1 || result.rows[0][0] != "2026-07-19 03:30:00" {
+		t.Fatalf("SELECT NOW() FROM nums = %#v, %v", result, err)
+	}
+	result, err = executeStatement(executor, "SELECT VERSION(), DATABASE()")
+	if err != nil || len(result.rows) != 1 || result.rows[0][0] != "8.4.11-database-0.1.0" || result.rows[0][1] != "app" {
+		t.Fatalf("SELECT VERSION(), DATABASE() = %#v, %v", result, err)
+	}
+}
+
 func TestCurrentTimeAtUTCIsStableWithinAStatement(t *testing.T) {
 	instant := time.Date(2026, 7, 18, 14, 5, 6, 0, time.UTC)
 	executor := currentTimeExecutor(t, "UTC", instant)

@@ -16,6 +16,7 @@ type exprParser struct {
 	tokens            []exprToken
 	pos               int
 	resolveIdentifier func(string) (exprValue, error)
+	session           *session
 	depth             int
 }
 
@@ -393,9 +394,20 @@ func keywordLiteral(p *exprParser, word string) (exprValue, bool, error) {
 	case "FALSE":
 		p.advance()
 		return intValue(0), true, nil
+	case "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "LOCALTIME", "LOCALTIMESTAMP":
+		return currentTimeKeyword(p, word)
 	default:
 		return exprValue{}, false, nil
 	}
+}
+
+func currentTimeKeyword(p *exprParser, word string) (exprValue, bool, error) {
+	if identifierStartsCall(p) || p.session == nil {
+		return exprValue{}, false, nil
+	}
+	p.advance()
+	value, _, err := sessionFunctionValue(p.session, word, nil)
+	return value, true, err
 }
 
 // parseFunctionCall consumes NAME ( args ) and dispatches to the registry. The
@@ -414,6 +426,9 @@ func parseFunctionCall(p *exprParser, name string) (exprValue, error) {
 	arguments, err := parseArgumentList(p)
 	if err != nil {
 		return exprValue{}, err
+	}
+	if value, handled, err := sessionFunctionValue(p.session, name, arguments); handled {
+		return value, err
 	}
 	return callFunction(name, arguments)
 }
