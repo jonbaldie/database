@@ -717,6 +717,9 @@ func orderedIndexRowBefore(left, right indexedRelationRow, index catalog.Index) 
 }
 
 func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int, runtime *selectRuntimeBinding) relationRowIterator {
+	if join.hash != nil {
+		return hashJoinedRowIterator(left, join, leftWidth, leftTables, runtime)
+	}
 	return func(yield relationRowYield) error {
 		started := time.Now()
 		inputRows, outputRows, outputBytes := 0, 0, 0
@@ -751,6 +754,100 @@ func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth,
 	}
 }
 
+func hashJoinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int, runtime *selectRuntimeBinding) relationRowIterator {
+	return func(yield relationRowYield) error {
+		started := time.Now()
+		rightStarted := time.Now()
+		buckets, hashBytes, err := buildRightHashBuckets(join, leftWidth)
+		runtime.recordSourceScan(leftTables, join.right, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(rightStarted))
+		if err != nil {
+			return err
+		}
+		matchedRight := make([]bool, len(join.right.table.Rows))
+		inputRows, outputRows, outputBytes := len(join.right.table.Rows), 0, 0
+		err = left(func(row relationRow) error {
+			inputRows++
+			key, present, keyErr := relationalHashKey(join.hash.left, join.hash.comparison, row)
+			if keyErr != nil {
+				return keyErr
+			}
+			matched := false
+			if present {
+				for _, rightIndex := range buckets[key] {
+					candidate := joinedCandidate(row, join.right.table.Rows[rightIndex])
+					ok, matchErr := joinCandidateMatches(join, candidate)
+					if matchErr != nil {
+						return matchErr
+					}
+					if !ok {
+						continue
+					}
+					matched, matchedRight[rightIndex] = true, true
+					outputRows++
+					outputBytes += relationRowMemory(candidate)
+					if yieldErr := yield(candidate); yieldErr != nil {
+						return yieldErr
+					}
+				}
+			}
+			if !matched && join.kind == "left" {
+				candidate := appendNullRight(row, len(join.right.columns))
+				outputRows++
+				outputBytes += relationRowMemory(candidate)
+				return yield(candidate)
+			}
+			return nil
+		})
+		if err == nil && join.kind == "right" {
+			err = yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, leftTables, func(row relationRow) error {
+				outputRows++
+				outputBytes += relationRowMemory(row)
+				return yield(row)
+			})
+		}
+		runtime.recordJoin(leftTables-1, inputRows, outputRows, hashBytes+outputBytes, time.Since(started))
+		return err
+	}
+}
+
+func buildRightHashBuckets(join relationalJoin, leftWidth int) (map[string][]int, int, error) {
+	buckets := make(map[string][]int, len(join.right.table.Rows))
+	bytes := 0
+	for index, values := range join.right.table.Rows {
+		row := relationRow{values: make([]string, leftWidth, leftWidth+len(values))}
+		row.values = append(row.values, values...)
+		key, present, err := relationalHashKey(join.hash.right, join.hash.comparison, row)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !present {
+			continue
+		}
+		buckets[key] = append(buckets[key], index)
+		bytes += len(key) + 8
+	}
+	return buckets, bytes, nil
+}
+
+func relationalHashKey(operand relationOperand, comparison characterType, row relationRow) (string, bool, error) {
+	value, err := relationOperandValue(operand, row)
+	if err != nil || value.isNull() {
+		return "", false, err
+	}
+	key := value.render()
+	if value.kind == valueString {
+		key = characterComparisonKey(comparison, key)
+	}
+	return strconv.Itoa(int(value.kind)) + ":" + key, true, nil
+}
+
+func joinedCandidate(left relationRow, right []string) relationRow {
+	return relationRow{
+		values:   append(append([]string(nil), left.values...), right...),
+		lockKeys: append(append([]string(nil), left.lockKeys...), rowLockKey(right)),
+	}
+}
+
 func relationRowMemory(row relationRow) int {
 	bytes := 0
 	for _, value := range row.values {
@@ -775,7 +872,7 @@ func sourceRowBytes(rows [][]string) int {
 func yieldJoinedRows(left relationRow, join relationalJoin, matchedRight []bool, yield relationRowYield) error {
 	matched := false
 	for rightIndex, values := range join.right.table.Rows {
-		candidate := relationRow{values: append(append([]string(nil), left.values...), values...), lockKeys: append(append([]string(nil), left.lockKeys...), rowLockKey(values))}
+		candidate := joinedCandidate(left, values)
 		ok, err := joinCandidateMatches(join, candidate)
 		if err != nil {
 			return err

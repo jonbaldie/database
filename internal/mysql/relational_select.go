@@ -217,7 +217,14 @@ type relationalJoin struct {
 	condition string
 	using     []string
 	predicate relationPredicate
+	hash      *relationalHashJoin
 	columns   []relationColumn
+}
+
+type relationalHashJoin struct {
+	left       relationOperand
+	right      relationOperand
+	comparison characterType
 }
 
 type relationColumn struct {
@@ -992,13 +999,52 @@ func (p *relationalSelectPlan) compilePredicates() error {
 		if p.source.joins[index].condition == "" {
 			continue
 		}
-		predicate, err := compileRelationPredicateContext(p.source.joins[index].condition, p.source.joins[index].columns, p.session, p.composed, p.outer, runtimeKeys)
+		join := &p.source.joins[index]
+		predicate, err := compileRelationPredicateContext(join.condition, join.columns, p.session, p.composed, p.outer, runtimeKeys)
 		if err != nil {
 			return err
 		}
-		p.source.joins[index].predicate = predicate
+		join.predicate = predicate
+		join.hash = compileRelationalHashJoin(*join)
 	}
 	return nil
+}
+
+func compileRelationalHashJoin(join relationalJoin) *relationalHashJoin {
+	operator, leftText, rightText, found := findRelationComparison(stripRelationParentheses(join.condition))
+	if !found || operator != "=" {
+		return nil
+	}
+	left, leftErr := compileRelationOperand(leftText, join.columns, nil)
+	right, rightErr := compileRelationOperand(rightText, join.columns, nil)
+	if leftErr != nil || rightErr != nil || !left.isColumn || !right.isColumn {
+		return nil
+	}
+	rightStart := len(join.columns) - len(join.right.columns)
+	if left.column >= rightStart && right.column < rightStart {
+		left, right = right, left
+	}
+	if left.column >= rightStart || right.column < rightStart {
+		return nil
+	}
+	comparison, compatible := hashJoinComparison(left, right)
+	if !compatible {
+		return nil
+	}
+	return &relationalHashJoin{left: left, right: right, comparison: comparison}
+}
+
+func hashJoinComparison(left, right relationOperand) (characterType, bool) {
+	leftCharacter, leftErr := parseCharacterType(left.definition.typeName)
+	rightCharacter, rightErr := parseCharacterType(right.definition.typeName)
+	if leftErr != nil || rightErr != nil {
+		return characterType{}, false
+	}
+	if leftCharacter.kind == characterText && rightCharacter.kind == characterText {
+		comparison, found, err := relationCharacterComparisonType(left, right)
+		return comparison, found && err == nil
+	}
+	return characterType{}, strings.EqualFold(left.definition.typeName, right.definition.typeName)
 }
 
 func parseDistinctProjection(expression string) (bool, string) {
@@ -1198,10 +1244,17 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 		}
 		read.Joins = append(read.Joins, queryexplanation.Join{
 			Type: join.kind, Table: relationSourceInfo(join.right), Condition: join.condition,
-			SourceClause: clause, SourceFragment: fragment,
+			SourceClause: clause, SourceFragment: fragment, Strategy: relationalJoinStrategy(join),
 		})
 	}
 	return queryexplanation.PlanSelect(serverVersion, sql, currentDatabase, read)
+}
+
+func relationalJoinStrategy(join relationalJoin) string {
+	if join.hash != nil {
+		return "hash_join"
+	}
+	return ""
 }
 
 func relationalRuntimeKey(query string) string {

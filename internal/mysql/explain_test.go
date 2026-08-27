@@ -211,7 +211,7 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 				assertOperatorInvocations(t, document["plan"].(map[string]any), "scan", 2)
 			}
 			if name == "cte_reuse" {
-				assertMaterializeReasonInvocations(t, document["plan"].(map[string]any), "reuse", 2)
+				assertMaterializeReasonInvocations(t, document["plan"].(map[string]any), "reuse", 1)
 			}
 		})
 	}
