@@ -263,6 +263,7 @@ func preflightUpgrade(request upgradeRequest, target dataVersion) (instance.Meta
 	if err != nil {
 		return instance.Metadata{}, nil, fmt.Errorf("invalid matching backup: %w", err)
 	}
+	defer archive.Close()
 	if err := validateUpgradeBackup(request, archive, metadata, marker != nil); err != nil {
 		return instance.Metadata{}, nil, err
 	}
@@ -385,8 +386,8 @@ func compareInts(left, right int) int {
 }
 
 func backupMatchesSource(directory string, archive backupArchive, metadata instance.Metadata, resuming bool) error {
-	var backupMetadata instance.Metadata
-	if err := json.Unmarshal(archive.files["instance.json"], &backupMetadata); err != nil {
+	backupMetadata, err := decodeBackupMetadataFile(archive.files["instance.json"].path)
+	if err != nil {
 		return errors.New("backup instance metadata is invalid")
 	}
 	if err := validateBackupMetadata(backupMetadata, metadata, resuming); err != nil {
@@ -405,22 +406,22 @@ func validateBackupMetadata(backupMetadata, current instance.Metadata, resuming 
 	return nil
 }
 
-func compareBackupFiles(directory string, files map[string][]byte) error {
+func compareBackupFiles(directory string, files map[string]storedBackupFile) error {
 	currentFiles, err := readSourceFiles(directory)
 	if err != nil {
 		return errors.New("backup does not match the current data directory")
 	}
 	currentLogical := logicalBackupSourceFiles(currentFiles)
-	backupLogical := logicalBackupSourceFiles(files)
+	backupLogical := logicalStoredBackupFiles(files)
 	if len(currentLogical) != len(backupLogical) {
 		return errors.New("backup does not match the current data directory")
 	}
-	for path, contents := range backupLogical {
+	for path, stored := range backupLogical {
 		if path == "instance.json" {
 			continue
 		}
 		current, ok := currentLogical[path]
-		if !ok || !backupSourceFileMatches(path, current, contents) {
+		if !ok || !backupSourceFileMatches(path, current, stored) {
 			return errors.New("backup does not match the current data directory")
 		}
 	}
@@ -429,13 +430,24 @@ func compareBackupFiles(directory string, files map[string][]byte) error {
 
 // logicalBackupSourceFiles drops durable row-engine files. Online backups carry
 // committed rows inside the catalog snapshot; on-disk rows/ is the live engine.
-func logicalBackupSourceFiles(files map[string][]byte) map[string][]byte {
-	logical := make(map[string][]byte, len(files))
-	for path, contents := range files {
+func logicalBackupSourceFiles(files []sourceBackupFile) map[string]sourceBackupFile {
+	logical := make(map[string]sourceBackupFile, len(files))
+	for _, file := range files {
+		if durableRowStoragePath(file.Path) {
+			continue
+		}
+		logical[file.Path] = file
+	}
+	return logical
+}
+
+func logicalStoredBackupFiles(files map[string]storedBackupFile) map[string]storedBackupFile {
+	logical := make(map[string]storedBackupFile, len(files))
+	for path, file := range files {
 		if durableRowStoragePath(path) {
 			continue
 		}
-		logical[path] = contents
+		logical[path] = file
 	}
 	return logical
 }
@@ -444,11 +456,23 @@ func durableRowStoragePath(path string) bool {
 	return path == "rows" || strings.HasPrefix(path, "rows/")
 }
 
-func backupSourceFileMatches(path string, current, backup []byte) bool {
+func backupSourceFileMatches(path string, current sourceBackupFile, backup storedBackupFile) bool {
 	if path == "catalog.json" {
-		return catalogSchemaMatches(current, backup)
+		return catalogSchemaFilesMatch(current.source, backup.path)
 	}
-	return equalBytes(current, backup)
+	return current.Size == backup.size && current.SHA256 == backup.sha256
+}
+
+func catalogSchemaFilesMatch(currentPath, backupPath string) bool {
+	current, err := os.ReadFile(currentPath)
+	if err != nil {
+		return false
+	}
+	backup, err := os.ReadFile(backupPath)
+	if err != nil {
+		return false
+	}
+	return catalogSchemaMatches(current, backup)
 }
 
 func catalogSchemaMatches(current, backup []byte) bool {
@@ -478,8 +502,8 @@ func equalBytes(left, right []byte) bool {
 
 func requiredUpgradeSpace(archive backupArchive) uint64 {
 	var total uint64
-	for _, contents := range archive.files {
-		total += uint64(len(contents))
+	for _, file := range archive.files {
+		total += uint64(file.size)
 	}
 	return total + 64*1024
 }

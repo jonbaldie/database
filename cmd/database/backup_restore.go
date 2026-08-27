@@ -42,8 +42,20 @@ type backupFile struct {
 }
 
 type backupArchive struct {
-	manifest backupManifest
-	files    map[string][]byte
+	manifest  backupManifest
+	files     map[string]storedBackupFile
+	directory string
+}
+
+type storedBackupFile struct {
+	path   string
+	size   int64
+	sha256 string
+}
+
+type sourceBackupFile struct {
+	backupFile
+	source string
 }
 
 func backupRestoreCommand(args []string, stdout, stderr io.Writer) int {
@@ -183,8 +195,8 @@ func createBackup(directory, output string) error {
 	if err != nil {
 		return err
 	}
-	manifest := makeBackupManifest(metadata, files)
-	return writeBackupArchive(output, manifest, files)
+	manifest := makeSourceBackupManifest(metadata, files)
+	return writeSourceBackupArchive(output, manifest, files)
 }
 
 func verifyBackupSource(directory string) error {
@@ -198,7 +210,7 @@ func verifyBackupSource(directory string) error {
 	return nil
 }
 
-func captureBackupSource(directory string) (map[string][]byte, instance.Metadata, error) {
+func captureBackupSource(directory string) ([]sourceBackupFile, instance.Metadata, error) {
 	metadata, err := instance.Load(directory)
 	if err != nil {
 		return nil, instance.Metadata{}, fmt.Errorf("invalid source instance: %w", err)
@@ -213,27 +225,31 @@ func captureBackupSource(directory string) (map[string][]byte, instance.Metadata
 	if err != nil {
 		return nil, instance.Metadata{}, err
 	}
-	if _, ok := files["instance.json"]; !ok {
+	paths := make(map[string]bool, len(files))
+	for _, file := range files {
+		paths[file.Path] = true
+	}
+	if !paths["instance.json"] {
 		return nil, instance.Metadata{}, errors.New("source instance metadata is missing")
 	}
-	if _, ok := files["catalog.json"]; !ok {
+	if !paths["catalog.json"] {
 		return nil, instance.Metadata{}, errors.New("source catalog is missing")
 	}
 	return files, metadata, nil
 }
 
-func readSourceFiles(directory string) (map[string][]byte, error) {
-	collector := sourceFileCollector{directory: directory, files: make(map[string][]byte)}
+func readSourceFiles(directory string) ([]sourceBackupFile, error) {
+	collector := sourceFileCollector{directory: directory}
 	err := filepath.Walk(directory, collector.visit)
 	return collector.files, err
 }
 
 type sourceFileCollector struct {
 	directory string
-	files     map[string][]byte
+	files     []sourceBackupFile
 }
 
-func (collector sourceFileCollector) visit(path string, info os.FileInfo, walkErr error) error {
+func (collector *sourceFileCollector) visit(path string, info os.FileInfo, walkErr error) error {
 	if walkErr != nil {
 		return walkErr
 	}
@@ -253,7 +269,7 @@ func (collector sourceFileCollector) visit(path string, info os.FileInfo, walkEr
 	return collector.capture(relative, path, info)
 }
 
-func (collector sourceFileCollector) capture(relative, path string, info os.FileInfo) error {
+func (collector *sourceFileCollector) capture(relative, path string, info os.FileInfo) error {
 	relative = filepath.ToSlash(relative)
 	if runtimeSourcePath(relative) {
 		return nil
@@ -264,12 +280,28 @@ func (collector sourceFileCollector) capture(relative, path string, info os.File
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return fmt.Errorf("unsupported source entry %q", relative)
 	}
-	contents, err := os.ReadFile(path)
+	digest, err := hashBackupFile(path)
 	if err != nil {
 		return err
 	}
-	collector.files[relative] = contents
+	collector.files = append(collector.files, sourceBackupFile{
+		backupFile: backupFile{Path: relative, Size: info.Size(), SHA256: digest},
+		source:     path,
+	})
 	return nil
+}
+
+func hashBackupFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.CopyBuffer(hash, file, make([]byte, 64*1024)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func runtimeSourcePath(path string) bool {
@@ -296,6 +328,19 @@ func makeBackupManifest(metadata instance.Metadata, files map[string][]byte) bac
 		digest := sha256.Sum256(contents)
 		entries = append(entries, backupFile{Path: path, Size: int64(len(contents)), SHA256: hex.EncodeToString(digest[:])})
 	}
+	return newBackupManifest(metadata, entries)
+}
+
+func makeSourceBackupManifest(metadata instance.Metadata, files []sourceBackupFile) backupManifest {
+	entries := make([]backupFile, len(files))
+	for index, file := range files {
+		entries[index] = file.backupFile
+	}
+	sort.Slice(entries, func(left, right int) bool { return entries[left].Path < entries[right].Path })
+	return newBackupManifest(metadata, entries)
+}
+
+func newBackupManifest(metadata instance.Metadata, entries []backupFile) backupManifest {
 	info := buildinfo.Current()
 	return backupManifest{Schema: backupSchema, BackupVersion: info.BackupCompatibility,
 		DataCompatibility: info.DataCompatibility, DataVersion: effectiveDataVersion(metadata), SourceInstanceID: metadata.InstanceID,
@@ -303,11 +348,23 @@ func makeBackupManifest(metadata instance.Metadata, files map[string][]byte) bac
 }
 
 func writeBackupArchive(output string, manifest backupManifest, files map[string][]byte) error {
+	return writeTemporaryBackupArchive(output, func(file *os.File) error {
+		return writeBackupEntries(file, manifest, files)
+	})
+}
+
+func writeSourceBackupArchive(output string, manifest backupManifest, files []sourceBackupFile) error {
+	return writeTemporaryBackupArchive(output, func(file *os.File) error {
+		return writeSourceBackupEntries(file, manifest, files)
+	})
+}
+
+func writeTemporaryBackupArchive(output string, write func(*os.File) error) error {
 	temporary, err := os.CreateTemp(filepath.Dir(output), ".database-backup-*")
 	if err != nil {
 		return err
 	}
-	if err := writeBackupEntries(temporary, manifest, files); err != nil {
+	if err := write(temporary); err != nil {
 		return failTemporaryArchive(temporary, err)
 	}
 	if err := syncTemporaryArchive(temporary); err != nil {
@@ -320,6 +377,49 @@ func writeBackupArchive(output string, manifest backupManifest, files map[string
 	if err := os.Rename(temporary.Name(), output); err != nil {
 		_ = os.Remove(temporary.Name())
 		return err
+	}
+	return nil
+}
+
+func writeSourceBackupEntries(file *os.File, manifest backupManifest, files []sourceBackupFile) error {
+	archive := tar.NewWriter(file)
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		_ = archive.Close()
+		return err
+	}
+	if err := writeArchiveFile(archive, backupManifestPath, manifestBytes); err != nil {
+		_ = archive.Close()
+		return err
+	}
+	ordered := append([]sourceBackupFile(nil), files...)
+	sort.Slice(ordered, func(left, right int) bool { return ordered[left].Path < ordered[right].Path })
+	buffer := make([]byte, 64*1024)
+	for _, entry := range ordered {
+		if err := writeSourceArchiveFile(archive, entry, buffer); err != nil {
+			_ = archive.Close()
+			return err
+		}
+	}
+	return archive.Close()
+}
+
+func writeSourceArchiveFile(archive *tar.Writer, entry sourceBackupFile, buffer []byte) error {
+	file, err := os.Open(entry.source)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := archive.WriteHeader(&tar.Header{Name: entry.Path, Mode: 0o600, Size: entry.Size}); err != nil {
+		return err
+	}
+	hash := sha256.New()
+	written, err := io.CopyBuffer(io.MultiWriter(archive, hash), file, buffer)
+	if err != nil {
+		return err
+	}
+	if written != entry.Size || hex.EncodeToString(hash.Sum(nil)) != entry.SHA256 {
+		return fmt.Errorf("source file changed during backup: %s", entry.Path)
 	}
 	return nil
 }
@@ -396,7 +496,10 @@ func rejectPathOverlap(source, target string) error {
 }
 
 func inspectBackup(input string) error {
-	_, err := loadBackupArchive(input)
+	archive, err := loadBackupArchive(input)
+	if err == nil {
+		err = archive.Close()
+	}
 	return err
 }
 
@@ -406,92 +509,112 @@ func loadBackupArchive(input string) (backupArchive, error) {
 		return backupArchive{}, err
 	}
 	defer file.Close()
-	entries, err := readBackupEntries(tar.NewReader(file))
+	directory, err := os.MkdirTemp("", ".database-backup-read-*")
 	if err != nil {
 		return backupArchive{}, err
 	}
-	manifest, files, err := splitBackupManifest(entries)
+	manifest, files, err := readBackupEntries(tar.NewReader(file), directory)
 	if err != nil {
+		_ = os.RemoveAll(directory)
 		return backupArchive{}, err
 	}
 	if err := validateBackupArchive(manifest, files); err != nil {
+		_ = os.RemoveAll(directory)
 		return backupArchive{}, err
 	}
-	return backupArchive{manifest: manifest, files: files}, nil
+	return backupArchive{manifest: manifest, files: files, directory: directory}, nil
 }
 
-type backupEntry struct {
-	path      string
-	contents  []byte
-	manifest  bool
-	directory bool
+func (archive backupArchive) Close() error {
+	if archive.directory == "" {
+		return nil
+	}
+	return os.RemoveAll(archive.directory)
 }
 
-func readBackupEntries(archive *tar.Reader) ([]backupEntry, error) {
-	entries := make([]backupEntry, 0)
+func readBackupEntries(archive *tar.Reader, directory string) (backupManifest, map[string]storedBackupFile, error) {
+	files := make(map[string]storedBackupFile)
 	seen := make(map[string]bool)
+	var manifest backupManifest
+	manifestFound := false
+	buffer := make([]byte, 64*1024)
 	for {
 		header, err := archive.Next()
 		if errors.Is(err, io.EOF) {
-			return entries, nil
+			if !manifestFound {
+				return backupManifest{}, nil, errors.New("backup manifest is missing")
+			}
+			return manifest, files, nil
 		}
 		if err != nil {
-			return nil, errors.New("invalid backup archive")
+			return backupManifest{}, nil, errors.New("invalid backup archive")
 		}
-		entry, err := readBackupEntry(archive, header, seen)
-		if err != nil {
-			return nil, err
+		path, err := restorePath("", header.Name)
+		if err != nil || path == "" {
+			return backupManifest{}, nil, errors.New("unsafe backup path")
 		}
-		entries = append(entries, entry)
-	}
-}
-
-func readBackupEntry(archive *tar.Reader, header *tar.Header, seen map[string]bool) (backupEntry, error) {
-	path, err := restorePath("", header.Name)
-	if err != nil || path == "" {
-		return backupEntry{}, errors.New("unsafe backup path")
-	}
-	if header.FileInfo().IsDir() {
-		return backupEntry{path: path, directory: true}, nil
-	}
-	if !header.FileInfo().Mode().IsRegular() {
-		return backupEntry{}, errors.New("invalid backup archive entry")
-	}
-	if seen[path] {
-		return backupEntry{}, errors.New("duplicate backup archive entry")
-	}
-	seen[path] = true
-	contents, err := io.ReadAll(archive)
-	if err != nil {
-		return backupEntry{}, errors.New("invalid backup archive")
-	}
-	return backupEntry{path: path, contents: contents, manifest: path == backupManifestPath}, nil
-}
-
-func splitBackupManifest(entries []backupEntry) (backupManifest, map[string][]byte, error) {
-	files := make(map[string][]byte)
-	var manifest backupManifest
-	manifestFound := false
-	for _, entry := range entries {
-		if entry.directory {
+		if header.FileInfo().IsDir() {
 			continue
 		}
-		if entry.manifest {
-			if manifestFound || json.Unmarshal(entry.contents, &manifest) != nil {
+		if !header.FileInfo().Mode().IsRegular() || header.Size < 0 {
+			return backupManifest{}, nil, errors.New("invalid backup archive entry")
+		}
+		if seen[path] {
+			return backupManifest{}, nil, errors.New("duplicate backup archive entry")
+		}
+		seen[path] = true
+		if path == backupManifestPath {
+			if manifestFound || decodeBackupManifest(archive, header.Size, &manifest) != nil {
 				return backupManifest{}, nil, errors.New("invalid backup manifest")
 			}
 			manifestFound = true
 			continue
 		}
-		files[entry.path] = entry.contents
+		stored, err := extractBackupEntry(archive, directory, path, header.Size, buffer)
+		if err != nil {
+			return backupManifest{}, nil, err
+		}
+		files[path] = stored
 	}
-	if !manifestFound {
-		return backupManifest{}, nil, errors.New("backup manifest is missing")
-	}
-	return manifest, files, nil
 }
 
-func validateBackupArchive(manifest backupManifest, files map[string][]byte) error {
+func decodeBackupManifest(archive io.Reader, size int64, manifest *backupManifest) error {
+	decoder := json.NewDecoder(io.LimitReader(archive, size))
+	if err := decoder.Decode(manifest); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("backup manifest has trailing data")
+	}
+	return nil
+}
+
+func extractBackupEntry(archive io.Reader, directory, path string, size int64, buffer []byte) (storedBackupFile, error) {
+	target, err := restorePath(directory, path)
+	if err != nil {
+		return storedBackupFile{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return storedBackupFile{}, err
+	}
+	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return storedBackupFile{}, err
+	}
+	hash := sha256.New()
+	written, copyErr := io.CopyBuffer(io.MultiWriter(file, hash), archive, buffer)
+	closeErr := file.Close()
+	if copyErr != nil || written != size {
+		return storedBackupFile{}, errors.New("invalid backup archive")
+	}
+	if closeErr != nil {
+		return storedBackupFile{}, closeErr
+	}
+	return storedBackupFile{path: target, size: written, sha256: hex.EncodeToString(hash.Sum(nil))}, nil
+}
+
+func validateBackupArchive(manifest backupManifest, files map[string]storedBackupFile) error {
 	if err := validateBackupManifest(manifest); err != nil {
 		return err
 	}
@@ -515,37 +638,49 @@ func validateBackupManifest(manifest backupManifest) error {
 	return nil
 }
 
-func validateBackupFileEntries(entries []backupFile, files map[string][]byte) (map[string]bool, error) {
+func validateBackupFileEntries(entries []backupFile, files map[string]storedBackupFile) (map[string]bool, error) {
 	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		if entry.Path == "" || entry.Path == backupManifestPath || seen[entry.Path] || entry.Size < 0 {
 			return nil, errors.New("invalid backup manifest files")
 		}
 		seen[entry.Path] = true
-		contents, ok := files[entry.Path]
-		if !ok || int64(len(contents)) != entry.Size {
+		file, ok := files[entry.Path]
+		if !ok || file.size != entry.Size {
 			return nil, errors.New("backup file set is incomplete")
 		}
-		digest := sha256.Sum256(contents)
-		if entry.SHA256 != hex.EncodeToString(digest[:]) {
+		if entry.SHA256 != file.sha256 {
 			return nil, errors.New("backup file integrity check failed")
 		}
 	}
 	return seen, nil
 }
 
-func validateDurableBackupFiles(sourceID, dataVersion string, files map[string][]byte) error {
-	metadata, err := decodeBackupMetadata(files["instance.json"])
+func validateDurableBackupFiles(sourceID, dataVersion string, files map[string]storedBackupFile) error {
+	metadata, err := decodeBackupMetadataFile(files["instance.json"].path)
 	if err != nil || metadata.Schema != "database.instance/v1" || metadata.InstanceID != sourceID || metadata.AdminAccount == "" || metadata.PasswordHash == "" {
 		return errors.New("backup instance identity is invalid")
 	}
 	if dataVersion != "" && effectiveDataVersion(metadata) != dataVersion {
 		return errors.New("backup data version is invalid")
 	}
-	if err := validateBackupCatalog(files["catalog.json"]); err != nil {
+	if err := validateBackupCatalogFile(files["catalog.json"].path); err != nil {
 		return errors.New("backup catalog is invalid")
 	}
 	return nil
+}
+
+func decodeBackupMetadataFile(path string) (instance.Metadata, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return instance.Metadata{}, err
+	}
+	defer file.Close()
+	var metadata instance.Metadata
+	if err := json.NewDecoder(file).Decode(&metadata); err != nil {
+		return instance.Metadata{}, err
+	}
+	return metadata, nil
 }
 
 func decodeBackupMetadata(contents []byte) (instance.Metadata, error) {
@@ -564,6 +699,19 @@ func validateBackupCatalog(contents []byte) error {
 	return nil
 }
 
+func validateBackupCatalogFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	var definition catalog.Definition
+	if err := json.NewDecoder(file).Decode(&definition); err != nil || definition.Namespaces == nil {
+		return errors.New("invalid catalog")
+	}
+	return nil
+}
+
 func restoreBackup(input, directory string) error {
 	if err := validateRestoreRequest(input, directory); err != nil {
 		return err
@@ -572,7 +720,12 @@ func restoreBackup(input, directory string) error {
 	if err != nil {
 		return err
 	}
-	metadataBytes, err := restoredMetadataBytes(archive.files["instance.json"])
+	defer archive.Close()
+	metadataContents, err := os.ReadFile(archive.files["instance.json"].path)
+	if err != nil {
+		return err
+	}
+	metadataBytes, err := restoredMetadataBytes(metadataContents)
 	if err != nil {
 		return err
 	}
@@ -650,17 +803,13 @@ func createRestoreStaging(directory string) (string, bool, error) {
 	return staging, existed, err
 }
 
-func populateRestoreStaging(staging string, files map[string][]byte, metadata []byte) error {
+func populateRestoreStaging(staging string, files map[string]storedBackupFile, metadata []byte) error {
 	paths := make([]string, 0, len(files))
 	for path := range files {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
 	for _, path := range paths {
-		contents := files[path]
-		if path == "instance.json" {
-			contents = metadata
-		}
 		restoredPath, err := restorePath(staging, path)
 		if err != nil {
 			return err
@@ -668,14 +817,38 @@ func populateRestoreStaging(staging string, files map[string][]byte, metadata []
 		if err := os.MkdirAll(filepath.Dir(restoredPath), 0o700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(restoredPath, contents, 0o600); err != nil {
+		if path == "instance.json" {
+			if err := os.WriteFile(restoredPath, metadata, 0o600); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := copyStoredBackupFile(files[path].path, restoredPath); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func populateAndValidateRestore(staging string, files map[string][]byte, metadata []byte) error {
+func copyStoredBackupFile(source, target string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.CopyBuffer(output, input, make([]byte, 64*1024))
+	closeErr := output.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func populateAndValidateRestore(staging string, files map[string]storedBackupFile, metadata []byte) error {
 	if err := populateRestoreStaging(staging, files, metadata); err != nil {
 		return err
 	}
