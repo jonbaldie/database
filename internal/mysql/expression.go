@@ -92,11 +92,15 @@ func evaluateScalar(text string) (exprValue, error) {
 }
 
 func evaluateScalarWithResolver(text string, resolve func(string) (exprValue, error)) (exprValue, error) {
+	return evaluateScalarResolved(text, resolve, nil)
+}
+
+func evaluateScalarResolved(text string, resolve func(string) (exprValue, error), session *session) (exprValue, error) {
 	tokens, err := tokenizeExpression(text)
 	if err != nil {
 		return exprValue{}, err
 	}
-	parser := &exprParser{tokens: tokens, resolveIdentifier: resolve}
+	parser := &exprParser{tokens: tokens, resolveIdentifier: resolve, session: session}
 	value, err := parser.parseExpression()
 	if err != nil {
 		return exprValue{}, err

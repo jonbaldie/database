@@ -122,7 +122,7 @@ func parseRelationalGroups(text string, columns []relationColumn, projections []
 		if err != nil {
 			return nil, err
 		}
-		if _, err := evaluateRelationExpressionContext(expression, columns, sampleRelationRow(columns), outer); err != nil {
+		if _, err := evaluateRelationExpressionContext(expression, columns, sampleRelationRow(columns), outer, nil); err != nil {
 			return nil, sqlFailure{1054, "42S22", "Unknown column '" + source + "' in 'group statement'"}
 		}
 		groups = append(groups, relationalGroup{expression: expression, source: source})
@@ -265,7 +265,7 @@ func checkedWindowExpressions(text string, columns []relationColumn, outer *oute
 	result := make([]string, 0, len(splitCSV(text)))
 	for _, expression := range splitCSV(text) {
 		expression = strings.TrimSpace(expression)
-		if _, err := evaluateRelationExpressionContext(expression, columns, sampleRelationRow(columns), outer); err != nil {
+		if _, err := evaluateRelationExpressionContext(expression, columns, sampleRelationRow(columns), outer, nil); err != nil {
 			return nil, err
 		}
 		result = append(result, expression)
@@ -281,7 +281,7 @@ func checkedWindowOrder(text string, columns []relationColumn, outer *outerRelat
 			result = append(result, relationalWindowOrder{expression: expression, direction: direction})
 			continue
 		}
-		if _, err := evaluateRelationExpressionContext(expression, columns, sampleRelationRow(columns), outer); err != nil {
+		if _, err := evaluateRelationExpressionContext(expression, columns, sampleRelationRow(columns), outer, nil); err != nil {
 			return nil, err
 		}
 		result = append(result, relationalWindowOrder{expression: expression, direction: direction})
@@ -475,7 +475,7 @@ func (p *relationalSelectPlan) validateGroupedExpression(expression string) erro
 		if !groupExpressionMatches(name, p.aggregation.groups) {
 			return exprValue{}, sqlFailure{1055, "42000", "Expression is not in GROUP BY clause and contains nonaggregated column"}
 		}
-		return evaluateRelationExpressionContext(name, p.source.columns, sampleRelationRow(p.source.columns), p.outer)
+		return evaluateRelationExpressionContext(name, p.source.columns, sampleRelationRow(p.source.columns), p.outer, p.session)
 	})
 	return err
 }
@@ -1357,7 +1357,7 @@ func groupSourceRows(plan *relationalSelectPlan, rows []relationRow) ([][]relati
 func (p *relationalSelectPlan) groupKey(row relationRow) (string, error) {
 	var builder strings.Builder
 	for _, group := range p.aggregation.groups {
-		value, err := evaluateRelationExpressionContext(group.expression, p.source.columns, row, p.outer)
+		value, err := evaluateRelationExpressionContext(group.expression, p.source.columns, row, p.outer, p.session)
 		if err != nil {
 			return "", err
 		}
@@ -1445,7 +1445,7 @@ func (p *relationalSelectPlan) aggregateTupleValue(arguments []string, row relat
 }
 
 func (p *relationalSelectPlan) aggregateSingleValue(aggregate relationalAggregate, row relationRow, seen map[string]struct{}) (exprValue, bool, error) {
-	value, err := evaluateRelationExpressionContext(aggregate.argument, p.source.columns, row, p.outer)
+	value, err := evaluateRelationExpressionContext(aggregate.argument, p.source.columns, row, p.outer, p.session)
 	if err != nil || value.isNull() {
 		return value, false, err
 	}
@@ -1474,7 +1474,7 @@ func aggregateArguments(aggregate relationalAggregate) []string {
 func (p *relationalSelectPlan) aggregateTupleKey(arguments []string, row relationRow) (string, bool, error) {
 	var builder strings.Builder
 	for _, argument := range arguments {
-		value, err := evaluateRelationExpressionContext(argument, p.source.columns, row, p.outer)
+		value, err := evaluateRelationExpressionContext(argument, p.source.columns, row, p.outer, p.session)
 		if err != nil {
 			return "", false, err
 		}
@@ -1549,7 +1549,7 @@ func (p *relationalSelectPlan) evaluateGroupExpression(expression string, group 
 		if len(group) == 0 {
 			return nullValue(), nil
 		}
-		return evaluateRelationExpressionContext(name, p.source.columns, group[0], p.outer)
+		return evaluateRelationExpressionContext(name, p.source.columns, group[0], p.outer, p.session)
 	})
 }
 
@@ -1836,7 +1836,7 @@ func (p *relationalSelectPlan) windowExpressionValue(row relationalResultRow, ex
 		}
 		return p.evaluateAggregate(aggregate, row.group)
 	}
-	return evaluateRelationExpressionContext(expression, p.source.columns, row.source, p.outer)
+	return evaluateRelationExpressionContext(expression, p.source.columns, row.source, p.outer, p.session)
 }
 
 func relationalValueKey(expression string, value exprValue, columns []relationColumn) string {
@@ -2293,7 +2293,7 @@ func windowOffsetTarget(position int, offset uint64, name string) (int, bool) {
 
 func (p *relationalSelectPlan) windowOffsetDefault(arguments []string, row relationRow) (exprValue, error) {
 	if len(arguments) == 3 {
-		return evaluateRelationExpressionContext(arguments[2], p.source.columns, row, p.outer)
+		return evaluateRelationExpressionContext(arguments[2], p.source.columns, row, p.outer, p.session)
 	}
 	return nullValue(), nil
 }

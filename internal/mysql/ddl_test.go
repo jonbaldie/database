@@ -172,6 +172,19 @@ func TestParseAlterTableActions(t *testing.T) {
 	}
 }
 
+func TestForeignKeyReferenceAllowsNoSpaceBeforeColumnList(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	if _, err := executeStatement(executor, "CREATE TABLE parents (id INT PRIMARY KEY)"); err != nil {
+		t.Fatalf("create parents: %v", err)
+	}
+	if _, err := executeStatement(executor, "CREATE TABLE children (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parents(id))"); err != nil {
+		t.Fatalf("create children: %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO children VALUES (1, 99)"); !isFailureCode(err, 1452) {
+		t.Fatalf("orphan insert = %v", err)
+	}
+}
+
 func equalStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false

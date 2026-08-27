@@ -59,6 +59,7 @@ func TestParseCharacterTypeRejections(t *testing.T) {
 
 func TestCanonicalCharacterValue(t *testing.T) {
 	text8, _ := parseCharacterType("VARCHAR(8)")
+	char4, _ := parseCharacterType("CHAR(4)")
 	binary4, _ := parseCharacterType("BINARY(4)")
 	unbounded, _ := parseCharacterType("TEXT")
 
@@ -81,8 +82,14 @@ func TestCanonicalCharacterValue(t *testing.T) {
 	if _, err := canonicalCharacterValue(binary4, "12345", "c", 1); !isFailureCode(err, 1406) {
 		t.Fatalf("over-length binary not rejected: %v", err)
 	}
-	if got, err := canonicalCharacterValue(binary4, "\xff\x00\x01", "c", 1); err != nil || got != "\xff\x00\x01" {
-		t.Fatalf("binary value altered = %q, %v", got, err)
+	if got, err := canonicalCharacterValue(char4, "ab  ", "c", 1); err != nil || got != "ab" {
+		t.Fatalf("CHAR trailing spaces kept = %q, %v", got, err)
+	}
+	if got, err := canonicalCharacterValue(binary4, "ab", "c", 1); err != nil || got != "ab\x00\x00" {
+		t.Fatalf("BINARY not padded = %q, %v", got, err)
+	}
+	if got, err := canonicalCharacterValue(binary4, "\xff\x00\x01", "c", 1); err != nil || got != "\xff\x00\x01\x00" {
+		t.Fatalf("BINARY value = %q, %v", got, err)
 	}
 }
 

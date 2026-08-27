@@ -110,7 +110,42 @@ func parseRelationalTableSource(s *relationExecutor, text string) (relationalTab
 	if source, tail, found, err := parseCTETableSource(s, parts, remainder); found {
 		return source, tail, err
 	}
+	if source, tail, found, err := parseInformationSchemaTableSource(s, parts, remainder); found {
+		return source, tail, err
+	}
 	return parseCatalogTableSource(s, parts, remainder)
+}
+
+func parseInformationSchemaTableSource(s *relationExecutor, parts []string, remainder string) (relationalTableSource, string, bool, error) {
+	name, ok := informationSchemaTableName(s, parts)
+	if !ok {
+		return relationalTableSource{}, "", false, nil
+	}
+	view, found := findInformationSchemaView(name)
+	if !found {
+		return relationalTableSource{}, "", true, sqlFailure{1105, "HY000", "unsupported information_schema view '" + name + "'"}
+	}
+	result := informationSchemaQueryResult(s.session, view)
+	table, err := queryResultTable(view.name, result)
+	if err != nil {
+		return relationalTableSource{}, "", true, err
+	}
+	alias, tail, err := relationAlias(remainder, view.name)
+	if err != nil {
+		return relationalTableSource{}, "", true, err
+	}
+	columns := relationalResultColumns(view.name, alias, table, result)
+	return relationalTableSource{namespace: informationSchemaName, name: view.name, alias: alias, table: table, columns: columns}, tail, true, nil
+}
+
+func informationSchemaTableName(s *relationExecutor, parts []string) (string, bool) {
+	if len(parts) == 2 && strings.EqualFold(parts[0], informationSchemaName) {
+		return parts[1], true
+	}
+	if len(parts) == 1 && s != nil && strings.EqualFold(s.database, informationSchemaName) {
+		return parts[0], true
+	}
+	return "", false
 }
 
 func parseCTETableSource(s *relationExecutor, parts []string, remainder string) (relationalTableSource, string, bool, error) {

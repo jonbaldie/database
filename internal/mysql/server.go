@@ -788,6 +788,81 @@ var informationSchemaViews = []informationSchemaView{
 			{name: "COLUMN_TYPE", typeName: "VARCHAR(255)"},
 		},
 	},
+	{name: "statistics", columns: []informationSchemaColumn{
+		{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
+		{name: "NON_UNIQUE", typeName: "INT"},
+		{name: "INDEX_NAME", typeName: "VARCHAR(64)"},
+		{name: "SEQ_IN_INDEX", typeName: "INT"},
+		{name: "COLUMN_NAME", typeName: "VARCHAR(64)"},
+		{name: "COLLATION", typeName: "VARCHAR(1)"},
+		{name: "SUB_PART", typeName: "INT"},
+		{name: "NULLABLE", typeName: "VARCHAR(3)"},
+		{name: "INDEX_TYPE", typeName: "VARCHAR(16)"},
+		{name: "COMMENT", typeName: "VARCHAR(16)"},
+		{name: "INDEX_COMMENT", typeName: "VARCHAR(2048)"},
+		{name: "VISIBLE", typeName: "VARCHAR(3)"},
+		{name: "EXPRESSION", typeName: "VARCHAR(64)"},
+	}},
+	{name: "table_constraints", columns: []informationSchemaColumn{
+		{name: "CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
+		{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
+		{name: "CONSTRAINT_TYPE", typeName: "VARCHAR(64)"},
+	}},
+	{name: "key_column_usage", columns: []informationSchemaColumn{
+		{name: "CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
+		{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
+		{name: "COLUMN_NAME", typeName: "VARCHAR(64)"},
+		{name: "ORDINAL_POSITION", typeName: "INT"},
+		{name: "REFERENCED_TABLE_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "REFERENCED_TABLE_NAME", typeName: "VARCHAR(64)"},
+		{name: "REFERENCED_COLUMN_NAME", typeName: "VARCHAR(64)"},
+	}},
+	{name: "referential_constraints", columns: []informationSchemaColumn{
+		{name: "CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
+		{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
+		{name: "REFERENCED_TABLE_NAME", typeName: "VARCHAR(64)"},
+	}},
+	{name: "check_constraints", columns: []informationSchemaColumn{
+		{name: "CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
+		{name: "CHECK_CLAUSE", typeName: "VARCHAR(2048)"},
+	}},
+	{name: "character_sets", columns: []informationSchemaColumn{
+		{name: "CHARACTER_SET_NAME", typeName: "VARCHAR(64)"},
+		{name: "DEFAULT_COLLATE_NAME", typeName: "VARCHAR(64)"},
+		{name: "DESCRIPTION", typeName: "VARCHAR(64)"},
+		{name: "MAXLEN", typeName: "INT"},
+	}},
+	{name: "collations", columns: []informationSchemaColumn{
+		{name: "COLLATION_NAME", typeName: "VARCHAR(64)"},
+		{name: "CHARACTER_SET_NAME", typeName: "VARCHAR(64)"},
+		{name: "IS_DEFAULT", typeName: "VARCHAR(3)"},
+	}},
+	{name: "accounts", columns: []informationSchemaColumn{
+		{name: "USER", typeName: "VARCHAR(32)"},
+		{name: "LOCKED", typeName: "INT"},
+	}},
+	{name: "account_grants", columns: []informationSchemaColumn{
+		{name: "USER", typeName: "VARCHAR(32)"},
+		{name: "PRIVILEGE", typeName: "VARCHAR(64)"},
+		{name: "NAMESPACE", typeName: "VARCHAR(64)"},
+	}},
+	{name: "processlist", columns: []informationSchemaColumn{
+		{name: "ID", typeName: "BIGINT"},
+		{name: "USER", typeName: "VARCHAR(32)"},
+		{name: "HOST", typeName: "VARCHAR(64)"},
+		{name: "DB", typeName: "VARCHAR(64)"},
+		{name: "COMMAND", typeName: "VARCHAR(16)"},
+		{name: "TIME", typeName: "INT"},
+		{name: "STATE", typeName: "VARCHAR(64)"},
+		{name: "INFO", typeName: "VARCHAR(65535)"},
+	}},
 }
 
 func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
@@ -968,6 +1043,10 @@ func (s *textStatementExecutor) transactionStatement(query, lower string) (*quer
 
 func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryResult, bool, error) {
 	catalogQueries := catalogExecutor{s.session}
+	if showGrantsStatement(lower) {
+		result, err := catalogQueries.showGrants(query)
+		return result, true, err
+	}
 	if result, handled, err := showCatalog(&catalogQueries, query, lower); handled {
 		return result, true, err
 	}
@@ -3660,9 +3739,12 @@ func (s *informationSchemaExecutor) selectInformationSchema(query string) (*quer
 	if err != nil {
 		return nil, err
 	}
-	catalogQueries := catalogExecutor{s.session}
-	rows := informationSchemaRows(view.name, catalogQueries.metadataDefinition())
+	rows := informationSchemaRows(view.name, s.session)
 	return projectInformationSchemaRows(view, projection, rows), nil
+}
+
+func informationSchemaQueryResult(s *session, view informationSchemaView) *queryResult {
+	return projectInformationSchemaRows(view, everyInformationSchemaColumn(view), informationSchemaRows(view.name, s))
 }
 
 func parseInformationSchemaQuery(query string) (informationSchemaView, []int, error) {
@@ -3773,13 +3855,19 @@ func findInformationSchemaView(name string) (informationSchemaView, bool) {
 	return informationSchemaView{}, false
 }
 
-func informationSchemaRows(viewName string, definition catalog.Definition) [][]metadataValue {
-	builders := map[string]func(catalog.Definition) [][]metadataValue{
-		"schemata": informationSchemaSchemataRows,
-		"tables":   informationSchemaTableRows,
-		"columns":  informationSchemaColumnRows,
+func informationSchemaRows(viewName string, s *session) [][]metadataValue {
+	builder, ok := informationSchemaRowBuilders[strings.ToLower(viewName)]
+	if !ok {
+		return nil
 	}
-	return builders[viewName](definition)
+	return builder(s, informationSchemaDefinition(s))
+}
+
+func informationSchemaDefinition(s *session) catalog.Definition {
+	if s == nil || s.server == nil || s.server.config.Catalog == nil {
+		return emptyDefinition()
+	}
+	return visibleCatalogDefinition(s.server.config.Catalog.Snapshot(), s.username)
 }
 
 func informationSchemaSchemataRows(definition catalog.Definition) [][]metadataValue {

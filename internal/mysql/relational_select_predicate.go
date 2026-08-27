@@ -16,6 +16,7 @@ type relationOperand struct {
 	definition relationColumn
 	columns    []relationColumn
 	outer      *outerRelationScope
+	session    *session
 }
 
 func compileRelationPredicate(text string, columns []relationColumn, session *session) (relationPredicate, error) {
@@ -281,7 +282,7 @@ func compileRelationOperandContext(text string, columns []relationColumn, sessio
 	if text == "" {
 		return relationOperand{}, unsupportedExpression()
 	}
-	if value, err := evaluateScalar(text); err == nil {
+	if value, err := evaluateScalarResolved(text, nil, session); err == nil {
 		return relationOperand{raw: text, value: value}, nil
 	}
 	column, err := resolveRelationColumn(text, columns)
@@ -293,10 +294,10 @@ func compileRelationOperandContext(text string, columns []relationColumn, sessio
 			return relationOperand{raw: text, value: value, bound: true}, nil
 		}
 	}
-	if _, expressionErr := evaluateRelationExpressionContext(text, columns, sampleRelationRow(columns), outer); expressionErr != nil {
+	if _, expressionErr := evaluateRelationExpressionContext(text, columns, sampleRelationRow(columns), outer, session); expressionErr != nil {
 		return relationOperand{}, expressionErr
 	}
-	return relationOperand{computed: true, raw: text, columns: columns, outer: outer}, nil
+	return relationOperand{computed: true, raw: text, columns: columns, outer: outer, session: session}, nil
 }
 
 func coerceRelationLiterals(left, right relationOperand, columns []relationColumn, session *session) (relationOperand, relationOperand, error) {
@@ -356,7 +357,7 @@ func typedRelationLiteral(operand relationOperand, column relationColumn, sessio
 
 func relationOperandValue(operand relationOperand, row relationRow) (exprValue, error) {
 	if operand.computed {
-		return evaluateRelationExpressionContext(operand.raw, operand.columns, row, operand.outer)
+		return evaluateRelationExpressionContext(operand.raw, operand.columns, row, operand.outer, operand.session)
 	}
 	if !operand.isColumn {
 		return operand.value, nil
@@ -372,17 +373,17 @@ func relationOperandValue(operand relationOperand, row relationRow) (exprValue, 
 }
 
 func evaluateRelationExpression(text string, columns []relationColumn, row relationRow) (exprValue, error) {
-	return evaluateRelationExpressionContext(text, columns, row, nil)
+	return evaluateRelationExpressionContext(text, columns, row, nil, nil)
 }
 
-func evaluateRelationExpressionContext(text string, columns []relationColumn, row relationRow, outer *outerRelationScope) (exprValue, error) {
-	return evaluateScalarWithResolver(text, func(name string) (exprValue, error) {
+func evaluateRelationExpressionContext(text string, columns []relationColumn, row relationRow, outer *outerRelationScope, session *session) (exprValue, error) {
+	return evaluateScalarResolved(text, func(name string) (exprValue, error) {
 		column, err := resolveRelationColumn(name, columns)
 		if err != nil {
 			return outerRelationValue(name, outer)
 		}
 		return relationColumnValue(columns, column, row)
-	})
+	}, session)
 }
 
 func sampleRelationRow(columns []relationColumn) relationRow {

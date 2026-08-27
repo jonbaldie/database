@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -519,4 +520,90 @@ func asciiLetterOrDigit(character byte) bool {
 func passwordHash(password string) string {
 	sum := sha256.Sum256([]byte(password))
 	return hex.EncodeToString(sum[:])
+}
+
+func showGrantsStatement(lower string) bool {
+	return lower == "show grants" || strings.HasPrefix(lower, "show grants for ")
+}
+
+func (s *catalogExecutor) showGrants(query string) (*queryResult, error) {
+	name, err := showGrantsTarget(query, s.username)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.authorizeShowGrants(name); err != nil {
+		return nil, err
+	}
+	account, found := s.server.config.Catalog.Account(name)
+	if !found {
+		return nil, sqlFailure{1141, "42000", "unknown account"}
+	}
+	return showGrantsResult(name, account.Grants), nil
+}
+
+func showGrantsTarget(query, current string) (string, error) {
+	rest := strings.TrimSpace(query[len("SHOW GRANTS"):])
+	if rest == "" {
+		return requireCurrentAccount(current)
+	}
+	lower := strings.ToLower(rest)
+	if !strings.HasPrefix(lower, "for ") {
+		return "", sqlFailure{1064, "42000", "malformed SHOW GRANTS"}
+	}
+	return showGrantsNamedTarget(strings.TrimSpace(rest[len("for "):]), current)
+}
+
+func showGrantsNamedTarget(target, current string) (string, error) {
+	if strings.EqualFold(target, "CURRENT_USER") || strings.EqualFold(target, "CURRENT_USER()") {
+		return requireCurrentAccount(current)
+	}
+	if len(target) < 2 || target[0] != '\'' || target[len(target)-1] != '\'' {
+		return "", sqlFailure{1064, "42000", "malformed SHOW GRANTS"}
+	}
+	return scalar(target), nil
+}
+
+func requireCurrentAccount(current string) (string, error) {
+	if current == "" {
+		return "", sqlFailure{1227, "42000", "access denied"}
+	}
+	return current, nil
+}
+
+func (s *catalogExecutor) authorizeShowGrants(name string) error {
+	if name == s.username {
+		return nil
+	}
+	account, found := s.server.config.Catalog.Account(s.username)
+	if !found || account.Locked || !accountHasGrant(account, accountManagerPrivilege) {
+		return sqlFailure{1227, "42000", "access denied"}
+	}
+	return nil
+}
+
+func showGrantsResult(name string, grants []catalog.Grant) *queryResult {
+	rows := make([][]string, 0, len(grants))
+	for _, grant := range sortedAccountGrants(grants) {
+		rows = append(rows, []string{renderGrantStatement(name, grant)})
+	}
+	return &queryResult{columns: []string{"Grants for " + name}, rows: rows}
+}
+
+func sortedAccountGrants(grants []catalog.Grant) []catalog.Grant {
+	result := append([]catalog.Grant(nil), grants...)
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Privilege != result[j].Privilege {
+			return result[i].Privilege < result[j].Privilege
+		}
+		return result[i].Namespace < result[j].Namespace
+	})
+	return result
+}
+
+func renderGrantStatement(name string, grant catalog.Grant) string {
+	scope := "*.*"
+	if grant.Namespace != "" {
+		scope = grant.Namespace + ".*"
+	}
+	return "GRANT " + grant.Privilege + " ON " + scope + " TO '" + name + "'"
 }

@@ -63,7 +63,14 @@ func parseProjectionItem(item string, columns []relationColumn, context *compose
 	if projection, scalarErr := scalarProjection(expression, alias); scalarErr == nil {
 		return projection, nil
 	}
-	return computedProjection(expression, alias, columns, outer)
+	return computedProjection(expression, alias, columns, outer, projectionSession(context))
+}
+
+func projectionSession(context *composedQueryContext) *session {
+	if context == nil || context.executor == nil {
+		return nil
+	}
+	return context.executor.session
 }
 
 func parseAnyWindowProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
@@ -132,8 +139,8 @@ func scalarProjection(expression, alias string) ([]relationalProjection, error) 
 	}}, nil
 }
 
-func computedProjection(expression, alias string, columns []relationColumn, outer *outerRelationScope) ([]relationalProjection, error) {
-	metadata, err := relationExpressionMetadataContext(expression, columns, outer)
+func computedProjection(expression, alias string, columns []relationColumn, outer *outerRelationScope, session *session) ([]relationalProjection, error) {
+	metadata, err := relationExpressionMetadataContext(expression, columns, outer, session)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +259,7 @@ func (p *relationalSelectPlan) projectionValue(projection relationalProjection, 
 		return projection.value, nil
 	}
 	if projection.computed {
-		return evaluateRelationExpressionContext(projection.expression, p.source.columns, row, projection.outer)
+		return evaluateRelationExpressionContext(projection.expression, p.source.columns, row, projection.outer, p.session)
 	}
 	if projection.column < 0 || projection.column >= len(row.values) {
 		return exprValue{}, sqlFailure{1105, "HY000", "row shape does not match SELECT projection"}
@@ -265,7 +272,7 @@ func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relat
 		if !order.computed {
 			continue
 		}
-		value, err := evaluateRelationExpressionContext(order.expression, p.source.columns, row, p.outer)
+		value, err := evaluateRelationExpressionContext(order.expression, p.source.columns, row, p.outer, p.session)
 		if err != nil {
 			return err
 		}
@@ -275,11 +282,11 @@ func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relat
 }
 
 func relationExpressionMetadata(expression string, columns []relationColumn) (columnMetadata, error) {
-	return relationExpressionMetadataContext(expression, columns, nil)
+	return relationExpressionMetadataContext(expression, columns, nil, nil)
 }
 
-func relationExpressionMetadataContext(expression string, columns []relationColumn, outer *outerRelationScope) (columnMetadata, error) {
-	value, err := representativeExpressionValueContext(expression, columns, outer)
+func relationExpressionMetadataContext(expression string, columns []relationColumn, outer *outerRelationScope, session *session) (columnMetadata, error) {
+	value, err := representativeExpressionValueContext(expression, columns, outer, session)
 	if err != nil {
 		return columnMetadata{}, err
 	}
@@ -324,19 +331,19 @@ func relationExpressionCharacterMetadata(expression string, columns []relationCo
 }
 
 func representativeExpressionValue(expression string, columns []relationColumn) (exprValue, error) {
-	return representativeExpressionValueContext(expression, columns, nil)
+	return representativeExpressionValueContext(expression, columns, nil, nil)
 }
 
-func representativeExpressionValueContext(expression string, columns []relationColumn, outer *outerRelationScope) (exprValue, error) {
+func representativeExpressionValueContext(expression string, columns []relationColumn, outer *outerRelationScope, session *session) (exprValue, error) {
 	var firstError error
 	for _, sample := range []int64{1, 2, 10, 1000, 0, -1} {
-		value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
+		value, err := evaluateScalarResolved(expression, func(name string) (exprValue, error) {
 			index, err := resolveRelationColumn(name, columns)
 			if err != nil {
 				return outerRelationValue(name, outer)
 			}
 			return relationMetadataValue(columns[index], sample), nil
-		})
+		}, session)
 		if err == nil {
 			return value, nil
 		}

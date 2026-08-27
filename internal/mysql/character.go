@@ -5,7 +5,7 @@
 // scalar ceiling all fail with a MySQL 8.4.11 error identity before any durable
 // effect, so a rejected write never changes a table. v0.1 never silently
 // truncates, pads away significant bytes, or reinterprets binary content as
-// text.
+// text. CHAR drops trailing U+0020 on store; BINARY(n) pads short values with 0x00.
 package mysql
 
 import (
@@ -247,7 +247,7 @@ func scanCharacterModifiers(modifiers []string) (string, string, error) {
 }
 
 // canonicalCharacterValue validates a supplied literal against a character or
-// binary column and returns its stored representation unchanged. Invalid UTF-8,
+// binary column and returns the stored representation. Invalid UTF-8,
 // an over-length assignment, and a value past the scalar ceiling all fail with a
 // MySQL error identity so the caller can reject the write before durability.
 func canonicalCharacterValue(typ characterType, value, column string, row int) (string, error) {
@@ -255,16 +255,30 @@ func canonicalCharacterValue(typ characterType, value, column string, row int) (
 		return "", dataTooLong(column, row)
 	}
 	if typ.kind == characterText {
-		if !utf8.ValidString(value) {
-			return "", incorrectStringValue(column, value, row)
-		}
-		if typ.bounded && utf8.RuneCountInString(value) > typ.length {
-			return "", dataTooLong(column, row)
-		}
-		return value, nil
+		return canonicalTextValue(typ, value, column, row)
 	}
+	return canonicalBinaryValue(typ, value, column, row)
+}
+
+func canonicalTextValue(typ characterType, value, column string, row int) (string, error) {
+	if !utf8.ValidString(value) {
+		return "", incorrectStringValue(column, value, row)
+	}
+	if typ.bounded && utf8.RuneCountInString(value) > typ.length {
+		return "", dataTooLong(column, row)
+	}
+	if typ.wire == mysqlTypeString {
+		return strings.TrimRight(value, " "), nil
+	}
+	return value, nil
+}
+
+func canonicalBinaryValue(typ characterType, value, column string, row int) (string, error) {
 	if typ.bounded && len(value) > typ.length {
 		return "", dataTooLong(column, row)
+	}
+	if typ.bounded && typ.wire == mysqlTypeString && len(value) < typ.length {
+		return value + strings.Repeat("\x00", typ.length-len(value)), nil
 	}
 	return value, nil
 }

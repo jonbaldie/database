@@ -153,9 +153,12 @@ func leadingIdentifierToken(value string) (string, string, bool) {
 	if value[0] == '`' {
 		return quotedIdentifierToken(value)
 	}
-	end := strings.IndexAny(value, " \t\r\n")
+	end := strings.IndexAny(value, " \t\r\n(")
 	if end < 0 {
 		return value, "", true
+	}
+	if end == 0 {
+		return "", value, false
 	}
 	return value[:end], value[end:], true
 }

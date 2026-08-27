@@ -276,7 +276,7 @@ func plannedScalarMetadataForSession(expression string, strictScope bool, outer 
 			return metadata, err
 		}
 	}
-	if value, err := evaluateScalar(trimmed); err == nil {
+	if value, err := evaluateScalarResolved(trimmed, nil, session); err == nil {
 		return scalarMetadata(trimmed, value.render(), value), nil
 	}
 	if outer != nil {
@@ -321,10 +321,6 @@ func executeSelectTerm(context *composedQueryContext, query string, outer *outer
 	executor.composed = context
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	if from := keywordAt(expression, "from"); from >= 0 {
-		source := strings.TrimSpace(expression[from+len("from"):])
-		if isInformationSchemaSource(source) {
-			return selectFrom(&executor, query, expression[:from], source)
-		}
 		return executeRelationalSelectContext(&executor, query, outer)
 	}
 	return executeScalarSelectContext(context, query, expression, outer)
@@ -374,9 +370,9 @@ func evaluateComposedScalar(context *composedQueryContext, expression string, ou
 		}
 		return value, scalarMetadata(expression, value.render(), value), nil
 	}
-	value, err := evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
+	value, err := evaluateScalarResolved(expression, func(name string) (exprValue, error) {
 		return outerRelationValue(name, outer)
-	})
+	}, context.executor.session)
 	if err != nil {
 		return exprValue{}, columnMetadata{}, err
 	}
