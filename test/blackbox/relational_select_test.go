@@ -63,6 +63,20 @@ func TestMySQLRelationalShapingMatchesTextAndPreparedWirePaths(t *testing.T) {
 	if computed.err != "" || !reflect.DeepEqual(computed.rows, [][]string{{"21"}, {"16"}}) {
 		t.Fatalf("computed select: %#v", computed)
 	}
+	flatPredicate := strings.Repeat("id >= 1 AND ", 99) + "id >= 1"
+	flat := client.query("SELECT id FROM authors WHERE " + flatPredicate + " ORDER BY id")
+	if flat.err != "" || !reflect.DeepEqual(flat.rows, [][]string{{"1"}, {"2"}, {"3"}}) {
+		t.Fatalf("long flat predicate: %#v", flat)
+	}
+	deepPredicate := strings.Repeat("(", 128) + "id = 1" + strings.Repeat(")", 128)
+	deep := client.query("SELECT id FROM authors WHERE " + deepPredicate)
+	if deep.err != "" || !reflect.DeepEqual(deep.rows, [][]string{{"1"}}) {
+		t.Fatalf("deep predicate: %#v", deep)
+	}
+	mixedPredicate := client.query("SELECT id FROM authors WHERE (id = 1 OR id = 2) AND (id = 2 OR id = 3)")
+	if mixedPredicate.err != "" || !reflect.DeepEqual(mixedPredicate.rows, [][]string{{"2"}}) {
+		t.Fatalf("mixed AND/OR predicate: %#v", mixedPredicate)
+	}
 
 	explained := client.query("EXPLAIN FORMAT=JSON SELECT DISTINCT a.name FROM authors a JOIN posts p ON a.id = p.author_id ORDER BY a.name DESC LIMIT 1")
 	if explained.err != "" || len(explained.rows) != 1 {

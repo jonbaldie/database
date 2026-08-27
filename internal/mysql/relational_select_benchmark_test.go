@@ -2,10 +2,41 @@ package mysql
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jonbaldie/database/internal/catalog"
 )
+
+func BenchmarkCompileRelationalPredicate(b *testing.B) {
+	columns := []relationColumn{{name: "id", typeName: "INT", index: 0}}
+	for _, size := range []int{100, 400, 800} {
+		b.Run("flat/terms="+strconv.Itoa(size), func(b *testing.B) {
+			text := strings.Repeat("id = 1 AND ", size-1) + "id = 1"
+			benchmarkCompileRelationalPredicate(b, text, columns)
+		})
+		b.Run("nested/depth="+strconv.Itoa(size), func(b *testing.B) {
+			text := strings.Repeat("(", size) + "id = 1" + strings.Repeat(")", size)
+			benchmarkCompileRelationalPredicate(b, text, columns)
+		})
+	}
+}
+
+func benchmarkCompileRelationalPredicate(b *testing.B, text string, columns []relationColumn) {
+	b.Helper()
+	session := &session{timeZone: "UTC"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		predicate, err := compileRelationPredicate(text, columns, session)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if predicate == nil {
+			b.Fatal("compiled predicate is nil")
+		}
+	}
+}
 
 func BenchmarkRelationalEqualityJoin(b *testing.B) {
 	for _, rows := range []int{100, 500, 1000} {

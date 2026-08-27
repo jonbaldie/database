@@ -515,12 +515,10 @@ func splitRelationKeyword(value, keyword string) []string {
 	start := 0
 	length := len(value)
 	keywordLength := len(keyword)
+	state := relationDepthState{}
 	for index := 0; index+1+keywordLength <= length; index++ {
-		if value[index] == '\'' {
-			index = skipQuoted(value, index)
-			continue
-		}
-		if !relationKeywordCandidate(value, keyword, index) {
+		if state.quoted || state.depth != 0 || !relationKeywordCandidate(value, keyword, index) {
+			index = state.advance(value, index, length)
 			continue
 		}
 		parts = append(parts, strings.TrimSpace(value[start:index+1]))
@@ -539,7 +537,7 @@ func relationKeywordCandidate(value, keyword string, index int) bool {
 		return false
 	}
 	start := index + 1
-	return strings.EqualFold(value[start:start+len(keyword)], keyword) && relationWordBoundary(value, start, len(keyword)) && relationDepthAt(value, index) == 0
+	return strings.EqualFold(value[start:start+len(keyword)], keyword) && relationWordBoundary(value, start, len(keyword))
 }
 
 func isRelationSpace(value byte) bool {
@@ -564,25 +562,9 @@ func isRelationWordByte(value byte) bool {
 	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_'
 }
 
-func relationDepthAt(value string, end int) int {
-	state := relationDepthState{}
-	length := minRelationLength(end, len(value))
-	for index := 0; index < length; index++ {
-		index = state.advance(value, index, length)
-	}
-	return state.depth
-}
-
 type relationDepthState struct {
 	depth  int
 	quoted bool
-}
-
-func minRelationLength(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
 }
 
 func (state *relationDepthState) advance(value string, index, length int) int {
@@ -635,12 +617,55 @@ func relationOperatorAt(value string, index int, operators []string) (string, st
 }
 
 func stripRelationParentheses(value string) string {
-	for strings.HasPrefix(value, "(") {
-		close, ok := matchingParenthesis(value, 0)
-		if !ok || strings.TrimSpace(value[close+1:]) != "" {
-			break
-		}
-		value = strings.TrimSpace(value[1:close])
+	value = strings.TrimSpace(value)
+	if value == "" || value[0] != '(' {
+		return value
 	}
-	return value
+	matches := relationParenthesisMatches(value)
+	start, end := 0, len(value)
+	for start < end && value[start] == '(' && matches[start] == end-1 {
+		start++
+		end--
+		for start < end && isRelationSpace(value[start]) {
+			start++
+		}
+		for start < end && isRelationSpace(value[end-1]) {
+			end--
+		}
+	}
+	return value[start:end]
+}
+
+func relationParenthesisMatches(value string) []int {
+	matches := make([]int, len(value))
+	for index := range matches {
+		matches[index] = -1
+	}
+	stack := make([]int, 0)
+	quoted := false
+	for index := 0; index < len(value); index++ {
+		if value[index] == '\'' {
+			if quoted && index+1 < len(value) && value[index+1] == '\'' {
+				index++
+				continue
+			}
+			quoted = !quoted
+			continue
+		}
+		if quoted {
+			continue
+		}
+		switch value[index] {
+		case '(':
+			stack = append(stack, index)
+		case ')':
+			if len(stack) == 0 {
+				continue
+			}
+			open := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			matches[open] = index
+		}
+	}
+	return matches
 }
