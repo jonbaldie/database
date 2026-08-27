@@ -238,6 +238,73 @@ func TestEngineAllowsMultipleNullValuesInUniqueKey(t *testing.T) {
 	}
 }
 
+func TestEngineChecksCompositeKeysWithinOneBatch(t *testing.T) {
+	engine, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	columns := []string{"tenant", "id", "code", "optional"}
+	primary := []string{"tenant", "id"}
+	uniques := [][]string{{"tenant", "code"}, {"tenant", "optional"}}
+	if err := engine.EnsureTable("app", "items", columns, primary, uniques); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	null := "\x00database-sql-null"
+	if err := txn.Insert("app", "items", []string{"one", "1", "alpha", null}); err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Insert("app", "items", []string{"one", "1", "beta", "present"}); err == nil {
+		t.Fatal("expected duplicate composite primary key")
+	}
+	if err := txn.Insert("app", "items", []string{"one", "2", "alpha", "other"}); err == nil {
+		t.Fatal("expected duplicate composite unique key")
+	}
+	if err := txn.Insert("app", "items", []string{"one", "2", "beta", null}); err != nil {
+		t.Fatalf("second nullable composite unique key: %v", err)
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.RowCount("app", "items"); got != 2 {
+		t.Fatalf("row count = %d, want 2", got)
+	}
+}
+
+func TestEngineClearResetsStagedKeyMaps(t *testing.T) {
+	engine, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.EnsureTable("app", "items", []string{"id", "code"}, []string{"id"}, [][]string{{"code"}}); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Insert("app", "items", []string{"1", "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Clear("app", "items"); err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Insert("app", "items", []string{"1", "alpha"}); err != nil {
+		t.Fatalf("insert after clear: %v", err)
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.RowCount("app", "items"); got != 1 {
+		t.Fatalf("row count = %d, want 1", got)
+	}
+}
+
 func TestEngineCompositeKeySeparatesControlBytes(t *testing.T) {
 	directory := t.TempDir()
 	engine, err := storage.Open(directory)

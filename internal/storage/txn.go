@@ -11,6 +11,8 @@ type tableOverlay struct {
 	base        *table
 	baseVersion uint64
 	inserts     [][]string
+	insertKeys  map[string]struct{}
+	uniqueKeys  map[string]map[string]struct{}
 	updates     map[string][]string
 	deletes     map[string]bool
 	clear       bool
@@ -56,7 +58,9 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 	if overlay.deletes != nil {
 		delete(overlay.deletes, key)
 	}
-	overlay.inserts = append(overlay.inserts, append([]string(nil), row...))
+	staged := append([]string(nil), row...)
+	overlay.inserts = append(overlay.inserts, staged)
+	overlay.addInsertKeys(staged)
 	return nil
 }
 
@@ -77,10 +81,8 @@ func (overlay *tableOverlay) rejectDuplicatePrimary(key string) error {
 			return errDuplicateKey
 		}
 	}
-	for _, staged := range overlay.inserts {
-		if overlay.base.primaryKey(staged) == key {
-			return errDuplicateKey
-		}
+	if _, exists := overlay.insertKeys[key]; exists {
+		return errDuplicateKey
 	}
 	if _, exists := overlay.updates[key]; exists {
 		return errDuplicateKey
@@ -112,15 +114,48 @@ func (overlay *tableOverlay) rejectDuplicateUnique(row, unique []string) error {
 			}
 		}
 	}
-	for _, staged := range overlay.inserts {
-		if uniqueKeyNullable(staged, indexes) {
-			continue
-		}
-		if rowKey(staged, indexes) == uniqueKey {
-			return errDuplicateKey
-		}
+	indexKey := strings.Join(unique, "\x00")
+	if _, exists := overlay.uniqueKeys[indexKey][uniqueKey]; exists {
+		return errDuplicateKey
 	}
 	return nil
+}
+
+func (overlay *tableOverlay) addInsertKeys(row []string) {
+	if len(overlay.base.primary) > 0 {
+		if overlay.insertKeys == nil {
+			overlay.insertKeys = map[string]struct{}{}
+		}
+		overlay.insertKeys[overlay.base.primaryKey(row)] = struct{}{}
+	}
+	for _, unique := range overlay.base.uniques {
+		indexes := overlay.base.columnIndexes(unique)
+		if uniqueKeyNullable(row, indexes) {
+			continue
+		}
+		indexKey := strings.Join(unique, "\x00")
+		if overlay.uniqueKeys == nil {
+			overlay.uniqueKeys = map[string]map[string]struct{}{}
+		}
+		if overlay.uniqueKeys[indexKey] == nil {
+			overlay.uniqueKeys[indexKey] = map[string]struct{}{}
+		}
+		overlay.uniqueKeys[indexKey][rowKey(row, indexes)] = struct{}{}
+	}
+}
+
+func (overlay *tableOverlay) removeInsertKeys(row []string) {
+	if len(overlay.base.primary) > 0 {
+		delete(overlay.insertKeys, overlay.base.primaryKey(row))
+	}
+	for _, unique := range overlay.base.uniques {
+		indexes := overlay.base.columnIndexes(unique)
+		if uniqueKeyNullable(row, indexes) {
+			continue
+		}
+		indexKey := strings.Join(unique, "\x00")
+		delete(overlay.uniqueKeys[indexKey], rowKey(row, indexes))
+	}
 }
 
 // UpdatePrimary replaces the row identified by primary key.
@@ -170,6 +205,8 @@ func (txn *Transaction) Clear(namespace, name string) error {
 	defer txn.engine.mu.RUnlock()
 	overlay.clear = true
 	overlay.inserts = nil
+	overlay.insertKeys = nil
+	overlay.uniqueKeys = nil
 	overlay.updates = nil
 	overlay.deletes = nil
 	return nil
@@ -202,6 +239,7 @@ func (txn *Transaction) DeletePrimary(namespace, name, primary string) error {
 	filtered := overlay.inserts[:0]
 	for _, row := range overlay.inserts {
 		if overlay.base.primaryKey(row) == primary {
+			overlay.removeInsertKeys(row)
 			continue
 		}
 		filtered = append(filtered, row)

@@ -29,6 +29,35 @@ func BenchmarkEnginePointUpdate(b *testing.B) {
 	}
 }
 
+func BenchmarkTransactionStageBatchInsert(b *testing.B) {
+	for _, rows := range []int{100, 400, 800} {
+		b.Run("rows="+strconv.Itoa(rows), func(b *testing.B) {
+			engine, err := storage.Open(b.TempDir())
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() { _ = engine.Close() })
+			if err := engine.EnsureTable("app", "items", []string{"id", "code"}, []string{"id"}, [][]string{{"code"}}); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				txn, beginErr := engine.Begin()
+				if beginErr != nil {
+					b.Fatal(beginErr)
+				}
+				for row := range rows {
+					value := strconv.Itoa(row)
+					if err := txn.Insert("app", "items", []string{value, "code-" + value}); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
+	}
+}
+
 func pointUpdateBenchmarkEngine(b *testing.B, rows int) *storage.Engine {
 	b.Helper()
 	engine, err := storage.Open(b.TempDir())
