@@ -44,8 +44,32 @@ func TestMySQLBTreeIndexesUseThePublicWireContract(t *testing.T) {
 	if result := client.query("CREATE INDEX idx_created USING BTREE ON accounts (created DESC)"); result.err != "" {
 		t.Fatalf("create index: %#v", result)
 	}
+	if result := client.query("SELECT id FROM accounts FORCE INDEX (idx_created)"); result.err != "" || strings.Join(result.rows[0], ",") != "2" || strings.Join(result.rows[1], ",") != "1" || strings.Join(result.rows[2], ",") != "3" {
+		t.Fatalf("reverse index scan: %#v", result)
+	}
+	if result := client.query("SELECT id FROM accounts FORCE INDEX (idx_created) WHERE created >= 2 AND created < 4"); result.err != "" || strings.Join(result.rows[0], ",") != "2" || strings.Join(result.rows[1], ",") != "1" {
+		t.Fatalf("reverse bounded index scan: %#v", result)
+	}
 	if result := client.query("ALTER TABLE accounts ADD INDEX idx_created_status (created, status)"); result.err != "" {
 		t.Fatalf("alter table add index: %#v", result)
+	}
+	if result := client.query("SELECT id FROM accounts FORCE INDEX (idx_created_status)"); result.err != "" || strings.Join(result.rows[0], ",") != "3" || strings.Join(result.rows[1], ",") != "1" || strings.Join(result.rows[2], ",") != "2" {
+		t.Fatalf("forward index scan: %#v", result)
+	}
+	if result := client.query("SELECT id FROM accounts FORCE INDEX (idx_status_created)"); result.err != "" || strings.Join(result.rows[0], ",") != "3" || strings.Join(result.rows[1], ",") != "2" || strings.Join(result.rows[2], ",") != "1" {
+		t.Fatalf("equal index keys: %#v", result)
+	}
+	if result := client.query("SELECT id FROM accounts FORCE INDEX (idx_created_status) WHERE created >= 2 AND created < 4"); result.err != "" || strings.Join(result.rows[0], ",") != "1" || strings.Join(result.rows[1], ",") != "2" {
+		t.Fatalf("bounded index scan: %#v", result)
+	}
+	if result := client.query("UPDATE accounts SET created = 4 WHERE id = 1"); result.err != "" {
+		t.Fatalf("update indexed value: %#v", result)
+	}
+	if result := client.query("SELECT id FROM accounts FORCE INDEX (idx_created_status) WHERE created >= 2 AND created < 4"); result.err != "" || len(result.rows) != 1 || strings.Join(result.rows[0], ",") != "2" {
+		t.Fatalf("index scan after update: %#v", result)
+	}
+	if result := client.query("UPDATE accounts SET created = 2 WHERE id = 1"); result.err != "" {
+		t.Fatalf("restore indexed value: %#v", result)
 	}
 
 	show := client.query("SHOW INDEX FROM accounts")

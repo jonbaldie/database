@@ -4,6 +4,7 @@ import "fmt"
 
 func (s *Store) replaceLocked(definition Definition) error {
 	staged := cloneDefinition(definition)
+	refreshOrderedIndexCaches(s.definition, &staged)
 	if err := validateDefinition(staged); err != nil {
 		return fmt.Errorf("invalid catalog: %w", err)
 	}

@@ -651,7 +651,17 @@ func tableRowIterator(table relationalTableSource, runtime *selectRuntimeBinding
 
 type indexedRelationRow struct {
 	values []string
-	keys   []string
+}
+
+type relationalIndexBound struct {
+	value     exprValue
+	present   bool
+	inclusive bool
+}
+
+type relationalIndexBounds struct {
+	lower relationalIndexBound
+	upper relationalIndexBound
 }
 
 func indexScanRows(table relationalTableSource) ([]indexedRelationRow, error) {
@@ -662,58 +672,314 @@ func indexScanRows(table relationalTableSource) ([]indexedRelationRow, error) {
 		}
 		return rows, nil
 	}
-	rows := make([]indexedRelationRow, len(table.table.Rows))
-	for number, values := range table.table.Rows {
-		keys, err := indexScanKeys(table, *table.access, values)
-		if err != nil {
-			return nil, err
-		}
-		rows[number] = indexedRelationRow{values: values, keys: keys}
-	}
-	sort.SliceStable(rows, func(left, right int) bool {
-		return orderedIndexRowBefore(rows[left], rows[right], *table.access)
+	entries, err := table.table.CachedOrderedIndex(indexScanCacheKey(table.table, *table.access), func() ([]catalog.OrderedIndexRow, error) {
+		return buildOrderedIndex(table, *table.access)
 	})
+	if err != nil {
+		return nil, err
+	}
+	entries, err = boundedOrderedIndex(entries, table, *table.access)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]indexedRelationRow, len(entries))
+	for number, entry := range entries {
+		rows[number] = indexedRelationRow{values: table.table.Rows[entry.Position]}
+	}
 	return rows, nil
 }
 
-func indexScanKeys(table relationalTableSource, index catalog.Index, row []string) ([]string, error) {
-	keys := make([]string, len(index.Parts))
-	for number, part := range index.Parts {
-		key, err := indexScanPartKey(table, part, row)
+func relationIndexBounds(table relationalTableSource, index catalog.Index, where string, session *session) (*relationalIndexBounds, error) {
+	if strings.TrimSpace(where) == "" || len(index.Parts) == 0 || index.Parts[0].Column == "" || index.Parts[0].PrefixLength != 0 {
+		return nil, nil
+	}
+	text := stripRelationParentheses(strings.TrimSpace(where))
+	if len(splitRelationKeyword(text, "OR")) > 1 {
+		return nil, nil
+	}
+	columnPosition := tableColumnIndex(table.table.Columns, index.Parts[0].Column)
+	if columnPosition < 0 || columnPosition >= len(table.columns) {
+		return nil, nil
+	}
+	column := table.columns[columnPosition]
+	bounds := &relationalIndexBounds{}
+	for _, part := range splitRelationKeyword(text, "AND") {
+		operator, left, right, found := findRelationComparison(stripRelationParentheses(strings.TrimSpace(part)))
+		if !found {
+			continue
+		}
+		value, normalized, found, err := relationIndexBoundValue(left, right, operator, table.columns, columnPosition, column, session)
 		if err != nil {
 			return nil, err
 		}
-		keys[number] = key
+		if !found || value.isNull() {
+			continue
+		}
+		applyRelationIndexBound(bounds, normalized, value, column)
 	}
-	return keys, nil
+	if !bounds.lower.present && !bounds.upper.present {
+		return nil, nil
+	}
+	return bounds, nil
 }
 
-func indexScanPartKey(table relationalTableSource, part catalog.IndexPart, row []string) (string, error) {
+func relationIndexBoundValue(left, right, operator string, columns []relationColumn, target int, column relationColumn, session *session) (exprValue, string, bool, error) {
+	leftIsTarget := relationIndexTargetColumn(left, columns, target)
+	rightIsTarget := relationIndexTargetColumn(right, columns, target)
+	if leftIsTarget == rightIsTarget {
+		return exprValue{}, "", false, nil
+	}
+	literalText := right
+	if rightIsTarget {
+		literalText = left
+		operator = reversedRelationIndexOperator(operator)
+	}
+	literal, err := compileRelationOperand(literalText, columns, session)
+	if err != nil || literal.isColumn || literal.computed || literal.bound {
+		return exprValue{}, "", false, err
+	}
+	literal, err = bindLiteralToColumn(literal, column, session)
+	if err != nil {
+		return exprValue{}, "", false, err
+	}
+	switch operator {
+	case "=", "<", "<=", ">", ">=":
+		return literal.value, operator, true, nil
+	default:
+		return exprValue{}, "", false, nil
+	}
+}
+
+func relationIndexTargetColumn(text string, columns []relationColumn, target int) bool {
+	position, err := resolveRelationColumn(strings.TrimSpace(text), columns)
+	if err != nil {
+		return false
+	}
+	return position == target
+}
+
+func reversedRelationIndexOperator(operator string) string {
+	switch operator {
+	case "<":
+		return ">"
+	case "<=":
+		return ">="
+	case ">":
+		return "<"
+	case ">=":
+		return "<="
+	default:
+		return operator
+	}
+}
+
+func applyRelationIndexBound(bounds *relationalIndexBounds, operator string, value exprValue, column relationColumn) {
+	switch operator {
+	case "=":
+		setRelationIndexLowerBound(&bounds.lower, value, true, column)
+		setRelationIndexUpperBound(&bounds.upper, value, true, column)
+	case ">":
+		setRelationIndexLowerBound(&bounds.lower, value, false, column)
+	case ">=":
+		setRelationIndexLowerBound(&bounds.lower, value, true, column)
+	case "<":
+		setRelationIndexUpperBound(&bounds.upper, value, false, column)
+	case "<=":
+		setRelationIndexUpperBound(&bounds.upper, value, true, column)
+	}
+}
+
+func setRelationIndexLowerBound(bound *relationalIndexBound, value exprValue, inclusive bool, column relationColumn) {
+	comparison := 1
+	if bound.present {
+		comparison = compareOrderedIndexValues(value, bound.value, &column)
+	}
+	if !bound.present || comparison > 0 || comparison == 0 && !inclusive {
+		*bound = relationalIndexBound{value: value, present: true, inclusive: inclusive}
+	}
+}
+
+func setRelationIndexUpperBound(bound *relationalIndexBound, value exprValue, inclusive bool, column relationColumn) {
+	comparison := -1
+	if bound.present {
+		comparison = compareOrderedIndexValues(value, bound.value, &column)
+	}
+	if !bound.present || comparison < 0 || comparison == 0 && !inclusive {
+		*bound = relationalIndexBound{value: value, present: true, inclusive: inclusive}
+	}
+}
+
+func boundedOrderedIndex(entries []catalog.OrderedIndexRow, table relationalTableSource, index catalog.Index) ([]catalog.OrderedIndexRow, error) {
+	if table.bounds == nil || len(index.Parts) == 0 {
+		return entries, nil
+	}
+	column := orderedIndexColumn(table, index.Parts[0])
+	if column == nil {
+		return entries, nil
+	}
+	valueAt := func(position int) exprValue {
+		entry := entries[position]
+		if entry.Nulls[0] {
+			return nullValue()
+		}
+		value, _ := relationStoredValue(*column, entry.Keys[0])
+		return value
+	}
+	start, end := 0, len(entries)
+	if !index.Parts[0].Descending {
+		if table.bounds.lower.present {
+			start = sort.Search(len(entries), func(position int) bool {
+				comparison := compareOrderedIndexValues(valueAt(position), table.bounds.lower.value, column)
+				return comparison > 0 || comparison == 0 && table.bounds.lower.inclusive
+			})
+		}
+		if table.bounds.upper.present {
+			end = sort.Search(len(entries), func(position int) bool {
+				comparison := compareOrderedIndexValues(valueAt(position), table.bounds.upper.value, column)
+				return comparison > 0 || comparison == 0 && !table.bounds.upper.inclusive
+			})
+		}
+	} else {
+		if table.bounds.upper.present {
+			start = sort.Search(len(entries), func(position int) bool {
+				comparison := compareOrderedIndexValues(valueAt(position), table.bounds.upper.value, column)
+				return comparison < 0 || comparison == 0 && table.bounds.upper.inclusive
+			})
+		}
+		if table.bounds.lower.present {
+			end = sort.Search(len(entries), func(position int) bool {
+				comparison := compareOrderedIndexValues(valueAt(position), table.bounds.lower.value, column)
+				return comparison < 0 || comparison == 0 && !table.bounds.lower.inclusive
+			})
+		}
+	}
+	if start > end {
+		start = end
+	}
+	return entries[start:end], nil
+}
+
+type orderedIndexBuildRow struct {
+	entry  catalog.OrderedIndexRow
+	values []exprValue
+}
+
+func buildOrderedIndex(table relationalTableSource, index catalog.Index) ([]catalog.OrderedIndexRow, error) {
+	rows := make([]orderedIndexBuildRow, len(table.table.Rows))
+	for position, row := range table.table.Rows {
+		entry := catalog.OrderedIndexRow{Position: position, Keys: make([]string, len(index.Parts)), Nulls: make([]bool, len(index.Parts))}
+		values := make([]exprValue, len(index.Parts))
+		for number, part := range index.Parts {
+			key, value, err := indexScanPartValue(table, part, row)
+			if err != nil {
+				return nil, err
+			}
+			entry.Keys[number], entry.Nulls[number], values[number] = key, value.isNull(), value
+		}
+		rows[position] = orderedIndexBuildRow{entry: entry, values: values}
+	}
+	sort.SliceStable(rows, func(left, right int) bool {
+		return orderedIndexBuildRowBefore(rows[left], rows[right], table, index)
+	})
+	entries := make([]catalog.OrderedIndexRow, len(rows))
+	for position, row := range rows {
+		entries[position] = row.entry
+	}
+	return entries, nil
+}
+
+func indexScanPartValue(table relationalTableSource, part catalog.IndexPart, row []string) (string, exprValue, error) {
 	if part.Expression != "" {
 		value, err := evaluateRelationExpression(part.Expression, table.columns, relationRow{values: row})
-		if err != nil || value.isNull() {
-			return "", err
+		if err != nil {
+			return "", exprValue{}, err
 		}
-		return indexPrefixKey(value.render(), part.PrefixLength), nil
+		return indexedValueWithPrefix(value, part.PrefixLength)
 	}
 	column := tableColumnIndex(table.table.Columns, part.Column)
 	if column < 0 || row[column] == storedSQLNullValue {
-		return "", nil
+		return "", nullValue(), nil
 	}
-	return indexPrefixKey(constraintColumnKey(table.table, column, row[column]), part.PrefixLength), nil
+	value, err := relationStoredValue(table.columns[column], row[column])
+	if err != nil {
+		return "", exprValue{}, err
+	}
+	return indexedValueWithPrefix(value, part.PrefixLength)
 }
 
-func orderedIndexRowBefore(left, right indexedRelationRow, index catalog.Index) bool {
-	for number, key := range left.keys {
-		if key == right.keys[number] {
+func indexedValueWithPrefix(value exprValue, prefixLength int) (string, exprValue, error) {
+	if value.isNull() {
+		return "", value, nil
+	}
+	key := indexPrefixKey(value.render(), prefixLength)
+	if prefixLength > 0 {
+		value = stringValue(key)
+	}
+	return key, value, nil
+}
+
+func orderedIndexBuildRowBefore(left, right orderedIndexBuildRow, table relationalTableSource, index catalog.Index) bool {
+	for number := range index.Parts {
+		comparison := compareOrderedIndexValues(left.values[number], right.values[number], orderedIndexColumn(table, index.Parts[number]))
+		if comparison == 0 {
 			continue
 		}
 		if index.Parts[number].Descending {
-			return key > right.keys[number]
+			return comparison > 0
 		}
-		return key < right.keys[number]
+		return comparison < 0
 	}
 	return false
+}
+
+func compareOrderedIndexValues(left, right exprValue, column *relationColumn) int {
+	if left.isNull() || right.isNull() {
+		switch {
+		case left.isNull() && right.isNull():
+			return 0
+		case left.isNull():
+			return -1
+		default:
+			return 1
+		}
+	}
+	comparison, err := compareRelationalOrderValues(left, right, column)
+	if err == nil {
+		return comparison
+	}
+	return strings.Compare(left.render(), right.render())
+}
+
+func orderedIndexColumn(table relationalTableSource, part catalog.IndexPart) *relationColumn {
+	if part.Column == "" {
+		return nil
+	}
+	position := tableColumnIndex(table.table.Columns, part.Column)
+	if position < 0 || position >= len(table.columns) {
+		return nil
+	}
+	return &table.columns[position]
+}
+
+func indexScanCacheKey(table catalog.Table, index catalog.Index) string {
+	var key strings.Builder
+	key.WriteString(index.Name)
+	for _, typeName := range table.ColumnTypes {
+		key.WriteByte('|')
+		key.WriteString(typeName)
+	}
+	for _, part := range index.Parts {
+		key.WriteByte('|')
+		key.WriteString(part.Column)
+		key.WriteByte(':')
+		key.WriteString(part.Expression)
+		key.WriteByte(':')
+		key.WriteString(strconv.Itoa(part.PrefixLength))
+		if part.Descending {
+			key.WriteByte('D')
+		}
+	}
+	return key.String()
 }
 
 func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int, runtime *selectRuntimeBinding) relationRowIterator {

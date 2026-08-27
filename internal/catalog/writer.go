@@ -126,6 +126,7 @@ func applyWriteRequests(batch []*writeRequest, staged Definition, revision uint6
 }
 
 func (s *Store) commitWriteBatch(previous, staged Definition) error {
+	refreshOrderedIndexCaches(previous, &staged)
 	if err := validatePublishedDefinition(s, previous, staged); err != nil {
 		return err
 	}

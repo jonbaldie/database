@@ -199,6 +199,7 @@ type relationalTableSource struct {
 	reason         string
 	hints          []relationalIndexHint
 	access         *catalog.Index
+	bounds         *relationalIndexBounds
 	forced         bool
 	covering       bool
 	materializeKey string
@@ -753,11 +754,19 @@ func (p *relationalSelectPlan) chooseIndexAccesses() error {
 			return err
 		}
 		p.source.tables[number].access, p.source.tables[number].forced, p.source.tables[number].covering = access, forced, covering
+		if access != nil {
+			bounds, boundsErr := relationIndexBounds(p.source.tables[number], *access, p.whereText, p.session)
+			if boundsErr != nil {
+				return boundsErr
+			}
+			p.source.tables[number].bounds = bounds
+		}
 	}
 	for number := range p.source.joins {
 		for _, table := range p.source.tables {
 			if identifiersEqual(table.alias, p.source.joins[number].right.alias) {
 				p.source.joins[number].right.access = table.access
+				p.source.joins[number].right.bounds = table.bounds
 				p.source.joins[number].right.forced = table.forced
 				p.source.joins[number].right.covering = table.covering
 				break

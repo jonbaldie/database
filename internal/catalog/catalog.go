@@ -35,14 +35,15 @@ type Namespace struct {
 	Tables map[string]Table `json:"tables"`
 }
 type Table struct {
-	Name             string            `json:"name,omitempty"`
-	Columns          []string          `json:"columns"`
-	ColumnTypes      []string          `json:"column_types,omitempty"`
-	ColumnAttributes []ColumnAttribute `json:"column_attributes,omitempty"`
-	Constraints      []Constraint      `json:"constraints,omitempty"`
-	Indexes          []Index           `json:"indexes,omitempty"`
-	Rows             [][]string        `json:"rows,omitempty"`
-	PrimaryIndex     map[string]int    `json:"-"`
+	Name             string             `json:"name,omitempty"`
+	Columns          []string           `json:"columns"`
+	ColumnTypes      []string           `json:"column_types,omitempty"`
+	ColumnAttributes []ColumnAttribute  `json:"column_attributes,omitempty"`
+	Constraints      []Constraint       `json:"constraints,omitempty"`
+	Indexes          []Index            `json:"indexes,omitempty"`
+	Rows             [][]string         `json:"rows,omitempty"`
+	PrimaryIndex     map[string]int     `json:"-"`
+	OrderedIndexes   *OrderedIndexCache `json:"-"`
 }
 
 // Index is one declared B-tree access path. Primary and unique constraints
@@ -369,6 +370,7 @@ func Apply(definition Definition, action func(*Definition) error) (Definition, e
 	if err := action(&staged); err != nil {
 		return Definition{}, err
 	}
+	refreshOrderedIndexCaches(definition, &staged)
 	if err := validateDefinition(staged); err != nil {
 		return Definition{}, fmt.Errorf("invalid catalog: %w", err)
 	}
@@ -390,8 +392,9 @@ func cloneDefinition(source Definition) Definition {
 				// Row images and primary indexes are immutable after publication.
 				// Snapshots share both so validators and point lookups stay O(1);
 				// writers copy the index before mutating it.
-				Rows:         sharedRowImage(definition.Rows),
-				PrimaryIndex: definition.PrimaryIndex,
+				Rows:           sharedRowImage(definition.Rows),
+				PrimaryIndex:   definition.PrimaryIndex,
+				OrderedIndexes: definition.OrderedIndexes,
 			}
 		}
 		copy.Namespaces[namespace] = cloned
@@ -445,6 +448,7 @@ func (s *Store) mutate(action func(*Definition) error) error {
 	if err := action(&staged); err != nil {
 		return err
 	}
+	refreshOrderedIndexCaches(s.definition, &staged)
 	if err := validateDefinition(staged); err != nil {
 		return fmt.Errorf("invalid catalog: %w", err)
 	}

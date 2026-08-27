@@ -22,6 +22,71 @@ func BenchmarkCompileRelationalPredicate(b *testing.B) {
 	}
 }
 
+func BenchmarkRelationalIndexScan(b *testing.B) {
+	for _, rowCount := range []int{100, 400, 800} {
+		b.Run("full/rows="+strconv.Itoa(rowCount), func(b *testing.B) {
+			table := relationalIndexScanBenchmark(rowCount)
+			if _, err := indexScanRows(table); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				rows, err := indexScanRows(table)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(rows) != rowCount {
+					b.Fatalf("rows = %d, want %d", len(rows), rowCount)
+				}
+			}
+		})
+		b.Run("bounded/rows="+strconv.Itoa(rowCount), func(b *testing.B) {
+			table := relationalIndexScanBenchmark(rowCount)
+			lower := int64(rowCount / 2)
+			table.bounds = &relationalIndexBounds{
+				lower: relationalIndexBound{value: intValue(lower), present: true, inclusive: true},
+				upper: relationalIndexBound{value: intValue(lower + 9), present: true, inclusive: true},
+			}
+			if _, err := indexScanRows(table); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				rows, err := indexScanRows(table)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(rows) != 10 {
+					b.Fatalf("rows = %d, want 10", len(rows))
+				}
+			}
+		})
+	}
+}
+
+func relationalIndexScanBenchmark(rowCount int) relationalTableSource {
+	table := catalog.Table{
+		Name:           "entries",
+		Columns:        []string{"id"},
+		ColumnTypes:    []string{"INT"},
+		Rows:           make([][]string, rowCount),
+		OrderedIndexes: &catalog.OrderedIndexCache{},
+	}
+	for row := range rowCount {
+		table.Rows[row] = []string{strconv.Itoa(rowCount - row)}
+	}
+	index := catalog.Index{Name: "idx_id", Parts: []catalog.IndexPart{{Column: "id"}}}
+	return relationalTableSource{
+		name:    "entries",
+		alias:   "entries",
+		table:   table,
+		columns: relationalTableColumns("benchmark", "entries", "entries", table),
+		access:  &index,
+	}
+}
+
 func benchmarkCompileRelationalPredicate(b *testing.B, text string, columns []relationColumn) {
 	b.Helper()
 	session := &session{timeZone: "UTC"}
