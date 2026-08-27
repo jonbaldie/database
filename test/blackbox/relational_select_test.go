@@ -246,6 +246,18 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	if rollingAggregates.err != "" || !reflect.DeepEqual(rollingAggregates.rows, [][]string{{"1", "1", "1", "1.0000", "1", "1"}, {"2", "2", "3", "1.5000", "1", "2"}, {"3", "2", "5", "2.5000", "2", "3"}}) {
 		t.Fatalf("rolling window aggregates: %#v", rollingAggregates)
 	}
+	for _, query := range []string{
+		"CREATE TABLE large_window_values (id INT PRIMARY KEY, value DOUBLE NOT NULL)",
+		"INSERT INTO large_window_values VALUES (1, 1e308), (2, 1e308)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+	largeCurrentRows := client.query("SELECT SUM(value) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM large_window_values ORDER BY id")
+	if largeCurrentRows.err != "" || !reflect.DeepEqual(largeCurrentRows.rows, [][]string{{"1e+308"}, {"1e+308"}}) {
+		t.Fatalf("large current-row windows: %#v", largeCurrentRows)
+	}
 	ranged := client.query("SELECT value, SUM(value) OVER (ORDER BY value RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM measurements WHERE value IS NOT NULL ORDER BY value")
 	if ranged.err != "" || !reflect.DeepEqual(ranged.rows, [][]string{{"5", "5"}, {"15", "20"}, {"20", "55"}, {"20", "55"}}) {
 		t.Fatalf("numeric RANGE frame: %#v", ranged)

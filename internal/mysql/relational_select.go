@@ -1020,20 +1020,8 @@ func (p *relationalSelectPlan) compilePredicates() error {
 }
 
 func compileRelationalHashJoin(join relationalJoin) *relationalHashJoin {
-	operator, leftText, rightText, found := findRelationComparison(stripRelationParentheses(join.condition))
-	if !found || operator != "=" {
-		return nil
-	}
-	left, leftErr := compileRelationOperand(leftText, join.columns, nil)
-	right, rightErr := compileRelationOperand(rightText, join.columns, nil)
-	if leftErr != nil || rightErr != nil || !left.isColumn || !right.isColumn {
-		return nil
-	}
-	rightStart := len(join.columns) - len(join.right.columns)
-	if left.column >= rightStart && right.column < rightStart {
-		left, right = right, left
-	}
-	if left.column >= rightStart || right.column < rightStart {
+	left, right, found := relationalHashOperands(join)
+	if !found {
 		return nil
 	}
 	comparison, compatible := hashJoinComparison(left, right)
@@ -1041,6 +1029,37 @@ func compileRelationalHashJoin(join relationalJoin) *relationalHashJoin {
 		return nil
 	}
 	return &relationalHashJoin{left: left, right: right, comparison: comparison}
+}
+
+func relationalHashOperands(join relationalJoin) (relationOperand, relationOperand, bool) {
+	operator, leftText, rightText, found := findRelationComparison(stripRelationParentheses(join.condition))
+	if !found || operator != "=" {
+		return relationOperand{}, relationOperand{}, false
+	}
+	left, right, found := compileRelationalHashOperands(leftText, rightText, join.columns)
+	if !found {
+		return relationOperand{}, relationOperand{}, false
+	}
+	return orientRelationalHashOperands(left, right, len(join.columns)-len(join.right.columns))
+}
+
+func compileRelationalHashOperands(leftText, rightText string, columns []relationColumn) (relationOperand, relationOperand, bool) {
+	left, leftErr := compileRelationOperand(leftText, columns, nil)
+	right, rightErr := compileRelationOperand(rightText, columns, nil)
+	if leftErr != nil || rightErr != nil || !left.isColumn || !right.isColumn {
+		return relationOperand{}, relationOperand{}, false
+	}
+	return left, right, true
+}
+
+func orientRelationalHashOperands(left, right relationOperand, rightStart int) (relationOperand, relationOperand, bool) {
+	if left.column >= rightStart && right.column < rightStart {
+		left, right = right, left
+	}
+	if left.column >= rightStart || right.column < rightStart {
+		return relationOperand{}, relationOperand{}, false
+	}
+	return left, right, true
 }
 
 func hashJoinComparison(left, right relationOperand) (characterType, bool) {

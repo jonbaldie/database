@@ -690,37 +690,52 @@ func indexScanRows(table relationalTableSource) ([]indexedRelationRow, error) {
 }
 
 func relationIndexBounds(table relationalTableSource, index catalog.Index, where string, session *session) (*relationalIndexBounds, error) {
-	if strings.TrimSpace(where) == "" || len(index.Parts) == 0 || index.Parts[0].Column == "" || index.Parts[0].PrefixLength != 0 {
+	columnPosition, column, eligible := relationIndexBoundColumn(table, index, where)
+	if !eligible {
 		return nil, nil
 	}
 	text := stripRelationParentheses(strings.TrimSpace(where))
 	if len(splitRelationKeyword(text, "OR")) > 1 {
 		return nil, nil
 	}
-	columnPosition := tableColumnIndex(table.table.Columns, index.Parts[0].Column)
-	if columnPosition < 0 || columnPosition >= len(table.columns) {
-		return nil, nil
-	}
-	column := table.columns[columnPosition]
 	bounds := &relationalIndexBounds{}
 	for _, part := range splitRelationKeyword(text, "AND") {
-		operator, left, right, found := findRelationComparison(stripRelationParentheses(strings.TrimSpace(part)))
-		if !found {
-			continue
-		}
-		value, normalized, found, err := relationIndexBoundValue(left, right, operator, table.columns, columnPosition, column, session)
-		if err != nil {
+		if err := applyRelationIndexPredicate(bounds, part, table.columns, columnPosition, column, session); err != nil {
 			return nil, err
 		}
-		if !found || value.isNull() {
-			continue
-		}
-		applyRelationIndexBound(bounds, normalized, value, column)
 	}
 	if !bounds.lower.present && !bounds.upper.present {
 		return nil, nil
 	}
 	return bounds, nil
+}
+
+func relationIndexBoundColumn(table relationalTableSource, index catalog.Index, where string) (int, relationColumn, bool) {
+	if strings.TrimSpace(where) == "" || len(index.Parts) == 0 {
+		return 0, relationColumn{}, false
+	}
+	part := index.Parts[0]
+	if part.Column == "" || part.PrefixLength != 0 {
+		return 0, relationColumn{}, false
+	}
+	position := tableColumnIndex(table.table.Columns, part.Column)
+	if position < 0 || position >= len(table.columns) {
+		return 0, relationColumn{}, false
+	}
+	return position, table.columns[position], true
+}
+
+func applyRelationIndexPredicate(bounds *relationalIndexBounds, predicate string, columns []relationColumn, position int, column relationColumn, session *session) error {
+	operator, left, right, found := findRelationComparison(stripRelationParentheses(strings.TrimSpace(predicate)))
+	if !found {
+		return nil
+	}
+	value, normalized, found, err := relationIndexBoundValue(left, right, operator, columns, position, column, session)
+	if err != nil || !found || value.isNull() {
+		return err
+	}
+	applyRelationIndexBound(bounds, normalized, value, column)
+	return nil
 }
 
 func relationIndexBoundValue(left, right, operator string, columns []relationColumn, target int, column relationColumn, session *session) (exprValue, string, bool, error) {
@@ -817,7 +832,19 @@ func boundedOrderedIndex(entries []catalog.OrderedIndexRow, table relationalTabl
 	if column == nil {
 		return entries, nil
 	}
-	valueAt := func(position int) exprValue {
+	valueAt := orderedIndexValueReader(entries, column)
+	start, end := ascendingOrderedIndexBounds(len(entries), table.bounds, column, valueAt)
+	if index.Parts[0].Descending {
+		start, end = descendingOrderedIndexBounds(len(entries), table.bounds, column, valueAt)
+	}
+	if start > end {
+		start = end
+	}
+	return entries[start:end], nil
+}
+
+func orderedIndexValueReader(entries []catalog.OrderedIndexRow, column *relationColumn) func(int) exprValue {
+	return func(position int) exprValue {
 		entry := entries[position]
 		if entry.Nulls[0] {
 			return nullValue()
@@ -825,38 +852,40 @@ func boundedOrderedIndex(entries []catalog.OrderedIndexRow, table relationalTabl
 		value, _ := relationStoredValue(*column, entry.Keys[0])
 		return value
 	}
-	start, end := 0, len(entries)
-	if !index.Parts[0].Descending {
-		if table.bounds.lower.present {
-			start = sort.Search(len(entries), func(position int) bool {
-				comparison := compareOrderedIndexValues(valueAt(position), table.bounds.lower.value, column)
-				return comparison > 0 || comparison == 0 && table.bounds.lower.inclusive
-			})
-		}
-		if table.bounds.upper.present {
-			end = sort.Search(len(entries), func(position int) bool {
-				comparison := compareOrderedIndexValues(valueAt(position), table.bounds.upper.value, column)
-				return comparison > 0 || comparison == 0 && !table.bounds.upper.inclusive
-			})
-		}
-	} else {
-		if table.bounds.upper.present {
-			start = sort.Search(len(entries), func(position int) bool {
-				comparison := compareOrderedIndexValues(valueAt(position), table.bounds.upper.value, column)
-				return comparison < 0 || comparison == 0 && table.bounds.upper.inclusive
-			})
-		}
-		if table.bounds.lower.present {
-			end = sort.Search(len(entries), func(position int) bool {
-				comparison := compareOrderedIndexValues(valueAt(position), table.bounds.lower.value, column)
-				return comparison < 0 || comparison == 0 && !table.bounds.lower.inclusive
-			})
-		}
+}
+
+func ascendingOrderedIndexBounds(length int, bounds *relationalIndexBounds, column *relationColumn, valueAt func(int) exprValue) (int, int) {
+	start, end := 0, length
+	if bounds.lower.present {
+		start = sort.Search(length, func(position int) bool {
+			comparison := compareOrderedIndexValues(valueAt(position), bounds.lower.value, column)
+			return comparison > 0 || comparison == 0 && bounds.lower.inclusive
+		})
 	}
-	if start > end {
-		start = end
+	if bounds.upper.present {
+		end = sort.Search(length, func(position int) bool {
+			comparison := compareOrderedIndexValues(valueAt(position), bounds.upper.value, column)
+			return comparison > 0 || comparison == 0 && !bounds.upper.inclusive
+		})
 	}
-	return entries[start:end], nil
+	return start, end
+}
+
+func descendingOrderedIndexBounds(length int, bounds *relationalIndexBounds, column *relationColumn, valueAt func(int) exprValue) (int, int) {
+	start, end := 0, length
+	if bounds.upper.present {
+		start = sort.Search(length, func(position int) bool {
+			comparison := compareOrderedIndexValues(valueAt(position), bounds.upper.value, column)
+			return comparison < 0 || comparison == 0 && bounds.upper.inclusive
+		})
+	}
+	if bounds.lower.present {
+		end = sort.Search(length, func(position int) bool {
+			comparison := compareOrderedIndexValues(valueAt(position), bounds.lower.value, column)
+			return comparison < 0 || comparison == 0 && !bounds.lower.inclusive
+		})
+	}
+	return start, end
 }
 
 type orderedIndexBuildRow struct {
@@ -963,23 +992,27 @@ func orderedIndexColumn(table relationalTableSource, part catalog.IndexPart) *re
 
 func indexScanCacheKey(table catalog.Table, index catalog.Index) string {
 	var key strings.Builder
-	key.WriteString(index.Name)
+	writeIndexCacheKeyField(&key, index.Name)
 	for _, typeName := range table.ColumnTypes {
-		key.WriteByte('|')
-		key.WriteString(typeName)
+		writeIndexCacheKeyField(&key, typeName)
 	}
 	for _, part := range index.Parts {
-		key.WriteByte('|')
-		key.WriteString(part.Column)
-		key.WriteByte(':')
-		key.WriteString(part.Expression)
-		key.WriteByte(':')
-		key.WriteString(strconv.Itoa(part.PrefixLength))
+		writeIndexCacheKeyField(&key, part.Column)
+		writeIndexCacheKeyField(&key, part.Expression)
+		writeIndexCacheKeyField(&key, strconv.Itoa(part.PrefixLength))
 		if part.Descending {
 			key.WriteByte('D')
+		} else {
+			key.WriteByte('A')
 		}
 	}
 	return key.String()
+}
+
+func writeIndexCacheKeyField(key *strings.Builder, value string) {
+	key.WriteString(strconv.Itoa(len(value)))
+	key.WriteByte(':')
+	key.WriteString(value)
 }
 
 func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int, runtime *selectRuntimeBinding) relationRowIterator {
@@ -1022,58 +1055,85 @@ func joinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth,
 
 func hashJoinedRowIterator(left relationRowIterator, join relationalJoin, leftWidth, leftTables int, runtime *selectRuntimeBinding) relationRowIterator {
 	return func(yield relationRowYield) error {
-		started := time.Now()
-		rightStarted := time.Now()
-		buckets, hashBytes, err := buildRightHashBuckets(join, leftWidth)
-		runtime.recordSourceScan(leftTables, join.right, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(rightStarted))
-		if err != nil {
-			return err
-		}
-		matchedRight := make([]bool, len(join.right.table.Rows))
-		inputRows, outputRows, outputBytes := len(join.right.table.Rows), 0, 0
-		err = left(func(row relationRow) error {
-			inputRows++
-			key, present, keyErr := relationalHashKey(join.hash.left, join.hash.comparison, row)
-			if keyErr != nil {
-				return keyErr
-			}
-			matched := false
-			if present {
-				for _, rightIndex := range buckets[key] {
-					candidate := joinedCandidate(row, join.right.table.Rows[rightIndex])
-					ok, matchErr := joinCandidateMatches(join, candidate)
-					if matchErr != nil {
-						return matchErr
-					}
-					if !ok {
-						continue
-					}
-					matched, matchedRight[rightIndex] = true, true
-					outputRows++
-					outputBytes += relationRowMemory(candidate)
-					if yieldErr := yield(candidate); yieldErr != nil {
-						return yieldErr
-					}
-				}
-			}
-			if !matched && join.kind == "left" {
-				candidate := appendNullRight(row, len(join.right.columns))
-				outputRows++
-				outputBytes += relationRowMemory(candidate)
-				return yield(candidate)
-			}
-			return nil
-		})
-		if err == nil && join.kind == "right" {
-			err = yieldUnmatchedRight(join.right.table.Rows, matchedRight, leftWidth, leftTables, func(row relationRow) error {
-				outputRows++
-				outputBytes += relationRowMemory(row)
-				return yield(row)
-			})
-		}
-		runtime.recordJoin(leftTables-1, inputRows, outputRows, hashBytes+outputBytes, time.Since(started))
+		return runHashJoin(left, join, leftWidth, leftTables, runtime, yield)
+	}
+}
+
+type hashJoinRun struct {
+	join                   relationalJoin
+	buckets                map[string][]int
+	matchedRight           []bool
+	yield                  relationRowYield
+	inputRows, outputRows  int
+	outputBytes, leftWidth int
+	leftTables             int
+}
+
+func runHashJoin(left relationRowIterator, join relationalJoin, leftWidth, leftTables int, runtime *selectRuntimeBinding, yield relationRowYield) error {
+	started, rightStarted := time.Now(), time.Now()
+	buckets, hashBytes, err := buildRightHashBuckets(join, leftWidth)
+	runtime.recordSourceScan(leftTables, join.right, len(join.right.table.Rows), sourceRowBytes(join.right.table.Rows), time.Since(rightStarted))
+	if err != nil {
 		return err
 	}
+	run := &hashJoinRun{
+		join: join, buckets: buckets, matchedRight: make([]bool, len(join.right.table.Rows)),
+		yield: yield, inputRows: len(join.right.table.Rows), leftWidth: leftWidth, leftTables: leftTables,
+	}
+	err = left(run.yieldLeftRow)
+	if err == nil {
+		err = run.yieldRightRemainder()
+	}
+	runtime.recordJoin(leftTables-1, run.inputRows, run.outputRows, hashBytes+run.outputBytes, time.Since(started))
+	return err
+}
+
+func (run *hashJoinRun) yieldLeftRow(row relationRow) error {
+	run.inputRows++
+	key, present, err := relationalHashKey(run.join.hash.left, run.join.hash.comparison, row)
+	if err != nil {
+		return err
+	}
+	matched := false
+	if present {
+		matched, err = run.yieldMatches(row, run.buckets[key])
+	}
+	if err != nil || matched || run.join.kind != "left" {
+		return err
+	}
+	return run.emit(appendNullRight(row, len(run.join.right.columns)))
+}
+
+func (run *hashJoinRun) yieldMatches(row relationRow, indexes []int) (bool, error) {
+	matched := false
+	for _, rightIndex := range indexes {
+		candidate := joinedCandidate(row, run.join.right.table.Rows[rightIndex])
+		ok, err := joinCandidateMatches(run.join, candidate)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			continue
+		}
+		matched, run.matchedRight[rightIndex] = true, true
+		if err := run.emit(candidate); err != nil {
+			return false, err
+		}
+	}
+	return matched, nil
+}
+
+func (run *hashJoinRun) yieldRightRemainder() error {
+	if run.join.kind != "right" {
+		return nil
+	}
+	return yieldUnmatchedRight(run.join.right.table.Rows, run.matchedRight, run.leftWidth, run.leftTables, run.emit)
+}
+
+func (run *hashJoinRun) emit(row relationRow) error {
+	run.outputRows++
+	run.outputBytes += relationRowMemory(row)
+	return run.yield(row)
 }
 
 func buildRightHashBuckets(join relationalJoin, leftWidth int) (map[string][]int, int, error) {

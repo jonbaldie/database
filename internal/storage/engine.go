@@ -19,6 +19,7 @@ type Engine struct {
 	commitsSinceCheckpoint int
 	checkpoint             checkpointState
 	checkpointHook         func(checkpointPhase) error
+	checkpointSyncHook     func() error
 	closed                 bool
 }
 

@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jonbaldie/database/internal/catalog"
@@ -81,5 +82,43 @@ func TestBackupInstanceRequiresOperationalControl(t *testing.T) {
 	failure, ok := err.(sqlFailure)
 	if !ok || failure.code != 1227 {
 		t.Fatalf("expected access denied, got %#v", err)
+	}
+}
+
+func TestBackupInstanceStreamsCatalogInBoundedChunks(t *testing.T) {
+	executor := backupExecutor(t, "admin", nil)
+	executor.streamRows = true
+	if err := executor.server.config.Catalog.CreateTableWithTypes("app", "items", []string{"value"}, []string{"TEXT"}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	payload := strings.Repeat("x", instanceBackupChunkSize*2)
+	if err := executor.server.config.Catalog.ReplaceRows("app", "items", [][]string{{payload}}); err != nil {
+		t.Fatalf("replace rows: %v", err)
+	}
+	result, err := executeStatement(executor, "BACKUP INSTANCE")
+	if err != nil {
+		t.Fatalf("backup instance: %v", err)
+	}
+	if result.stream == nil || len(result.rows) != 0 {
+		t.Fatalf("stream result = %#v", result)
+	}
+	files := map[string]string{}
+	chunks := map[string]int{}
+	if err := result.stream(func(row []string, _ []bool) error {
+		files[row[0]] += row[1]
+		chunks[row[0]]++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if chunks["catalog.json"] < 2 {
+		t.Fatalf("catalog chunks = %d, want at least 2", chunks["catalog.json"])
+	}
+	var definition catalog.Definition
+	if err := json.Unmarshal([]byte(files["catalog.json"]), &definition); err != nil {
+		t.Fatalf("decode streamed catalog: %v", err)
+	}
+	if got := definition.Namespaces["app"].Tables["items"].Rows[0][0]; got != payload {
+		t.Fatalf("streamed payload length = %d, want %d", len(got), len(payload))
 	}
 }

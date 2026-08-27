@@ -120,6 +120,37 @@ func TestCheckpointRejectsDamagedPublishedFile(t *testing.T) {
 	}
 }
 
+func TestCheckpointDirectorySyncFailureStopsFurtherCommits(t *testing.T) {
+	directory := t.TempDir()
+	engine := openCheckpointTestEngine(t, directory)
+	syncs := 0
+	engine.checkpointSyncHook = func() error {
+		syncs++
+		if syncs == 2 {
+			return errString("simulated directory sync failure")
+		}
+		return nil
+	}
+	for id := range checkpointEveryCommits {
+		insertCheckpointTestRow(t, engine, id)
+	}
+	if _, err := engine.Begin(); err != errClosed {
+		t.Fatalf("begin after publication failure = %v, want %v", err, errClosed)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got := reopened.RowCount("app", "items"); got != checkpointEveryCommits {
+		t.Fatalf("row count = %d, want %d", got, checkpointEveryCommits)
+	}
+}
+
 func openCheckpointTestEngine(t *testing.T, directory string) *Engine {
 	t.Helper()
 	engine, err := Open(directory)

@@ -48,6 +48,10 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 		return err
 	}
 	defer txn.engine.mu.RUnlock()
+	return stageInsert(overlay, row)
+}
+
+func stageInsert(overlay *tableOverlay, row []string) error {
 	if err := overlay.base.validateRow(row); err != nil {
 		return err
 	}
@@ -171,6 +175,10 @@ func (txn *Transaction) UpdatePrimary(namespace, name, primary string, row []str
 		return err
 	}
 	defer txn.engine.mu.RUnlock()
+	return stagePrimaryUpdate(overlay, primary, row)
+}
+
+func stagePrimaryUpdate(overlay *tableOverlay, primary string, row []string) error {
 	if err := overlay.base.validateRow(row); err != nil {
 		return err
 	}

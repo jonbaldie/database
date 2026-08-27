@@ -46,32 +46,33 @@ func (s *Store) prepareNamespaceRowSync(prepared *preparedRowSync, previousNames
 		namespaceName = namespaceKey
 	}
 	for tableKey, table := range namespace.Tables {
-		tableName := table.Name
-		if tableName == "" {
-			tableName = tableKey
-		}
-		previousTable, existed := previousNamespace.Tables[tableKey]
-		schemaChanged := !existed || !sameRowStorageSchema(previousTable, table)
-		rowsChanged := !sameRowSlice(previousTable.Rows, table.Rows)
-		if !schemaChanged && !rowsChanged {
-			continue
-		}
-		if err := s.ensureRowTable(namespaceName, table); err != nil {
+		if err := s.prepareTableRowSync(prepared, previousNamespace, namespaceName, tableKey, table); err != nil {
 			return err
-		}
-		if !rowsChanged {
-			continue
-		}
-		primary, _ := tableKeyColumns(table)
-		txn, err := s.stageTableRows(namespaceName, tableName, previousTable.Rows, table.Rows, table, primary)
-		if err != nil {
-			return err
-		}
-		if txn != nil {
-			prepared.txns = append(prepared.txns, txn)
 		}
 	}
 	return nil
+}
+
+func (s *Store) prepareTableRowSync(prepared *preparedRowSync, previousNamespace Namespace, namespaceName, tableKey string, table Table) error {
+	previousTable, existed := previousNamespace.Tables[tableKey]
+	schemaChanged := !existed || !sameRowStorageSchema(previousTable, table)
+	rowsChanged := !sameRowSlice(previousTable.Rows, table.Rows)
+	if !schemaChanged && !rowsChanged {
+		return nil
+	}
+	if err := s.ensureRowTable(namespaceName, table); err != nil || !rowsChanged {
+		return err
+	}
+	tableName := table.Name
+	if tableName == "" {
+		tableName = tableKey
+	}
+	primary, _ := tableKeyColumns(table)
+	txn, err := s.stageTableRows(namespaceName, tableName, previousTable.Rows, table.Rows, table, primary)
+	if err == nil && txn != nil {
+		prepared.txns = append(prepared.txns, txn)
+	}
+	return err
 }
 
 func sameRowStorageSchema(left, right Table) bool {

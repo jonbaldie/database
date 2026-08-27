@@ -36,7 +36,8 @@ func (p *relationalSelectPlan) windowRankPartitionValues(rows []relationalResult
 	dense := function.name == "DENSE_RANK"
 	rank := int64(1)
 	values[0] = intValue(rank)
-	for position := 1; position < len(partition); position++ {
+	length := len(partition)
+	for position := 1; position < length; position++ {
 		tied, err := p.windowResultRowsTie(rows[partition[position-1]], rows[partition[position]], function.spec)
 		if err != nil {
 			return nil, err
@@ -76,25 +77,24 @@ func (p *relationalSelectPlan) windowPositionalPartitionValues(rows []relational
 	}
 	values := make([]exprValue, len(partition))
 	for position, frame := range frames {
-		if frame.empty() {
-			values[position] = nullValue()
-			continue
-		}
-		target, valid, targetErr := positionalWindowTarget(function.name, arguments, frame.end-frame.start+1)
-		if targetErr != nil {
-			return nil, targetErr
-		}
-		if !valid {
-			values[position] = nullValue()
-			continue
-		}
-		value, valueErr := p.windowExpressionValue(rows[partition[frame.start+target]], arguments[0])
-		if valueErr != nil {
-			return nil, valueErr
+		value, err := p.windowPositionalFrameValue(rows, partition, frame, function.name, arguments)
+		if err != nil {
+			return nil, err
 		}
 		values[position] = value
 	}
 	return values, nil
+}
+
+func (p *relationalSelectPlan) windowPositionalFrameValue(rows []relationalResultRow, partition []int, frame windowFrameRange, name string, arguments []string) (exprValue, error) {
+	if frame.empty() {
+		return nullValue(), nil
+	}
+	target, valid, err := positionalWindowTarget(name, arguments, frame.end-frame.start+1)
+	if err != nil || !valid {
+		return nullValue(), err
+	}
+	return p.windowExpressionValue(rows[partition[frame.start+target]], arguments[0])
 }
 
 func (p *relationalSelectPlan) windowFrameRanges(rows []relationalResultRow, partition []int, spec relationalWindowSpec) ([]windowFrameRange, error) {
@@ -163,9 +163,10 @@ func (p *relationalSelectPlan) peerWindowFrameRanges(rows []relationalResultRow,
 func (p *relationalSelectPlan) windowPeerBounds(rows []relationalResultRow, partition []int, spec relationalWindowSpec) ([]int, []int, error) {
 	starts := make([]int, len(partition))
 	ends := make([]int, len(partition))
-	for groupStart := 0; groupStart < len(partition); {
+	length := len(partition)
+	for groupStart := 0; groupStart < length; {
 		groupEnd := groupStart
-		for groupEnd+1 < len(partition) {
+		for groupEnd+1 < length {
 			tied, err := p.windowResultRowsTie(rows[partition[groupEnd]], rows[partition[groupEnd+1]], spec)
 			if err != nil {
 				return nil, nil, err
@@ -197,43 +198,51 @@ func (p *relationalSelectPlan) numericRangeFrameRanges(rows []relationalResultRo
 	nonNullStart, nonNullEnd := windowNonNullBounds(orderValues)
 	ranges := make([]windowFrameRange, len(partition))
 	for position, current := range orderValues {
-		if current.isNull() {
-			ranges[position] = windowFrameRange{start: peerStarts[position], end: peerEnds[position]}
-			continue
-		}
-		lower, lowerOpen, err := rangeFrameBoundary(current, frame.start, order.direction, true)
+		calculated, err := numericRangeFrameRange(orderValues, position, current, peerStarts, peerEnds, nonNullStart, nonNullEnd, order, frame)
 		if err != nil {
 			return nil, err
 		}
-		upper, upperOpen, err := rangeFrameBoundary(current, frame.end, order.direction, false)
-		if err != nil {
-			return nil, err
-		}
-		start, end := nonNullStart, nonNullEnd
-		if !lowerOpen {
-			start, err = windowRangeLowerBound(orderValues, nonNullStart, nonNullEnd+1, lower, order.direction)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if !upperOpen {
-			upperEnd, upperErr := windowRangeUpperBound(orderValues, nonNullStart, nonNullEnd+1, upper, order.direction)
-			if upperErr != nil {
-				return nil, upperErr
-			}
-			end = upperEnd - 1
-		}
-		ranges[position] = windowFrameRange{start: start, end: end}
+		ranges[position] = calculated
 	}
 	return ranges, nil
+}
+
+func numericRangeFrameRange(values []exprValue, position int, current exprValue, peerStarts, peerEnds []int, nonNullStart, nonNullEnd int, order relationalWindowOrder, frame relationalWindowFrame) (windowFrameRange, error) {
+	if current.isNull() {
+		return windowFrameRange{start: peerStarts[position], end: peerEnds[position]}, nil
+	}
+	lower, lowerOpen, err := rangeFrameBoundary(current, frame.start, order.direction, true)
+	if err != nil {
+		return windowFrameRange{}, err
+	}
+	upper, upperOpen, err := rangeFrameBoundary(current, frame.end, order.direction, false)
+	if err != nil {
+		return windowFrameRange{}, err
+	}
+	start, end := nonNullStart, nonNullEnd
+	if !lowerOpen {
+		start, err = windowRangeLowerBound(values, nonNullStart, nonNullEnd+1, lower, order.direction)
+	}
+	if err != nil {
+		return windowFrameRange{}, err
+	}
+	if !upperOpen {
+		upperEnd, upperErr := windowRangeUpperBound(values, nonNullStart, nonNullEnd+1, upper, order.direction)
+		if upperErr != nil {
+			return windowFrameRange{}, upperErr
+		}
+		end = upperEnd - 1
+	}
+	return windowFrameRange{start: start, end: end}, nil
 }
 
 func windowValuePeerBounds(values []exprValue, order relationalWindowOrder, plan *relationalSelectPlan) ([]int, []int) {
 	starts := make([]int, len(values))
 	ends := make([]int, len(values))
-	for groupStart := 0; groupStart < len(values); {
+	length := len(values)
+	for groupStart := 0; groupStart < length; {
 		groupEnd := groupStart
-		for groupEnd+1 < len(values) && plan.compareWindowOrderValues(order, values[groupEnd], values[groupEnd+1]) == 0 {
+		for groupEnd+1 < length && plan.compareWindowOrderValues(order, values[groupEnd], values[groupEnd+1]) == 0 {
 			groupEnd++
 		}
 		for position := groupStart; position <= groupEnd; position++ {
@@ -247,10 +256,11 @@ func windowValuePeerBounds(values []exprValue, order relationalWindowOrder, plan
 
 func windowNonNullBounds(values []exprValue) (int, int) {
 	start := 0
-	for start < len(values) && values[start].isNull() {
+	length := len(values)
+	for start < length && values[start].isNull() {
 		start++
 	}
-	end := len(values) - 1
+	end := length - 1
 	for end >= 0 && values[end].isNull() {
 		end--
 	}
@@ -297,12 +307,50 @@ type windowAggregateInput struct {
 
 type rollingWindowAggregate struct {
 	aggregate   relationalAggregate
+	kind        rollingAggregateKind
 	inputs      []windowAggregateInput
 	frequencies map[string]int
 	count       int
 	total       exprValue
 	extremes    []int
 	extremeHead int
+}
+
+type rollingAggregateKind byte
+
+const (
+	rollingCount rollingAggregateKind = iota
+	rollingSum
+	rollingAverage
+	rollingMinimum
+	rollingMaximum
+)
+
+func rollingAggregateKindFor(name string) rollingAggregateKind {
+	switch name {
+	case "COUNT":
+		return rollingCount
+	case "AVG":
+		return rollingAverage
+	case "MIN":
+		return rollingMinimum
+	case "MAX":
+		return rollingMaximum
+	default:
+		return rollingSum
+	}
+}
+
+func (kind rollingAggregateKind) usesExtremes() bool {
+	return kind == rollingMinimum || kind == rollingMaximum
+}
+
+func (kind rollingAggregateKind) tracksTotal() bool {
+	return kind == rollingSum || kind == rollingAverage
+}
+
+func (kind rollingAggregateKind) keepsExtreme(comparison int) bool {
+	return kind == rollingMinimum && comparison < 0 || kind == rollingMaximum && comparison > 0
 }
 
 func (p *relationalSelectPlan) windowAggregatePartitionValues(rows []relationalResultRow, partition []int, function relationalWindowFunction) ([]exprValue, error) {
@@ -314,36 +362,46 @@ func (p *relationalSelectPlan) windowAggregatePartitionValues(rows []relationalR
 	if err != nil {
 		return nil, err
 	}
-	state := rollingWindowAggregate{aggregate: function.relationalAggregate, inputs: inputs}
+	state := rollingWindowAggregate{aggregate: function.relationalAggregate, kind: rollingAggregateKindFor(function.name), inputs: inputs}
 	if function.distinct {
 		state.frequencies = make(map[string]int)
 	}
 	values := make([]exprValue, len(partition))
 	activeStart, activeEnd := 0, -1
 	for position, frame := range frames {
-		if frame.start < activeStart || frame.end < activeEnd {
-			return nil, sqlFailure{1105, "HY000", "window frame bounds moved backwards"}
+		err = state.advance(frame, &activeStart, &activeEnd)
+		if err == nil {
+			values[position], err = state.result()
 		}
-		for activeEnd < frame.end {
-			activeEnd++
-			if err := state.add(activeEnd); err != nil {
-				return nil, err
-			}
-		}
-		for activeStart < frame.start {
-			if activeStart <= activeEnd {
-				if err := state.remove(activeStart); err != nil {
-					return nil, err
-				}
-			}
-			activeStart++
-		}
-		values[position], err = state.result()
 		if err != nil {
 			return nil, err
 		}
 	}
 	return values, nil
+}
+
+func (state *rollingWindowAggregate) advance(frame windowFrameRange, activeStart, activeEnd *int) error {
+	if frame.start < *activeStart || frame.end < *activeEnd {
+		return sqlFailure{1105, "HY000", "window frame bounds moved backwards"}
+	}
+	// Remove rows before adding their replacements. This keeps the rolling
+	// total inside the value range when two individually valid values would
+	// overflow if they were present together for one intermediate step.
+	for *activeStart < frame.start {
+		if *activeStart <= *activeEnd {
+			if err := state.remove(*activeStart); err != nil {
+				return err
+			}
+		}
+		*activeStart++
+	}
+	for *activeEnd < frame.end {
+		*activeEnd++
+		if err := state.add(*activeEnd); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *relationalSelectPlan) windowAggregateInputs(rows []relationalResultRow, partition []int, aggregate relationalAggregate) ([]windowAggregateInput, error) {
@@ -373,20 +431,17 @@ func (state *rollingWindowAggregate) add(position int) error {
 	if !input.present {
 		return nil
 	}
-	if state.aggregate.distinct && state.aggregate.name != "MIN" && state.aggregate.name != "MAX" {
-		state.frequencies[input.key]++
-		if state.frequencies[input.key] > 1 {
-			return nil
-		}
+	if state.skipDistinctAddition(input) {
+		return nil
 	}
-	if state.aggregate.name == "MIN" || state.aggregate.name == "MAX" {
+	if state.kind.usesExtremes() {
 		if err := state.addExtreme(position); err != nil {
 			return err
 		}
 		state.count++
 		return nil
 	}
-	if state.aggregate.name != "COUNT" {
+	if state.kind.tracksTotal() {
 		if state.count == 0 {
 			state.total = aggregateTotalStart(state.aggregate.name, input.value)
 		} else {
@@ -401,19 +456,23 @@ func (state *rollingWindowAggregate) add(position int) error {
 	return nil
 }
 
+func (state *rollingWindowAggregate) skipDistinctAddition(input windowAggregateInput) bool {
+	if !state.aggregate.distinct || state.kind.usesExtremes() {
+		return false
+	}
+	state.frequencies[input.key]++
+	return state.frequencies[input.key] > 1
+}
+
 func (state *rollingWindowAggregate) remove(position int) error {
 	input := state.inputs[position]
 	if !input.present {
 		return nil
 	}
-	if state.aggregate.distinct && state.aggregate.name != "MIN" && state.aggregate.name != "MAX" {
-		state.frequencies[input.key]--
-		if state.frequencies[input.key] > 0 {
-			return nil
-		}
-		delete(state.frequencies, input.key)
+	if state.skipDistinctRemoval(input) {
+		return nil
 	}
-	if state.aggregate.name == "MIN" || state.aggregate.name == "MAX" {
+	if state.kind.usesExtremes() {
 		if state.extremeHead < len(state.extremes) && state.extremes[state.extremeHead] == position {
 			state.extremeHead++
 		}
@@ -421,7 +480,7 @@ func (state *rollingWindowAggregate) remove(position int) error {
 		return nil
 	}
 	state.count--
-	if state.aggregate.name == "COUNT" || state.count == 0 {
+	if !state.kind.tracksTotal() || state.count == 0 {
 		return nil
 	}
 	var err error
@@ -429,34 +488,57 @@ func (state *rollingWindowAggregate) remove(position int) error {
 	return err
 }
 
+func (state *rollingWindowAggregate) skipDistinctRemoval(input windowAggregateInput) bool {
+	if !state.aggregate.distinct || state.kind.usesExtremes() {
+		return false
+	}
+	state.frequencies[input.key]--
+	if state.frequencies[input.key] > 0 {
+		return true
+	}
+	delete(state.frequencies, input.key)
+	return false
+}
+
 func (state *rollingWindowAggregate) addExtreme(position int) error {
-	for len(state.extremes) > state.extremeHead {
-		last := state.extremes[len(state.extremes)-1]
+	for state.hasExtremeCandidate() {
+		lastIndex := len(state.extremes) - 1
+		last := state.extremes[lastIndex]
 		comparison, err := compareOperands(state.inputs[last].value, state.inputs[position].value)
 		if err != nil {
 			return err
 		}
-		if (state.aggregate.name == "MIN" && comparison < 0) || (state.aggregate.name == "MAX" && comparison > 0) {
+		if state.kind.keepsExtreme(comparison) {
 			break
 		}
-		state.extremes = state.extremes[:len(state.extremes)-1]
+		state.extremes = state.extremes[:lastIndex]
 	}
 	state.extremes = append(state.extremes, position)
 	return nil
 }
 
+func (state *rollingWindowAggregate) hasExtremeCandidate() bool {
+	return len(state.extremes) > state.extremeHead
+}
+
 func (state *rollingWindowAggregate) result() (exprValue, error) {
-	if state.aggregate.name == "COUNT" {
+	switch state.kind {
+	case rollingCount:
 		return intValue(int64(state.count)), nil
-	}
-	if state.count == 0 {
-		return nullValue(), nil
-	}
-	if state.aggregate.name == "MIN" || state.aggregate.name == "MAX" {
+	case rollingMinimum, rollingMaximum:
+		if state.count == 0 {
+			return nullValue(), nil
+		}
 		return state.inputs[state.extremes[state.extremeHead]].value, nil
-	}
-	if state.aggregate.name == "AVG" {
+	case rollingAverage:
+		if state.count == 0 {
+			return nullValue(), nil
+		}
 		return divideArithmetic(state.total, intValue(int64(state.count)))
+	default:
+		if state.count == 0 {
+			return nullValue(), nil
+		}
+		return state.total, nil
 	}
-	return state.total, nil
 }

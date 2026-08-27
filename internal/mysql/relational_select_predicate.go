@@ -624,16 +624,19 @@ func stripRelationParentheses(value string) string {
 	matches := relationParenthesisMatches(value)
 	start, end := 0, len(value)
 	for start < end && value[start] == '(' && matches[start] == end-1 {
-		start++
-		end--
-		for start < end && isRelationSpace(value[start]) {
-			start++
-		}
-		for start < end && isRelationSpace(value[end-1]) {
-			end--
-		}
+		start, end = trimRelationParenthesisLayer(value, start+1, end-1)
 	}
 	return value[start:end]
+}
+
+func trimRelationParenthesisLayer(value string, start, end int) (int, int) {
+	for start < end && isRelationSpace(value[start]) {
+		start++
+	}
+	for start < end && isRelationSpace(value[end-1]) {
+		end--
+	}
+	return start, end
 }
 
 func relationParenthesisMatches(value string) []int {
@@ -643,29 +646,41 @@ func relationParenthesisMatches(value string) []int {
 	}
 	stack := make([]int, 0)
 	quoted := false
-	for index := 0; index < len(value); index++ {
-		if value[index] == '\'' {
-			if quoted && index+1 < len(value) && value[index+1] == '\'' {
-				index++
-				continue
-			}
-			quoted = !quoted
+	length := len(value)
+	for index := 0; index < length; index++ {
+		next, nextQuoted, handled := advanceRelationParenthesisQuote(value, index, quoted)
+		if handled {
+			index, quoted = next, nextQuoted
 			continue
 		}
 		if quoted {
 			continue
 		}
-		switch value[index] {
-		case '(':
-			stack = append(stack, index)
-		case ')':
-			if len(stack) == 0 {
-				continue
-			}
-			open := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			matches[open] = index
-		}
+		stack = recordRelationParenthesis(value[index], index, stack, matches)
 	}
 	return matches
+}
+
+func advanceRelationParenthesisQuote(value string, index int, quoted bool) (int, bool, bool) {
+	if value[index] != '\'' {
+		return index, quoted, false
+	}
+	if quoted && index+1 < len(value) && value[index+1] == '\'' {
+		return index + 1, quoted, true
+	}
+	return index, !quoted, true
+}
+
+func recordRelationParenthesis(character byte, index int, stack, matches []int) []int {
+	switch character {
+	case '(':
+		return append(stack, index)
+	case ')':
+		if len(stack) > 0 {
+			open := stack[len(stack)-1]
+			matches[open] = index
+			return stack[:len(stack)-1]
+		}
+	}
+	return stack
 }

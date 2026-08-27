@@ -30,25 +30,19 @@ func (e *Engine) replayWAL() error {
 		return err
 	}
 	defer file.Close()
+	return e.replayWALFile(file)
+}
+
+func (e *Engine) replayWALFile(file *os.File) error {
 	generation, headerSize, err := inspectWALHeader(file)
 	if err != nil {
 		return err
 	}
 	e.walGeneration = generation
 	e.walHeaderSize = headerSize
-	start := headerSize
-	if e.checkpoint.loaded {
-		switch generation {
-		case e.checkpoint.walGeneration:
-			start = e.checkpoint.walOffset
-		case e.checkpoint.walGeneration + 1:
-			if headerSize == 0 {
-				return fmt.Errorf("checkpoint WAL generation has no header")
-			}
-			start = headerSize
-		default:
-			return fmt.Errorf("WAL generation %d does not follow checkpoint generation %d", generation, e.checkpoint.walGeneration)
-		}
+	start, err := e.walReplayStart(generation, headerSize)
+	if err != nil {
+		return err
 	}
 	info, err := file.Stat()
 	if err != nil {
@@ -60,6 +54,27 @@ func (e *Engine) replayWAL() error {
 	if _, err := file.Seek(start, io.SeekStart); err != nil {
 		return err
 	}
+	return e.replayWALRecords(file)
+}
+
+func (e *Engine) walReplayStart(generation uint64, headerSize int64) (int64, error) {
+	if !e.checkpoint.loaded {
+		return headerSize, nil
+	}
+	switch generation {
+	case e.checkpoint.walGeneration:
+		return e.checkpoint.walOffset, nil
+	case e.checkpoint.walGeneration + 1:
+		if headerSize == 0 {
+			return 0, fmt.Errorf("checkpoint WAL generation has no header")
+		}
+		return headerSize, nil
+	default:
+		return 0, fmt.Errorf("WAL generation %d does not follow checkpoint generation %d", generation, e.checkpoint.walGeneration)
+	}
+}
+
+func (e *Engine) replayWALRecords(file *os.File) error {
 	for {
 		record, done, err := readWALRecord(file)
 		if done {

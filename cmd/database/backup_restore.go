@@ -533,49 +533,73 @@ func (archive backupArchive) Close() error {
 }
 
 func readBackupEntries(archive *tar.Reader, directory string) (backupManifest, map[string]storedBackupFile, error) {
-	files := make(map[string]storedBackupFile)
-	seen := make(map[string]bool)
-	var manifest backupManifest
-	manifestFound := false
-	buffer := make([]byte, 64*1024)
+	reader := backupEntryReader{
+		archive: archive, directory: directory,
+		files: make(map[string]storedBackupFile), seen: make(map[string]bool),
+		buffer: make([]byte, 64*1024),
+	}
 	for {
 		header, err := archive.Next()
 		if errors.Is(err, io.EOF) {
-			if !manifestFound {
-				return backupManifest{}, nil, errors.New("backup manifest is missing")
-			}
-			return manifest, files, nil
+			return reader.result()
 		}
 		if err != nil {
 			return backupManifest{}, nil, errors.New("invalid backup archive")
 		}
-		path, err := restorePath("", header.Name)
-		if err != nil || path == "" {
-			return backupManifest{}, nil, errors.New("unsafe backup path")
-		}
-		if header.FileInfo().IsDir() {
-			continue
-		}
-		if !header.FileInfo().Mode().IsRegular() || header.Size < 0 {
-			return backupManifest{}, nil, errors.New("invalid backup archive entry")
-		}
-		if seen[path] {
-			return backupManifest{}, nil, errors.New("duplicate backup archive entry")
-		}
-		seen[path] = true
-		if path == backupManifestPath {
-			if manifestFound || decodeBackupManifest(archive, header.Size, &manifest) != nil {
-				return backupManifest{}, nil, errors.New("invalid backup manifest")
-			}
-			manifestFound = true
-			continue
-		}
-		stored, err := extractBackupEntry(archive, directory, path, header.Size, buffer)
-		if err != nil {
+		if err := reader.read(header); err != nil {
 			return backupManifest{}, nil, err
 		}
-		files[path] = stored
 	}
+}
+
+type backupEntryReader struct {
+	archive       *tar.Reader
+	directory     string
+	files         map[string]storedBackupFile
+	seen          map[string]bool
+	manifest      backupManifest
+	manifestFound bool
+	buffer        []byte
+}
+
+func (reader *backupEntryReader) result() (backupManifest, map[string]storedBackupFile, error) {
+	if !reader.manifestFound {
+		return backupManifest{}, nil, errors.New("backup manifest is missing")
+	}
+	return reader.manifest, reader.files, nil
+}
+
+func (reader *backupEntryReader) read(header *tar.Header) error {
+	path, err := restorePath("", header.Name)
+	if err != nil || path == "" {
+		return errors.New("unsafe backup path")
+	}
+	if header.FileInfo().IsDir() {
+		return nil
+	}
+	if !header.FileInfo().Mode().IsRegular() || header.Size < 0 {
+		return errors.New("invalid backup archive entry")
+	}
+	if reader.seen[path] {
+		return errors.New("duplicate backup archive entry")
+	}
+	reader.seen[path] = true
+	if path == backupManifestPath {
+		return reader.readManifest(header.Size)
+	}
+	stored, err := extractBackupEntry(reader.archive, reader.directory, path, header.Size, reader.buffer)
+	if err == nil {
+		reader.files[path] = stored
+	}
+	return err
+}
+
+func (reader *backupEntryReader) readManifest(size int64) error {
+	if reader.manifestFound || decodeBackupManifest(reader.archive, size, &reader.manifest) != nil {
+		return errors.New("invalid backup manifest")
+	}
+	reader.manifestFound = true
+	return nil
 }
 
 func decodeBackupManifest(archive io.Reader, size int64, manifest *backupManifest) error {
@@ -705,11 +729,113 @@ func validateBackupCatalogFile(path string) error {
 		return err
 	}
 	defer file.Close()
-	var definition catalog.Definition
-	if err := json.NewDecoder(file).Decode(&definition); err != nil || definition.Namespaces == nil {
+	return validateBackupCatalogReader(file)
+}
+
+func validateBackupCatalogReader(reader io.Reader) error {
+	decoder := json.NewDecoder(reader)
+	if err := requireBackupJSONDelimiter(decoder, '{'); err != nil {
+		return errors.New("invalid catalog")
+	}
+	namespaces, err := consumeBackupCatalogObject(decoder)
+	if err != nil || !namespaces {
+		return errors.New("invalid catalog")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return errors.New("invalid catalog")
 	}
 	return nil
+}
+
+func consumeBackupCatalogObject(decoder *json.Decoder) (bool, error) {
+	namespaces := false
+	for decoder.More() {
+		name, err := readBackupJSONKey(decoder)
+		if err != nil {
+			return false, err
+		}
+		value, err := decoder.Token()
+		if err != nil {
+			return false, err
+		}
+		if name == "namespaces" {
+			namespaces = value == json.Delim('{')
+		}
+		if err := consumeBackupJSONValue(decoder, value, 0); err != nil {
+			return false, err
+		}
+	}
+	return namespaces, requireBackupJSONDelimiter(decoder, '}')
+}
+
+func readBackupJSONKey(decoder *json.Decoder) (string, error) {
+	key, err := decoder.Token()
+	if err != nil {
+		return "", err
+	}
+	name, ok := key.(string)
+	if !ok {
+		return "", errors.New("invalid JSON object key")
+	}
+	return name, nil
+}
+
+func requireBackupJSONDelimiter(decoder *json.Decoder, want json.Delim) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != want {
+		return errors.New("invalid JSON delimiter")
+	}
+	return nil
+}
+
+func consumeBackupJSONValue(decoder *json.Decoder, first json.Token, depth int) error {
+	delimiter, structured := first.(json.Delim)
+	if !structured {
+		return nil
+	}
+	if depth >= 128 {
+		return errors.New("JSON nesting is too deep")
+	}
+	switch delimiter {
+	case '{':
+		return consumeBackupJSONObject(decoder, depth+1)
+	case '[':
+		return consumeBackupJSONArray(decoder, depth+1)
+	default:
+		return errors.New("invalid JSON value")
+	}
+}
+
+func consumeBackupJSONObject(decoder *json.Decoder, depth int) error {
+	for decoder.More() {
+		if _, err := readBackupJSONKey(decoder); err != nil {
+			return err
+		}
+		if err := consumeNextBackupJSONValue(decoder, depth); err != nil {
+			return err
+		}
+	}
+	return requireBackupJSONDelimiter(decoder, '}')
+}
+
+func consumeBackupJSONArray(decoder *json.Decoder, depth int) error {
+	for decoder.More() {
+		if err := consumeNextBackupJSONValue(decoder, depth); err != nil {
+			return err
+		}
+	}
+	return requireBackupJSONDelimiter(decoder, ']')
+}
+
+func consumeNextBackupJSONValue(decoder *json.Decoder, depth int) error {
+	value, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	return consumeBackupJSONValue(decoder, value, depth)
 }
 
 func restoreBackup(input, directory string) error {
