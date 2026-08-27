@@ -44,6 +44,17 @@ const (
 	collationBin
 )
 
+func collationSQLName(kind collationKind) string {
+	if kind == collationBin {
+		return "utf8mb4_bin"
+	}
+	return "utf8mb4_0900_ai_ci"
+}
+
+func illegalMixOfCollations(left, right characterType) error {
+	return sqlFailure{1267, "HY000", fmt.Sprintf("Illegal mix of collations (%s) and (%s) for operation '='", collationSQLName(left.collation), collationSQLName(right.collation))}
+}
+
 // characterType is the parsed description of a declared character or binary
 // column. A characterNone kind means the declaration belongs to another
 // contract (numeric, temporal, or an unknown legacy type).

@@ -20,7 +20,7 @@ func evalLike(value, pattern exprValue, escape string, negate bool) (exprValue, 
 	if !ok {
 		return exprValue{}, unsupportedExpression()
 	}
-	matched := likeMatch(value.render(), pattern.render(), escapeRune, true)
+	matched := likeMatch(value.render(), pattern.render(), escapeRune, value.collation != collationBin)
 	return boolValue(matched != negate), nil
 }
 

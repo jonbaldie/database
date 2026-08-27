@@ -261,8 +261,12 @@ func relationCharacterComparisonType(left, right relationOperand) (characterType
 		if typ.kind != characterText {
 			continue
 		}
-		if !found || typ.collation == collationBin {
+		if !found {
 			selected, found = typ, true
+			continue
+		}
+		if typ.collation != selected.collation {
+			return characterType{}, false, illegalMixOfCollations(selected, typ)
 		}
 	}
 	return selected, found, nil
@@ -433,6 +437,20 @@ func relationStoredValue(column relationColumn, raw string) (exprValue, error) {
 		}
 		if typ.kind != numericNone {
 			return evaluateScalar(raw)
+		}
+		temporal, temporalErr := parseTemporalType(column.typeName)
+		if temporalErr != nil {
+			return exprValue{}, temporalErr
+		}
+		if temporal.kind != temporalNone {
+			return exprValue{kind: valueString, s: raw, temporal: temporal.kind}, nil
+		}
+		character, characterErr := parseCharacterType(column.typeName)
+		if characterErr != nil {
+			return exprValue{}, characterErr
+		}
+		if character.kind != characterNone {
+			return exprValue{kind: valueString, s: raw, collation: character.collation}, nil
 		}
 	}
 	return stringValue(raw), nil

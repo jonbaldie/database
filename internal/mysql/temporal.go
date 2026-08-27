@@ -166,6 +166,13 @@ func canonicalTemporalValue(typ temporalType, raw, column string, row int) (stri
 	return canonicalTemporalValueAtOffset(typ, raw, column, row, 0)
 }
 
+func temporalComparisonKey(value exprValue) string {
+	if value.temporal == temporalDate {
+		return value.s + " 00:00:00"
+	}
+	return value.s
+}
+
 // canonicalTemporalValueAtOffset validates a temporal literal and stores a
 // TIMESTAMP as its UTC instant. Other temporal families remain wall-clock
 // values. The offset is the session-local offset used to interpret a supplied
