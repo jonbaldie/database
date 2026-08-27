@@ -1,12 +1,44 @@
 package storage_test
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 
 	"github.com/jonbaldie/database/internal/storage"
 )
+
+func TestEngineBoundsWALAfterManyCommits(t *testing.T) {
+	directory := t.TempDir()
+	engine, err := storage.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.EnsureTable("app", "items", []string{"id"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for id := range 1024 {
+		txn, beginErr := engine.Begin()
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if err := txn.Insert("app", "items", []string{strconv.Itoa(id)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := txn.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(filepath.Join(directory, "rows", "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > 16*1024 {
+		t.Fatalf("WAL size = %d, want at most 16 KiB", info.Size())
+	}
+}
 
 func TestEnginePointUpdateDoesNotCopyEveryStoredRow(t *testing.T) {
 	engine, err := storage.Open(t.TempDir())

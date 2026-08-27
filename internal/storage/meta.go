@@ -98,10 +98,25 @@ func (e *Engine) persistMetaLocked() error {
 		builder.WriteByte('\n')
 	}
 	temporary := rowsMetaPath(e.directory) + ".tmp"
-	if err := os.WriteFile(temporary, []byte(builder.String()), 0o600); err != nil {
+	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(temporary, rowsMetaPath(e.directory))
+	_, writeErr := io.WriteString(file, builder.String())
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(temporary, rowsMetaPath(e.directory)); err != nil {
+		return err
+	}
+	return syncRowsDirectory(e.directory)
 }
 
 func (e *Engine) loadMeta() error {
@@ -132,7 +147,7 @@ func (e *Engine) loadMeta() error {
 	return nil
 }
 
-func (e *Engine) loadCheckpoints() error {
+func (e *Engine) loadLegacyCheckpoints() error {
 	for _, current := range e.tables {
 		path := rowsCheckpointPath(e.directory, current.namespace, current.name)
 		file, err := os.Open(path)
@@ -142,7 +157,7 @@ func (e *Engine) loadCheckpoints() error {
 		if err != nil {
 			return err
 		}
-		if err := loadCheckpoint(file, current); err != nil {
+		if err := loadLegacyCheckpoint(file, current); err != nil {
 			_ = file.Close()
 			return err
 		}
@@ -153,7 +168,7 @@ func (e *Engine) loadCheckpoints() error {
 	return nil
 }
 
-func loadCheckpoint(reader io.Reader, current *table) error {
+func loadLegacyCheckpoint(reader io.Reader, current *table) error {
 	buffered := bufio.NewReader(reader)
 	for {
 		row, err := readRow(buffered)

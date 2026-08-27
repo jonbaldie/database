@@ -307,6 +307,8 @@ func (txn *Transaction) Commit() error {
 	if err := publishCommittedOverlays(engine, txn.overlays, keys); err != nil {
 		return err
 	}
+	engine.commitsSinceCheckpoint++
+	_ = engine.maybeCheckpointLocked()
 	txn.finished = true
 	return nil
 }

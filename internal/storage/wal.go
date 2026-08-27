@@ -1,11 +1,17 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
 )
+
+var walFileMagic = []byte("DBWAL001")
+
+const walHeaderSize = int64(16)
 
 func (e *Engine) replayWAL() error {
 	if e.closed {
@@ -13,12 +19,47 @@ func (e *Engine) replayWAL() error {
 	}
 	file, err := os.Open(rowsWalPath(e.directory))
 	if errorsIsNotExist(err) {
+		if e.checkpoint.loaded {
+			return fmt.Errorf("WAL is missing after checkpoint")
+		}
+		e.walGeneration = 0
+		e.walHeaderSize = 0
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	generation, headerSize, err := inspectWALHeader(file)
+	if err != nil {
+		return err
+	}
+	e.walGeneration = generation
+	e.walHeaderSize = headerSize
+	start := headerSize
+	if e.checkpoint.loaded {
+		switch generation {
+		case e.checkpoint.walGeneration:
+			start = e.checkpoint.walOffset
+		case e.checkpoint.walGeneration + 1:
+			if headerSize == 0 {
+				return fmt.Errorf("checkpoint WAL generation has no header")
+			}
+			start = headerSize
+		default:
+			return fmt.Errorf("WAL generation %d does not follow checkpoint generation %d", generation, e.checkpoint.walGeneration)
+		}
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if start < headerSize || start > info.Size() {
+		return fmt.Errorf("checkpoint WAL offset %d is outside WAL size %d", start, info.Size())
+	}
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return err
+	}
 	for {
 		record, done, err := readWALRecord(file)
 		if done {
@@ -31,6 +72,40 @@ func (e *Engine) replayWAL() error {
 			return err
 		}
 	}
+}
+
+func inspectWALHeader(file *os.File) (uint64, int64, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return 0, 0, err
+	}
+	magic := make([]byte, len(walFileMagic))
+	if _, err := io.ReadFull(file, magic); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
+				return 0, 0, seekErr
+			}
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	if !bytes.Equal(magic, walFileMagic) {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return 0, 0, err
+		}
+		return 0, 0, nil
+	}
+	var generation uint64
+	if err := binary.Read(file, binary.LittleEndian, &generation); err != nil {
+		return 0, 0, err
+	}
+	return generation, walHeaderSize, nil
+}
+
+func writeWALHeader(file *os.File, generation uint64) error {
+	if _, err := file.Write(walFileMagic); err != nil {
+		return err
+	}
+	return binary.Write(file, binary.LittleEndian, generation)
 }
 
 func readWALRecord(file *os.File) ([]byte, bool, error) {

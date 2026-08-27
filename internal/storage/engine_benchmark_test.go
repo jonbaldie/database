@@ -7,6 +7,61 @@ import (
 	"github.com/jonbaldie/database/internal/storage"
 )
 
+func BenchmarkEngineStartupAfterWrites(b *testing.B) {
+	for _, writes := range []int{64, 256, 1024} {
+		b.Run("writes="+strconv.Itoa(writes), func(b *testing.B) {
+			directory := b.TempDir()
+			engine, err := storage.Open(directory)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := engine.EnsureTable("app", "items", []string{"id", "value"}, []string{"id"}, nil); err != nil {
+				b.Fatal(err)
+			}
+			seed, err := engine.Begin()
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := seed.Insert("app", "items", []string{"1", "0"}); err != nil {
+				b.Fatal(err)
+			}
+			if err := seed.Commit(); err != nil {
+				b.Fatal(err)
+			}
+			for id := range writes {
+				txn, beginErr := engine.Begin()
+				if beginErr != nil {
+					b.Fatal(beginErr)
+				}
+				if err := txn.UpdatePrimary("app", "items", "1", []string{"1", strconv.Itoa(id)}); err != nil {
+					b.Fatal(err)
+				}
+				if err := txn.Commit(); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := engine.Close(); err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				reopened, openErr := storage.Open(directory)
+				if openErr != nil {
+					b.Fatal(openErr)
+				}
+				if got := reopened.RowCount("app", "items"); got != 1 {
+					b.Fatalf("row count = %d, want 1 after %d writes", got, writes)
+				}
+				if err := reopened.Close(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkEnginePointUpdate(b *testing.B) {
 	for _, rows := range []int{100, 500, 1000} {
 		b.Run("rows="+strconv.Itoa(rows), func(b *testing.B) {
