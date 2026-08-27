@@ -4,8 +4,53 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
+
+func TestApplyCopiesOnlyChangedPrimaryIndex(t *testing.T) {
+	first := Table{
+		Name:        "first",
+		Columns:     []string{"id"},
+		Constraints: []Constraint{{Name: "PRIMARY", Type: ConstraintTypePrimary, Columns: []string{"id"}}},
+		Rows:        [][]string{{"1"}},
+	}
+	second := Table{
+		Name:        "second",
+		Columns:     []string{"id"},
+		Constraints: []Constraint{{Name: "PRIMARY", Type: ConstraintTypePrimary, Columns: []string{"id"}}},
+		Rows:        [][]string{{"2"}},
+	}
+	RebuildPrimaryIndex(&first)
+	RebuildPrimaryIndex(&second)
+	source := Definition{Namespaces: map[string]Namespace{
+		"app": {Name: "app", Tables: map[string]Table{"first": first, "second": second}},
+	}}
+
+	staged, err := Apply(source, func(definition *Definition) error {
+		namespace := definition.Namespaces["app"]
+		table := namespace.Tables["first"]
+		previousLength := len(table.Rows)
+		previousIndex := table.PrimaryIndex
+		table.Rows = append(table.Rows, []string{"3"})
+		MaintainPrimaryIndex(&table, previousLength, previousIndex)
+		namespace.Tables["first"] = table
+		definition.Namespaces["app"] = namespace
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed := staged.Namespaces["app"].Tables["first"].PrimaryIndex
+	unchanged := staged.Namespaces["app"].Tables["second"].PrimaryIndex
+	if reflect.ValueOf(changed).Pointer() == reflect.ValueOf(first.PrimaryIndex).Pointer() {
+		t.Fatal("changed table still shares its primary index")
+	}
+	if reflect.ValueOf(unchanged).Pointer() != reflect.ValueOf(second.PrimaryIndex).Pointer() {
+		t.Fatal("unchanged table copied its primary index")
+	}
+}
 
 func TestRecoverRemovesAbandonedCatalogSnapshot(t *testing.T) {
 	directory := t.TempDir()

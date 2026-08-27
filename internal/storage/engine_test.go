@@ -2,10 +2,79 @@ package storage_test
 
 import (
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/jonbaldie/database/internal/storage"
 )
+
+func TestEnginePointUpdateDoesNotCopyEveryStoredRow(t *testing.T) {
+	engine, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.EnsureTable("app", "items", []string{"id", "value"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := range 256 {
+		value := strconv.Itoa(id)
+		if err := txn.Insert("app", "items", []string{value, value}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var updateErr error
+	allocations := testing.AllocsPerRun(3, func() {
+		var update *storage.Transaction
+		update, updateErr = engine.Begin()
+		if updateErr != nil {
+			return
+		}
+		if updateErr = update.UpdatePrimary("app", "items", "0", []string{"0", "changed"}); updateErr != nil {
+			return
+		}
+		updateErr = update.Commit()
+	})
+	if updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if allocations >= 128 {
+		t.Fatalf("point update allocations = %.0f, want fewer than 128", allocations)
+	}
+}
+
+func TestEngineDoesNotRebuildUnchangedTableMetadata(t *testing.T) {
+	engine, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	columns := []string{"id", "value"}
+	primary := []string{"id"}
+	uniques := [][]string{{"value"}}
+	if err := engine.EnsureTable("app", "items", columns, primary, uniques); err != nil {
+		t.Fatal(err)
+	}
+
+	var ensureErr error
+	allocations := testing.AllocsPerRun(3, func() {
+		ensureErr = engine.EnsureTable("app", "items", columns, primary, uniques)
+	})
+	if ensureErr != nil {
+		t.Fatal(ensureErr)
+	}
+	if allocations >= 2 {
+		t.Fatalf("unchanged EnsureTable allocations = %.0f, want fewer than 2", allocations)
+	}
+}
 
 func TestEngineInsertLookupSurvivesReopen(t *testing.T) {
 	directory := t.TempDir()

@@ -20,6 +20,7 @@ type Engine struct {
 type table struct {
 	namespace  string
 	name       string
+	version    uint64
 	columns    []string
 	primary    []string
 	uniques    [][]string

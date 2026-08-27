@@ -8,11 +8,12 @@ import (
 )
 
 type tableOverlay struct {
-	base    *table
-	inserts [][]string
-	updates map[string][]string
-	deletes map[string]bool
-	clear   bool
+	base        *table
+	baseVersion uint64
+	inserts     [][]string
+	updates     map[string][]string
+	deletes     map[string]bool
+	clear       bool
 }
 
 // Begin starts a private mutation transaction.
@@ -41,6 +42,10 @@ func (txn *Transaction) Insert(namespace, name string, row []string) error {
 	if err != nil {
 		return err
 	}
+	if err := txn.lockOverlay(overlay); err != nil {
+		return err
+	}
+	defer txn.engine.mu.RUnlock()
 	if err := overlay.base.validateRow(row); err != nil {
 		return err
 	}
@@ -127,6 +132,10 @@ func (txn *Transaction) UpdatePrimary(namespace, name, primary string, row []str
 	if err != nil {
 		return err
 	}
+	if err := txn.lockOverlay(overlay); err != nil {
+		return err
+	}
+	defer txn.engine.mu.RUnlock()
 	if err := overlay.base.validateRow(row); err != nil {
 		return err
 	}
@@ -155,6 +164,10 @@ func (txn *Transaction) Clear(namespace, name string) error {
 	if err != nil {
 		return err
 	}
+	if err := txn.lockOverlay(overlay); err != nil {
+		return err
+	}
+	defer txn.engine.mu.RUnlock()
 	overlay.clear = true
 	overlay.inserts = nil
 	overlay.updates = nil
@@ -171,6 +184,10 @@ func (txn *Transaction) DeletePrimary(namespace, name, primary string) error {
 	if err != nil {
 		return err
 	}
+	if err := txn.lockOverlay(overlay); err != nil {
+		return err
+	}
+	defer txn.engine.mu.RUnlock()
 	if overlay.clear {
 		return nil
 	}
@@ -200,13 +217,27 @@ func (txn *Transaction) overlay(namespace, name string) (*tableOverlay, error) {
 	}
 	txn.engine.mu.RLock()
 	base, ok := txn.engine.tables[key]
+	var version uint64
+	if ok {
+		version = base.version
+	}
 	txn.engine.mu.RUnlock()
 	if !ok {
 		return nil, errMissingTable
 	}
-	staged := &tableOverlay{base: base}
+	staged := &tableOverlay{base: base, baseVersion: version}
 	txn.overlays[key] = staged
 	return staged, nil
+}
+
+func (txn *Transaction) lockOverlay(overlay *tableOverlay) error {
+	txn.engine.mu.RLock()
+	current, ok := txn.engine.tables[tableKey(overlay.base.namespace, overlay.base.name)]
+	if !ok || current != overlay.base || current.version != overlay.baseVersion {
+		txn.engine.mu.RUnlock()
+		return errMissingTable
+	}
+	return nil
 }
 
 // Commit validates and applies all staged mutations before publishing them and
@@ -229,14 +260,15 @@ func (txn *Transaction) Commit() error {
 		txn.finished = true
 		return nil
 	}
-	staged, err := stageOverlays(engine, txn.overlays, keys)
-	if err != nil {
+	if err := validateOverlays(engine, txn.overlays, keys); err != nil {
 		return err
 	}
 	if err := appendTransactionWAL(engine.wal, txn.overlays, keys); err != nil {
 		return err
 	}
-	publishStagedTables(engine, staged)
+	if err := publishCommittedOverlays(engine, txn.overlays, keys); err != nil {
+		return err
+	}
 	txn.finished = true
 	return nil
 }
@@ -248,21 +280,18 @@ func ensureCommitReady(engine *Engine) error {
 	return nil
 }
 
-func stageOverlays(engine *Engine, overlays map[string]*tableOverlay, keys []string) (map[string]*table, error) {
-	staged := make(map[string]*table, len(keys))
+func validateOverlays(engine *Engine, overlays map[string]*tableOverlay, keys []string) error {
 	for _, key := range keys {
 		overlay := overlays[key]
 		current, ok := engine.tables[key]
-		if !ok || current != overlay.base {
-			return nil, errMissingTable
+		if !ok || current != overlay.base || current.version != overlay.baseVersion {
+			return errMissingTable
 		}
-		copy := cloneTable(current)
-		if err := applyOverlay(copy, overlay); err != nil {
-			return nil, err
+		if err := validateOverlay(current, overlay); err != nil {
+			return err
 		}
-		staged[key] = copy
 	}
-	return staged, nil
+	return nil
 }
 
 func appendTransactionWAL(file *os.File, overlays map[string]*tableOverlay, keys []string) error {
@@ -280,10 +309,15 @@ func appendTransactionWAL(file *os.File, overlays map[string]*tableOverlay, keys
 	return file.Sync()
 }
 
-func publishStagedTables(engine *Engine, staged map[string]*table) {
-	for key, copy := range staged {
-		engine.tables[key] = copy
+func publishCommittedOverlays(engine *Engine, overlays map[string]*tableOverlay, keys []string) error {
+	for _, key := range keys {
+		current := engine.tables[key]
+		if err := applyOverlay(current, overlays[key]); err != nil {
+			return err
+		}
+		current.version++
 	}
+	return nil
 }
 
 func changedOverlayKeys(overlays map[string]*tableOverlay) []string {
@@ -336,6 +370,118 @@ func sortedKeys[T any](values map[string]T) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+type overlayConstraintState struct {
+	table          *table
+	clear          bool
+	removedPrimary map[string]bool
+	addedPrimary   map[string]bool
+	removedUnique  map[string]map[string]bool
+	addedUnique    map[string]map[string]bool
+}
+
+func validateOverlay(current *table, overlay *tableOverlay) error {
+	state := newOverlayConstraintState(current, overlay.clear)
+	for _, primary := range sortedKeys(overlay.deletes) {
+		position, ok := current.primaryIdx[primary]
+		if !ok {
+			return errMissingRow
+		}
+		state.remove(current.rows[position])
+	}
+	for _, primary := range sortedKeys(overlay.updates) {
+		position, ok := current.primaryIdx[primary]
+		if !ok {
+			return errMissingRow
+		}
+		state.remove(current.rows[position])
+		if err := state.add(overlay.updates[primary]); err != nil {
+			return err
+		}
+	}
+	for _, row := range overlay.inserts {
+		if err := state.add(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newOverlayConstraintState(current *table, clear bool) *overlayConstraintState {
+	state := &overlayConstraintState{
+		table: current, clear: clear,
+		removedPrimary: map[string]bool{}, addedPrimary: map[string]bool{},
+		removedUnique: map[string]map[string]bool{}, addedUnique: map[string]map[string]bool{},
+	}
+	for _, unique := range current.uniques {
+		key := strings.Join(unique, "\x00")
+		state.removedUnique[key] = map[string]bool{}
+		state.addedUnique[key] = map[string]bool{}
+	}
+	return state
+}
+
+func (state *overlayConstraintState) remove(row []string) {
+	if len(state.table.primary) > 0 {
+		state.removedPrimary[state.table.primaryKey(row)] = true
+	}
+	for _, unique := range state.table.uniques {
+		indexes := state.table.columnIndexes(unique)
+		if uniqueKeyNullable(row, indexes) {
+			continue
+		}
+		indexKey := strings.Join(unique, "\x00")
+		state.removedUnique[indexKey][rowKey(row, indexes)] = true
+	}
+}
+
+func (state *overlayConstraintState) add(row []string) error {
+	if err := state.table.validateRow(row); err != nil {
+		return err
+	}
+	if len(state.table.primary) > 0 {
+		key := state.table.primaryKey(row)
+		if state.primaryExists(key) {
+			return errDuplicateKey
+		}
+		state.addedPrimary[key] = true
+	}
+	for _, unique := range state.table.uniques {
+		indexes := state.table.columnIndexes(unique)
+		if uniqueKeyNullable(row, indexes) {
+			continue
+		}
+		indexKey := strings.Join(unique, "\x00")
+		key := rowKey(row, indexes)
+		if state.uniqueExists(indexKey, key) {
+			return errDuplicateKey
+		}
+		state.addedUnique[indexKey][key] = true
+	}
+	return nil
+}
+
+func (state *overlayConstraintState) primaryExists(key string) bool {
+	if state.addedPrimary[key] {
+		return true
+	}
+	if state.clear || state.removedPrimary[key] {
+		return false
+	}
+	_, exists := state.table.primaryIdx[key]
+	return exists
+}
+
+func (state *overlayConstraintState) uniqueExists(indexKey, key string) bool {
+	if state.addedUnique[indexKey][key] {
+		return true
+	}
+	if state.clear || state.removedUnique[indexKey][key] {
+		return false
+	}
+	_, exists := state.table.uniqueIdx[indexKey][key]
+	return exists
 }
 
 func applyOverlay(target *table, overlay *tableOverlay) error {

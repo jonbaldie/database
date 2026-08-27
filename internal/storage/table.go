@@ -244,28 +244,6 @@ func rowKey(row []string, indexes []int) string {
 	return strings.Join(parts, "")
 }
 
-func cloneTable(source *table) *table {
-	cloned := &table{
-		namespace: source.namespace,
-		name:      source.name,
-		columns:   append([]string(nil), source.columns...),
-		primary:   append([]string(nil), source.primary...),
-		uniques:   cloneStringMatrix(source.uniques),
-		rows:      cloneRows(source.rows),
-		uniqueIdx: map[string]map[string]int{},
-	}
-	rebuildIndexes(cloned)
-	return cloned
-}
-
-func cloneRows(rows [][]string) [][]string {
-	cloned := make([][]string, len(rows))
-	for index, row := range rows {
-		cloned[index] = append([]string(nil), row...)
-	}
-	return cloned
-}
-
 func writeRow(writer io.Writer, row []string) error {
 	if err := binary.Write(writer, binary.LittleEndian, uint32(len(row))); err != nil {
 		return err

@@ -17,6 +17,9 @@ func (e *Engine) EnsureTable(namespace, name string, columns, primary []string, 
 	}
 	key := tableKey(namespace, name)
 	if current, ok := e.tables[key]; ok {
+		if sameStrings(current.columns, columns) && sameStrings(current.primary, primary) && sameStringMatrix(current.uniques, uniques) {
+			return nil
+		}
 		current.columns = append([]string(nil), columns...)
 		current.primary = append([]string(nil), primary...)
 		current.uniques = cloneStringMatrix(uniques)
@@ -25,6 +28,7 @@ func (e *Engine) EnsureTable(namespace, name string, columns, primary []string, 
 			current.uniqueIdx[strings.Join(unique, "\x00")] = map[string]int{}
 		}
 		rebuildIndexes(current)
+		current.version++
 		return e.persistMetaLocked()
 	}
 	created := newTable(namespace, name, columns, primary, uniques)
@@ -178,6 +182,18 @@ func sameStrings(left, right []string) bool {
 	}
 	for index := range left {
 		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringMatrix(left, right [][]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !sameStrings(left[index], right[index]) {
 			return false
 		}
 	}

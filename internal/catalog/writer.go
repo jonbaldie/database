@@ -98,7 +98,6 @@ func (s *Store) beginWriteBatch() (Definition, Definition, uint64) {
 	previous := s.definition
 	revision := s.revision
 	s.mu.Unlock()
-	detachPrimaryIndexes(staged)
 	return staged, previous, revision
 }
 
