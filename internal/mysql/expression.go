@@ -31,12 +31,14 @@ const (
 // exprValue is one evaluated scalar. Only the field selected by kind is
 // meaningful; a valueNull carries no payload.
 type exprValue struct {
-	kind valueKind
-	i    int64
-	u    uint64
-	dec  decimalValue
-	f    float64
-	s    string
+	kind      valueKind
+	i         int64
+	u         uint64
+	dec       decimalValue
+	f         float64
+	s         string
+	collation collationKind
+	temporal  temporalKind
 }
 
 func nullValue() exprValue                    { return exprValue{kind: valueNull} }

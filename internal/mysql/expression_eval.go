@@ -10,6 +10,7 @@ package mysql
 import (
 	"math"
 	"strconv"
+	"strings"
 )
 
 func isNumericKind(kind valueKind) bool {
@@ -176,6 +177,9 @@ func applyComparison(operator string, order int) bool {
 // domain, using approximate comparison only when an approximate operand is
 // present.
 func compareOperands(a, b exprValue) (int, error) {
+	if a.temporal != temporalNone && b.temporal != temporalNone {
+		return strings.Compare(temporalComparisonKey(a), temporalComparisonKey(b)), nil
+	}
 	if a.kind == valueString || b.kind == valueString {
 		if a.kind == valueString && b.kind == valueString {
 			return compareStrings(a.s, b.s), nil
