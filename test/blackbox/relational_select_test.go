@@ -224,6 +224,14 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	if framed.err != "" || !reflect.DeepEqual(framed.rows, wantFramed) {
 		t.Fatalf("window frames: %#v", framed)
 	}
+	emptyAndBounded := client.query("SELECT n, COUNT(*) OVER bounded, SUM(n) OVER bounded FROM numbers WINDOW bounded AS (ORDER BY n ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) ORDER BY n")
+	if emptyAndBounded.err != "" || !reflect.DeepEqual(emptyAndBounded.rows, [][]string{{"1", "0", ""}, {"2", "1", "1"}, {"3", "2", "3"}}) {
+		t.Fatalf("empty and bounded window frames: %#v", emptyAndBounded)
+	}
+	rollingAggregates := client.query("SELECT n, COUNT(n) OVER bounded, SUM(n) OVER bounded, AVG(n) OVER bounded, MIN(n) OVER bounded, MAX(n) OVER bounded FROM numbers WINDOW bounded AS (ORDER BY n ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) ORDER BY n")
+	if rollingAggregates.err != "" || !reflect.DeepEqual(rollingAggregates.rows, [][]string{{"1", "1", "1", "1.0000", "1", "1"}, {"2", "2", "3", "1.5000", "1", "2"}, {"3", "2", "5", "2.5000", "2", "3"}}) {
+		t.Fatalf("rolling window aggregates: %#v", rollingAggregates)
+	}
 	ranged := client.query("SELECT value, SUM(value) OVER (ORDER BY value RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM measurements WHERE value IS NOT NULL ORDER BY value")
 	if ranged.err != "" || !reflect.DeepEqual(ranged.rows, [][]string{{"5", "5"}, {"15", "20"}, {"20", "55"}, {"20", "55"}}) {
 		t.Fatalf("numeric RANGE frame: %#v", ranged)
