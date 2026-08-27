@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-08-27
+
+### Changed
+
+- Used hash joins for supported equality predicates. Work now grows with input
+  rows and output rows instead of every left and right row pair.
+- Used indexed parent keys, direct lock-resource lookups, staged insert key
+  maps, and one-pass predicate parsing. These changes remove quadratic scans
+  from normal validation, locking, batch insert, and parsing paths.
+- Kept ordered indexes between queries and used index bounds. Full scans no
+  longer sort all rows for each query, and bounded scans can start and stop at
+  the range limits.
+- Evaluated supported window functions with linear partition passes after
+  sorting.
+- Applied durable point updates as deltas instead of full-table copies. Row-only
+  writes no longer rebuild unchanged catalog metadata and indexes.
+- Streamed backup and restore data with bounded buffers instead of reading
+  complete data sets into memory.
+- Added atomic checkpoints and safe WAL prefix removal. Startup now replays only
+  changes after the latest valid checkpoint.
+
 ## [0.2.3] - 2026-08-26
 
 ### Fixed
@@ -98,6 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.4]: https://github.com/jonbaldie/database/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/jonbaldie/database/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/jonbaldie/database/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/jonbaldie/database/compare/v0.2.0...v0.2.1
