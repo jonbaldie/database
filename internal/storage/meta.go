@@ -17,6 +17,9 @@ func (e *Engine) EnsureTable(namespace, name string, columns, primary []string, 
 	}
 	key := tableKey(namespace, name)
 	if current, ok := e.tables[key]; ok {
+		if sameStrings(current.columns, columns) && sameStrings(current.primary, primary) && sameStringMatrix(current.uniques, uniques) {
+			return nil
+		}
 		current.columns = append([]string(nil), columns...)
 		current.primary = append([]string(nil), primary...)
 		current.uniques = cloneStringMatrix(uniques)
@@ -25,6 +28,7 @@ func (e *Engine) EnsureTable(namespace, name string, columns, primary []string, 
 			current.uniqueIdx[strings.Join(unique, "\x00")] = map[string]int{}
 		}
 		rebuildIndexes(current)
+		current.version++
 		return e.persistMetaLocked()
 	}
 	created := newTable(namespace, name, columns, primary, uniques)
@@ -94,10 +98,25 @@ func (e *Engine) persistMetaLocked() error {
 		builder.WriteByte('\n')
 	}
 	temporary := rowsMetaPath(e.directory) + ".tmp"
-	if err := os.WriteFile(temporary, []byte(builder.String()), 0o600); err != nil {
+	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(temporary, rowsMetaPath(e.directory))
+	_, writeErr := io.WriteString(file, builder.String())
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(temporary, rowsMetaPath(e.directory)); err != nil {
+		return err
+	}
+	return syncRowsDirectory(e.directory)
 }
 
 func (e *Engine) loadMeta() error {
@@ -128,7 +147,7 @@ func (e *Engine) loadMeta() error {
 	return nil
 }
 
-func (e *Engine) loadCheckpoints() error {
+func (e *Engine) loadLegacyCheckpoints() error {
 	for _, current := range e.tables {
 		path := rowsCheckpointPath(e.directory, current.namespace, current.name)
 		file, err := os.Open(path)
@@ -138,7 +157,7 @@ func (e *Engine) loadCheckpoints() error {
 		if err != nil {
 			return err
 		}
-		if err := loadCheckpoint(file, current); err != nil {
+		if err := loadLegacyCheckpoint(file, current); err != nil {
 			_ = file.Close()
 			return err
 		}
@@ -149,7 +168,7 @@ func (e *Engine) loadCheckpoints() error {
 	return nil
 }
 
-func loadCheckpoint(reader io.Reader, current *table) error {
+func loadLegacyCheckpoint(reader io.Reader, current *table) error {
 	buffered := bufio.NewReader(reader)
 	for {
 		row, err := readRow(buffered)
@@ -178,6 +197,18 @@ func sameStrings(left, right []string) bool {
 	}
 	for index := range left {
 		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringMatrix(left, right [][]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !sameStrings(left[index], right[index]) {
 			return false
 		}
 	}

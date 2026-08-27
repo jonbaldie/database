@@ -63,6 +63,20 @@ func TestMySQLRelationalShapingMatchesTextAndPreparedWirePaths(t *testing.T) {
 	if computed.err != "" || !reflect.DeepEqual(computed.rows, [][]string{{"21"}, {"16"}}) {
 		t.Fatalf("computed select: %#v", computed)
 	}
+	flatPredicate := strings.Repeat("id >= 1 AND ", 99) + "id >= 1"
+	flat := client.query("SELECT id FROM authors WHERE " + flatPredicate + " ORDER BY id")
+	if flat.err != "" || !reflect.DeepEqual(flat.rows, [][]string{{"1"}, {"2"}, {"3"}}) {
+		t.Fatalf("long flat predicate: %#v", flat)
+	}
+	deepPredicate := strings.Repeat("(", 128) + "id = 1" + strings.Repeat(")", 128)
+	deep := client.query("SELECT id FROM authors WHERE " + deepPredicate)
+	if deep.err != "" || !reflect.DeepEqual(deep.rows, [][]string{{"1"}}) {
+		t.Fatalf("deep predicate: %#v", deep)
+	}
+	mixedPredicate := client.query("SELECT id FROM authors WHERE (id = 1 OR id = 2) AND (id = 2 OR id = 3)")
+	if mixedPredicate.err != "" || !reflect.DeepEqual(mixedPredicate.rows, [][]string{{"2"}}) {
+		t.Fatalf("mixed AND/OR predicate: %#v", mixedPredicate)
+	}
 
 	explained := client.query("EXPLAIN FORMAT=JSON SELECT DISTINCT a.name FROM authors a JOIN posts p ON a.id = p.author_id ORDER BY a.name DESC LIMIT 1")
 	if explained.err != "" || len(explained.rows) != 1 {
@@ -223,6 +237,26 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	wantFramed := [][]string{{"", "", ""}, {"5", "5", "5"}, {"15", "20", "15"}, {"20", "35", "40"}, {"20", "40", "40"}}
 	if framed.err != "" || !reflect.DeepEqual(framed.rows, wantFramed) {
 		t.Fatalf("window frames: %#v", framed)
+	}
+	emptyAndBounded := client.query("SELECT n, COUNT(*) OVER bounded, SUM(n) OVER bounded FROM numbers WINDOW bounded AS (ORDER BY n ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) ORDER BY n")
+	if emptyAndBounded.err != "" || !reflect.DeepEqual(emptyAndBounded.rows, [][]string{{"1", "0", ""}, {"2", "1", "1"}, {"3", "2", "3"}}) {
+		t.Fatalf("empty and bounded window frames: %#v", emptyAndBounded)
+	}
+	rollingAggregates := client.query("SELECT n, COUNT(n) OVER bounded, SUM(n) OVER bounded, AVG(n) OVER bounded, MIN(n) OVER bounded, MAX(n) OVER bounded FROM numbers WINDOW bounded AS (ORDER BY n ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) ORDER BY n")
+	if rollingAggregates.err != "" || !reflect.DeepEqual(rollingAggregates.rows, [][]string{{"1", "1", "1", "1.0000", "1", "1"}, {"2", "2", "3", "1.5000", "1", "2"}, {"3", "2", "5", "2.5000", "2", "3"}}) {
+		t.Fatalf("rolling window aggregates: %#v", rollingAggregates)
+	}
+	for _, query := range []string{
+		"CREATE TABLE large_window_values (id INT PRIMARY KEY, value DOUBLE NOT NULL)",
+		"INSERT INTO large_window_values VALUES (1, 1e308), (2, 1e308)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+	largeCurrentRows := client.query("SELECT SUM(value) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM large_window_values ORDER BY id")
+	if largeCurrentRows.err != "" || !reflect.DeepEqual(largeCurrentRows.rows, [][]string{{"1e+308"}, {"1e+308"}}) {
+		t.Fatalf("large current-row windows: %#v", largeCurrentRows)
 	}
 	ranged := client.query("SELECT value, SUM(value) OVER (ORDER BY value RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM measurements WHERE value IS NOT NULL ORDER BY value")
 	if ranged.err != "" || !reflect.DeepEqual(ranged.rows, [][]string{{"5", "5"}, {"15", "20"}, {"20", "55"}, {"20", "55"}}) {

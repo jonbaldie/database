@@ -72,6 +72,85 @@ func TestMySQLPlannedExplanationUsesTheWireContract(t *testing.T) {
 	}
 }
 
+func TestMySQLEqualityJoinUsesTheHashJoinStrategy(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "hash-join-secret")
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+
+	client := newWireClient(t, address, "admin", "hash-join-secret")
+	defer client.close()
+	for _, query := range []string{
+		"CREATE DATABASE joins",
+		"USE joins",
+		"CREATE TABLE authors (id INT PRIMARY KEY, name VARCHAR(32))",
+		"CREATE TABLE posts (id INT PRIMARY KEY, author_id INT, title VARCHAR(32))",
+		"INSERT INTO authors VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Linus')",
+		"INSERT INTO posts VALUES (10, 1, 'first'), (11, 1, 'second'), (12, 2, 'third')",
+	} {
+		mustQuery(t, client, query)
+	}
+
+	joined := client.query("SELECT authors.name, posts.title FROM authors JOIN posts ON authors.id = posts.author_id ORDER BY posts.id")
+	if joined.err != "" || !slices.EqualFunc(joined.rows, [][]string{{"Ada", "first"}, {"Ada", "second"}, {"Grace", "third"}}, slices.Equal) {
+		t.Fatalf("equality join: %#v", joined)
+	}
+
+	analyzed := client.query("EXPLAIN ANALYZE FORMAT=JSON SELECT authors.name, posts.title FROM authors JOIN posts ON authors.id = posts.author_id")
+	if analyzed.err != "" || len(analyzed.rows) != 1 {
+		t.Fatalf("analyze equality join: %#v", analyzed)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(analyzed.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode equality join analysis: %v", err)
+	}
+	join := findPublicPlanKind(t, document["plan"], "join")
+	strategy, ok := join["strategy"].(map[string]any)
+	if !ok || strategy["name"] != "hash_join" {
+		t.Fatalf("equality join strategy: %#v", join)
+	}
+	actual := join["actual"].(map[string]any)
+	if actual["input_rows"] != float64(6) {
+		t.Fatalf("equality join input rows = %#v, want 6", actual["input_rows"])
+	}
+}
+
+func findPublicPlanKind(t *testing.T, value any, kind string) map[string]any {
+	t.Helper()
+	plan, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("public plan node: %#v", value)
+	}
+	if plan["kind"] == kind {
+		return plan
+	}
+	for _, child := range plan["children"].([]any) {
+		if found := findPublicPlanKindOptional(child, kind); found != nil {
+			return found
+		}
+	}
+	t.Fatalf("public plan has no %s operator: %#v", kind, value)
+	return nil
+}
+
+func findPublicPlanKindOptional(value any, kind string) map[string]any {
+	plan, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if plan["kind"] == kind {
+		return plan
+	}
+	children, _ := plan["children"].([]any)
+	for _, child := range children {
+		if found := findPublicPlanKindOptional(child, kind); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
 func assertPublicPlan(t *testing.T, value any, hasRuntimeEvidence bool) {
 	t.Helper()
 	plan, ok := value.(map[string]any)

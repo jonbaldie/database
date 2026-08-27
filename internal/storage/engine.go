@@ -10,16 +10,23 @@ import (
 
 // Engine is the durable row store for one initialized data directory.
 type Engine struct {
-	mu        sync.RWMutex
-	directory string
-	tables    map[string]*table
-	wal       *os.File
-	closed    bool
+	mu                     sync.RWMutex
+	directory              string
+	tables                 map[string]*table
+	wal                    *os.File
+	walGeneration          uint64
+	walHeaderSize          int64
+	commitsSinceCheckpoint int
+	checkpoint             checkpointState
+	checkpointHook         func(checkpointPhase) error
+	checkpointSyncHook     func() error
+	closed                 bool
 }
 
 type table struct {
 	namespace  string
 	name       string
+	version    uint64
 	columns    []string
 	primary    []string
 	uniques    [][]string
@@ -57,8 +64,14 @@ func Open(directory string) (*Engine, error) {
 	if err := engine.loadMeta(); err != nil {
 		return nil, err
 	}
-	if err := engine.loadCheckpoints(); err != nil {
+	loaded, err := engine.loadGlobalCheckpoint()
+	if err != nil {
 		return nil, err
+	}
+	if !loaded {
+		if err := engine.loadLegacyCheckpoints(); err != nil {
+			return nil, err
+		}
 	}
 	if err := engine.replayWAL(); err != nil {
 		return nil, err
@@ -96,8 +109,10 @@ func tableKey(namespace, name string) string {
 }
 
 func rowsWalPath(directory string) string {
-	return filepath.Join(directory, "rows", "wal.log")
+	return filepath.Join(rowsWalDirectory(directory), "wal.log")
 }
+
+func rowsWalDirectory(directory string) string { return filepath.Join(directory, "rows") }
 
 func rowsMetaPath(directory string) string {
 	return filepath.Join(directory, "rows", "tables.meta")
@@ -105,6 +120,10 @@ func rowsMetaPath(directory string) string {
 
 func rowsCheckpointPath(directory, namespace, name string) string {
 	return filepath.Join(directory, "rows", namespace+"."+name+".chk")
+}
+
+func rowsGlobalCheckpointPath(directory string) string {
+	return filepath.Join(directory, "rows", "checkpoint.dat")
 }
 
 const ioSeekEnd = 2

@@ -26,6 +26,7 @@ func createOnlineBackup(request onlineConnectionRequest, output string, reporter
 	if err != nil {
 		return nil, err, onlineBackupExitClass(err)
 	}
+	defer files.Close()
 	return writeValidatedOnlineBackup(files, output, reporter)
 }
 
@@ -69,14 +70,10 @@ func warnOnlineNonTLS(request onlineConnectionRequest, reporter *operationReport
 	}
 }
 
-func writeValidatedOnlineBackup(files map[string][]byte, output string, reporter *operationReporter) (map[string]any, error, string) {
-	metadata, err := decodeBackupMetadata(files["instance.json"])
-	if err != nil {
-		return nil, errors.New("backup capture returned invalid instance metadata"), "operation_failed"
-	}
+func writeValidatedOnlineBackup(capture onlineBackupCapture, output string, reporter *operationReporter) (map[string]any, error, string) {
 	reporter.progress("writing")
-	manifest := makeBackupManifest(metadata, files)
-	if err := writeBackupArchive(output, manifest, files); err != nil {
+	manifest := makeSourceBackupManifest(capture.metadata, capture.files)
+	if err := writeSourceBackupArchive(output, manifest, capture.files); err != nil {
 		return nil, err, "operation_failed"
 	}
 	reporter.progress("validating")
@@ -84,7 +81,7 @@ func writeValidatedOnlineBackup(files map[string][]byte, output string, reporter
 		_ = os.Remove(output)
 		return nil, err, "operation_failed"
 	}
-	return onlineBackupDetails(output, metadata, manifest)
+	return onlineBackupDetails(output, capture.metadata, manifest)
 }
 
 func onlineBackupDetails(output string, metadata instance.Metadata, manifest backupManifest) (map[string]any, error, string) {
@@ -103,34 +100,125 @@ func onlineBackupDetails(output string, metadata instance.Metadata, manifest bac
 	}, nil, "success"
 }
 
-func captureOnlineBackupFiles(db *sql.DB) (map[string][]byte, error) {
+type onlineBackupCapture struct {
+	directory string
+	files     []sourceBackupFile
+	metadata  instance.Metadata
+}
+
+func (capture onlineBackupCapture) Close() error {
+	if capture.directory == "" {
+		return nil
+	}
+	return os.RemoveAll(capture.directory)
+}
+
+func captureOnlineBackupFiles(db *sql.DB) (onlineBackupCapture, error) {
 	rows, err := db.Query("BACKUP INSTANCE")
 	if err != nil {
-		return nil, err
+		return onlineBackupCapture{}, err
 	}
+	return captureOnlineBackupRows(rows)
+}
+
+type onlineBackupRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+	Close() error
+}
+
+func captureOnlineBackupRows(rows onlineBackupRows) (onlineBackupCapture, error) {
 	defer rows.Close()
-	files := make(map[string][]byte)
+	directory, err := os.MkdirTemp("", ".database-online-backup-*")
+	if err != nil {
+		return onlineBackupCapture{}, err
+	}
+	capture := onlineBackupCapture{directory: directory}
+	if err := capture.readRows(rows); err != nil {
+		_ = capture.Close()
+		return onlineBackupCapture{}, err
+	}
+	files, err := readSourceFiles(directory)
+	if err != nil {
+		_ = capture.Close()
+		return onlineBackupCapture{}, err
+	}
+	capture.files = files
+	capture.metadata, err = decodeBackupMetadataFile(filepath.Join(directory, "instance.json"))
+	if err != nil {
+		_ = capture.Close()
+		return onlineBackupCapture{}, errors.New("backup capture returned invalid instance metadata")
+	}
+	return capture, nil
+}
+
+func (capture *onlineBackupCapture) readRows(rows onlineBackupRows) error {
+	writers := make(map[string]*os.File, 2)
+	defer closeOnlineBackupWriters(writers)
 	for rows.Next() {
 		var path, content string
 		if err := rows.Scan(&path, &content); err != nil {
-			return nil, err
+			return err
 		}
-		files[path] = []byte(content)
+		if err := capture.writeRow(writers, path, content); err != nil {
+			return err
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	return requireOnlineBackupFiles(files)
+	return finishOnlineBackupWriters(writers)
 }
 
-func requireOnlineBackupFiles(files map[string][]byte) (map[string][]byte, error) {
-	if _, ok := files["instance.json"]; !ok {
-		return nil, errors.New("backup capture omitted instance metadata")
+func (capture *onlineBackupCapture) writeRow(writers map[string]*os.File, path, content string) error {
+	writer, err := capture.writer(writers, path)
+	if err != nil {
+		return err
 	}
-	if _, ok := files["catalog.json"]; !ok {
-		return nil, errors.New("backup capture omitted catalog")
+	_, err = writer.WriteString(content)
+	return err
+}
+
+func finishOnlineBackupWriters(writers map[string]*os.File) error {
+	for _, path := range []string{"instance.json", "catalog.json"} {
+		writer, found := writers[path]
+		if !found {
+			if path == "instance.json" {
+				return errors.New("backup capture omitted instance metadata")
+			}
+			return errors.New("backup capture omitted catalog")
+		}
+		if err := writer.Sync(); err != nil {
+			return err
+		}
+		if err := writer.Close(); err != nil {
+			return err
+		}
+		delete(writers, path)
 	}
-	return files, nil
+	return nil
+}
+
+func (capture *onlineBackupCapture) writer(writers map[string]*os.File, path string) (*os.File, error) {
+	if path != "instance.json" && path != "catalog.json" {
+		return nil, fmt.Errorf("backup capture returned unexpected path %q", path)
+	}
+	if writer := writers[path]; writer != nil {
+		return writer, nil
+	}
+	writer, err := os.OpenFile(filepath.Join(capture.directory, path), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	writers[path] = writer
+	return writer, nil
+}
+
+func closeOnlineBackupWriters(writers map[string]*os.File) {
+	for _, writer := range writers {
+		_ = writer.Close()
+	}
 }
 
 func onlineBackupExitClass(err error) string {

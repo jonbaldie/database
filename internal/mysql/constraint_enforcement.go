@@ -564,20 +564,19 @@ func foreignKeyParent(definition catalog.Definition, namespaceName string, const
 }
 
 func validateForeignKeyRows(previous catalog.Definition, namespaceName, tableName string, child, parent catalog.Table, constraint catalog.Constraint, childColumns, parentColumns []int) error {
+	parentKeys := make(map[string]struct{}, len(parent.Rows))
+	for _, row := range parent.Rows {
+		key, nullable := constraintRowKey(parent, row, parentColumns)
+		if !nullable {
+			parentKeys[key] = struct{}{}
+		}
+	}
 	for _, row := range child.Rows {
 		key, nullable := constraintRowKey(child, row, childColumns)
 		if nullable {
 			continue
 		}
-		matched := false
-		for _, parentRow := range parent.Rows {
-			parentKey, parentNull := constraintRowKey(parent, parentRow, parentColumns)
-			if !parentNull && parentKey == key {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+		if _, matched := parentKeys[key]; !matched {
 			return foreignKeyViolation(previous, namespaceName, tableName, parent, constraint)
 		}
 	}

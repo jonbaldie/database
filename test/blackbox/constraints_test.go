@@ -180,3 +180,31 @@ func TestConstraintSurfaceThroughMySQL(t *testing.T) {
 		t.Fatalf("inbound foreign-key plan has the wrong owner: %#v", result)
 	}
 }
+
+func TestCompositeForeignKeyValidationThroughMySQL(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer client.close()
+
+	for _, query := range []string{
+		"CREATE DATABASE app",
+		"USE app",
+		"CREATE TABLE parent (account_id INT NOT NULL, item_id INT NOT NULL, PRIMARY KEY (account_id, item_id))",
+		"CREATE TABLE child (id INT NOT NULL, account_id INT, item_id INT, PRIMARY KEY (id), CONSTRAINT child_parent FOREIGN KEY (account_id, item_id) REFERENCES parent (account_id, item_id))",
+		"INSERT INTO parent VALUES (1, 10), (1, 20)",
+		"INSERT INTO child VALUES (1, 1, 10), (2, NULL, 99), (3, 1, NULL)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("query %q: %#v", query, result)
+		}
+	}
+	if result := client.query("INSERT INTO child VALUES (4, 1, 99)"); result.errCode != 1452 || !strings.HasPrefix(result.err, "23000") {
+		t.Fatalf("missing composite parent key: %#v", result)
+	}
+	if result := client.query("SELECT id FROM child"); result.err != "" || len(result.rows) != 3 {
+		t.Fatalf("matching and nullable composite keys: %#v", result)
+	}
+}

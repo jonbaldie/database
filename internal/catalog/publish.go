@@ -4,7 +4,7 @@ import "fmt"
 
 func (s *Store) replaceLocked(definition Definition) error {
 	staged := cloneDefinition(definition)
-	detachPrimaryIndexes(staged)
+	refreshOrderedIndexCaches(s.definition, &staged)
 	if err := validateDefinition(staged); err != nil {
 		return fmt.Errorf("invalid catalog: %w", err)
 	}
@@ -46,27 +46,63 @@ func (s *Store) prepareNamespaceRowSync(prepared *preparedRowSync, previousNames
 		namespaceName = namespaceKey
 	}
 	for tableKey, table := range namespace.Tables {
-		tableName := table.Name
-		if tableName == "" {
-			tableName = tableKey
-		}
-		if err := s.ensureRowTable(namespaceName, table); err != nil {
+		if err := s.prepareTableRowSync(prepared, previousNamespace, namespaceName, tableKey, table); err != nil {
 			return err
-		}
-		previousTable := previousNamespace.Tables[tableKey]
-		if sameRowSlice(previousTable.Rows, table.Rows) {
-			continue
-		}
-		primary, _ := tableKeyColumns(table)
-		txn, err := s.stageTableRows(namespaceName, tableName, previousTable.Rows, table.Rows, table, primary)
-		if err != nil {
-			return err
-		}
-		if txn != nil {
-			prepared.txns = append(prepared.txns, txn)
 		}
 	}
 	return nil
+}
+
+func (s *Store) prepareTableRowSync(prepared *preparedRowSync, previousNamespace Namespace, namespaceName, tableKey string, table Table) error {
+	previousTable, existed := previousNamespace.Tables[tableKey]
+	schemaChanged := !existed || !sameRowStorageSchema(previousTable, table)
+	rowsChanged := !sameRowSlice(previousTable.Rows, table.Rows)
+	if !schemaChanged && !rowsChanged {
+		return nil
+	}
+	if err := s.ensureRowTable(namespaceName, table); err != nil || !rowsChanged {
+		return err
+	}
+	tableName := table.Name
+	if tableName == "" {
+		tableName = tableKey
+	}
+	primary, _ := tableKeyColumns(table)
+	txn, err := s.stageTableRows(namespaceName, tableName, previousTable.Rows, table.Rows, table, primary)
+	if err == nil && txn != nil {
+		prepared.txns = append(prepared.txns, txn)
+	}
+	return err
+}
+
+func sameRowStorageSchema(left, right Table) bool {
+	leftPrimary, leftUniques := tableKeyColumns(left)
+	rightPrimary, rightUniques := tableKeyColumns(right)
+	return sameCatalogStrings(left.Columns, right.Columns) && sameCatalogStrings(leftPrimary, rightPrimary) && sameCatalogStringMatrix(leftUniques, rightUniques)
+}
+
+func sameCatalogStringMatrix(left, right [][]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !sameCatalogStrings(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameCatalogStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) stageTableRows(namespace, name string, previous, next [][]string, table Table, primary []string) (rowTxn, error) {

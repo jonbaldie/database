@@ -5,11 +5,89 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jonbaldie/database/internal/instance"
 )
+
+func TestBackupRestoreStreamsBeyondMemoryLimit(t *testing.T) {
+	if os.Getenv("DATABASE_STREAM_BACKUP_HELPER") == "1" {
+		runStreamingBackupHelper(t, os.Getenv("DATABASE_STREAM_BACKUP_ROOT"))
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	command := exec.Command(executable, "-test.run=^TestBackupRestoreStreamsBeyondMemoryLimit$", "-test.v")
+	command.Env = append(os.Environ(),
+		"DATABASE_STREAM_BACKUP_HELPER=1",
+		"DATABASE_STREAM_BACKUP_ROOT="+root,
+		"GOMEMLIMIT=32MiB",
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("capped-memory helper failed: %v\n%s", err, output)
+	}
+}
+
+func runStreamingBackupHelper(t *testing.T, root string) {
+	t.Helper()
+	const payloadSize = int64(96 * 1024 * 1024)
+	source := filepath.Join(root, "source")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeInstanceFixture(t, source)
+	payload := filepath.Join(source, "payload.bin")
+	if err := os.WriteFile(payload, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(payload, payloadSize); err != nil {
+		t.Fatal(err)
+	}
+	var peak atomic.Uint64
+	done := make(chan struct{})
+	go sampleHeapPeak(done, &peak)
+	archive := filepath.Join(root, "instance.tar")
+	if err := createBackup(source, archive); err != nil {
+		close(done)
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "restored")
+	if err := restoreBackup(archive, destination); err != nil {
+		close(done)
+		t.Fatal(err)
+	}
+	close(done)
+	if info, err := os.Stat(filepath.Join(destination, "payload.bin")); err != nil || info.Size() != payloadSize {
+		t.Fatalf("restored payload: info=%v err=%v", info, err)
+	}
+	if used := peak.Load(); used > 64*1024*1024 {
+		t.Fatalf("peak heap = %d bytes, want at most 64 MiB", used)
+	}
+}
+
+func sampleHeapPeak(done <-chan struct{}, peak *atomic.Uint64) {
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var stats runtime.MemStats
+		runtime.ReadMemStats(&stats)
+		for current := peak.Load(); stats.HeapAlloc > current && !peak.CompareAndSwap(current, stats.HeapAlloc); current = peak.Load() {
+		}
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+	}
+}
 
 func TestBackupRestoreWorkflowCreatesAndRestoresCompleteArtifactWithTerminalConfirmation(t *testing.T) {
 	source := t.TempDir()

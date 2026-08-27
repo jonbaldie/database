@@ -24,8 +24,6 @@ func EnsurePrimaryIndex(table *Table) map[string]int {
 }
 
 // MaintainPrimaryIndex updates the primary index after a row-image replacement.
-// Callers must pass an exclusive index map (see detachPrimaryIndexes) when
-// appending so this can update the map in place without racing readers.
 func MaintainPrimaryIndex(table *Table, previousLength int, previous map[string]int) {
 	// A same-length rewrite (REPLACE delete-then-append, or an in-place
 	// primary-key change) can move or rekey existing rows. Only a strict
@@ -34,7 +32,7 @@ func MaintainPrimaryIndex(table *Table, previousLength int, previous map[string]
 		RebuildPrimaryIndex(table)
 		return
 	}
-	table.PrimaryIndex = previous
+	table.PrimaryIndex = clonePrimaryIndex(previous, len(table.Rows)-previousLength)
 	if len(table.Rows) == previousLength {
 		return
 	}
@@ -49,21 +47,10 @@ func MaintainPrimaryIndex(table *Table, previousLength int, previous map[string]
 	}
 }
 
-// detachPrimaryIndexes replaces shared primary-index maps with exclusive copies
-// so later MaintainPrimaryIndex calls can append in place.
-func detachPrimaryIndexes(definition Definition) {
-	for namespaceKey, namespace := range definition.Namespaces {
-		for tableKey, table := range namespace.Tables {
-			if table.PrimaryIndex == nil {
-				continue
-			}
-			owned := make(map[string]int, len(table.PrimaryIndex)+8)
-			for key, value := range table.PrimaryIndex {
-				owned[key] = value
-			}
-			table.PrimaryIndex = owned
-			namespace.Tables[tableKey] = table
-		}
-		definition.Namespaces[namespaceKey] = namespace
+func clonePrimaryIndex(index map[string]int, growth int) map[string]int {
+	owned := make(map[string]int, len(index)+growth)
+	for key, value := range index {
+		owned[key] = value
 	}
+	return owned
 }

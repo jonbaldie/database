@@ -46,6 +46,7 @@ type Join struct {
 	Condition      string
 	SourceClause   string
 	SourceFragment string
+	Strategy       string
 }
 
 // Order records one ORDER BY expression and direction.
@@ -318,13 +319,17 @@ func joinOperator(join Join, left, right *Operator) *Operator {
 		})
 	}
 	rows := left.Estimates.Rows * right.Estimates.Rows
-	return &Operator{
+	operator := &Operator{
 		Kind: "join", Summary: "Combine rows from the joined relations.",
 		Operation: joinOperation{JoinType: joinType}, Predicates: predicates,
 		Objects:   append(append([]ObjectReference{}, left.Objects...), right.Objects...),
 		Estimates: Estimates{Rows: rows, RowWidthBytes: left.Estimates.RowWidthBytes + right.Estimates.RowWidthBytes, Cost: left.Estimates.Cost + right.Estimates.Cost + rows, PeakMemoryBytes: 0},
 		Output:    concatenateOutput(left.Output, right.Output), Warnings: []Warning{}, Children: []*Operator{left, right},
 	}
+	if join.Strategy == "hash_join" {
+		operator.Strategy = &Strategy{Name: "hash_join", Summary: "Match equality keys with a hash table."}
+	}
+	return operator
 }
 
 func projectionColumns(columns []string, child *Operator) *Operator {

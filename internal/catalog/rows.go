@@ -24,6 +24,7 @@ func openWithRows(store *Store, directory string) (*Store, error) {
 		_ = engine.Close()
 		return nil, err
 	}
+	refreshOrderedIndexCaches(Definition{}, &store.definition)
 	return store, nil
 }
 

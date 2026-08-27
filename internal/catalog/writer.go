@@ -98,7 +98,6 @@ func (s *Store) beginWriteBatch() (Definition, Definition, uint64) {
 	previous := s.definition
 	revision := s.revision
 	s.mu.Unlock()
-	detachPrimaryIndexes(staged)
 	return staged, previous, revision
 }
 
@@ -127,6 +126,7 @@ func applyWriteRequests(batch []*writeRequest, staged Definition, revision uint6
 }
 
 func (s *Store) commitWriteBatch(previous, staged Definition) error {
+	refreshOrderedIndexCaches(previous, &staged)
 	if err := validatePublishedDefinition(s, previous, staged); err != nil {
 		return err
 	}

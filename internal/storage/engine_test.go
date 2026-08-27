@@ -1,11 +1,112 @@
 package storage_test
 
 import (
+	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/jonbaldie/database/internal/storage"
 )
+
+func TestEngineBoundsWALAfterManyCommits(t *testing.T) {
+	directory := t.TempDir()
+	engine, err := storage.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.EnsureTable("app", "items", []string{"id"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for id := range 1024 {
+		txn, beginErr := engine.Begin()
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if err := txn.Insert("app", "items", []string{strconv.Itoa(id)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := txn.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(filepath.Join(directory, "rows", "wal.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > 16*1024 {
+		t.Fatalf("WAL size = %d, want at most 16 KiB", info.Size())
+	}
+}
+
+func TestEnginePointUpdateDoesNotCopyEveryStoredRow(t *testing.T) {
+	engine, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.EnsureTable("app", "items", []string{"id", "value"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := range 256 {
+		value := strconv.Itoa(id)
+		if err := txn.Insert("app", "items", []string{value, value}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var updateErr error
+	allocations := testing.AllocsPerRun(3, func() {
+		var update *storage.Transaction
+		update, updateErr = engine.Begin()
+		if updateErr != nil {
+			return
+		}
+		if updateErr = update.UpdatePrimary("app", "items", "0", []string{"0", "changed"}); updateErr != nil {
+			return
+		}
+		updateErr = update.Commit()
+	})
+	if updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if allocations >= 128 {
+		t.Fatalf("point update allocations = %.0f, want fewer than 128", allocations)
+	}
+}
+
+func TestEngineDoesNotRebuildUnchangedTableMetadata(t *testing.T) {
+	engine, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	columns := []string{"id", "value"}
+	primary := []string{"id"}
+	uniques := [][]string{{"value"}}
+	if err := engine.EnsureTable("app", "items", columns, primary, uniques); err != nil {
+		t.Fatal(err)
+	}
+
+	var ensureErr error
+	allocations := testing.AllocsPerRun(3, func() {
+		ensureErr = engine.EnsureTable("app", "items", columns, primary, uniques)
+	})
+	if ensureErr != nil {
+		t.Fatal(ensureErr)
+	}
+	if allocations >= 2 {
+		t.Fatalf("unchanged EnsureTable allocations = %.0f, want fewer than 2", allocations)
+	}
+}
 
 func TestEngineInsertLookupSurvivesReopen(t *testing.T) {
 	directory := t.TempDir()
@@ -166,6 +267,73 @@ func TestEngineAllowsMultipleNullValuesInUniqueKey(t *testing.T) {
 	defer reopened.Close()
 	if got := reopened.RowCount("app", "items"); got != 2 {
 		t.Fatalf("reopened row count = %d", got)
+	}
+}
+
+func TestEngineChecksCompositeKeysWithinOneBatch(t *testing.T) {
+	engine, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	columns := []string{"tenant", "id", "code", "optional"}
+	primary := []string{"tenant", "id"}
+	uniques := [][]string{{"tenant", "code"}, {"tenant", "optional"}}
+	if err := engine.EnsureTable("app", "items", columns, primary, uniques); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	null := "\x00database-sql-null"
+	if err := txn.Insert("app", "items", []string{"one", "1", "alpha", null}); err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Insert("app", "items", []string{"one", "1", "beta", "present"}); err == nil {
+		t.Fatal("expected duplicate composite primary key")
+	}
+	if err := txn.Insert("app", "items", []string{"one", "2", "alpha", "other"}); err == nil {
+		t.Fatal("expected duplicate composite unique key")
+	}
+	if err := txn.Insert("app", "items", []string{"one", "2", "beta", null}); err != nil {
+		t.Fatalf("second nullable composite unique key: %v", err)
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.RowCount("app", "items"); got != 2 {
+		t.Fatalf("row count = %d, want 2", got)
+	}
+}
+
+func TestEngineClearResetsStagedKeyMaps(t *testing.T) {
+	engine, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.EnsureTable("app", "items", []string{"id", "code"}, []string{"id"}, [][]string{{"code"}}); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Insert("app", "items", []string{"1", "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Clear("app", "items"); err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Insert("app", "items", []string{"1", "alpha"}); err != nil {
+		t.Fatalf("insert after clear: %v", err)
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.RowCount("app", "items"); got != 1 {
+		t.Fatalf("row count = %d, want 1", got)
 	}
 }
 

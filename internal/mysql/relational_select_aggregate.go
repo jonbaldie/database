@@ -1727,12 +1727,12 @@ func (p *relationalSelectPlan) windowFunctionValues(rows []relationalResultRow, 
 		return nil, err
 	}
 	for _, partition := range partitions {
+		partitionValues, err := p.windowPartitionValues(rows, partition, function)
+		if err != nil {
+			return nil, err
+		}
 		for position, rowIndex := range partition {
-			value, err := p.windowValue(rows, partition, position, function)
-			if err != nil {
-				return nil, err
-			}
-			values[rowIndex] = value
+			values[rowIndex] = partitionValues[position]
 		}
 	}
 	return values, nil

@@ -183,26 +183,14 @@ func (m *lockManager) stopWaiting(session *session) {
 
 func (m *lockManager) conflictingOwners(requester *session, resources []rowLockResource, wanted lockMode) map[*session]struct{} {
 	owners := make(map[*session]struct{})
-	for heldResource, holders := range m.granted {
-		for _, requestedResource := range resources {
-			if !lockResourcesOverlap(heldResource, requestedResource) {
-				continue
-			}
-			for holder, heldMode := range holders {
-				if holder != requester && (wanted == lockExclusive || heldMode == lockExclusive) {
-					owners[holder] = struct{}{}
-				}
+	for _, resource := range resources {
+		for holder, heldMode := range m.granted[resource] {
+			if holder != requester && (wanted == lockExclusive || heldMode == lockExclusive) {
+				owners[holder] = struct{}{}
 			}
 		}
 	}
 	return owners
-}
-
-func lockResourcesOverlap(left, right rowLockResource) bool {
-	if left.namespace != right.namespace || left.table != right.table {
-		return false
-	}
-	return left.key == right.key
 }
 
 func (m *lockManager) waitGraphReaches(owners map[*session]struct{}, target *session, visited map[*session]bool) bool {
