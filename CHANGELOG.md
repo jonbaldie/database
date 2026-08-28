@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-08-28
+
+### Fixed
+
+- Accepted `FOREIGN KEY ... REFERENCES table(column)` when no space precedes
+  the column list.
+- Evaluated `NOW()`, `CURDATE()`, `VERSION()`, and `DATABASE()` in ordinary
+  expressions, not only as a whole-statement `SELECT`.
+- Stripped trailing spaces from `CHAR` values on store so retrieval matches
+  MySQL CHAR.
+- Padded `BINARY(n)` values with `0x00` to the declared width.
+- Ran `information_schema` `SELECT` through the relational engine so `WHERE`,
+  `ORDER BY`, `GROUP BY`, `LIMIT`, and aliases work.
+- Added contracted `information_schema` views: `STATISTICS`,
+  `TABLE_CONSTRAINTS`, `KEY_COLUMN_USAGE`, `REFERENTIAL_CONSTRAINTS`,
+  `CHECK_CONSTRAINTS`, `CHARACTER_SETS`, `COLLATIONS`, `ACCOUNTS`,
+  `ACCOUNT_GRANTS`, and `PROCESSLIST`.
+- Accepted `SHOW GRANTS`, `SHOW GRANTS FOR CURRENT_USER`, and
+  `SHOW GRANTS FOR 'name'`.
+- Matched `LIKE` with the column collation so `utf8mb4_bin` is case-sensitive.
+- Returned MySQL error 1267 for mixed `utf8mb4_0900_ai_ci` and `utf8mb4_bin`
+  column comparisons.
+- Compared `DATE` and `DATETIME` as temporal values so a date equals the same
+  calendar day at midnight.
+
 ## [0.2.4] - 2026-08-27
 
 ### Changed
@@ -119,6 +144,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.5]: https://github.com/jonbaldie/database/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/jonbaldie/database/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/jonbaldie/database/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/jonbaldie/database/compare/v0.2.1...v0.2.2
