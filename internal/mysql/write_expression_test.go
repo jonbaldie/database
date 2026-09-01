@@ -87,3 +87,88 @@ func TestUpdateEvaluatesAssignmentExpressions(t *testing.T) {
 		t.Fatalf("updated rows = %#v, err = %v", result, err)
 	}
 }
+
+func TestUpdateEvaluatesAssignmentsLeftToRight(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE items (id INT PRIMARY KEY, a INT, b INT)",
+		"INSERT INTO items VALUES (1, 5, 0)",
+		"UPDATE items SET a = a + 1, b = a WHERE id = 1",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	result, err := executeStatement(executor, "SELECT id, a, b FROM items")
+	if err != nil {
+		t.Fatalf("select updated row: %v", err)
+	}
+	if !equalRows(result.rows, [][]string{{"1", "6", "6"}}) {
+		t.Fatalf("updated rows = %#v, want [[1 6 6]]", result.rows)
+	}
+}
+
+func TestUpdateAssignmentOrderAffectsLaterExpressions(t *testing.T) {
+	tests := []struct {
+		name        string
+		initial     string
+		assignments string
+		want        [][]string
+	}{
+		{
+			name:        "swap reads the first assigned value",
+			initial:     "1, 5, 10",
+			assignments: "a = b, b = a",
+			want:        [][]string{{"1", "10", "10"}},
+		},
+		{
+			name:        "reversed order reads the original value first",
+			initial:     "1, 5, 0",
+			assignments: "b = a, a = a + 1",
+			want:        [][]string{{"1", "6", "5"}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executor := ddlExecutorForTest(t)
+			for _, query := range []string{
+				"CREATE TABLE items (id INT PRIMARY KEY, a INT, b INT)",
+				"INSERT INTO items VALUES (" + test.initial + ")",
+				"UPDATE items SET " + test.assignments + " WHERE id = 1",
+			} {
+				if _, err := executeStatement(executor, query); err != nil {
+					t.Fatalf("execute %q: %v", query, err)
+				}
+			}
+			result, err := executeStatement(executor, "SELECT id, a, b FROM items")
+			if err != nil {
+				t.Fatalf("select updated row: %v", err)
+			}
+			if !equalRows(result.rows, test.want) {
+				t.Fatalf("updated rows = %#v, want %#v", result.rows, test.want)
+			}
+		})
+	}
+}
+
+func TestUpdateAssignmentFailureLeavesRowUnchanged(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE items (id INT PRIMARY KEY, a INT, b TINYINT)",
+		"INSERT INTO items VALUES (1, 5, 0)",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	if _, err := executeStatement(executor, "UPDATE items SET a = a + 1, b = 128 WHERE id = 1"); err == nil {
+		t.Fatal("update with invalid later assignment succeeded")
+	}
+	result, err := executeStatement(executor, "SELECT id, a, b FROM items")
+	if err != nil {
+		t.Fatalf("select row after failed update: %v", err)
+	}
+	if !equalRows(result.rows, [][]string{{"1", "5", "0"}}) {
+		t.Fatalf("row after failed update = %#v, want [[1 5 0]]", result.rows)
+	}
+}

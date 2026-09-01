@@ -2811,10 +2811,15 @@ func pointUpdateRow(plan updatePlan) ([]string, bool) {
 type updatePlan struct {
 	namespace, name string
 	table           catalog.Table
-	updates         map[int]string
+	updates         []updateAssignment
 	matcher         func([]string) bool
 	primaryKey      string
 	offsetMinutes   int
+}
+
+type updateAssignment struct {
+	column int
+	value  string
 }
 
 func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
@@ -2875,8 +2880,8 @@ func planTable(s *relationExecutor, target string) (string, string, catalog.Tabl
 	return namespace, name, table, err
 }
 
-func assignmentValues(value string, indexes map[string]int) (map[int]string, error) {
-	updates := make(map[int]string)
+func assignmentValues(value string, indexes map[string]int) ([]updateAssignment, error) {
+	updates := make([]updateAssignment, 0, len(splitCSV(value)))
 	seen := make(map[int]bool)
 	for _, assignment := range splitCSV(value) {
 		column, rawValue, ok := splitEquals(assignment)
@@ -2891,7 +2896,8 @@ func assignmentValues(value string, indexes map[string]int) (map[int]string, err
 		if !found || seen[index] {
 			return nil, sqlFailure{1054, "42S22", "unknown or duplicate column '" + column + "'"}
 		}
-		seen[index], updates[index] = true, strings.TrimSpace(rawValue)
+		seen[index] = true
+		updates = append(updates, updateAssignment{column: index, value: strings.TrimSpace(rawValue)})
 	}
 	return updates, nil
 }
@@ -3000,8 +3006,8 @@ func applyPointUpdatePlan(plan updatePlan, key string) ([][]string, uint64, erro
 // row matches.
 func validateUpdateAssignments(plan updatePlan) error {
 	resolve := tableSchemaResolver(plan.table)
-	for column, value := range plan.updates {
-		_, err := assignCanonicalColumnValue(plan.table, column, value, 1, plan.offsetMinutes, resolve)
+	for _, assignment := range plan.updates {
+		_, err := assignCanonicalColumnValue(plan.table, assignment.column, assignment.value, 1, plan.offsetMinutes, resolve)
 		if isUnknownColumnAssignment(err) {
 			return err
 		}
@@ -3010,14 +3016,16 @@ func validateUpdateAssignments(plan updatePlan) error {
 }
 
 func assignUpdateRow(plan updatePlan, row []string, rowNumber int) (map[int]string, error) {
-	resolve := tableRowResolver(plan.table, row)
+	working := append([]string(nil), row...)
+	resolve := tableRowResolver(plan.table, working)
 	updates := make(map[int]string, len(plan.updates))
-	for column, value := range plan.updates {
-		canonical, err := assignCanonicalColumnValue(plan.table, column, value, rowNumber, plan.offsetMinutes, resolve)
+	for _, assignment := range plan.updates {
+		canonical, err := assignCanonicalColumnValue(plan.table, assignment.column, assignment.value, rowNumber, plan.offsetMinutes, resolve)
 		if err != nil {
 			return nil, err
 		}
-		updates[column] = canonical
+		working[assignment.column] = canonical
+		updates[assignment.column] = canonical
 	}
 	return updates, nil
 }
