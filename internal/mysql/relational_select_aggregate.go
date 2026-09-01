@@ -2088,7 +2088,7 @@ func (p *relationalSelectPlan) numericRangeFrame(rows []relationalResultRow, par
 		return nil, sqlFailure{3587, "HY000", "RANGE frame with value offset requires numeric ORDER BY values"}
 	}
 	if current.isNull() {
-		return p.nullNumericRangeFrame(rows, partition, position, order)
+		return p.nullNumericRangeFrame(rows, partition, position, order, frame)
 	}
 	lower, lowerOpen, err := rangeFrameBoundary(current, frame.start, order.direction, true)
 	if err != nil {
@@ -2112,11 +2112,21 @@ func (p *relationalSelectPlan) numericRangeFrame(rows []relationalResultRow, par
 	return result, nil
 }
 
-func (p *relationalSelectPlan) nullNumericRangeFrame(rows []relationalResultRow, partition []int, position int, order relationalWindowOrder) ([]int, error) {
-	frame := relationalWindowFrame{start: relationalWindowBound{kind: "current_row"}, end: relationalWindowBound{kind: "current_row"}}
-	start, end, err := p.expandCurrentRangePeers(rows, partition, position, relationalWindowSpec{order: []relationalWindowOrder{order}}, frame, position, position)
+func (p *relationalSelectPlan) nullNumericRangeFrame(rows []relationalResultRow, partition []int, position int, order relationalWindowOrder, frame relationalWindowFrame) ([]int, error) {
+	start, end := windowFrameBounds(position, len(partition), frame)
+	peerFrame := relationalWindowFrame{start: relationalWindowBound{kind: "current_row"}, end: relationalWindowBound{kind: "current_row"}}
+	peerStart, peerEnd, err := p.expandCurrentRangePeers(rows, partition, position, relationalWindowSpec{order: []relationalWindowOrder{order}}, peerFrame, position, position)
 	if err != nil {
 		return nil, err
+	}
+	if frame.start.kind != "unbounded_preceding" {
+		start = peerStart
+	}
+	if frame.end.kind != "unbounded_following" {
+		end = peerEnd
+	}
+	if start > end {
+		return nil, nil
 	}
 	return partition[start : end+1], nil
 }

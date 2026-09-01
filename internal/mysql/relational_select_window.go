@@ -209,7 +209,7 @@ func (p *relationalSelectPlan) numericRangeFrameRanges(rows []relationalResultRo
 
 func numericRangeFrameRange(values []exprValue, position int, current exprValue, peerStarts, peerEnds []int, nonNullStart, nonNullEnd int, order relationalWindowOrder, frame relationalWindowFrame) (windowFrameRange, error) {
 	if current.isNull() {
-		return windowFrameRange{start: peerStarts[position], end: peerEnds[position]}, nil
+		return nullNumericRangeFrameRange(position, len(values), peerStarts, peerEnds, frame), nil
 	}
 	lower, lowerOpen, err := rangeFrameBoundary(current, frame.start, order.direction, true)
 	if err != nil {
@@ -234,6 +234,17 @@ func numericRangeFrameRange(values []exprValue, position int, current exprValue,
 		end = upperEnd - 1
 	}
 	return windowFrameRange{start: start, end: end}, nil
+}
+
+func nullNumericRangeFrameRange(position, length int, peerStarts, peerEnds []int, frame relationalWindowFrame) windowFrameRange {
+	start, end := windowFrameBounds(position, length, frame)
+	if frame.start.kind != "unbounded_preceding" {
+		start = peerStarts[position]
+	}
+	if frame.end.kind != "unbounded_following" {
+		end = peerEnds[position]
+	}
+	return windowFrameRange{start: start, end: end}
 }
 
 func windowValuePeerBounds(values []exprValue, order relationalWindowOrder, plan *relationalSelectPlan) ([]int, []int) {
