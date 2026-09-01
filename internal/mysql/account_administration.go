@@ -219,6 +219,7 @@ func (s *textStatementExecutor) createAccount(query string) error {
 	hash := passwordHash(password)
 	err := s.session.server.config.Catalog.CreateAccount(catalog.Account{Name: name, PasswordHash: hash})
 	if err != nil && ifNotExists {
+		s.session.addDiagnostic("Note", 3163, "Authorization ID '"+name+"' already exists.")
 		return nil
 	}
 	if err != nil {
@@ -258,6 +259,7 @@ func (s *textStatementExecutor) alterAccountTarget(query string) (string, string
 	}
 	account, found := s.session.server.config.Catalog.Account(name)
 	if !found && ifExists {
+		s.session.addDiagnostic("Note", 3162, "Authorization ID '"+name+"' does not exist.")
 		return "", "", catalog.Account{}, nil
 	}
 	if !found {
@@ -317,6 +319,7 @@ func (s *textStatementExecutor) dropAccount(query string) error {
 	name := scalar(rest)
 	account, found := s.session.server.config.Catalog.Account(name)
 	if !found && ifExists {
+		s.session.addDiagnostic("Note", 3162, "Authorization ID '"+name+"' does not exist.")
 		return nil
 	}
 	if !found {

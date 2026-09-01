@@ -469,6 +469,7 @@ type session struct {
 	statementCancel <-chan struct{}
 	resources       *statementResources
 	runtimeMetrics  *queryexplanation.RuntimeMetrics
+	diagnostics     []sqlDiagnostic
 	transactionState
 }
 
@@ -717,6 +718,16 @@ type sqlFailure struct {
 }
 
 func (e sqlFailure) Error() string { return e.message }
+
+// sqlDiagnostic is one condition in the session diagnostics area. The area
+// is replaced when the next nondiagnostic statement starts and is exposed by
+// SHOW WARNINGS and SHOW ERRORS.
+type sqlDiagnostic struct {
+	level   string
+	code    uint16
+	message string
+}
+
 func mysqlError(err error) []byte {
 	var failure sqlFailure
 	if errors.As(err, &failure) {
@@ -730,6 +741,7 @@ type queryResult struct {
 	rows     [][]string
 	metadata []columnMetadata
 	affected uint64
+	warnings uint16
 	stream   queryRowStream
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
@@ -868,6 +880,7 @@ var informationSchemaViews = []informationSchemaView{
 func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
 	statement, err := normalizeStatement(query)
 	if err != nil {
+		s.statements.session.replaceDiagnostics([]sqlDiagnostic{diagnosticForError(err)})
 		return writePacket(connection, sequence, mysqlError(err))
 	}
 	executor := s.statements
@@ -876,11 +889,13 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
+	warnings := s.statements.session.diagnosticCount()
 	if result == nil {
-		return writePacket(connection, sequence, okPacket())
+		return writePacket(connection, sequence, okPacketWithWarnings(0, warnings))
 	}
+	result.warnings = warnings
 	if len(result.columns) == 0 {
-		return writePacket(connection, sequence, okPacket(result.affected))
+		return writePacket(connection, sequence, okPacketWithWarnings(result.affected, warnings))
 	}
 	return writeResult(connection, sequence, result, s.statements.server.config.MaxAllowedPacket)
 }
@@ -949,7 +964,10 @@ func (s *textStatementExecutor) setTimeZone(query string) (bool, error) {
 	return true, nil
 }
 
-func (s *textStatementExecutor) builtinStatement(_ string, lower string) (*queryResult, bool, error) {
+func (s *textStatementExecutor) builtinStatement(query, lower string) (*queryResult, bool, error) {
+	if result, handled, err := s.showDiagnostics(query, lower); handled {
+		return result, true, err
+	}
 	if strings.HasPrefix(lower, "show ") {
 		return s.showVariables(lower)
 	}
@@ -1229,10 +1247,12 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	if strings.EqualFold(name, informationSchemaName) {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
+	noOp := false
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
 		key := catalog.Key(name)
 		if _, exists := definition.Namespaces[key]; exists {
 			if ifNotExists {
+				noOp = true
 				return nil
 			}
 			return errors.New("namespace already exists")
@@ -1242,8 +1262,16 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1007, "HY000", err.Error()})
 	}
+	recordCreateDatabaseDiagnostic(s.session, name, noOp)
 	return nil
 }
+
+func recordCreateDatabaseDiagnostic(session *session, name string, noOp bool) {
+	if noOp {
+		session.addDiagnostic("Note", 1007, fmt.Sprintf("Can't create database '%s'; database exists", name))
+	}
+}
+
 func createTable(s *relationExecutor, query string) error {
 	table, err := parseCreateTable(query)
 	if err != nil {
@@ -1256,12 +1284,25 @@ func createTable(s *relationExecutor, query string) error {
 	if len(table.columns) == 0 || s.server.config.Catalog == nil {
 		return sqlFailure{1105, "HY000", "database is not initialized"}
 	}
+	noOp := false
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
+		if namespaceDefinition, exists := definition.Namespaces[catalog.Key(namespace)]; exists {
+			if _, tableExists := namespaceDefinition.Tables[catalog.Key(name)]; tableExists && table.ifNotExists {
+				noOp = true
+			}
+		}
 		return createTableInDefinition(definition, namespace, name, table)
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1050, "42S01", err.Error()})
 	}
+	recordCreateTableDiagnostic(s.session, namespace, name, noOp)
 	return nil
+}
+
+func recordCreateTableDiagnostic(session *session, namespace, name string, noOp bool) {
+	if noOp {
+		session.addDiagnostic("Note", 1050, fmt.Sprintf("Table '%s.%s' already exists", namespace, name))
+	}
 }
 
 func createTableInDefinition(definition *catalog.Definition, namespace, name string, table tableDefinition) error {
@@ -4382,6 +4423,9 @@ func (s *preparedPreparation) queryColumns(query string, preserveMetadata bool) 
 	if err != nil {
 		return nil, err
 	}
+	if isShowDiagnosticsStatement(statement.lower) {
+		return diagnosticMetadata(), nil
+	}
 	executor := textStatementExecutor{session: s.session}
 	result, err := newStatementExecutionPolicy(&executor).execute(statement)
 	if err != nil {
@@ -4415,7 +4459,9 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	}
 	boundStatement, err := s.boundStatement(payload, statement)
 	if err != nil {
-		return writePacket(connection, sequence, mysqlError(preparedStatementError(err)))
+		err = preparedStatementError(err)
+		s.session.replaceDiagnostics([]sqlDiagnostic{diagnosticForError(err)})
+		return writePacket(connection, sequence, mysqlError(err))
 	}
 	finishExplanation := s.recordPreparedExplanation(statement)
 	defer finishExplanation()
@@ -4424,11 +4470,13 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	if err != nil {
 		return writePacket(connection, sequence, mysqlError(err))
 	}
+	warnings := s.session.diagnosticCount()
 	if result == nil {
-		return writePacket(connection, sequence, okPacket())
+		return writePacket(connection, sequence, okPacketWithWarnings(0, warnings))
 	}
+	result.warnings = warnings
 	if len(result.columns) == 0 {
-		return writePacket(connection, sequence, okPacket(result.affected))
+		return writePacket(connection, sequence, okPacketWithWarnings(result.affected, warnings))
 	}
 	return writeBinaryResult(connection, sequence, result, s.server.config.MaxAllowedPacket)
 }
@@ -4730,6 +4778,7 @@ func (s *preparedLifecycle) resetConnection() error {
 	s.resetSessionSettings()
 	s.closeAllPrepared()
 	s.prepared.longDataBytes = 0
+	s.clearDiagnostics()
 	return nil
 }
 
@@ -4887,9 +4936,13 @@ func okPacket(affected ...uint64) []byte {
 	if len(affected) > 0 {
 		count = affected[0]
 	}
+	return okPacketWithWarnings(count, 0)
+}
+
+func okPacketWithWarnings(affected uint64, warnings uint16) []byte {
 	payload := []byte{0x00}
-	payload = append(payload, lengthEncodedUint(count)...)
-	payload = append(payload, 0x00, 0x02, 0x00, 0x00, 0x00)
+	payload = append(payload, lengthEncodedUint(affected)...)
+	payload = append(payload, 0x00, 0x02, 0x00, byte(warnings), byte(warnings>>8))
 	return payload
 }
 
