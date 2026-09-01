@@ -1,6 +1,7 @@
 package blackbox_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -2147,7 +2148,7 @@ func TestMySQLStrictNumericAndBitSemantics(t *testing.T) {
 		t.Fatalf("valid numeric insert: %#v", inserted)
 	}
 	selected := client.query("SELECT small, count, price, ratio, active, mask FROM t")
-	if selected.err != "" || len(selected.rows) != 1 || strings.Join(selected.rows[0], ",") != "-128,7,1.50,2.5,1,5" {
+	if selected.err != "" || len(selected.rows) != 1 || len(selected.rows[0]) != 6 || strings.Join(selected.rows[0][:5], ",") != "-128,7,1.50,2.5,1" || !bytes.Equal([]byte(selected.rows[0][5]), []byte{5}) {
 		t.Fatalf("canonical numeric values: %#v", selected)
 	}
 	if len(selected.metadata) != 6 || selected.metadata[2].typ != 0xf6 || selected.metadata[4].typ != 0x01 || selected.metadata[5].typ != 0x10 {
