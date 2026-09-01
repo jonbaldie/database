@@ -509,11 +509,11 @@ func (p *relationalSelectPlan) hasAggregateOrWindow() bool {
 func parseAggregateProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
 	function, tail, found := relationalFunction(expression)
 	if !found {
-		return nil, false, nil
+		return parseComposedAggregateProjection(expression, alias, columns)
 	}
 	name := strings.ToUpper(function.name)
 	if !isAggregateName(name) {
-		return nil, false, nil
+		return parseComposedAggregateProjection(expression, alias, columns)
 	}
 	projection, err := aggregateProjection(expression, alias, columns, name, function.arguments)
 	if err != nil {
@@ -544,7 +544,7 @@ func projectAggregateWindow(projection relationalProjection, tail string, column
 		return []relationalProjection{projection}, true, nil
 	}
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(tail)), "over ") {
-		return nil, true, unsupportedExpression()
+		return []relationalProjection{projection}, true, nil
 	}
 	if projection.aggregate.distinct {
 		return nil, true, sqlFailure{1235, "42000", "DISTINCT is not supported for window functions"}
@@ -556,6 +556,36 @@ func projectAggregateWindow(projection relationalProjection, tail string, column
 	}
 	projection.aggregate, projection.window = nil, &relationalWindowFunction{relationalAggregate: *projection.aggregate, spec: spec}
 	return []relationalProjection{projection}, true, nil
+}
+
+func parseComposedAggregateProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
+	length := len(expression)
+	for index := 0; index < length; index++ {
+		nameStart, nameEnd := aggregateNameAt(expression, index)
+		if nameStart < 0 {
+			continue
+		}
+		open := afterAggregateName(expression, nameEnd)
+		close, found := matchingParenthesis(expression, open)
+		if open >= len(expression) || expression[open] != '(' || !found {
+			continue
+		}
+		aggregate, err := parseRelationalAggregate(strings.ToUpper(expression[nameStart:nameEnd]), expression[open+1:close])
+		if err != nil {
+			return nil, true, err
+		}
+		metadata, err := aggregateMetadata(aggregate, columns)
+		if err != nil {
+			return nil, true, err
+		}
+		name := expression
+		if alias != "" {
+			name = alias
+		}
+		metadata.name = name
+		return []relationalProjection{{expression: expression, name: name, alias: alias, column: -1, metadata: metadata, aggregate: &aggregate}}, true, nil
+	}
+	return nil, false, nil
 }
 
 func parseWindowProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
@@ -1384,6 +1414,10 @@ func (p *relationalSelectPlan) projectAggregateGroup(group []relationRow) (relat
 
 func (p *relationalSelectPlan) aggregateProjectionValue(projection relationalProjection, group []relationRow, source relationRow) (exprValue, error) {
 	if projection.aggregate != nil {
+		function, tail, found := relationalFunction(projection.expression)
+		if !found || strings.TrimSpace(tail) != "" || !strings.EqualFold(function.name, projection.aggregate.name) {
+			return p.evaluateGroupExpression(projection.expression, group, relationalResultRow{})
+		}
 		return p.evaluateAggregate(*projection.aggregate, group)
 	}
 	if projection.window != nil {
