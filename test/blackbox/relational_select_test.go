@@ -255,7 +255,8 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 		}
 	}
 	largeCurrentRows := client.query("SELECT SUM(value) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM large_window_values ORDER BY id")
-	if largeCurrentRows.err != "" || !reflect.DeepEqual(largeCurrentRows.rows, [][]string{{"1e+308"}, {"1e+308"}}) {
+	largeDouble := "1" + strings.Repeat("0", 308)
+	if largeCurrentRows.err != "" || !reflect.DeepEqual(largeCurrentRows.rows, [][]string{{largeDouble}, {largeDouble}}) {
 		t.Fatalf("large current-row windows: %#v", largeCurrentRows)
 	}
 	ranged := client.query("SELECT value, SUM(value) OVER (ORDER BY value RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM measurements WHERE value IS NOT NULL ORDER BY value")

@@ -79,9 +79,10 @@ func (v exprValue) render() string {
 }
 
 // renderDouble spells an approximate value with the shortest round-tripping
-// decimal representation, so the same float always renders identically.
+// decimal representation without an exponent, matching MySQL's text result
+// format for DOUBLE values.
 func renderDouble(value float64) string {
-	return strconv.FormatFloat(value, 'g', -1, 64)
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 // evaluateScalar parses and evaluates a complete scalar expression. A non-nil
