@@ -20,7 +20,7 @@ func writeResult(connection net.Conn, sequence byte, result *queryResult, maximu
 	if err := writer.writeTextResultRows(result); err != nil {
 		return writer.writeStreamError(err)
 	}
-	return writer.writeEOF()
+	return writer.writeEOF(result.warnings)
 }
 
 func writeBinaryResult(connection net.Conn, sequence byte, result *queryResult, maximum int64) error {
@@ -31,7 +31,7 @@ func writeBinaryResult(connection net.Conn, sequence byte, result *queryResult, 
 	if err := writer.writeBinaryResultRows(result); err != nil {
 		return writer.writeStreamError(err)
 	}
-	return writer.writeEOF()
+	return writer.writeEOF(result.warnings)
 }
 
 func (w *resultWriter) writeTextResultRows(result *queryResult) error {
@@ -102,7 +102,7 @@ func (w *resultWriter) writeBinaryRows(rows [][]string, nulls [][]bool) error {
 	return nil
 }
 
-func (w *resultWriter) writeEOF() error { return w.write(eofPacket()) }
+func (w *resultWriter) writeEOF(warnings ...uint16) error { return w.write(eofPacket(warnings...)) }
 
 func (w *resultWriter) writeStreamError(err error) error {
 	var failure sqlFailure
@@ -394,7 +394,13 @@ func columnDefinition(definition columnMetadata) []byte {
 	return payload
 }
 
-func eofPacket() []byte { return []byte{0xfe, 0, 0, 2, 0} }
+func eofPacket(warnings ...uint16) []byte {
+	count := uint16(0)
+	if len(warnings) > 0 {
+		count = warnings[0]
+	}
+	return []byte{0xfe, byte(count), byte(count >> 8), 2, 0}
+}
 
 func lengthEncodedInt(value int) []byte {
 	if value < 251 {

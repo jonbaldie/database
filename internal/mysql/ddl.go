@@ -204,9 +204,11 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
 	key := catalog.Key(name)
+	noOp := false
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
 		if _, found := definition.Namespaces[key]; !found {
 			if ifExists {
+				noOp = true
 				return nil
 			}
 			return errors.New("unknown database")
@@ -220,6 +222,7 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 	if strings.EqualFold(s.database, name) {
 		s.database = ""
 	}
+	recordDropDatabaseDiagnostic(s.session, name, noOp)
 	return nil
 }
 
@@ -233,6 +236,7 @@ func (s *ddlExecutor) dropTable(query string) error {
 		return err
 	}
 	key := catalog.Key(name)
+	noOp := false
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
 		namespaceDefinition, found := definition.Namespaces[catalog.Key(namespace)]
 		if !found {
@@ -240,6 +244,7 @@ func (s *ddlExecutor) dropTable(query string) error {
 		}
 		if _, found := namespaceDefinition.Tables[key]; !found {
 			if ifExists {
+				noOp = true
 				return nil
 			}
 			return errors.New("table does not exist")
@@ -250,7 +255,20 @@ func (s *ddlExecutor) dropTable(query string) error {
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1051, "42S02", err.Error()})
 	}
+	recordDropTableDiagnostic(s.session, namespace, name, noOp)
 	return nil
+}
+
+func recordDropDatabaseDiagnostic(session *session, name string, noOp bool) {
+	if noOp {
+		session.addDiagnostic("Note", 1008, fmt.Sprintf("Can't drop database '%s'; database doesn't exist", name))
+	}
+}
+
+func recordDropTableDiagnostic(session *session, namespace, name string, noOp bool) {
+	if noOp {
+		session.addDiagnostic("Note", 1051, fmt.Sprintf("Unknown table '%s.%s'", namespace, name))
+	}
 }
 
 func (s *ddlExecutor) truncateTable(query string) error {

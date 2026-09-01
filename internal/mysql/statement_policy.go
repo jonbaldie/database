@@ -32,9 +32,11 @@ func normalizeStatementText(query string) normalizedStatement {
 	return normalizedStatement{query: query, lower: strings.ToLower(query)}
 }
 
-func (p statementExecutionPolicy) execute(statement normalizedStatement) (*queryResult, error) {
+func (p statementExecutionPolicy) execute(statement normalizedStatement) (result *queryResult, err error) {
 	s := p.executor
 	query, lower := statement.query, statement.lower
+	startStatementDiagnostics(s.session, lower)
+	defer finishStatementDiagnostics(s.session, &err)
 	if err := s.session.checkStatementResources(); err != nil {
 		return nil, err
 	}
@@ -56,7 +58,7 @@ func (p statementExecutionPolicy) execute(statement normalizedStatement) (*query
 		return s.dispatchAndCheckResources(query, lower)
 	}
 	defer s.clearStatementDefinition()
-	result, err := s.dispatchStatement(query, lower)
+	result, err = s.dispatchStatement(query, lower)
 	// A mutation may already be staged inside an explicit transaction. Its
 	// catalog path checks immediately before staging, so do not turn a later
 	// post-dispatch deadline observation into a failed statement with retained
@@ -66,4 +68,18 @@ func (p statementExecutionPolicy) execute(statement normalizedStatement) (*query
 		err = s.session.checkStatementResources()
 	}
 	return execution.finish(s.session, result, err)
+}
+
+func startStatementDiagnostics(session *session, lower string) {
+	// SHOW WARNINGS and SHOW ERRORS inspect the current diagnostics area. They
+	// do not replace it until a later nondiagnostic statement runs.
+	if !isShowDiagnosticsStatement(lower) {
+		session.clearDiagnostics()
+	}
+}
+
+func finishStatementDiagnostics(session *session, err *error) {
+	if *err != nil {
+		session.replaceDiagnostics([]sqlDiagnostic{diagnosticForError(*err)})
+	}
 }
