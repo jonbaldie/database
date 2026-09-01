@@ -39,7 +39,11 @@ func (w *resultWriter) writeTextResultRows(result *queryResult) error {
 		return w.writeTextRows(result.rows, result.nulls)
 	}
 	return result.stream(func(row []string, nulls []bool) error {
-		return w.write(textRow(row, 0, [][]bool{nulls}))
+		payload, err := textRowWithDefinitions(row, 0, [][]bool{nulls}, w.definitions)
+		if err != nil {
+			return err
+		}
+		return w.write(payload)
 	})
 }
 
@@ -82,7 +86,11 @@ func (w *resultWriter) writeColumns(columns []string, metadata []columnMetadata)
 
 func (w *resultWriter) writeTextRows(rows [][]string, nulls [][]bool) error {
 	for rowIndex, row := range rows {
-		if err := w.write(textRow(row, rowIndex, nulls)); err != nil {
+		payload, err := textRowWithDefinitions(row, rowIndex, nulls, w.definitions)
+		if err != nil {
+			return err
+		}
+		if err := w.write(payload); err != nil {
 			return err
 		}
 	}
@@ -136,15 +144,35 @@ func resultColumnDefinition(name string, index int, metadata []columnMetadata) c
 }
 
 func textRow(row []string, rowIndex int, nulls [][]bool) []byte {
+	payload, _ := textRowWithDefinitions(row, rowIndex, nulls, nil)
+	return payload
+}
+
+func textRowWithDefinitions(row []string, rowIndex int, nulls [][]bool, definitions []columnMetadata) ([]byte, error) {
 	payload := make([]byte, 0)
 	for columnIndex, value := range row {
 		if resultValueIsNull(rowIndex, columnIndex, nulls) {
 			payload = append(payload, 0xfb)
 			continue
 		}
-		payload = append(payload, lengthEncodedString(value)...)
+		encoded, err := encodeTextValue(value, resultColumnDefinition("", columnIndex, definitions))
+		if err != nil {
+			return nil, err
+		}
+		payload = append(payload, encoded...)
 	}
-	return payload
+	return payload, nil
+}
+
+func encodeTextValue(value string, definition columnMetadata) ([]byte, error) {
+	if definition.typ != mysqlTypeBit {
+		return lengthEncodedString(value), nil
+	}
+	encoded, err := encodeBitResultValue(value, definition.length)
+	if err != nil {
+		return nil, err
+	}
+	return lengthEncodedBytes(encoded), nil
 }
 
 func resultValueIsNull(rowIndex, columnIndex int, nulls [][]bool) bool {
@@ -179,6 +207,12 @@ func encodeBinaryValue(value string, definition columnMetadata) ([]byte, error) 
 		return encodeBinaryLong(value)
 	case mysqlTypeDouble:
 		return encodeBinaryDouble(value)
+	case mysqlTypeBit:
+		encoded, err := encodeBitResultValue(value, definition.length)
+		if err != nil {
+			return nil, err
+		}
+		return lengthEncodedBytes(encoded), nil
 	case mysqlTypeDate, mysqlTypeDatetime, mysqlTypeTimestamp, mysqlTypeTime:
 		return encodeBinaryTemporal(value, definition.typ)
 	case mysqlTypeYear:
@@ -384,6 +418,26 @@ func encodeBinaryDouble(value string) ([]byte, error) {
 	return encoded, err
 }
 
+func encodeBitResultValue(value string, width uint32) ([]byte, error) {
+	if width < 1 || width > 64 {
+		return nil, fmt.Errorf("unsupported BIT result width %d", width)
+	}
+	parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("malformed BIT result %q", value)
+	}
+	if width < 64 && parsed >= uint64(1)<<width {
+		return nil, fmt.Errorf("BIT result %q exceeds width %d", value, width)
+	}
+	byteCount := int((width + 7) / 8)
+	encoded := make([]byte, byteCount)
+	for index := range encoded {
+		shift := uint((byteCount - 1 - index) * 8)
+		encoded[index] = byte(parsed >> shift)
+	}
+	return encoded, nil
+}
+
 func columnDefinition(definition columnMetadata) []byte {
 	payload := append(lengthEncodedString(definition.catalog), lengthEncodedString(definition.schema)...)
 	payload = append(payload, lengthEncodedString(definition.table)...)
@@ -429,7 +483,11 @@ func lengthEncodedUint(value uint64) []byte {
 }
 
 func lengthEncodedString(value string) []byte {
-	return append(lengthEncodedInt(len(value)), []byte(value)...)
+	return lengthEncodedBytes([]byte(value))
+}
+
+func lengthEncodedBytes(value []byte) []byte {
+	return append(lengthEncodedInt(len(value)), value...)
 }
 
 func readLengthEncoded(payload []byte, offset int) ([]byte, int, bool) {
