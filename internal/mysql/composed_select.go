@@ -676,7 +676,7 @@ func compileInSubquery(text string, columns []relationColumn, session *session, 
 		return nil, false, nil
 	}
 	left, negate := stripNotIn(left)
-	operand, err := compileRelationOperandContext(left, columns, session, outer)
+	operand, err := compileRelationOperandContext(left, columns, session, outer, context)
 	if err != nil {
 		return nil, true, err
 	}
