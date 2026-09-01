@@ -66,6 +66,26 @@ func TestInsertDefaultRejectsRequiredColumnWithoutDefault(t *testing.T) {
 	}
 }
 
+func TestInsertDistinguishesOmittedRequiredColumnFromExplicitNull(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	if _, err := executeStatement(executor, "CREATE TABLE items (id INT PRIMARY KEY, required_value INT NOT NULL, optional_value INT DEFAULT 7)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO items (id) VALUES (1)"); !isFailureCode(err, 1364) {
+		t.Fatalf("omitted required column error = %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO items (id, required_value) VALUES (2, NULL)"); !isFailureCode(err, 1048) {
+		t.Fatalf("explicit NULL error = %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO items (id, required_value) VALUES (3, 9)"); err != nil {
+		t.Fatalf("insert with omitted declared default: %v", err)
+	}
+	result, err := executeStatement(executor, "SELECT id, required_value, optional_value FROM items")
+	if err != nil || !equalRows(result.rows, [][]string{{"3", "9", "7"}}) {
+		t.Fatalf("rows after inserts = %#v, err = %v", result.rows, err)
+	}
+}
+
 func TestUpdateRejectsUnknownAssignmentColumn(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{
