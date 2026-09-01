@@ -19,6 +19,26 @@ func TestInsertEvaluatesScalarExpressions(t *testing.T) {
 	}
 }
 
+func TestInsertAcceptsEmptyColumnAndValueLists(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	if _, err := executeStatement(executor, "CREATE TABLE defaults (id INT DEFAULT 7, note VARCHAR(32) DEFAULT 'empty')"); err != nil {
+		t.Fatalf("create defaults: %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO defaults () VALUES ()"); err != nil {
+		t.Fatalf("empty insert: %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO defaults VALUES ()"); err != nil {
+		t.Fatalf("default-values insert: %v", err)
+	}
+	result, err := executeStatement(executor, "SELECT id, note FROM defaults")
+	if err != nil || !equalRows(result.rows, [][]string{{"7", "empty"}, {"7", "empty"}}) {
+		t.Fatalf("default row = %#v, err = %v", result.rows, err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO defaults (id) VALUES ()"); !isFailureCode(err, 1136) {
+		t.Fatalf("empty value list with explicit column error = %v", err)
+	}
+}
+
 func TestUpdateRejectsUnknownAssignmentColumn(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{
