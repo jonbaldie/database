@@ -45,61 +45,87 @@ func likeMatch(value, pattern string, escape rune, fold bool) bool {
 	return likeMatchRunes([]rune(value), []rune(pattern), escape, fold)
 }
 
+type likeTokenKind byte
+
+const (
+	likeLiteral likeTokenKind = iota
+	likeSingle
+	likeAny
+)
+
+type likeToken struct {
+	kind    likeTokenKind
+	literal rune
+}
+
 func likeMatchRunes(value, pattern []rune, escape rune, fold bool) bool {
-	valueIndex, patternIndex := 0, 0
-	valueLength, patternLength := len(value), len(pattern)
-	for patternIndex < patternLength {
-		consumed, ok := consumeLikeToken(value, pattern, &valueIndex, &patternIndex, valueLength, patternLength, escape, fold)
-		if !ok {
-			return false
-		}
-		if consumed {
-			return true
-		}
+	// Dynamic programming keeps one bounded row for each pattern token. A
+	// percent token consumes zero or more value runes, so its row recurrence is
+	// previous[i] (zero runes) or current[i-1] (one more rune). This removes the
+	// recursive backtracking that made multiple percent wildcards exponential.
+	tokens := tokenizeLikePattern(pattern, escape)
+
+	valueLength := len(value)
+	previous := make([]bool, valueLength+1)
+	current := make([]bool, valueLength+1)
+	previous[0] = true
+	for _, token := range tokens {
+		clear(current)
+		applyLikeToken(token, value, valueLength, previous, current, fold)
+		previous, current = current, previous
 	}
-	return valueIndex == valueLength
+	return previous[valueLength]
 }
 
-func consumeLikeToken(value, pattern []rune, valueIndex, patternIndex *int, valueLength, patternLength int, escape rune, fold bool) (bool, bool) {
-	if pattern[*patternIndex] == escape && *patternIndex+1 < patternLength {
-		return false, consumeLikeLiteral(value, pattern[*patternIndex+1], valueIndex, patternIndex, valueLength, 2, fold)
-	}
-	switch pattern[*patternIndex] {
-	case '%':
-		*patternIndex++
-		return likeMatchPercent(value, pattern, *valueIndex, *patternIndex, escape, fold), true
-	case '_':
-		if *valueIndex == valueLength {
-			return false, false
+func tokenizeLikePattern(pattern []rune, escape rune) []likeToken {
+	tokens := make([]likeToken, 0, len(pattern))
+	patternLength := len(pattern)
+	for index := 0; index < patternLength; index++ {
+		if pattern[index] == escape && index+1 < patternLength {
+			tokens = append(tokens, likeToken{kind: likeLiteral, literal: pattern[index+1]})
+			index++
+			continue
 		}
-		*valueIndex++
-		*patternIndex++
-		return false, true
-	default:
-		return false, consumeLikeLiteral(value, pattern[*patternIndex], valueIndex, patternIndex, valueLength, 1, fold)
+		switch pattern[index] {
+		case '%':
+			tokens = append(tokens, likeToken{kind: likeAny})
+		case '_':
+			tokens = append(tokens, likeToken{kind: likeSingle})
+		default:
+			tokens = append(tokens, likeToken{kind: likeLiteral, literal: pattern[index]})
+		}
+	}
+	return tokens
+}
+
+func applyLikeToken(token likeToken, value []rune, valueLength int, previous, current []bool, fold bool) {
+	switch token.kind {
+	case likeLiteral:
+		fillLikeLiteralRow(token.literal, value, valueLength, previous, current, fold)
+	case likeSingle:
+		fillLikeSingleRow(valueLength, previous, current)
+	case likeAny:
+		fillLikeAnyRow(valueLength, previous, current)
 	}
 }
 
-func consumeLikeLiteral(value []rune, want rune, valueIndex, patternIndex *int, valueLength, patternAdvance int, fold bool) bool {
-	if *valueIndex == valueLength || !likeRuneEqual(value[*valueIndex], want, fold) {
-		return false
+func fillLikeLiteralRow(want rune, value []rune, valueLength int, previous, current []bool, fold bool) {
+	for valueIndex := 1; valueIndex <= valueLength; valueIndex++ {
+		current[valueIndex] = previous[valueIndex-1] && likeRuneEqual(value[valueIndex-1], want, fold)
 	}
-	*valueIndex++
-	*patternIndex += patternAdvance
-	return true
 }
 
-func likeMatchPercent(value, pattern []rune, valueIndex, patternIndex int, escape rune, fold bool) bool {
-	if patternIndex == len(pattern) {
-		return true
+func fillLikeSingleRow(valueLength int, previous, current []bool) {
+	for valueIndex := 1; valueIndex <= valueLength; valueIndex++ {
+		current[valueIndex] = previous[valueIndex-1]
 	}
-	limit := len(value)
-	for index := valueIndex; index <= limit; index++ {
-		if likeMatchRunes(value[index:], pattern[patternIndex:], escape, fold) {
-			return true
-		}
+}
+
+func fillLikeAnyRow(valueLength int, previous, current []bool) {
+	current[0] = previous[0]
+	for valueIndex := 1; valueIndex <= valueLength; valueIndex++ {
+		current[valueIndex] = previous[valueIndex] || current[valueIndex-1]
 	}
-	return false
 }
 
 func likeRuneEqual(left, right rune, fold bool) bool {
