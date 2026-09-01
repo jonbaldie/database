@@ -27,8 +27,11 @@ func TestInsertAcceptsEmptyColumnAndValueLists(t *testing.T) {
 	if _, err := executeStatement(executor, "INSERT INTO defaults () VALUES ()"); err != nil {
 		t.Fatalf("empty insert: %v", err)
 	}
+	if _, err := executeStatement(executor, "INSERT INTO defaults VALUES ()"); err != nil {
+		t.Fatalf("default-values insert: %v", err)
+	}
 	result, err := executeStatement(executor, "SELECT id, note FROM defaults")
-	if err != nil || !equalRows(result.rows, [][]string{{"7", "empty"}}) {
+	if err != nil || !equalRows(result.rows, [][]string{{"7", "empty"}, {"7", "empty"}}) {
 		t.Fatalf("default row = %#v, err = %v", result.rows, err)
 	}
 	if _, err := executeStatement(executor, "INSERT INTO defaults (id) VALUES ()"); !isFailureCode(err, 1136) {
