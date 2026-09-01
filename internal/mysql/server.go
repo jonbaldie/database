@@ -2289,6 +2289,7 @@ type insertPlan struct {
 	table           catalog.Table
 	columns         []int
 	groups          [][]string
+	defaultValues   bool
 	sourceSQL       string
 	offsetMinutes   int
 }
@@ -2474,7 +2475,7 @@ func makeExplicitInsertPlan(s *relationExecutor, parts, columns []string, groups
 	if err != nil {
 		return insertPlan{}, err
 	}
-	return insertPlan{namespace: namespace, name: name, table: table, columns: indexes, groups: groups, offsetMinutes: offsetMinutes}, nil
+	return insertPlan{namespace: namespace, name: name, table: table, columns: indexes, groups: groups, defaultValues: len(columns) == 0, offsetMinutes: offsetMinutes}, nil
 }
 
 func parseInsertInput(query string) ([]string, []string, [][]string, error) {
@@ -2517,6 +2518,11 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 	added := make([][]string, 0, len(plan.groups))
 	rowNumber := 1
 	for _, group := range plan.groups {
+		if len(group) == 0 && plan.defaultValues {
+			added = append(added, defaultTableRow(plan.table))
+			rowNumber++
+			continue
+		}
 		if len(group) != len(plan.columns) {
 			return nil, 0, sqlFailure{1136, "21S01", "column count does not match value count"}
 		}
@@ -3157,10 +3163,7 @@ func insertTarget(value string) ([]string, []string, bool) {
 	if !ok {
 		return nil, nil, false
 	}
-	columns := splitCSV(value[open+1 : close])
-	if len(columns) == 0 || columns[0] == "" {
-		return nil, nil, false
-	}
+	columns := normalizeEmptyCSV(splitCSV(value[open+1 : close]))
 	for index, column := range columns {
 		name, valid := singleIdentifier(column)
 		if !valid {
@@ -3181,7 +3184,7 @@ func valueGroups(value string) ([][]string, bool) {
 		if !ok {
 			return nil, false
 		}
-		groups = append(groups, splitCSV(value[1:close]))
+		groups = append(groups, normalizeEmptyCSV(splitCSV(value[1:close])))
 		value = strings.TrimSpace(value[close+1:])
 		if value == "" {
 			break
@@ -4703,6 +4706,13 @@ func splitCSV(value string) []string {
 	}
 	result = append(result, strings.TrimSpace(value[start:]))
 	return result
+}
+
+func normalizeEmptyCSV(parts []string) []string {
+	if len(parts) == 1 && strings.TrimSpace(parts[0]) == "" {
+		return nil
+	}
+	return parts
 }
 
 const maximumPacketFrame = (1 << 24) - 1
