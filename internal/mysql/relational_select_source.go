@@ -598,7 +598,7 @@ func joinUsingCondition(item string, left, right []relationColumn) (string, stri
 
 func splitJoinCondition(text string) (string, string) {
 	positions := make([]int, 0, 4)
-	for _, word := range []string{"join", "where", "order", "limit"} {
+	for _, word := range []string{"left outer join", "right outer join", "inner join", "cross join", "left join", "right join", "join", "where", "order", "limit"} {
 		if position := keywordAt(text, word); position >= 0 {
 			positions = append(positions, position)
 		}
