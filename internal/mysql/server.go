@@ -3140,9 +3140,13 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	locks, err := matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)
+	selected, err := plan.selectedRows()
 	if err != nil {
 		return 0, err
+	}
+	locks := make([]rowLockResource, 0, len(selected))
+	for _, candidate := range selected {
+		locks = append(locks, rowLockResource{namespace: plan.namespace, table: plan.name, key: rowLockKey(candidate.result.source.values)})
 	}
 	if err := s.acquireWriteLocks(locks); err != nil {
 		return 0, err
@@ -3170,14 +3174,18 @@ type deletePlan struct {
 	table           catalog.Table
 	matcher         dmlPredicateMatcher
 	offsetMinutes   int
+	columns         []relationColumn
+	order           []relationalOrder
+	limit           relationalLimit
+	session         *session
 }
 
 func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
-	target, where, err := parseDeleteInput(query)
+	input, err := parseDeleteInputDetails(query)
 	if err != nil {
 		return deletePlan{}, err
 	}
-	namespace, name, table, err := planTable(s, target)
+	namespace, name, table, err := planTable(s, input.target)
 	if err != nil {
 		return deletePlan{}, err
 	}
@@ -3185,36 +3193,134 @@ func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
 	if err != nil {
 		return deletePlan{}, err
 	}
-	matcher, err := compileDMLPredicate(s, namespace, name, table, where)
+	columns := relationalTableColumns(namespace, name, name, table)
+	orders, err := parseRelationalOrder(input.order, nil, columns)
 	if err != nil {
 		return deletePlan{}, err
 	}
-	return deletePlan{namespace: namespace, name: name, table: table, matcher: matcher, offsetMinutes: offsetMinutes}, nil
+	limit, err := parseRelationalLimit(input.limit)
+	if err != nil {
+		return deletePlan{}, err
+	}
+	matcher, err := compileDMLPredicate(s, namespace, name, table, input.where)
+	if err != nil {
+		return deletePlan{}, err
+	}
+	return deletePlan{namespace: namespace, name: name, table: table, matcher: matcher, offsetMinutes: offsetMinutes, columns: columns, order: orders, limit: limit, session: s.session}, nil
 }
 
 func parseDeleteInput(query string) (string, string, error) {
-	rest := strings.TrimSpace(query[len("DELETE FROM "):])
-	target, where, ok := splitWhere(rest)
-	if !ok || target == "" {
-		return "", "", sqlFailure{1064, "42000", "malformed DELETE"}
+	input, err := parseDeleteInputDetails(query)
+	if err != nil {
+		return "", "", err
 	}
-	return target, where, nil
+	return input.target, input.where, nil
+}
+
+type deleteInput struct {
+	target string
+	where  string
+	order  string
+	limit  string
+}
+
+func parseDeleteInputDetails(query string) (deleteInput, error) {
+	rest := strings.TrimSpace(query[len("DELETE FROM "):])
+	target, where, group, having, window, order, limit, err := splitSelectTail(rest)
+	if err != nil {
+		return deleteInput{}, sqlFailure{1064, "42000", "malformed DELETE"}
+	}
+	if target == "" || group != "" || having != "" || window != "" {
+		return deleteInput{}, sqlFailure{1064, "42000", "malformed DELETE"}
+	}
+	return deleteInput{target: target, where: where, order: order, limit: limit}, nil
 }
 
 func applyDeletePlan(plan deletePlan) ([][]string, uint64, error) {
-	rows, affected := make([][]string, 0, len(plan.table.Rows)), uint64(0)
-	for _, row := range plan.table.Rows {
-		matched, err := plan.matcher(row)
-		if err != nil {
-			return nil, 0, err
-		}
-		if matched {
-			affected++
+	selected, err := plan.selectedRows()
+	if err != nil {
+		return nil, 0, err
+	}
+	selectedPositions := make(map[int]bool, len(selected))
+	for _, candidate := range selected {
+		selectedPositions[candidate.position] = true
+	}
+	rows, affected := make([][]string, 0, len(plan.table.Rows)-len(selected)), uint64(len(selected))
+	for position, row := range plan.table.Rows {
+		if selectedPositions[position] {
 			continue
 		}
 		rows = append(rows, append([]string(nil), row...))
 	}
 	return rows, affected, nil
+}
+
+type deleteCandidate struct {
+	position int
+	result   relationalResultRow
+}
+
+func (plan deletePlan) selectedRows() ([]deleteCandidate, error) {
+	candidates := make([]deleteCandidate, 0, len(plan.table.Rows))
+	for position, row := range plan.table.Rows {
+		candidate, matched, err := plan.deleteCandidate(position, row)
+		if err != nil {
+			return nil, err
+		}
+		if !matched {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	sortDeleteCandidates(candidates, plan.order, plan.columns)
+	return limitDeleteCandidates(candidates, plan.limit), nil
+}
+
+func (plan deletePlan) deleteCandidate(position int, row []string) (deleteCandidate, bool, error) {
+	matched, err := plan.matcher(row)
+	if err != nil || !matched {
+		return deleteCandidate{}, matched, err
+	}
+	result := relationalResultRow{source: relationRow{values: append([]string(nil), row...)}, orders: make([]exprValue, len(plan.order))}
+	for index, order := range plan.order {
+		if !order.computed {
+			continue
+		}
+		value, err := evaluateRelationExpressionContext(order.expression, plan.columns, result.source, nil, plan.session)
+		if err != nil {
+			return deleteCandidate{}, false, err
+		}
+		result.orders[index] = value
+	}
+	return deleteCandidate{position: position, result: result}, true, nil
+}
+
+func sortDeleteCandidates(candidates []deleteCandidate, orders []relationalOrder, columns []relationColumn) {
+	if len(orders) == 0 {
+		return
+	}
+	sort.SliceStable(candidates, func(left, right int) bool {
+		for index, order := range orders {
+			comparison := compareRelationalOrder(candidates[left].result, candidates[right].result, index, order, columns)
+			if comparison == 0 {
+				continue
+			}
+			return orderedBefore(comparison, order.direction)
+		}
+		return false
+	})
+}
+
+func limitDeleteCandidates(candidates []deleteCandidate, limit relationalLimit) []deleteCandidate {
+	if !limit.present {
+		return candidates
+	}
+	start := min(limit.offset, len(candidates))
+	end := start + limit.count
+	if end < start || end > len(candidates) {
+		end = len(candidates)
+	}
+	return candidates[start:end]
 }
 
 func relationTable(s *relationExecutor, namespace, name string) (catalog.Table, error) {
