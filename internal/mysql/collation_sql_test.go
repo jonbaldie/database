@@ -106,3 +106,39 @@ func TestColumnVersusLiteralUsesColumnCollation(t *testing.T) {
 		t.Fatalf("utf8mb4_bin column = 'abc' = %v, want no rows", bin.rows)
 	}
 }
+
+func TestBinaryColumnsUseBytewiseComparison(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE t (id INT PRIMARY KEY, b BINARY(10), v VARBINARY(10))",
+		"INSERT INTO t VALUES (1, 'Hello', 'Hello')",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	for _, query := range []string{
+		"SELECT id FROM t WHERE b = 'hello'",
+		"SELECT id FROM t WHERE v = 'hello'",
+	} {
+		result, err := executeStatement(executor, query)
+		if err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		if len(result.rows) != 0 {
+			t.Fatalf("%s returned %v, want no rows", query, result.rows)
+		}
+	}
+	for _, query := range []string{
+		"SELECT id FROM t WHERE b < 'hello'",
+		"SELECT id FROM t WHERE v < 'hello'",
+	} {
+		result, err := executeStatement(executor, query)
+		if err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		if !equalRows(result.rows, [][]string{{"1"}}) {
+			t.Fatalf("%s returned %v, want [[1]]", query, result.rows)
+		}
+	}
+}
