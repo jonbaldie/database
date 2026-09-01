@@ -107,6 +107,35 @@ func TestEvaluateArithmeticFailsClosed(t *testing.T) {
 	}
 }
 
+func TestEvaluateUnsignedArithmeticRejectsOutOfRange(t *testing.T) {
+	for _, expression := range []string{
+		"CAST(1 AS UNSIGNED) - 2",
+		"5 - CAST(10 AS UNSIGNED)",
+		"-CAST(1 AS UNSIGNED)",
+		"CAST(18446744073709551615 AS UNSIGNED) + 1",
+	} {
+		if _, err := evaluateScalar(expression); !isFailureCode(err, 1690) {
+			t.Errorf("evaluateScalar(%q) error = %v, want MySQL error 1690", expression, err)
+		}
+	}
+}
+
+func TestEvaluateUnsignedArithmeticKeepsUnsignedDomain(t *testing.T) {
+	for expression, want := range map[string]uint64{
+		"CAST(1 AS UNSIGNED) + 2":                    3,
+		"CAST(18446744073709551615 AS UNSIGNED) - 1": 18446744073709551614,
+		"CAST(3 AS UNSIGNED) * CAST(4 AS UNSIGNED)":  12,
+	} {
+		value, err := evaluateScalar(expression)
+		if err != nil {
+			t.Fatalf("evaluateScalar(%q) unexpected error: %v", expression, err)
+		}
+		if value.kind != valueUint || value.u != want {
+			t.Errorf("evaluateScalar(%q) = %#v, want unsigned %d", expression, value, want)
+		}
+	}
+}
+
 func TestEvaluateComparison(t *testing.T) {
 	cases := map[string]string{
 		"1 = 1":         "1",
