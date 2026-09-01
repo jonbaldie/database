@@ -39,6 +39,33 @@ func TestInsertAcceptsEmptyColumnAndValueLists(t *testing.T) {
 	}
 }
 
+func TestInsertUsesExplicitDefaultValues(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE items (id INT PRIMARY KEY, count INT DEFAULT 42, status VARCHAR(32) DEFAULT 'ready')",
+		"INSERT INTO items (id, count, status) VALUES (1, DEFAULT, DEFAULT), (2, 7, 'manual'), (3, default, 'DEFAULT')",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	result, err := executeStatement(executor, "SELECT id, count, status FROM items ORDER BY id")
+	want := [][]string{{"1", "42", "ready"}, {"2", "7", "manual"}, {"3", "42", "DEFAULT"}}
+	if err != nil || !equalRows(result.rows, want) {
+		t.Fatalf("inserted rows = %#v, err = %v", result.rows, err)
+	}
+}
+
+func TestInsertDefaultRejectsRequiredColumnWithoutDefault(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	if _, err := executeStatement(executor, "CREATE TABLE items (id INT PRIMARY KEY, status VARCHAR(32) NOT NULL)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO items VALUES (1, DEFAULT)"); !isFailureCode(err, 1364) {
+		t.Fatalf("missing default error = %v", err)
+	}
+}
+
 func TestUpdateRejectsUnknownAssignmentColumn(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{
