@@ -47,6 +47,25 @@ func TestUtf8mb40900AICILikeIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestUtf8mb40900AICILikeIsAccentInsensitive(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(16) COLLATE utf8mb4_0900_ai_ci)",
+		"INSERT INTO t VALUES (1, 'cafe'), (2, 'café')",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	result, err := executeStatement(executor, "SELECT id FROM t WHERE v LIKE 'cafe' ORDER BY id")
+	if err != nil {
+		t.Fatalf("LIKE cafe: %v", err)
+	}
+	if !equalRows(result.rows, [][]string{{"1"}, {"2"}}) {
+		t.Fatalf("utf8mb4_0900_ai_ci accent-insensitive LIKE = %v, want [[1] [2]]", result.rows)
+	}
+}
+
 func TestMixedCollationColumnComparisonIsError1267(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{
