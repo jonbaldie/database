@@ -2515,6 +2515,9 @@ func insertColumnIndexes(table catalog.Table, columns []string) ([]int, error) {
 }
 
 func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
+	if err := validateInsertColumnDefaults(plan.table, plan.columns); err != nil {
+		return nil, 0, err
+	}
 	added := make([][]string, 0, len(plan.groups))
 	rowNumber := 1
 	for _, group := range plan.groups {
@@ -2545,6 +2548,21 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		rows = owned
 	}
 	return append(rows, added...), uint64(len(added)), nil
+}
+
+func validateInsertColumnDefaults(table catalog.Table, columns []int) error {
+	supplied := make(map[int]bool, len(columns))
+	for _, column := range columns {
+		supplied[column] = true
+	}
+	for column := range table.Columns {
+		attribute := catalog.ColumnAttributeAt(table, column)
+		if supplied[column] || attribute.HasDefault || attribute.Nullable {
+			continue
+		}
+		return sqlFailure{1364, "HY000", fmt.Sprintf("Field '%s' doesn't have a default value", table.Columns[column])}
+	}
+	return nil
 }
 
 func insertColumnValue(table catalog.Table, columnIndex int, raw string, row, offsetMinutes int) (string, error) {
