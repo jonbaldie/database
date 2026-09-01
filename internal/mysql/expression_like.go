@@ -2,7 +2,6 @@ package mysql
 
 import (
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -107,7 +106,7 @@ func likeRuneEqual(left, right rune, fold bool) bool {
 	if left == right || !fold {
 		return left == right
 	}
-	return unicode.ToLower(left) == unicode.ToLower(right)
+	return characterComparisonKey(defaultStringType, string(left)) == characterComparisonKey(defaultStringType, string(right))
 }
 
 func mysqlLike(value, pattern string) bool {
