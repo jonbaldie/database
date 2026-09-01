@@ -2529,7 +2529,7 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		row := defaultTableRow(plan.table)
 		for valueIndex, value := range group {
 			columnIndex := plan.columns[valueIndex]
-			canonical, err := canonicalColumnValueAtOffset(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
+			canonical, err := insertColumnValue(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -2545,6 +2545,20 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		rows = owned
 	}
 	return append(rows, added...), uint64(len(added)), nil
+}
+
+func insertColumnValue(table catalog.Table, columnIndex int, raw string, row, offsetMinutes int) (string, error) {
+	if !strings.EqualFold(strings.TrimSpace(raw), "DEFAULT") {
+		return canonicalColumnValueAtOffset(table, columnIndex, raw, row, offsetMinutes)
+	}
+	attribute := catalog.ColumnAttributeAt(table, columnIndex)
+	if attribute.HasDefault {
+		return attribute.Default, nil
+	}
+	if attribute.Nullable {
+		return storedSQLNullValue, nil
+	}
+	return "", sqlFailure{1364, "HY000", fmt.Sprintf("Field '%s' doesn't have a default value", table.Columns[columnIndex])}
 }
 
 func defaultTableRow(table catalog.Table) []string {
