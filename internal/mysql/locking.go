@@ -351,14 +351,18 @@ func (s *relationExecutor) acquireWriteLocks(resources []rowLockResource) error 
 	return err
 }
 
-func matchingRowLocks(namespace, table string, rows [][]string, matcher func([]string) bool) []rowLockResource {
+func matchingRowLocks(namespace, table string, rows [][]string, matcher dmlPredicateMatcher) ([]rowLockResource, error) {
 	resources := make([]rowLockResource, 0)
 	for _, row := range rows {
-		if matcher(row) {
+		matched, err := matcher(row)
+		if err != nil {
+			return nil, err
+		}
+		if matched {
 			resources = append(resources, rowLockResource{namespace: namespace, table: table, key: rowLockKey(row)})
 		}
 	}
-	return resources
+	return resources, nil
 }
 
 func rowLockKey(row []string) string {

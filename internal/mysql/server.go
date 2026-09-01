@@ -2804,7 +2804,10 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	locks := matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)
+	locks, err := matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)
+	if err != nil {
+		return 0, err
+	}
 	if plan.primaryKey != "" {
 		if row, ok := pointUpdateRow(plan); ok {
 			locks = []rowLockResource{{namespace: plan.namespace, table: plan.name, key: rowLockKey(row)}}
@@ -2844,7 +2847,7 @@ type updatePlan struct {
 	namespace, name string
 	table           catalog.Table
 	updates         []updateAssignment
-	matcher         func([]string) bool
+	matcher         dmlPredicateMatcher
 	primaryKey      string
 	offsetMinutes   int
 }
@@ -2875,15 +2878,23 @@ func makeUpdatePlan(s *relationExecutor, query string) (updatePlan, error) {
 	if err != nil {
 		return updatePlan{}, err
 	}
-	matcher, err := rowMatcherAtOffset(where, table, indexes, offsetMinutes)
+	matcher, err := compileDMLPredicate(s, namespace, name, table, where)
 	if err != nil {
 		return updatePlan{}, err
 	}
-	primaryKey := ""
-	if column, value, ok := parseSimpleEqualityWhere(where); ok && primaryColumn(table) == column {
-		primaryKey = value
-	}
+	primaryKey := updatePrimaryKey(table, where)
 	return updatePlan{namespace: namespace, name: name, table: table, updates: updates, matcher: matcher, primaryKey: primaryKey, offsetMinutes: offsetMinutes}, nil
+}
+
+func updatePrimaryKey(table catalog.Table, where string) string {
+	column, value, ok := parseSimpleEqualityWhere(where)
+	if !ok {
+		return ""
+	}
+	if primaryColumn(table) != column || !simplePrimaryKeyValue(value) {
+		return ""
+	}
+	return value
 }
 
 func parseUpdateInput(query string) (string, string, string, error) {
@@ -2939,23 +2950,39 @@ func applyUpdatePlan(plan updatePlan) ([][]string, uint64, error) {
 		return nil, 0, err
 	}
 	if key, ok := pointUpdatePrimaryKey(plan); ok {
-		return applyPointUpdatePlan(plan, key)
+		if row, found := pointUpdateRow(plan); found {
+			matched, err := plan.matcher(row)
+			if err != nil {
+				return nil, 0, err
+			}
+			if matched {
+				return applyPointUpdatePlan(plan, key)
+			}
+			return plan.table.Rows, 0, nil
+		}
 	}
-	changed := changedUpdateRows(plan)
+	changed, err := changedUpdateRows(plan)
+	if err != nil {
+		return nil, 0, err
+	}
 	if len(changed) == 0 {
 		return plan.table.Rows, 0, nil
 	}
 	return applyChangedUpdateRows(plan, changed)
 }
 
-func changedUpdateRows(plan updatePlan) []int {
+func changedUpdateRows(plan updatePlan) ([]int, error) {
 	changed := make([]int, 0)
 	for rowIndex, row := range plan.table.Rows {
-		if plan.matcher(row) {
+		matched, err := plan.matcher(row)
+		if err != nil {
+			return nil, err
+		}
+		if matched {
 			changed = append(changed, rowIndex)
 		}
 	}
-	return changed
+	return changed, nil
 }
 
 func applyChangedUpdateRows(plan updatePlan, changed []int) ([][]string, uint64, error) {
@@ -3072,16 +3099,23 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := s.acquireWriteLocks(matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)); err != nil {
+	locks, err := matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)
+	if err != nil {
 		return 0, err
 	}
-	_, affected := applyDeletePlan(plan)
+	if err := s.acquireWriteLocks(locks); err != nil {
+		return 0, err
+	}
+	_, affected, err := applyDeletePlan(plan)
+	if err != nil {
+		return 0, err
+	}
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
 			currentPlan := plan
 			currentPlan.table = table
-			rows, _ := applyDeletePlan(currentPlan)
-			return rows, nil
+			rows, _, err := applyDeletePlan(currentPlan)
+			return rows, err
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
@@ -3093,7 +3127,7 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 type deletePlan struct {
 	namespace, name string
 	table           catalog.Table
-	matcher         func([]string) bool
+	matcher         dmlPredicateMatcher
 	offsetMinutes   int
 }
 
@@ -3106,15 +3140,11 @@ func makeDeletePlan(s *relationExecutor, query string) (deletePlan, error) {
 	if err != nil {
 		return deletePlan{}, err
 	}
-	indexes, err := tableColumnIndexes(table)
-	if err != nil {
-		return deletePlan{}, err
-	}
 	offsetMinutes, err := sessionTimeZoneOffset(s.session)
 	if err != nil {
 		return deletePlan{}, err
 	}
-	matcher, err := rowMatcherAtOffset(where, table, indexes, offsetMinutes)
+	matcher, err := compileDMLPredicate(s, namespace, name, table, where)
 	if err != nil {
 		return deletePlan{}, err
 	}
@@ -3130,16 +3160,20 @@ func parseDeleteInput(query string) (string, string, error) {
 	return target, where, nil
 }
 
-func applyDeletePlan(plan deletePlan) ([][]string, uint64) {
+func applyDeletePlan(plan deletePlan) ([][]string, uint64, error) {
 	rows, affected := make([][]string, 0, len(plan.table.Rows)), uint64(0)
 	for _, row := range plan.table.Rows {
-		if plan.matcher(row) {
+		matched, err := plan.matcher(row)
+		if err != nil {
+			return nil, 0, err
+		}
+		if matched {
 			affected++
 			continue
 		}
 		rows = append(rows, append([]string(nil), row...))
 	}
-	return rows, affected
+	return rows, affected, nil
 }
 
 func relationTable(s *relationExecutor, namespace, name string) (catalog.Table, error) {
@@ -3343,6 +3377,32 @@ func splitEquals(value string) (string, string, bool) {
 
 func rowMatcher(where string, table catalog.Table, indexes map[string]int) (func([]string) bool, error) {
 	return rowMatcherAtOffset(where, table, indexes, 0)
+}
+
+type dmlPredicateMatcher func([]string) (bool, error)
+
+func compileDMLPredicate(s *relationExecutor, namespace, name string, table catalog.Table, where string) (dmlPredicateMatcher, error) {
+	where = strings.TrimSpace(where)
+	if where == "" {
+		return func([]string) (bool, error) { return true, nil }, nil
+	}
+	columns := relationalTableColumns(namespace, name, name, table)
+	context := s.composed
+	if context == nil {
+		context = newComposedQueryContext(s)
+		s.composed = context
+	}
+	predicate, err := compileRelationPredicateContext(where, columns, s.session, context, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return func(row []string) (bool, error) {
+		return predicateMatches(predicate, relationRow{values: row})
+	}, nil
+}
+
+func simplePrimaryKeyValue(value string) bool {
+	return strings.TrimSpace(value) != "" && !strings.ContainsAny(value, "()+-*/")
 }
 
 func rowMatcherAtOffset(where string, table catalog.Table, indexes map[string]int, offsetMinutes int) (func([]string) bool, error) {
