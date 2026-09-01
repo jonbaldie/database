@@ -62,6 +62,8 @@ func additiveArithmetic(operator string, a, b exprValue) (exprValue, error) {
 		return checkFinite(applyFloatArithmetic(operator, toFloat(a), toFloat(b)))
 	case valueDecimal:
 		return boundedDecimal(applyDecimalArithmetic(operator, toDecimal(a), toDecimal(b)))
+	case valueUint:
+		return unsignedArithmetic(operator, a, b)
 	default:
 		return integerArithmetic(operator, a.i, b.i)
 	}
@@ -77,8 +79,11 @@ func arithmeticDomain(a, b exprValue) (valueKind, error) {
 	if a.kind == valueDouble || b.kind == valueDouble {
 		return valueDouble, nil
 	}
-	if a.kind == valueDecimal || b.kind == valueDecimal || a.kind == valueUint || b.kind == valueUint {
+	if a.kind == valueDecimal || b.kind == valueDecimal {
 		return valueDecimal, nil
+	}
+	if a.kind == valueUint || b.kind == valueUint {
+		return valueUint, nil
 	}
 	return valueInt, nil
 }
@@ -120,6 +125,35 @@ func integerArithmetic(operator string, a, b int64) (exprValue, error) {
 		return exprValue{}, outOfRangeValue()
 	}
 	return intValue(result), nil
+}
+
+// unsignedArithmetic evaluates exact integer arithmetic with an unsigned
+// operand. MySQL keeps this domain unsigned, so a negative result or a value
+// above UINT64_MAX is an out-of-range error instead of a signed or decimal
+// promotion.
+func unsignedArithmetic(operator string, a, b exprValue) (exprValue, error) {
+	left := integerBig(a)
+	right := integerBig(b)
+	result := new(big.Int)
+	switch operator {
+	case "+":
+		result.Add(left, right)
+	case "-":
+		result.Sub(left, right)
+	default:
+		result.Mul(left, right)
+	}
+	if result.Sign() < 0 || !result.IsUint64() {
+		return exprValue{}, outOfRangeValue()
+	}
+	return uintValue(result.Uint64()), nil
+}
+
+func integerBig(value exprValue) *big.Int {
+	if value.kind == valueUint {
+		return new(big.Int).SetUint64(value.u)
+	}
+	return big.NewInt(value.i)
 }
 
 func checkedInteger(operator string, a, b int64) (int64, bool) {
