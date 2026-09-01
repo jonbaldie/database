@@ -259,7 +259,7 @@ func relationCharacterComparisonType(left, right relationOperand) (characterType
 		if err != nil {
 			return characterType{}, false, err
 		}
-		if typ.kind != characterText {
+		if typ.kind != characterText && typ.kind != characterBinary {
 			continue
 		}
 		if !found {
