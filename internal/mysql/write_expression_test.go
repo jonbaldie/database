@@ -219,3 +219,79 @@ func TestUpdateAssignmentFailureLeavesRowUnchanged(t *testing.T) {
 		t.Fatalf("row after failed update = %#v, want [[1 5 0]]", result.rows)
 	}
 }
+
+func TestDMLWhereSupportsRelationalPredicates(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE items (id INT PRIMARY KEY, value INT)",
+		"INSERT INTO items VALUES (1, 10), (2, 20), (3, 30)",
+		"DELETE FROM items WHERE value > 15",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	result, err := executeStatement(executor, "SELECT id, value FROM items")
+	if err != nil || !equalRows(result.rows, [][]string{{"1", "10"}}) {
+		t.Fatalf("rows after DELETE = %#v, err = %v", result, err)
+	}
+
+	for _, query := range []string{
+		"UPDATE items SET value = value + 1 WHERE value < 10 OR value = 10",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	result, err = executeStatement(executor, "SELECT id, value FROM items")
+	if err != nil || !equalRows(result.rows, [][]string{{"1", "11"}}) {
+		t.Fatalf("rows after UPDATE = %#v, err = %v", result, err)
+	}
+}
+
+func TestDMLWhereSupportsNullAndSubqueryPredicates(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE items (id INT PRIMARY KEY, value INT)",
+		"CREATE TABLE eligible (id INT PRIMARY KEY)",
+		"CREATE TABLE matching (id INT PRIMARY KEY, value INT)",
+		"INSERT INTO items VALUES (1, 10), (2, 20), (3, NULL)",
+		"INSERT INTO eligible VALUES (2)",
+		"INSERT INTO matching VALUES (1, 10), (2, 999)",
+		"DELETE FROM items WHERE value IS NULL",
+		"UPDATE items SET value = value + 1 WHERE id IN (SELECT id FROM eligible)",
+		"UPDATE items SET value = value + 1 WHERE id = (SELECT id FROM eligible WHERE id = 2)",
+		"UPDATE items SET value = value + 10 WHERE EXISTS (SELECT 1 FROM matching WHERE matching.id = items.id AND matching.value = items.value)",
+		"UPDATE items SET value = value + 1 WHERE id IN (SELECT matching.id FROM matching WHERE matching.id = items.id AND matching.value = 10)",
+		"UPDATE items SET value = value + 1 WHERE id = (SELECT matching.id FROM matching WHERE matching.id = items.id AND matching.value = 10)",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	result, err := executeStatement(executor, "SELECT id, value FROM items ORDER BY id")
+	if err != nil || !equalRows(result.rows, [][]string{{"1", "22"}, {"2", "22"}}) {
+		t.Fatalf("rows after DML predicates = %#v, err = %v", result, err)
+	}
+}
+
+func TestDMLWherePredicateFailureIsAtomic(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE items (id INT PRIMARY KEY, value INT)",
+		"CREATE TABLE matches (id INT, value INT)",
+		"INSERT INTO items VALUES (1, 10), (2, 20)",
+		"INSERT INTO matches VALUES (1, 100), (1, 101)",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	if _, err := executeStatement(executor, "UPDATE items SET value = value + 1 WHERE id = (SELECT matches.id FROM matches WHERE matches.id = items.id)"); !isFailureCode(err, 1242) {
+		t.Fatalf("multiple-row scalar predicate error = %v", err)
+	}
+	result, err := executeStatement(executor, "SELECT id, value FROM items ORDER BY id")
+	if err != nil || !equalRows(result.rows, [][]string{{"1", "10"}, {"2", "20"}}) {
+		t.Fatalf("rows after failed predicate = %#v, err = %v", result, err)
+	}
+}

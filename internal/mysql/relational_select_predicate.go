@@ -11,11 +11,13 @@ type relationOperand struct {
 	isColumn   bool
 	bound      bool
 	computed   bool
+	subquery   string
 	raw        string
 	value      exprValue
 	definition relationColumn
 	columns    []relationColumn
 	outer      *outerRelationScope
+	context    *composedQueryContext
 	session    *session
 }
 
@@ -73,7 +75,7 @@ func compileSimpleRelationPredicateContext(text string, columns []relationColumn
 		return compileRelationComparisonContext(operator, left, right, columns, session, outer, context)
 	}
 	if isPosition, left, right := splitRelationKeywordOnce(text, "IS"); isPosition {
-		return compileIsPredicate(left, right, columns, session)
+		return compileIsPredicate(left, right, columns, session, outer, context)
 	}
 	operand, err := compileRelationOperandContext(text, columns, session, outer, context)
 	if err != nil {
@@ -84,8 +86,8 @@ func compileSimpleRelationPredicateContext(text string, columns []relationColumn
 	}, nil
 }
 
-func compileIsPredicate(left, right string, columns []relationColumn, session *session) (relationPredicate, error) {
-	operand, err := compileRelationOperand(left, columns, session)
+func compileIsPredicate(left, right string, columns []relationColumn, session *session, outer *outerRelationScope, context *composedQueryContext) (relationPredicate, error) {
+	operand, err := compileRelationOperandContext(left, columns, session, outer, context)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +284,7 @@ func compileRelationOperandContext(text string, columns []relationColumn, sessio
 	if text == "" {
 		return relationOperand{}, unsupportedExpression()
 	}
-	if operand, found, err := compileScalarSubqueryOperand(text, outer, context); found {
+	if operand, found, err := compileScalarSubqueryOperand(text, columns, outer, context); found {
 		return operand, err
 	}
 	if value, err := evaluateScalarResolved(text, nil, session); err == nil {
@@ -303,7 +305,7 @@ func compileRelationOperandContext(text string, columns []relationColumn, sessio
 	return relationOperand{computed: true, raw: text, columns: columns, outer: outer, session: session}, nil
 }
 
-func compileScalarSubqueryOperand(text string, outer *outerRelationScope, context *composedQueryContext) (relationOperand, bool, error) {
+func compileScalarSubqueryOperand(text string, columns []relationColumn, outer *outerRelationScope, context *composedQueryContext) (relationOperand, bool, error) {
 	query, ok := scalarSubquerySQL(text)
 	if !ok {
 		return relationOperand{}, false, nil
@@ -311,11 +313,18 @@ func compileScalarSubqueryOperand(text string, outer *outerRelationScope, contex
 	if context == nil {
 		return relationOperand{}, true, unsupportedExpression()
 	}
-	value, _, err := executeScalarSubquery(context, query, outer)
-	if err != nil {
+	scope := &outerRelationScope{columns: columns, row: sampleRelationRow(columns), parent: outer}
+	if _, err := describeComposedSelect(context, query, scope); err != nil {
 		return relationOperand{}, true, err
 	}
-	return relationOperand{raw: text, value: value, bound: true}, true, nil
+	if !context.planning && !composedQueryIsCorrelated(context, query, scope) {
+		value, _, err := executeScalarSubquery(context, query, nil)
+		if err != nil {
+			return relationOperand{}, true, err
+		}
+		return relationOperand{raw: text, value: value, bound: true}, true, nil
+	}
+	return relationOperand{raw: text, subquery: query, bound: true, columns: columns, outer: outer, context: context}, true, nil
 }
 
 func coerceRelationLiterals(left, right relationOperand, columns []relationColumn, session *session) (relationOperand, relationOperand, error) {
@@ -374,6 +383,11 @@ func typedRelationLiteral(operand relationOperand, column relationColumn, sessio
 }
 
 func relationOperandValue(operand relationOperand, row relationRow) (exprValue, error) {
+	if operand.subquery != "" {
+		scope := &outerRelationScope{columns: operand.columns, row: row, parent: operand.outer}
+		value, _, err := executeScalarSubquery(operand.context, operand.subquery, scope)
+		return value, err
+	}
 	if operand.computed {
 		return evaluateRelationExpressionContext(operand.raw, operand.columns, row, operand.outer, operand.session)
 	}

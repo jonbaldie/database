@@ -785,8 +785,15 @@ func relationIndexBoundValue(left, right, operator string, columns []relationCol
 		operator = reversedRelationIndexOperator(operator)
 	}
 	literal, err := compileRelationOperand(literalText, columns, session)
-	if err != nil || literal.isColumn || literal.computed || literal.bound {
-		return exprValue{}, "", false, err
+	if err != nil {
+		// A valid predicate can reference a column from an outer query scope.
+		// That value is not available to this local index planner, so leave the
+		// predicate unbounded and let the compiled predicate evaluate it at row
+		// time. Predicate compilation has already validated the expression.
+		return exprValue{}, "", false, nil
+	}
+	if literal.isColumn || literal.computed || literal.bound {
+		return exprValue{}, "", false, nil
 	}
 	literal, err = bindLiteralToColumn(literal, column, session)
 	if err != nil {
