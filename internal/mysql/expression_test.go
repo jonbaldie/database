@@ -113,6 +113,11 @@ func TestEvaluateUnsignedArithmeticRejectsOutOfRange(t *testing.T) {
 		"5 - CAST(10 AS UNSIGNED)",
 		"-CAST(1 AS UNSIGNED)",
 		"CAST(18446744073709551615 AS UNSIGNED) + 1",
+		"(CAST(10 AS UNSIGNED) DIV 2) - 10",
+		"CAST(10 AS UNSIGNED) DIV -2",
+		"-10 DIV CAST(2 AS UNSIGNED)",
+		"(CAST(10 AS UNSIGNED) % 3) - 10",
+		"(18446744073709551615 % 10) - 10",
 	} {
 		if _, err := evaluateScalar(expression); !isFailureCode(err, 1690) {
 			t.Errorf("evaluateScalar(%q) error = %v, want MySQL error 1690", expression, err)
@@ -122,9 +127,14 @@ func TestEvaluateUnsignedArithmeticRejectsOutOfRange(t *testing.T) {
 
 func TestEvaluateUnsignedArithmeticKeepsUnsignedDomain(t *testing.T) {
 	for expression, want := range map[string]uint64{
-		"CAST(1 AS UNSIGNED) + 2":                    3,
-		"CAST(18446744073709551615 AS UNSIGNED) - 1": 18446744073709551614,
-		"CAST(3 AS UNSIGNED) * CAST(4 AS UNSIGNED)":  12,
+		"CAST(1 AS UNSIGNED) + 2":                     3,
+		"CAST(18446744073709551615 AS UNSIGNED) - 1":  18446744073709551614,
+		"CAST(3 AS UNSIGNED) * CAST(4 AS UNSIGNED)":   12,
+		"18446744073709551615 DIV 1":                  18446744073709551615,
+		"CAST(9223372036854775808 AS UNSIGNED) DIV 1": 9223372036854775808,
+		"CAST(10 AS UNSIGNED) DIV 2":                  5,
+		"18446744073709551615 % 10":                   5,
+		"CAST(10 AS UNSIGNED) % 3":                    1,
 	} {
 		value, err := evaluateScalar(expression)
 		if err != nil {
@@ -272,7 +282,23 @@ func TestEvaluateExtendedFunctionSemantics(t *testing.T) {
 		"SUBSTRING('abcdef' FROM 2 FOR 3)":  "bcd",
 		"SUBSTRING('abcdef' FROM -2 FOR 1)": "e",
 		"SUBSTRING('abcdef' FROM 3)":        "cdef",
+		"SUBSTRING('abcdef', -7)":           "",
+		"SUBSTRING('abcdef', -6)":           "abcdef",
+		"SUBSTRING('abcdef', -100)":         "",
+		"SUBSTRING('abcdef', 0)":            "",
+		"SUBSTRING('', -1)":                 "",
+		"SUBSTRING('', 0)":                  "",
+		"SUBSTRING('', 1)":                  "",
 		"LOCATE('B', 'abc')":                "2",
+		"LOCATE('', '')":                    "1",
+		"LOCATE('', '', 1)":                 "1",
+		"LOCATE('', '', 2)":                 "0",
+		"LOCATE('', 'abc', 1)":              "1",
+		"LOCATE('', 'abc', 3)":              "3",
+		"LOCATE('', 'abc', 4)":              "4",
+		"LOCATE('', 'abc', 5)":              "0",
+		"LOCATE('', 'abc', 0)":              "0",
+		"LOCATE('a', '')":                   "0",
 	}
 	for expression, want := range cases {
 		if got := evalRender(t, expression); got != want {

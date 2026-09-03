@@ -270,7 +270,7 @@ func substringStart(length int, position int64) int {
 	}
 	start := int64(length) + position
 	if start < 0 {
-		return 0
+		return length
 	}
 	return int(start)
 }
@@ -325,20 +325,29 @@ func locateValue(arguments []exprValue) (exprValue, error) {
 	if start <= 0 {
 		return intValue(0), nil
 	}
-	haystackRunes, needleRunes := []rune(haystack), []rune(needle)
-	startIndex := start - 1
-	if startIndex >= int64(len(haystackRunes)) {
-		return intValue(0), nil
+	return searchLocateNeedle([]rune(haystack), []rune(needle), needle, start-1), nil
+}
+
+func searchLocateNeedle(haystackRunes, needleRunes []rune, needle string, startIndex int64) exprValue {
+	haystackLength := len(haystackRunes)
+	if needle == "" {
+		if startIndex <= int64(haystackLength) {
+			return intValue(startIndex + 1)
+		}
+		return intValue(0)
 	}
-	needleLength, haystackLength := len(needleRunes), len(haystackRunes)
+	if startIndex >= int64(haystackLength) {
+		return intValue(0)
+	}
+	needleLength := len(needleRunes)
 	needleKey := characterComparisonKey(defaultStringType, needle)
 	for index := int(startIndex); index+needleLength <= haystackLength; index++ {
 		candidate := string(haystackRunes[index : index+needleLength])
 		if characterComparisonKey(defaultStringType, candidate) == needleKey {
-			return intValue(int64(index + 1)), nil
+			return intValue(int64(index + 1))
 		}
 	}
-	return intValue(0), nil
+	return intValue(0)
 }
 
 func locateStart(arguments []exprValue) (int64, error) {

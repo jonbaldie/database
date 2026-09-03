@@ -585,16 +585,19 @@ func writeUpgradeFile(path string, contents []byte) error {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err == nil {
-		_, err = temporary.Write(contents)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
 	}
-	if err == nil {
-		err = temporary.Sync()
+	if _, err := temporary.Write(contents); err != nil {
+		_ = temporary.Close()
+		return err
 	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
 	}
-	if err != nil {
+	if err := temporary.Close(); err != nil {
 		return err
 	}
 	return os.Rename(temporaryPath, path)
