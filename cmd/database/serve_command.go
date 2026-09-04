@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 
 	"github.com/jonbaldie/database/internal/lifecycle"
 )
@@ -79,7 +80,7 @@ func serveLifecycleWithReporter(opts lifecycle.Options, reporter *operationRepor
 		}
 	})
 	if err != nil {
-		return reporter.failure("operation_failed", "", err.Error(), details)
+		return reporter.failure(serveExitClass(err), "", err.Error(), details)
 	}
 	if state == "stopped" || state == "" {
 		details["state"] = "stopped"
@@ -87,6 +88,13 @@ func serveLifecycleWithReporter(opts lifecycle.Options, reporter *operationRepor
 	details["data_directory"] = opts.DataDirectory
 	details["recovered"] = recovered
 	return reporter.success(details)
+}
+
+func serveExitClass(err error) string {
+	if strings.Contains(err.Error(), "already in use") {
+		return "precondition"
+	}
+	return "operation_failed"
 }
 
 func serveInputFailure(stderr io.Writer, err error) int {
@@ -137,11 +145,16 @@ func writeHumanServeEvent(stdout io.Writer, event lifecycle.Event) {
 }
 
 func serveFailure(format, operationID string, stdout, stderr io.Writer, err error) int {
+	class := serveExitClass(err)
+	code := operatorExitCode(class)
+	if class == "operation_failed" {
+		code = 1
+	}
 	if format == "json" {
-		return writeOperatorFailure(stdout, "serve", operationID, "operation_failed", 1, err.Error())
+		return writeOperatorFailure(stdout, "serve", operationID, class, code, err.Error())
 	}
 	fmt.Fprintf(stderr, "database serve: %v\n", err)
-	return 1
+	return code
 }
 
 func serveSuccess(format, operationID string, stdout io.Writer) int {

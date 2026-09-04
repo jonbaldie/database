@@ -263,11 +263,11 @@ func TestOperatorBackupInspectAndRestoreRejectNonEmptyDestination(t *testing.T) 
 		"--data-directory", occupied,
 		"--result=json",
 	)
-	if denied.ExitCode != 6 {
-		t.Fatalf("restore non-empty exit = %d, want 6; %#v", denied.ExitCode, denied)
+	if denied.ExitCode != 3 {
+		t.Fatalf("restore non-empty exit = %d, want 3; %#v", denied.ExitCode, denied)
 	}
 	deniedResult := decodeOperatorResult(t, denied.Stdout)
-	if deniedResult["exit_class"] != "operation_failed" {
+	if deniedResult["exit_class"] != "precondition" {
 		t.Fatalf("restore non-empty result = %#v", deniedResult)
 	}
 }

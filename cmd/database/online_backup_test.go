@@ -70,7 +70,7 @@ func runOnlineStreamingBackupHelper(t *testing.T, root string) {
 		close(done)
 		t.Fatal(err)
 	}
-	if err := inspectBackup(archive); err != nil {
+	if _, err := inspectBackup(archive); err != nil {
 		close(done)
 		t.Fatal(err)
 	}

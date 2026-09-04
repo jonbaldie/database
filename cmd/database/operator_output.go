@@ -278,7 +278,7 @@ func writeOperatorResult(stdout io.Writer, operation, operationID string, succes
 }
 
 func writeOperatorFailure(stdout io.Writer, operation, operationID, class string, code int, message string) int {
-	reporter := &operationReporter{command: operation, id: operationID, started: time.Now().UTC(), output: commandOutput{result: "json", progress: "none"}, stdout: stdout}
+	reporter := &operationReporter{command: operation, id: operationID, started: time.Now().UTC(), output: commandOutput{result: "json", progress: "none", legacy: true}, stdout: stdout}
 	resultCode := reporter.failure(class, diagnosticCodeForClass(class), message, nil)
 	if code != 0 && resultCode != code {
 		return code

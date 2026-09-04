@@ -77,7 +77,7 @@ func writeValidatedOnlineBackup(capture onlineBackupCapture, output string, repo
 		return nil, err, "operation_failed"
 	}
 	reporter.progress("validating")
-	if err := inspectBackup(output); err != nil {
+	if _, err := inspectBackup(output); err != nil {
 		_ = os.Remove(output)
 		return nil, err, "operation_failed"
 	}

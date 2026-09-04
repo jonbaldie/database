@@ -60,7 +60,7 @@ func runStreamingBackupHelper(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 	destination := filepath.Join(root, "restored")
-	if err := restoreBackup(archive, destination); err != nil {
+	if _, err := restoreBackup(archive, destination); err != nil {
 		close(done)
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestRestoreRejectsNonEmptyDestination(t *testing.T) {
 
 	destination := t.TempDir()
 	writeBackupFixture(t, filepath.Join(destination, "existing.txt"), "existing")
-	assertOperatorFailure(t, []string{"restore", "--backup", archive, "--data-directory", destination}, "restore", "operation_failed", 1)
+	assertOperatorFailure(t, []string{"restore", "--backup", archive, "--data-directory", destination}, "restore", "precondition", 3)
 }
 
 func TestBackupInspectRejectsInvalidArtifact(t *testing.T) {

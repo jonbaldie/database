@@ -1361,7 +1361,7 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 
 	process, address := startMySQLServer(t, runner, directory)
 	second := runner.Run(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", freeAddress(t), "--format=json")
-	if second.ExitCode != 1 || !strings.Contains(second.Stdout, "already in use") {
+	if second.ExitCode != 3 || !strings.Contains(second.Stdout, "already in use") {
 		t.Fatalf("second owner: %#v", second)
 	}
 
