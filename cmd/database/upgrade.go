@@ -61,12 +61,12 @@ func upgradeCommand(args []string, stdout, stderr io.Writer) int {
 		return reporter.failure("invalid_input", "", err.Error(), nil)
 	}
 	reporter.progress("upgrading")
-	err, exitClass := executeUpgrade(request)
+	details, err, exitClass := executeUpgrade(request)
 	if err != nil {
 		return reporter.failure(exitClass, "", err.Error(), nil)
 	}
 	reporter.progress("validating")
-	return reporter.success(nil)
+	return reporter.success(details)
 }
 
 func parseUpgradeRequest(args []string) (upgradeRequest, error) {
@@ -183,17 +183,17 @@ func defaultUpgradeTarget() string {
 	return instance.CurrentDataVersion
 }
 
-func executeUpgrade(request upgradeRequest) (error, string) {
+func executeUpgrade(request upgradeRequest) (map[string]any, error, string) {
 	target, err := parseDataVersion(request.target)
 	if err != nil {
-		return err, "invalid_input"
+		return nil, err, "invalid_input"
 	}
 	if err := rejectUnsupportedUpgrade(request); err != nil {
-		return err, "precondition"
+		return nil, err, "precondition"
 	}
 	metadata, marker, lock, exitClass, err := prepareUpgrade(request, target)
 	if err != nil {
-		return err, exitClass
+		return nil, err, exitClass
 	}
 	defer releaseUpgradeLock(lock)
 	return completeUpgrade(request, metadata, marker)
@@ -236,19 +236,28 @@ func prepareUpgrade(request upgradeRequest, target dataVersion) (instance.Metada
 	return metadata, marker, lock, "success", nil
 }
 
-func completeUpgrade(request upgradeRequest, metadata instance.Metadata, marker *upgradeMarker) (error, string) {
+func completeUpgrade(request upgradeRequest, metadata instance.Metadata, marker *upgradeMarker) (map[string]any, error, string) {
+	previousVersion := effectiveDataVersion(metadata)
 	metadata.DataVersion = request.target
 	metadata.State = "stopped"
 	if err := writeInstanceMetadata(request.directory, metadata); err != nil {
-		return err, "operation_failed"
+		return nil, err, "operation_failed"
 	}
 	if marker == nil {
-		return errors.New("upgrade marker is missing"), "operation_failed"
+		return nil, errors.New("upgrade marker is missing"), "operation_failed"
 	}
 	if err := os.Remove(filepath.Join(request.directory, instance.UpgradeIncompleteMarker)); err != nil {
-		return err, "operation_failed"
+		return nil, err, "operation_failed"
 	}
-	return nil, "success"
+	details := map[string]any{
+		"instance_id":       metadata.InstanceID,
+		"data_directory":    filepath.Clean(request.directory),
+		"previous_version":  previousVersion,
+		"resulting_version": request.target,
+		"data_version":      request.target,
+		"state":             "stopped",
+	}
+	return details, nil, "success"
 }
 
 func preflightUpgrade(request upgradeRequest, target dataVersion) (instance.Metadata, *upgradeMarker, error) {

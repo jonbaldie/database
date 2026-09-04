@@ -40,52 +40,16 @@ func operatorCommand(args []string, stdout, stderr io.Writer) int {
 		return shutdownCommand(args[1:], stdout, stderr)
 	}
 	if args[0] == "upgrade" {
-		if len(args) == 1 {
-			return unsupportedSimpleOperatorCommand(args, stdout, stderr, operation)
-		}
 		return upgradeCommand(args[1:], stdout, stderr)
 	}
 	if args[0] == "data" {
-		if len(args) == 2 {
-			return unsupportedDataCommand(args, stdout, stderr, operation)
-		}
 		return dataCommand(args[1:], stdout, stderr)
 	}
 	return unsupportedOperatorCommand(args, stdout, stderr, operation)
 }
 
 func unsupportedOperatorCommand(args []string, stdout, stderr io.Writer, operation string) int {
-	if args[0] == "data" {
-		return unsupportedDataCommand(args, stdout, stderr, operation)
-	}
-	if args[0] == "upgrade" {
-		return unsupportedSimpleOperatorCommand(args, stdout, stderr, operation)
-	}
 	return newOperationReporter(operation, commandOutput{result: "json", progress: "none", legacy: true}, stdout, stderr).failure("invalid_input", "", fmt.Sprintf("unsupported operator command %q", args[0]), nil)
-}
-
-func unsupportedDataCommand(args []string, stdout, stderr io.Writer, operation string) int {
-	reporter := newOperationReporter(operation, commandOutput{result: "json", progress: "none", legacy: true}, stdout, stderr)
-	if len(args) < 2 {
-		return reporter.failure("invalid_input", "", "data requires validate or inspect", nil)
-	}
-	operation = strings.Join(args[:2], " ")
-	reporter.command = operation
-	if args[1] != "validate" && args[1] != "inspect" {
-		return reporter.failure("invalid_input", "", fmt.Sprintf("unsupported data operation %q", args[1]), nil)
-	}
-	if hasUnknownOperatorFlag(args[2:]) {
-		return reporter.failure("invalid_input", "", "unknown operator flag", nil)
-	}
-	return reporter.failure("operation_failed", "", fmt.Sprintf("%s is not implemented", operation), nil)
-}
-
-func unsupportedSimpleOperatorCommand(args []string, stdout, stderr io.Writer, operation string) int {
-	reporter := newOperationReporter(operation, commandOutput{result: "json", progress: "none", legacy: true}, stdout, stderr)
-	if hasUnknownOperatorFlag(args[1:]) {
-		return reporter.failure("invalid_input", "", "unknown operator flag", nil)
-	}
-	return reporter.failure("operation_failed", "", fmt.Sprintf("%s is not implemented", args[0]), nil)
 }
 
 func operatorName(args []string) string {
@@ -130,15 +94,6 @@ func operatorOptions(args []string, allowed ...string) (map[string]string, error
 		values[name] = value
 	}
 	return values, nil
-}
-
-func hasUnknownOperatorFlag(args []string) bool {
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
-			return true
-		}
-	}
-	return false
 }
 
 func version(args []string, stdout, stderr io.Writer) int {

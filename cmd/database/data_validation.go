@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
+	"github.com/jonbaldie/database/internal/buildinfo"
 	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/instance"
 )
@@ -241,6 +243,34 @@ func dataValidationDetails(report dataValidationReport) map[string]any {
 }
 
 func inspectDataDirectory(directory string) (map[string]any, error) {
+	paths, err := inspectDirectoryEntries(directory)
+	if err != nil {
+		return nil, err
+	}
+	metadata, metadataErr := instance.Load(directory)
+	details := map[string]any{
+		"data_directory":    directory,
+		"validated":         false,
+		"examined":          []string{"directory", "instance.json", "catalog.json"},
+		"entries":           paths,
+		"recovery_required": incompleteCatalogCommit(directory) || incompleteInitialization(directory),
+		"integrity":         "not-validated",
+		"compatibility":     buildinfo.Current().DataCompatibility,
+	}
+	if state := inspectedInstanceState(directory, metadata, metadataErr); state != "" {
+		details["state"] = state
+	}
+	if metadataErr != nil {
+		details["inspection_finding"] = "instance metadata is unavailable"
+		return details, nil
+	}
+	details["instance_id"] = metadata.InstanceID
+	details["data_version"] = effectiveDataVersion(metadata)
+	details["upgrade_required"] = metadata.State == "upgrade-incomplete"
+	return details, nil
+}
+
+func inspectDirectoryEntries(directory string) ([]string, error) {
 	info, err := os.Stat(directory)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("data directory does not exist")
@@ -252,22 +282,34 @@ func inspectDataDirectory(directory string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect data directory: %w", err)
 	}
-	metadata, metadataErr := instance.Load(directory)
 	paths := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		paths = append(paths, entry.Name())
 	}
 	sort.Strings(paths)
-	details := map[string]any{"data_directory": directory, "validated": false, "examined": []string{"directory", "instance.json", "catalog.json"}, "entries": paths, "recovery_required": incompleteCatalogCommit(directory) || incompleteInitialization(directory)}
-	if metadataErr != nil {
-		details["integrity"] = "not-validated"
-		details["inspection_finding"] = "instance metadata is unavailable"
-		return details, nil
+	return paths, nil
+}
+
+func inspectedInstanceState(directory string, metadata instance.Metadata, err error) string {
+	if isDataDirectoryServing(directory) {
+		return "serving"
 	}
-	details["instance_id"] = metadata.InstanceID
-	details["data_version"] = effectiveDataVersion(metadata)
-	details["state"] = metadata.State
-	details["upgrade_required"] = metadata.State == "upgrade-incomplete"
-	details["integrity"] = "not-validated"
-	return details, nil
+	if err != nil {
+		return ""
+	}
+	return metadata.State
+}
+
+func isDataDirectoryServing(directory string) bool {
+	lockPath := filepath.Join(directory, ".running.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_WRONLY, 0o600)
+	if err != nil {
+		return false
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true
+	}
+	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	return false
 }

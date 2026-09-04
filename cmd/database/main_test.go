@@ -35,9 +35,9 @@ func TestUnsupportedOperatorOperationsFailExplicitly(t *testing.T) {
 		exitClass string
 		operation string
 	}{
-		{name: "upgrade", args: []string{"upgrade"}, exitCode: 1, exitClass: "operation_failed", operation: "upgrade"},
-		{name: "data validate", args: []string{"data", "validate"}, exitCode: 1, exitClass: "operation_failed", operation: "data validate"},
-		{name: "data inspect", args: []string{"data", "inspect"}, exitCode: 1, exitClass: "operation_failed", operation: "data inspect"},
+		{name: "upgrade", args: []string{"upgrade"}, exitCode: 2, exitClass: "invalid_input", operation: "upgrade"},
+		{name: "data validate", args: []string{"data", "validate"}, exitCode: 2, exitClass: "invalid_input", operation: "data validate"},
+		{name: "data inspect", args: []string{"data", "inspect"}, exitCode: 2, exitClass: "invalid_input", operation: "data inspect"},
 		{name: "config inspect", args: []string{"config", "inspect", "--format=json"}, exitCode: 2, exitClass: "invalid_input", operation: "config inspect"},
 	}
 	for _, test := range tests {

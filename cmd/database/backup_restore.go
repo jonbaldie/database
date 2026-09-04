@@ -87,8 +87,8 @@ func executeBackupRestore(args []string, reporter *operationReporter) (map[strin
 	}
 	if args[0] == "restore" {
 		reportBackupRestoreProgress(reporter, "restore")
-		err, exitClass := restoreCommand(args[1:])
-		return nil, err, exitClass
+		details, err, exitClass := restoreCommand(args[1:])
+		return details, err, exitClass
 	}
 	details, err, exitClass := backupCommand(args[1:], reporter)
 	if err != nil && len(args) > 1 && args[1] == "inspect" && exitClass == "operation_failed" {
@@ -116,8 +116,8 @@ func backupCommand(args []string, reporter *operationReporter) (map[string]any, 
 	}
 	if args[0] == "inspect" {
 		reportBackupRestoreProgress(reporter, "backup inspect")
-		err, exitClass := backupInspectCommand(args[1:])
-		return nil, err, exitClass
+		details, err, exitClass := backupInspectCommand(args[1:])
+		return details, err, exitClass
 	}
 	return nil, fmt.Errorf("unsupported backup operation %q", args[0]), "invalid_input"
 }
@@ -137,32 +137,44 @@ func backupCreateCommand(args []string, reporter *operationReporter) (map[string
 	return createOnlineBackup(request, options["--output"], reporter)
 }
 
-func backupInspectCommand(args []string) (error, string) {
+func backupInspectCommand(args []string) (map[string]any, error, string) {
 	options, err := operatorOptions(args, "--input", "--backup")
 	if err != nil {
-		return err, "invalid_input"
+		return nil, err, "invalid_input"
 	}
 	if options["--input"] != "" && options["--backup"] != "" {
-		return errors.New("backup inspect input may be specified once"), "invalid_input"
+		return nil, errors.New("backup inspect input may be specified once"), "invalid_input"
 	}
 	if options["--input"] == "" {
 		options["--input"] = options["--backup"]
 	}
 	if options["--input"] == "" {
-		return errors.New("backup inspect requires --backup"), "invalid_input"
+		return nil, errors.New("backup inspect requires --backup"), "invalid_input"
 	}
-	return inspectBackup(options["--input"]), "operation_failed"
+	details, err := inspectBackup(options["--input"])
+	if err != nil {
+		return nil, err, "operation_failed"
+	}
+	return details, nil, "success"
 }
 
-func restoreCommand(args []string) (error, string) {
+func restoreCommand(args []string) (map[string]any, error, string) {
 	options, err := operatorOptions(args, "--input", "--backup", "--data-dir", "--data-directory")
 	if err != nil {
-		return err, "invalid_input"
+		return nil, err, "invalid_input"
 	}
 	if err := normalizeRestoreOptions(options); err != nil {
-		return err, "invalid_input"
+		return nil, err, "invalid_input"
 	}
-	return restoreBackup(options["--input"], options["--data-dir"]), "operation_failed"
+	details, err := restoreBackup(options["--input"], options["--data-dir"])
+	if err != nil {
+		exitClass := "operation_failed"
+		if strings.Contains(err.Error(), "must be new or empty") {
+			exitClass = "precondition"
+		}
+		return nil, err, exitClass
+	}
+	return details, nil, "success"
 }
 
 func normalizeRestoreOptions(options map[string]string) error {
@@ -495,12 +507,29 @@ func rejectPathOverlap(source, target string) error {
 	return nil
 }
 
-func inspectBackup(input string) error {
+func inspectBackup(input string) (map[string]any, error) {
 	archive, err := loadBackupArchive(input)
-	if err == nil {
-		err = archive.Close()
+	if err != nil {
+		return nil, err
 	}
-	return err
+	defer archive.Close()
+	dataVer := archive.manifest.DataVersion
+	if dataVer == "" {
+		dataVer = instance.CurrentDataVersion
+	}
+	details := map[string]any{
+		"completeness":       archive.manifest.Complete,
+		"complete":           archive.manifest.Complete,
+		"integrity":          "valid",
+		"source_instance_id": archive.manifest.SourceInstanceID,
+		"data_version":       dataVer,
+		"source_version":     dataVer,
+		"created_at":         archive.manifest.CreatedAt,
+		"compatibility":      archive.manifest.DataCompatibility,
+		"data_compatibility": archive.manifest.DataCompatibility,
+		"backup_version":     archive.manifest.BackupVersion,
+	}
+	return details, nil
 }
 
 func loadBackupArchive(input string) (backupArchive, error) {
@@ -838,28 +867,55 @@ func consumeNextBackupJSONValue(decoder *json.Decoder, depth int) error {
 	return consumeBackupJSONValue(decoder, value, depth)
 }
 
-func restoreBackup(input, directory string) error {
+func restoreBackup(input, directory string) (map[string]any, error) {
 	if err := validateRestoreRequest(input, directory); err != nil {
-		return err
+		return nil, err
 	}
 	archive, err := loadBackupArchive(input)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer archive.Close()
-	metadataContents, err := os.ReadFile(archive.files["instance.json"].path)
+	restoredMeta, metadataBytes, err := prepareRestoredMetadata(archive.files["instance.json"].path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	metadataBytes, err := restoredMetadataBytes(metadataContents)
+	if err := applyRestoreStaging(directory, archive.files, metadataBytes); err != nil {
+		return nil, err
+	}
+	details := map[string]any{
+		"artifact_path":      filepath.Clean(input),
+		"target_directory":   filepath.Clean(directory),
+		"instance_id":        restoredMeta.InstanceID,
+		"source_instance_id": restoredMeta.SourceInstanceID,
+		"data_version":       effectiveDataVersion(restoredMeta),
+		"state":              "stopped",
+	}
+	return details, nil
+}
+
+func prepareRestoredMetadata(path string) (instance.Metadata, []byte, error) {
+	metadataContents, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return instance.Metadata{}, nil, err
 	}
+	restoredMeta, err := restoredMetadata(metadataContents)
+	if err != nil {
+		return instance.Metadata{}, nil, err
+	}
+	metadataBytes, err := formatRestoredMetadata(restoredMeta)
+	if err != nil {
+		return instance.Metadata{}, nil, err
+	}
+	return restoredMeta, metadataBytes, nil
+}
+
+func applyRestoreStaging(directory string, files map[string]storedBackupFile, metadataBytes []byte) error {
 	staging, existed, err := createRestoreStaging(directory)
 	if err != nil {
 		return err
 	}
-	if err := populateAndValidateRestore(staging, archive.files, metadataBytes); err != nil {
+	if err := populateAndValidateRestore(staging, files, metadataBytes); err != nil {
 		_ = os.RemoveAll(staging)
 		return err
 	}
@@ -877,11 +933,7 @@ func validateRestoreRequest(input, directory string) error {
 	return validateRestoreDestination(directory)
 }
 
-func restoredMetadataBytes(contents []byte) ([]byte, error) {
-	metadata, err := restoredMetadata(contents)
-	if err != nil {
-		return nil, err
-	}
+func formatRestoredMetadata(metadata instance.Metadata) ([]byte, error) {
 	encoded, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return nil, err
