@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-09-04
+
+### Added
+
+- Added root `Dockerfile` exposing MySQL (3306) and diagnostics (8080) ports for general usage.
+- Added `dev.Dockerfile` configured with development toolchain and utilities.
+
+### Fixed
+
+- Forwarded bare `data validate`, `data inspect`, and `upgrade` CLI commands directly to command handlers, reporting `invalid_input` (exit code 2) when required inputs are missing.
+- Classified concurrent `database serve` on an already-serving data directory as `precondition` (exit code 3).
+- Classified `database restore` targeting a non-empty directory as `precondition` (exit code 3).
+- Populated required operator facts in terminal `details` for `backup inspect`, `restore`, and `upgrade` JSON results.
+- Inspected active directory lock `.running.lock` during `data inspect` to report state as `serving` when the server is actively running.
+
 ## [0.2.6] - 2026-09-04
 
 ### Fixed
@@ -183,6 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.7]: https://github.com/jonbaldie/database/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/jonbaldie/database/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/jonbaldie/database/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/jonbaldie/database/compare/v0.2.3...v0.2.4
