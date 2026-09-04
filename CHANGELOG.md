@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-09-04
+
+### Fixed
+
+- Checked `chmod`, `write`, `sync`, and `close` errors during instance upgrade
+  file creation to prevent metadata corruption.
+- Returned an empty string for `SUBSTRING` when a negative start position
+  exceeds the string length.
+- Returned the 1-based start index for `LOCATE` when the searched needle is an
+  empty string.
+- Supported `DIV` integer division on unsigned operands exceeding `MaxInt64`
+  and preserved the unsigned integer domain.
+- Preserved the unsigned integer domain in `%` and `MOD` operations and
+  rejected negative remainder results with error 1690.
+- Rejected `DROP TABLE` on parent tables referenced by foreign keys with MySQL
+  error 3730.
+- Encoded `BIT` column results as packed bytes over the MySQL wire protocol.
+- Supported `ORDER BY` and `LIMIT` clauses on `DELETE` statements.
+- Accepted `CHECK(expr)` constraints without whitespace preceding the opening
+  parenthesis.
+- Bound `LIKE` wildcard matching to prevent exponential backtracking.
+- Formatted `DOUBLE` numeric values without exponential scientific notation
+  when within standard display precision.
+- Parsed mixed outer join chains combining `LEFT JOIN` and `RIGHT JOIN`.
+- Exposed diagnostics through `SHOW WARNINGS`.
+- Evaluated `UPDATE` and `DELETE` `WHERE` clauses using relational expressions.
+- Compared `BINARY` and `VARBINARY` column values bytewise.
+- Evaluated scalar subqueries within comparison and `WHERE` predicates.
+- Supported arithmetic expressions on aggregate function projections.
+- Reported MySQL error 1364 when non-nullable columns without default values
+  are omitted from `INSERT` statements.
+- Supported explicit `DEFAULT` values in `INSERT INTO ... VALUES` expressions.
+- Evaluated multi-column `UPDATE` assignment expressions sequentially from left
+  to right.
+- Preserved `NULL` frame bounds in window function range specifications.
+- Supported empty value lists in `INSERT INTO table VALUES ()`.
+- Enforced out-of-range bounds on unsigned arithmetic expressions.
+- Made `LIKE` pattern comparisons accent-insensitive under `utf8mb4_0900_ai_ci`.
+
 ## [0.2.5] - 2026-08-28
 
 ### Fixed
@@ -144,6 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.6]: https://github.com/jonbaldie/database/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/jonbaldie/database/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/jonbaldie/database/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/jonbaldie/database/compare/v0.2.2...v0.2.3
