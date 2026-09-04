@@ -20,3 +20,8 @@ provided under the [Apache License 2.0](LICENSE). The project does not require a
 Contributor License Agreement or Developer Certificate of Origin sign-off.
 
 Do not commit local tooling state or metadata, including `.beads/`.
+
+## Coding standards.
+
+Please read [CODING_STANDARDS.md](CODING_STANDARDS.md), understand it, and use
+it whenever working with production code. 
