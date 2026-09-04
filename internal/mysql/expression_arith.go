@@ -233,6 +233,16 @@ func integerDivide(a, b exprValue) (exprValue, error) {
 	if !ok {
 		return exprValue{}, divisionByZero()
 	}
+	return finishIntegerDivide(a, b, quotient)
+}
+
+func finishIntegerDivide(a, b exprValue, quotient *big.Int) (exprValue, error) {
+	if a.kind == valueUint || b.kind == valueUint {
+		if quotient.Sign() < 0 || !quotient.IsUint64() {
+			return exprValue{}, outOfRangeValue()
+		}
+		return uintValue(quotient.Uint64()), nil
+	}
 	if !quotient.IsInt64() {
 		return exprValue{}, outOfRangeValue()
 	}
@@ -262,10 +272,32 @@ func moduloArithmetic(a, b exprValue) (exprValue, error) {
 	if a.kind == valueDouble || b.kind == valueDouble {
 		return floatModulo(a, b)
 	}
-	if dividend, divisor, ok := integerPair(a, b); ok {
-		return integerModulo(dividend, divisor)
+	if isIntegerKind(a.kind) && isIntegerKind(b.kind) {
+		if a.kind == valueUint || b.kind == valueUint {
+			return unsignedModulo(a, b)
+		}
+		return integerModulo(a.i, b.i)
 	}
 	return decimalModulo(toDecimal(a), toDecimal(b))
+}
+
+func isIntegerKind(kind valueKind) bool {
+	return kind == valueInt || kind == valueUint
+}
+
+func unsignedModulo(a, b exprValue) (exprValue, error) {
+	left := integerBig(a)
+	right := integerBig(b)
+	if right.Sign() == 0 {
+		return exprValue{}, divisionByZero()
+	}
+	quotient := new(big.Int)
+	remainder := new(big.Int)
+	quotient.QuoRem(left, right, remainder)
+	if remainder.Sign() < 0 || !remainder.IsUint64() {
+		return exprValue{}, outOfRangeValue()
+	}
+	return uintValue(remainder.Uint64()), nil
 }
 
 func floatModulo(a, b exprValue) (exprValue, error) {
@@ -279,6 +311,9 @@ func floatModulo(a, b exprValue) (exprValue, error) {
 func integerModulo(dividend, divisor int64) (exprValue, error) {
 	if divisor == 0 {
 		return exprValue{}, divisionByZero()
+	}
+	if divisor == -1 {
+		return intValue(0), nil
 	}
 	return intValue(dividend % divisor), nil
 }
@@ -303,26 +338,4 @@ func truncatedQuotient(a, b decimalValue) (*big.Int, bool) {
 		return nil, false
 	}
 	return new(big.Int).Quo(numerator, denominator), true
-}
-
-// integerPair reports whether both operands are exact integers within the signed
-// 64-bit range, the case an integer remainder covers directly.
-func integerPair(a, b exprValue) (int64, int64, bool) {
-	dividend, okA := asInt64(a)
-	divisor, okB := asInt64(b)
-	return dividend, divisor, okA && okB
-}
-
-func asInt64(value exprValue) (int64, bool) {
-	switch value.kind {
-	case valueInt:
-		return value.i, true
-	case valueUint:
-		if value.u <= math.MaxInt64 {
-			return int64(value.u), true
-		}
-		return 0, false
-	default:
-		return 0, false
-	}
 }

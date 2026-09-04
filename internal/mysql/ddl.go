@@ -249,6 +249,9 @@ func (s *ddlExecutor) dropTable(query string) error {
 			}
 			return errors.New("table does not exist")
 		}
+		if err := checkTableNotReferencedByForeignKey(definition, catalog.Key(namespace), key, name); err != nil {
+			return err
+		}
 		delete(namespaceDefinition.Tables, key)
 		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
 		return nil
@@ -257,6 +260,44 @@ func (s *ddlExecutor) dropTable(query string) error {
 	}
 	recordDropTableDiagnostic(s.session, namespace, name, noOp)
 	return nil
+}
+
+func checkTableNotReferencedByForeignKey(definition *catalog.Definition, targetNamespaceKey, targetTableKey, tableName string) error {
+	for nsKey, ns := range definition.Namespaces {
+		for tKey, tbl := range ns.Tables {
+			if nsKey == targetNamespaceKey && tKey == targetTableKey {
+				continue
+			}
+			if constraint, found := tableReferencesTarget(tbl, nsKey, targetNamespaceKey, targetTableKey); found {
+				childName := tbl.Name
+				if childName == "" {
+					childName = string(tKey)
+				}
+				return sqlFailure{
+					code:    3730,
+					state:   "HY000",
+					message: fmt.Sprintf("Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'", tableName, constraint.Name, childName),
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func tableReferencesTarget(tbl catalog.Table, nsKey, targetNamespaceKey, targetTableKey string) (catalog.Constraint, bool) {
+	for _, constraint := range tbl.Constraints {
+		if constraint.Type != catalog.ConstraintTypeForeignKey {
+			continue
+		}
+		refNamespace := catalog.Key(constraint.ReferencedNamespace)
+		if refNamespace == "" {
+			refNamespace = nsKey
+		}
+		if refNamespace == targetNamespaceKey && catalog.Key(constraint.ReferencedTable) == targetTableKey {
+			return constraint, true
+		}
+	}
+	return catalog.Constraint{}, false
 }
 
 func recordDropDatabaseDiagnostic(session *session, name string, noOp bool) {

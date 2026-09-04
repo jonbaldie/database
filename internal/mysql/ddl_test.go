@@ -185,6 +185,26 @@ func TestForeignKeyReferenceAllowsNoSpaceBeforeColumnList(t *testing.T) {
 	}
 }
 
+func TestDropTableReferencedByForeignKeyFails(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE parent (id INT PRIMARY KEY)",
+		"CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, CONSTRAINT fk_child_parent FOREIGN KEY (parent_id) REFERENCES parent(id))",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("setup query %q: %v", query, err)
+		}
+	}
+	_, err := executeStatement(executor, "DROP TABLE parent")
+	if err == nil {
+		t.Fatal("expected error dropping parent table referenced by foreign key, got nil")
+	}
+	failure, ok := err.(sqlFailure)
+	if !ok || failure.code != 3730 {
+		t.Fatalf("expected error code 3730, got: %v", err)
+	}
+}
+
 func equalStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false

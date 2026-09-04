@@ -92,6 +92,9 @@ func TestConstraintSurfaceThroughMySQL(t *testing.T) {
 			t.Fatalf("parent foreign-key failure for %q: %#v", query, result)
 		}
 	}
+	if result := client.query("DROP TABLE parent"); result.errCode != 3730 {
+		t.Fatalf("drop referenced parent failure: %#v", result)
+	}
 	for _, query := range []string{"SELECT id FROM child WHERE id = 4", "SELECT id FROM child WHERE id = 5"} {
 		if result := client.query(query); result.err != "" || len(result.rows) != 0 {
 			t.Fatalf("failed multi-row write was not atomic: query=%q result=%#v", query, result)
