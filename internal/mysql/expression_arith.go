@@ -255,8 +255,11 @@ func floatIntegerDivide(a, b exprValue) (exprValue, error) {
 		return exprValue{}, divisionByZero()
 	}
 	quotient := math.Trunc(toFloat(a) / divisor)
-	if math.IsInf(quotient, 0) || math.IsNaN(quotient) || quotient >= maxInt64AsFloat || quotient < minInt64AsFloat {
+	if math.IsInf(quotient, 0) || math.IsNaN(quotient) || quotient > maxInt64AsFloat || quotient < minInt64AsFloat {
 		return exprValue{}, outOfRangeValue()
+	}
+	if quotient >= maxInt64AsFloat {
+		return intValue(math.MaxInt64), nil
 	}
 	return intValue(int64(quotient)), nil
 }
