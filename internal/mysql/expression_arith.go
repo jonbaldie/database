@@ -11,6 +11,7 @@ package mysql
 import (
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 )
 
@@ -219,21 +220,51 @@ func floatDivide(a, b exprValue) (exprValue, error) {
 }
 
 // integerDivide evaluates the integer-division operator DIV, whose result is
-// always an integer: the quotient truncated toward zero across the exact
-// numeric domains, or through double arithmetic when a double operand is
-// present. A character operand requires an explicit cast.
+// always an integer: the quotient truncated toward zero across numeric domains,
+// converting noninteger operands to DECIMAL per MySQL rules. A character operand
+// requires an explicit cast.
 func integerDivide(a, b exprValue) (exprValue, error) {
 	if a.kind == valueString || b.kind == valueString {
 		return exprValue{}, strictConversionError()
 	}
-	if a.kind == valueDouble || b.kind == valueDouble {
-		return floatIntegerDivide(a, b)
+	decA, err := decimalForDivide(a)
+	if err != nil {
+		return exprValue{}, err
 	}
-	quotient, ok := truncatedQuotient(toDecimal(a), toDecimal(b))
+	decB, err := decimalForDivide(b)
+	if err != nil {
+		return exprValue{}, err
+	}
+	quotient, ok := truncatedQuotient(decA, decB)
 	if !ok {
 		return exprValue{}, divisionByZero()
 	}
 	return finishIntegerDivide(a, b, quotient)
+}
+
+// decimalForDivide converts a numeric operand to decimal for integer division,
+// applying MySQL's rule that noninteger operands are converted to DECIMAL.
+func decimalForDivide(value exprValue) (decimalValue, error) {
+	switch value.kind {
+	case valueInt:
+		return decimalFromInt(value.i), nil
+	case valueUint:
+		parsed, _ := parseDecimalText(strconv.FormatUint(value.u, 10))
+		return parsed, nil
+	case valueDecimal:
+		return value.dec, nil
+	case valueDouble:
+		if math.IsNaN(value.f) || math.IsInf(value.f, 0) {
+			return decimalValue{}, outOfRangeValue()
+		}
+		parsed, ok := parseDecimalText(strconv.FormatFloat(value.f, 'f', -1, 64))
+		if !ok || !parsed.withinDecimalCeiling() {
+			return decimalValue{}, outOfRangeValue()
+		}
+		return parsed, nil
+	default:
+		return decimalValue{}, strictConversionError()
+	}
 }
 
 func finishIntegerDivide(a, b exprValue, quotient *big.Int) (exprValue, error) {
@@ -247,21 +278,6 @@ func finishIntegerDivide(a, b exprValue, quotient *big.Int) (exprValue, error) {
 		return exprValue{}, outOfRangeValue()
 	}
 	return intValue(quotient.Int64()), nil
-}
-
-func floatIntegerDivide(a, b exprValue) (exprValue, error) {
-	divisor := toFloat(b)
-	if divisor == 0 {
-		return exprValue{}, divisionByZero()
-	}
-	quotient := math.Trunc(toFloat(a) / divisor)
-	if math.IsInf(quotient, 0) || math.IsNaN(quotient) || quotient > maxInt64AsFloat || quotient < minInt64AsFloat {
-		return exprValue{}, outOfRangeValue()
-	}
-	if quotient >= maxInt64AsFloat {
-		return intValue(math.MaxInt64), nil
-	}
-	return intValue(int64(quotient)), nil
 }
 
 // moduloArithmetic evaluates the modulus operator (% and MOD), preserving the
