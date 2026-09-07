@@ -10,7 +10,11 @@ import (
 
 func isTableConstraintDefinition(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
-	return strings.HasPrefix(value, "constraint ") || strings.HasPrefix(value, "primary key") || strings.HasPrefix(value, "unique ") || strings.HasPrefix(value, "foreign key") || (strings.HasPrefix(value, "check") && wordEnd(value, len("check")))
+	return strings.HasPrefix(value, "constraint ") ||
+		(strings.HasPrefix(value, "primary key") && wordEnd(value, len("primary key"))) ||
+		(strings.HasPrefix(value, "unique") && wordEnd(value, len("unique"))) ||
+		(strings.HasPrefix(value, "foreign key") && wordEnd(value, len("foreign key"))) ||
+		(strings.HasPrefix(value, "check") && wordEnd(value, len("check")))
 }
 
 func splitColumnTypeAndModifiers(value string) (string, string) {
