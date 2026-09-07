@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.8] - 2026-09-07
+
+### Fixed
+
+- Recognized `UNIQUE` table constraints without whitespace before opening parentheses in `CREATE TABLE` and `ALTER TABLE` statements.
+- Returned an empty result set for queries combining `ORDER BY` with `LIMIT 0` while preserving column metadata.
+
 ## [0.2.7] - 2026-09-04
 
 ### Added
@@ -198,6 +205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.8]: https://github.com/jonbaldie/database/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/jonbaldie/database/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/jonbaldie/database/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/jonbaldie/database/compare/v0.2.4...v0.2.5

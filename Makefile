@@ -1,4 +1,4 @@
-VERSION ?= 0.2.7
+VERSION ?= 0.2.8
 BUILD_IDENTITY ?= local
 GO ?= go
 LDFLAGS = -s -w -X github.com/jonbaldie/database/internal/buildinfo.ProductVersion=$(VERSION) -X github.com/jonbaldie/database/internal/buildinfo.BuildIdentity=$(BUILD_IDENTITY)
