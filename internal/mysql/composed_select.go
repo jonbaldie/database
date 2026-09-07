@@ -219,7 +219,11 @@ func describeSelectTerm(context *composedQueryContext, query string, outer *oute
 	}
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	if keywordAt(expression, "from") < 0 {
-		return describeScalarSelect(context, expression, outer)
+		projection, _, err := splitScalarSelectTail(expression)
+		if err != nil {
+			return nil, err
+		}
+		return describeScalarSelect(context, projection, outer)
 	}
 	executor := *context.executor
 	executor.composed = context
@@ -329,7 +333,28 @@ func executeSelectTerm(context *composedQueryContext, query string, outer *outer
 func executeScalarSelectContext(context *composedQueryContext, query, expression string, outer *outerRelationScope) (*queryResult, error) {
 	started := time.Now()
 	termKey := context.selectRuntimeKey(query)
-	items := splitCSV(expression)
+	projection, where, err := splitScalarSelectTail(expression)
+	if err != nil {
+		return nil, err
+	}
+	if where != "" {
+		predicate, err := compileRelationPredicateContext(where, nil, context.executor.session, context, outer, nil)
+		if err != nil {
+			return nil, err
+		}
+		matched, err := predicateMatches(predicate, relationRow{})
+		if err != nil {
+			return nil, err
+		}
+		if !matched {
+			described, err := describeScalarSelect(context, projection, outer)
+			if err != nil {
+				return nil, err
+			}
+			return &queryResult{columns: described.columns, metadata: described.metadata}, nil
+		}
+	}
+	items := splitCSV(projection)
 	columns := make([]string, len(items))
 	row := make([]string, len(items))
 	nulls := make([]bool, len(items))
@@ -629,9 +654,17 @@ func existsProjectionQuery(query string) string {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	from := keywordAt(expression, "from")
 	if from < 0 {
+		if where := selectClauseAt(expression, "where"); where >= 0 {
+			return "SELECT 1 " + strings.TrimSpace(expression[where:])
+		}
 		return "SELECT 1"
 	}
 	return "SELECT 1 " + strings.TrimSpace(expression[from:])
+}
+
+func splitScalarSelectTail(expression string) (string, string, error) {
+	projection, where, _, _, _, _, _, err := splitSelectTail(expression)
+	return projection, where, err
 }
 
 func existsUnionQuery(query setQuery) (string, bool) {

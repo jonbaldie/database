@@ -397,6 +397,14 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 	if existsProjection.err != "" || !reflect.DeepEqual(existsProjection.rows, [][]string{{"Ada"}, {"Grace"}}) {
 		t.Fatalf("EXISTS evaluated projection: %#v", existsProjection)
 	}
+	existsWithoutFrom := client.query("SELECT a.name FROM authors a WHERE EXISTS (SELECT 1 WHERE 1 = 0) ORDER BY a.id")
+	if existsWithoutFrom.err != "" || len(existsWithoutFrom.rows) != 0 {
+		t.Fatalf("EXISTS without FROM ignored WHERE: %#v", existsWithoutFrom)
+	}
+	notExistsWithoutFrom := client.query("SELECT a.name FROM authors a WHERE NOT EXISTS (SELECT 1 WHERE 1 = 0) ORDER BY a.id")
+	if notExistsWithoutFrom.err != "" || !reflect.DeepEqual(notExistsWithoutFrom.rows, [][]string{{"Ada"}, {"Grace"}, {"Linus"}}) {
+		t.Fatalf("NOT EXISTS without FROM ignored WHERE: %#v", notExistsWithoutFrom)
+	}
 
 	predicates := client.query("SELECT a.name FROM authors a WHERE EXISTS (SELECT p.id FROM posts p WHERE p.author_id = a.id) AND a.id IN (SELECT p.author_id FROM posts p WHERE p.score >= 15) ORDER BY a.id")
 	if predicates.err != "" || !reflect.DeepEqual(predicates.rows, [][]string{{"Ada"}, {"Grace"}}) {
