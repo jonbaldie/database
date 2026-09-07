@@ -253,6 +253,9 @@ func (s *relationalSpillSorter) recordSpill(run relationalSpillRun) {
 
 func (s *relationalSpillSorter) stream(yield func([]string, []bool) error) error {
 	defer s.close()
+	if s.plan.limit.present && s.plan.limit.count == 0 {
+		return nil
+	}
 	if len(s.runs) == 0 {
 		return s.delivery.streamRows(s.rows, yield, false)
 	}
@@ -303,25 +306,37 @@ func (d *relationalSpillDelivery) yield(row relationalResultRow, yield func([]st
 	if err := d.plan.session.checkStatementResources(); err != nil {
 		return err
 	}
+	if d.limitReached() {
+		return errStopRelationStream
+	}
 	if d.shouldSkip() {
 		return nil
 	}
 	values, nulls := d.plan.renderResultRow(row)
-	if reserveDelivery {
-		release, err := d.plan.session.reserveDeliveredRow(queryResultMemory([][]string{values}, [][]bool{nulls}))
-		if err != nil {
-			return err
-		}
-		defer release()
-	}
-	if err := yield(values, nulls); err != nil {
+	if err := d.yieldDeliveredRow(values, nulls, yield, reserveDelivery); err != nil {
 		return err
 	}
 	d.emitted++
-	if d.plan.limit.present && d.emitted >= d.plan.limit.count {
+	if d.limitReached() {
 		return errStopRelationStream
 	}
 	return nil
+}
+
+func (d *relationalSpillDelivery) limitReached() bool {
+	return d.plan.limit.present && d.emitted >= d.plan.limit.count
+}
+
+func (d *relationalSpillDelivery) yieldDeliveredRow(values []string, nulls []bool, yield func([]string, []bool) error, reserveDelivery bool) error {
+	if !reserveDelivery {
+		return yield(values, nulls)
+	}
+	release, err := d.plan.session.reserveDeliveredRow(queryResultMemory([][]string{values}, [][]bool{nulls}))
+	if err != nil {
+		return err
+	}
+	defer release()
+	return yield(values, nulls)
 }
 
 func (d *relationalSpillDelivery) shouldSkip() bool {
