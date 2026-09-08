@@ -197,6 +197,11 @@ Derived tables and CTEs expose their projected names, types, collations, and
 nullability to their consumers. Recursive CTEs and CTE column lists are outside
 v0.1.
 
+Relational queries support `INNER JOIN`, `CROSS JOIN`, `LEFT [OUTER] JOIN`, and
+`RIGHT [OUTER] JOIN` with `ON` predicates or `USING` column lists (`CROSS JOIN`
+requires neither). `FULL [OUTER] JOIN` and `NATURAL JOIN` forms are outside
+v0.1; they fail before execution with MySQL error `1064` and SQLSTATE `42000`.
+
 `UNION`, `INTERSECT`, and `EXCEPT`, with optional `ALL` or `DISTINCT`, are
 supported. `INTERSECT` binds more tightly than `UNION` and `EXCEPT`; parentheses
 override that precedence. Distinct set comparison treats `NULL` values as equal

@@ -556,3 +556,63 @@ func TestMySQLComposedQueriesMatchTextAndPreparedWirePaths(t *testing.T) {
 		}
 	}
 }
+
+func TestMySQLUnsupportedJoinFormsRejectedOverWire(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer client.close()
+
+	for _, query := range []string{
+		"CREATE DATABASE join_test",
+		"USE join_test",
+		"CREATE TABLE a (id INT PRIMARY KEY, x INT)",
+		"CREATE TABLE b (id INT PRIMARY KEY, x INT)",
+		"INSERT INTO a VALUES (1, 10), (2, 20)",
+		"INSERT INTO b VALUES (1, 100), (3, 300)",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("%s: %#v", query, result)
+		}
+	}
+
+	for _, testCase := range []struct {
+		query   string
+		code    uint16
+		state   string
+		message string
+	}{
+		{"SELECT * FROM a FULL JOIN b ON full.id = b.id ORDER BY full.id", 1064, "42000", "FULL JOIN is not supported"},
+		{"SELECT * FROM a FULL JOIN b ON a.id = b.id", 1064, "42000", "FULL JOIN is not supported"},
+		{"SELECT * FROM a FULL OUTER JOIN b ON a.id = b.id", 1064, "42000", "FULL OUTER JOIN is not supported"},
+		{"SELECT * FROM a NATURAL JOIN b", 1064, "42000", "NATURAL JOIN is not supported"},
+		{"SELECT * FROM a NATURAL JOIN b ON natural.id = b.id", 1064, "42000", "NATURAL JOIN is not supported"},
+		{"SELECT * FROM a NATURAL INNER JOIN b", 1064, "42000", "NATURAL JOIN is not supported"},
+		{"SELECT * FROM a NATURAL LEFT JOIN b", 1064, "42000", "NATURAL JOIN is not supported"},
+		{"SELECT * FROM a NATURAL RIGHT JOIN b", 1064, "42000", "NATURAL JOIN is not supported"},
+	} {
+		result := client.query(testCase.query)
+		if result.errCode != testCase.code || result.errState != testCase.state || !strings.Contains(result.err, testCase.message) {
+			t.Fatalf("query %q: got err=%q code=%d state=%s, want code=%d state=%s message containing %q",
+				testCase.query, result.err, result.errCode, result.errState, testCase.code, testCase.state, testCase.message)
+		}
+	}
+
+	// Supported aliases continue to parse and execute correctly over the wire.
+	for _, supported := range []string{
+		"SELECT full.id, full.x, b.x FROM a AS full JOIN b ON full.id = b.id ORDER BY full.id",
+		"SELECT natural.id, natural.x, b.x FROM a AS natural JOIN b ON natural.id = b.id ORDER BY natural.id",
+		"SELECT `full`.id, `full`.x, b.x FROM a `full` JOIN b ON `full`.id = b.id ORDER BY `full`.id",
+		"SELECT `natural`.id, `natural`.x, b.x FROM a `natural` JOIN b ON `natural`.id = b.id ORDER BY `natural`.id",
+	} {
+		result := client.query(supported)
+		if result.err != "" {
+			t.Fatalf("supported query %q failed: %#v", supported, result)
+		}
+		if !reflect.DeepEqual(result.rows, [][]string{{"1", "10", "100"}}) {
+			t.Fatalf("supported query %q unexpected rows: %#v", supported, result.rows)
+		}
+	}
+}

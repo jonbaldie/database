@@ -38,7 +38,10 @@ func parseRelationalSource(s *relationExecutor, text string) (relationalSource, 
 }
 
 func parseRelationalJoin(s *relationExecutor, text string, left []relationColumn) (relationalJoin, relationalTableSource, string, error) {
-	kind, after, ok := consumeJoinStart(text)
+	kind, after, err, ok := consumeJoinStart(text)
+	if err != nil {
+		return relationalJoin{}, relationalTableSource{}, "", err
+	}
 	if !ok {
 		return relationalJoin{}, relationalTableSource{}, "", sqlFailure{1064, "42000", "malformed JOIN clause"}
 	}
@@ -517,19 +520,51 @@ func validateRelationalIndexHints(hints []relationalIndexHint) error {
 }
 
 func isJoinWord(text string) bool {
-	word := strings.ToLower(strings.Fields(text)[0])
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return false
+	}
+	word := strings.ToLower(fields[0])
 	switch word {
-	case "join", "inner", "left", "right", "cross", "outer", "on", "using":
+	case "join", "inner", "left", "right", "cross", "outer", "on", "using", "full", "natural":
 		return true
 	default:
 		return false
 	}
 }
 
-func consumeJoinStart(text string) (string, string, bool) {
+var unsupportedJoins = []struct {
+	prefix  string
+	message string
+}{
+	{"full outer join", "FULL OUTER JOIN is not supported"},
+	{"full join", "FULL JOIN is not supported"},
+	{"natural inner join", "NATURAL JOIN is not supported"},
+	{"natural left outer join", "NATURAL JOIN is not supported"},
+	{"natural right outer join", "NATURAL JOIN is not supported"},
+	{"natural left join", "NATURAL JOIN is not supported"},
+	{"natural right join", "NATURAL JOIN is not supported"},
+	{"natural join", "NATURAL JOIN is not supported"},
+}
+
+func unsupportedJoinFailure(text string) error {
+	fields := strings.Fields(strings.ToLower(text))
+	normalized := strings.Join(fields, " ")
+	for _, candidate := range unsupportedJoins {
+		if normalized == candidate.prefix || strings.HasPrefix(normalized, candidate.prefix+" ") {
+			return sqlFailure{1064, "42000", candidate.message}
+		}
+	}
+	return nil
+}
+
+func consumeJoinStart(text string) (string, string, error, bool) {
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, ",") {
-		return "cross", strings.TrimSpace(text[1:]), true
+		return "cross", strings.TrimSpace(text[1:]), nil, true
+	}
+	if err := unsupportedJoinFailure(text); err != nil {
+		return "", "", err, false
 	}
 	for _, candidate := range []struct {
 		prefix string
@@ -544,10 +579,10 @@ func consumeJoinStart(text string) (string, string, bool) {
 		{"join ", "inner"},
 	} {
 		if strings.HasPrefix(strings.ToLower(text), candidate.prefix) {
-			return candidate.kind, strings.TrimSpace(text[len(candidate.prefix):]), true
+			return candidate.kind, strings.TrimSpace(text[len(candidate.prefix):]), nil, true
 		}
 	}
-	return "", "", false
+	return "", "", nil, false
 }
 
 func parseJoinUsing(text string, left, right []relationColumn) (string, []string, string, bool) {
