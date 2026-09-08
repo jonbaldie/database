@@ -320,9 +320,9 @@ func TestEvaluateRejectsMalformedExpressions(t *testing.T) {
 
 func TestEvaluateExtendedFunctionSemantics(t *testing.T) {
 	cases := map[string]string{
-		"ROUND(2.5e0)":                      "2",
-		"ROUND(-2.5e0)":                     "-2",
-		"ROUND(25e0, -1)":                   "20",
+		"ROUND(2.5e0)":                      "3",
+		"ROUND(-2.5e0)":                     "-3",
+		"ROUND(25e0, -1)":                   "30",
 		"SUBSTRING('abcdef' FROM 2 FOR 3)":  "bcd",
 		"SUBSTRING('abcdef' FROM -2 FOR 1)": "e",
 		"SUBSTRING('abcdef' FROM 3)":        "cdef",
@@ -351,6 +351,30 @@ func TestEvaluateExtendedFunctionSemantics(t *testing.T) {
 	}
 	for _, expression := range []string{"POW(2, 3)", "SUBSTR('abc', 1)"} {
 		evalError(t, expression)
+	}
+}
+
+func TestRoundDoubleHalfAwayFromZero(t *testing.T) {
+	cases := map[string]string{
+		"ROUND(SQRT(0.25))":   "1",
+		"ROUND(SQRT(6.25))":   "3",
+		"ROUND(POWER(2, -1))": "1",
+		"ROUND(2.5e0)":        "3",
+		"ROUND(-2.5e0)":       "-3",
+		"ROUND(-0.5e0)":       "-1",
+		"ROUND(1.25e0, 1)":    "1.3",
+		"ROUND(-1.25e0, 1)":   "-1.3",
+		"ROUND(25e0, -1)":     "30",
+		"ROUND(-25e0, -1)":    "-30",
+		"ROUND(2.5)":          "3",
+		"ROUND(-2.5)":         "-3",
+		"ROUND(15, -1)":       "20",
+		"ROUND(25, -1)":       "30",
+	}
+	for expression, want := range cases {
+		if got := evalRender(t, expression); got != want {
+			t.Errorf("evaluateScalar(%q) = %q, want %q", expression, got, want)
+		}
 	}
 }
 
