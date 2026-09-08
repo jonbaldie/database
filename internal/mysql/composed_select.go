@@ -231,36 +231,126 @@ func describeSelectTerm(context *composedQueryContext, query string, outer *oute
 	return &queryResult{columns: columns, metadata: metadata}, nil
 }
 
+func firstScalarClauseAt(expression string) int {
+	clauses := selectClauses(expression)
+	if len(clauses) == 0 {
+		return -1
+	}
+	minAt := clauses[0].at
+	for _, c := range clauses[1:] {
+		if c.at < minAt {
+			minAt = c.at
+		}
+	}
+	return minAt
+}
+
+func splitScalarSelect(expression string) (string, string, string, error) {
+	_, rest := parseDistinctProjection(expression)
+	clauses := selectClauses(rest)
+	sort.Slice(clauses, func(i, j int) bool { return clauses[i].at < clauses[j].at })
+	if len(clauses) == 0 {
+		return strings.TrimSpace(rest), "", "", nil
+	}
+	if clauses[0].at == 0 {
+		return "", "", "", sqlFailure{1064, "42000", "malformed SELECT projection"}
+	}
+	values := map[string]string{}
+	for index, current := range clauses {
+		end := len(rest)
+		if index+1 < len(clauses) {
+			end = clauses[index+1].at
+		}
+		value, err := selectClauseValue(rest, current.name, current.at, end)
+		if err != nil {
+			return "", "", "", err
+		}
+		values[current.name] = value
+	}
+	return strings.TrimSpace(rest[:clauses[0].at]), values["where"], values["limit"], nil
+}
+
+func validateScalarWhere(context *composedQueryContext, whereText string, outer *outerRelationScope) error {
+	if whereText == "" {
+		return nil
+	}
+	prefix := ""
+	if context != nil {
+		prefix = context.runtimePrefix
+	}
+	runtimeKeys := &predicateRuntimeKeys{prefix: prefix}
+	var session *session
+	if context != nil && context.executor != nil {
+		session = context.executor.session
+	}
+	_, err := compileRelationPredicateContext(whereText, nil, session, context, outer, runtimeKeys)
+	return err
+}
+
+func describeScalarSubqueryItem(context *composedQueryContext, query string, outer *outerRelationScope) (columnMetadata, error) {
+	result, err := describeComposedSelect(context, query, outer)
+	if err != nil {
+		return columnMetadata{}, err
+	}
+	if len(result.columns) != 1 {
+		return columnMetadata{}, sqlFailure{1241, "21000", "operand should contain 1 column"}
+	}
+	metadata := resultColumnDefinition(result.columns[0], 0, result.metadata)
+	metadata.flags &^= mysqlNotNullFlag
+	return metadata, nil
+}
+
+func describeScalarPlannedItem(context *composedQueryContext, itemExpr string, outer *outerRelationScope) (columnMetadata, error) {
+	session := (*session)(nil)
+	strictScope := false
+	if context != nil {
+		strictScope = context.strictScope
+		if context.executor != nil {
+			session = context.executor.session
+		}
+	}
+	return plannedScalarMetadataForSession(itemExpr, strictScope, outer, session)
+}
+
+func describeScalarProjectionItem(context *composedQueryContext, item string, outer *outerRelationScope) (string, columnMetadata, error) {
+	itemExpr, alias, err := splitProjectionAlias(item)
+	if err != nil {
+		return "", columnMetadata{}, err
+	}
+	name := itemExpr
+	if alias != "" {
+		name = alias
+	}
+	var metadata columnMetadata
+	if query, ok := scalarSubquerySQL(itemExpr); ok {
+		metadata, err = describeScalarSubqueryItem(context, query, outer)
+	} else {
+		metadata, err = describeScalarPlannedItem(context, itemExpr, outer)
+	}
+	if err != nil {
+		return "", columnMetadata{}, err
+	}
+	metadata.name = name
+	return name, metadata, nil
+}
+
 func describeScalarSelect(context *composedQueryContext, expression string, outer *outerRelationScope) (*queryResult, error) {
-	items := splitCSV(expression)
+	projectionText, whereText, _, err := splitScalarSelect(expression)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateScalarWhere(context, whereText, outer); err != nil {
+		return nil, err
+	}
+	items := splitCSV(projectionText)
 	columns := make([]string, len(items))
 	metadata := make([]columnMetadata, len(items))
 	for index, item := range items {
-		expression, alias, err := splitProjectionAlias(item)
+		name, meta, err := describeScalarProjectionItem(context, item, outer)
 		if err != nil {
 			return nil, err
 		}
-		name := expression
-		if alias != "" {
-			name = alias
-		}
-		if query, ok := scalarSubquerySQL(expression); ok {
-			result, err := describeComposedSelect(context, query, outer)
-			if err != nil {
-				return nil, err
-			}
-			if len(result.columns) != 1 {
-				return nil, sqlFailure{1241, "21000", "operand should contain 1 column"}
-			}
-			metadata[index] = resultColumnDefinition(result.columns[0], 0, result.metadata)
-			metadata[index].flags &^= mysqlNotNullFlag
-		} else {
-			metadata[index], err = plannedScalarMetadataForSession(expression, context.strictScope, outer, context.executor.session)
-			if err != nil {
-				return nil, err
-			}
-		}
-		columns[index], metadata[index].name = name, name
+		columns[index], metadata[index] = name, meta
 	}
 	return &queryResult{columns: columns, metadata: metadata}, nil
 }
@@ -326,38 +416,106 @@ func executeSelectTerm(context *composedQueryContext, query string, outer *outer
 	return executeScalarSelectContext(context, query, expression, outer)
 }
 
-func executeScalarSelectContext(context *composedQueryContext, query, expression string, outer *outerRelationScope) (*queryResult, error) {
-	started := time.Now()
-	termKey := context.selectRuntimeKey(query)
-	items := splitCSV(expression)
+func matchScalarWhere(context *composedQueryContext, whereText, termKey string, outer *outerRelationScope) (bool, error) {
+	runtimeKeys := &predicateRuntimeKeys{prefix: termKey}
+	var session *session
+	if context != nil && context.executor != nil {
+		session = context.executor.session
+	}
+	predicate, err := compileRelationPredicateContext(whereText, nil, session, context, outer, runtimeKeys)
+	if err != nil {
+		return false, err
+	}
+	return predicateMatches(predicate, relationRow{})
+}
+
+func scalarLimitIsEmpty(limitText string) (bool, error) {
+	limit, err := parseRelationalLimit(limitText)
+	if err != nil {
+		return false, err
+	}
+	return limit.present && (limit.count == 0 || limit.offset > 0), nil
+}
+
+func shouldReturnEmptyScalar(context *composedQueryContext, whereText, limitText, termKey string, outer *outerRelationScope) (bool, error) {
+	if whereText != "" {
+		matched, err := matchScalarWhere(context, whereText, termKey, outer)
+		if err != nil || !matched {
+			return true, err
+		}
+	}
+	if limitText != "" {
+		return scalarLimitIsEmpty(limitText)
+	}
+	return false, nil
+}
+
+func emptyScalarResult(context *composedQueryContext, expression, termKey string, outer *outerRelationScope, started time.Time) (*queryResult, error) {
+	described, err := describeScalarSelect(context, expression, outer)
+	if err != nil {
+		return nil, err
+	}
+	result := &queryResult{columns: described.columns, rows: [][]string{}, nulls: [][]bool{}, metadata: described.metadata}
+	recordScalarSelect(context, termKey, result, time.Since(started))
+	return result, nil
+}
+
+func executeScalarProjectionItem(context *composedQueryContext, item, termKey string, index int, outer *outerRelationScope) (string, columnMetadata, string, bool, error) {
+	itemExpr, alias, err := splitProjectionAlias(item)
+	if err != nil {
+		return "", columnMetadata{}, "", false, err
+	}
+	subqueryKey := queryexplanation.RuntimeOperatorKey(termKey, "subquery", index)
+	value, definition, err := evaluateComposedScalar(context, itemExpr, outer, subqueryKey)
+	if err != nil {
+		return "", columnMetadata{}, "", false, err
+	}
+	name := itemExpr
+	if alias != "" {
+		name = alias
+	}
+	definition.name = name
+	if value.isNull() {
+		return name, definition, storedSQLNullValue, true, nil
+	}
+	return name, definition, value.render(), false, nil
+}
+
+func executeScalarRowResult(context *composedQueryContext, termKey, projectionText string, outer *outerRelationScope, started time.Time) (*queryResult, error) {
+	items := splitCSV(projectionText)
 	columns := make([]string, len(items))
 	row := make([]string, len(items))
 	nulls := make([]bool, len(items))
 	metadata := make([]columnMetadata, len(items))
 	for index, item := range items {
-		expression, alias, err := splitProjectionAlias(item)
+		name, def, val, isNull, err := executeScalarProjectionItem(context, item, termKey, index, outer)
 		if err != nil {
 			return nil, err
 		}
-		value, definition, err := evaluateComposedScalar(context, expression, outer, queryexplanation.RuntimeOperatorKey(termKey, "subquery", index))
-		if err != nil {
-			return nil, err
-		}
-		name := expression
-		if alias != "" {
-			name = alias
-		}
-		definition.name = name
-		columns[index], metadata[index] = name, definition
-		if value.isNull() {
-			row[index], nulls[index] = storedSQLNullValue, true
-		} else {
-			row[index] = value.render()
-		}
+		columns[index], metadata[index] = name, def
+		nulls[index] = isNull
+		row[index] = val
 	}
 	result := &queryResult{columns: columns, rows: [][]string{row}, nulls: [][]bool{nulls}, metadata: metadata}
 	recordScalarSelect(context, termKey, result, time.Since(started))
 	return result, nil
+}
+
+func executeScalarSelectContext(context *composedQueryContext, query, expression string, outer *outerRelationScope) (*queryResult, error) {
+	started := time.Now()
+	termKey := context.selectRuntimeKey(query)
+	projectionText, whereText, limitText, err := splitScalarSelect(expression)
+	if err != nil {
+		return nil, err
+	}
+	empty, err := shouldReturnEmptyScalar(context, whereText, limitText, termKey, outer)
+	if err != nil {
+		return nil, err
+	}
+	if empty {
+		return emptyScalarResult(context, expression, termKey, outer, started)
+	}
+	return executeScalarRowResult(context, termKey, projectionText, outer, started)
 }
 
 func evaluateComposedScalar(context *composedQueryContext, expression string, outer *outerRelationScope, runtimePrefixes ...string) (exprValue, columnMetadata, error) {
@@ -629,6 +787,9 @@ func existsProjectionQuery(query string) string {
 	expression := strings.TrimSpace(query[len("SELECT "):])
 	from := keywordAt(expression, "from")
 	if from < 0 {
+		if at := firstScalarClauseAt(expression); at >= 0 {
+			return "SELECT 1 " + strings.TrimSpace(expression[at:])
+		}
 		return "SELECT 1"
 	}
 	return "SELECT 1 " + strings.TrimSpace(expression[from:])
