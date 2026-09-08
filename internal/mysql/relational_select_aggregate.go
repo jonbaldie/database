@@ -434,15 +434,51 @@ func (p *relationalSelectPlan) validateAggregateProjection() error {
 	if !p.requiresGrouping() {
 		return nil
 	}
+	determined := p.functionallyDeterminedTables()
 	for _, projection := range p.projection {
-		if projection.aggregate != nil || projection.window != nil || projection.scalar {
-			continue
-		}
-		if !projectionMatchesGroup(projection, p.aggregation.groups) {
-			return sqlFailure{1055, "42000", "Expression is not in GROUP BY clause and contains nonaggregated column"}
+		if err := p.validateAggregateProjectionItem(projection, determined); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (p *relationalSelectPlan) validateAggregateProjectionItem(projection relationalProjection, determined map[string]bool) error {
+	if projection.aggregate != nil || projection.window != nil || projection.scalar {
+		return nil
+	}
+	if projectionMatchesGroup(projection, p.aggregation.groups) || p.projectionFunctionallyDependent(projection, determined) {
+		return nil
+	}
+	return sqlFailure{1055, "42000", "Expression is not in GROUP BY clause and contains nonaggregated column"}
+}
+
+func (p *relationalSelectPlan) projectionFunctionallyDependent(projection relationalProjection, determined map[string]bool) bool {
+	if p.columnFunctionallyDependent(projection.column, determined) {
+		return true
+	}
+	return p.expressionFunctionallyDependent(projection.expression, determined)
+}
+
+func (p *relationalSelectPlan) columnFunctionallyDependent(column int, determined map[string]bool) bool {
+	if column < 0 || column >= len(p.source.columns) {
+		return false
+	}
+	return determined[relationTableInstanceKey(p.source.columns[column])]
+}
+
+func (p *relationalSelectPlan) expressionFunctionallyDependent(expression string, determined map[string]bool) bool {
+	if strings.TrimSpace(expression) == "" {
+		return false
+	}
+	replaced, err := p.replaceGroupAggregates(expression, nil)
+	if err != nil {
+		return false
+	}
+	_, err = evaluateScalarWithResolver(replaced, func(name string) (exprValue, error) {
+		return p.groupedIdentifierValue(name, determined)
+	})
+	return err == nil
 }
 
 func (p *relationalSelectPlan) validateGroupedOrders(orders []relationalOrder) error {
@@ -464,6 +500,7 @@ func (p *relationalSelectPlan) validateGroupedExpression(expression string) erro
 	if !p.requiresGrouping() || strings.TrimSpace(expression) == "" {
 		return nil
 	}
+	determined := p.functionallyDeterminedTables()
 	replaced, err := p.replaceGroupAggregates(expression, nil)
 	if err != nil {
 		return err
@@ -472,12 +509,201 @@ func (p *relationalSelectPlan) validateGroupedExpression(expression string) erro
 		if index, found := projectionIndex(p.projection, name); found {
 			return p.projection[index].value, nil
 		}
-		if !groupExpressionMatches(name, p.aggregation.groups) {
-			return exprValue{}, sqlFailure{1055, "42000", "Expression is not in GROUP BY clause and contains nonaggregated column"}
-		}
-		return evaluateRelationExpressionContext(name, p.source.columns, sampleRelationRow(p.source.columns), p.outer, p.session)
+		return p.groupedIdentifierValue(name, determined)
 	})
 	return err
+}
+
+func (p *relationalSelectPlan) groupedIdentifierValue(name string, determined map[string]bool) (exprValue, error) {
+	if !p.groupedIdentifierAllowed(name, determined) {
+		return exprValue{}, sqlFailure{1055, "42000", "Expression is not in GROUP BY clause and contains nonaggregated column"}
+	}
+	return evaluateRelationExpressionContext(name, p.source.columns, sampleRelationRow(p.source.columns), p.outer, p.session)
+}
+
+func (p *relationalSelectPlan) groupedIdentifierAllowed(name string, determined map[string]bool) bool {
+	if groupExpressionMatches(name, p.aggregation.groups) {
+		return true
+	}
+	index, err := resolveRelationColumn(name, p.source.columns)
+	if err != nil {
+		return false
+	}
+	return determined[relationTableInstanceKey(p.source.columns[index])]
+}
+
+func (p *relationalSelectPlan) functionallyDeterminedTables() map[string]bool {
+	grouped := p.groupedColumnsByTable()
+	nullable := p.source.nullableTableInstances()
+	determined := map[string]bool{}
+	seen := map[string]bool{}
+	for _, column := range p.source.columns {
+		instance := relationTableInstanceKey(column)
+		if seen[instance] {
+			continue
+		}
+		seen[instance] = true
+		if nullable[instance] {
+			continue
+		}
+		if tableInstanceDetermined(column.tableDefinition, grouped[instance]) {
+			determined[instance] = true
+		}
+	}
+	return determined
+}
+
+func (p *relationalSelectPlan) groupedColumnsByTable() map[string]map[string]bool {
+	grouped := map[string]map[string]bool{}
+	for _, group := range p.aggregation.groups {
+		index, err := resolveRelationColumn(group.expression, p.source.columns)
+		if err != nil {
+			continue
+		}
+		column := p.source.columns[index]
+		instance := relationTableInstanceKey(column)
+		if grouped[instance] == nil {
+			grouped[instance] = map[string]bool{}
+		}
+		grouped[instance][catalog.Key(column.name)] = true
+	}
+	return grouped
+}
+
+func (source relationalSource) nullableTableInstances() map[string]bool {
+	nullable := map[string]bool{}
+	if len(source.tables) == 0 {
+		return nullable
+	}
+	leftKeys := []string{tableSourceInstanceKey(source.tables[0])}
+	for _, join := range source.joins {
+		rightKey := tableSourceInstanceKey(join.right)
+		switch join.kind {
+		case "left":
+			nullable[rightKey] = true
+		case "right":
+			for _, key := range leftKeys {
+				nullable[key] = true
+			}
+		}
+		leftKeys = append(leftKeys, rightKey)
+	}
+	return nullable
+}
+
+func relationTableInstanceKey(column relationColumn) string {
+	if column.qualifier != "" {
+		return catalog.Key(column.qualifier)
+	}
+	return catalog.Key(column.table)
+}
+
+func tableSourceInstanceKey(table relationalTableSource) string {
+	if table.alias != "" {
+		return catalog.Key(table.alias)
+	}
+	return catalog.Key(table.name)
+}
+
+func tableInstanceDetermined(table catalog.Table, grouped map[string]bool) bool {
+	if len(grouped) == 0 {
+		return false
+	}
+	for _, key := range determiningKeyColumns(table) {
+		if keyIsGrouped(key, grouped) {
+			return true
+		}
+	}
+	return false
+}
+
+func keyIsGrouped(columns []string, grouped map[string]bool) bool {
+	if len(columns) == 0 {
+		return false
+	}
+	for _, column := range columns {
+		if !grouped[catalog.Key(column)] {
+			return false
+		}
+	}
+	return true
+}
+
+func determiningKeyColumns(table catalog.Table) [][]string {
+	keys := appendConstraintKeys(nil, table)
+	return appendUniqueIndexKeys(keys, table)
+}
+
+func appendConstraintKeys(keys [][]string, table catalog.Table) [][]string {
+	for _, constraint := range table.Constraints {
+		if key, ok := determiningConstraintKey(table, constraint); ok {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func determiningConstraintKey(table catalog.Table, constraint catalog.Constraint) ([]string, bool) {
+	switch constraint.Type {
+	case catalog.ConstraintTypePrimary:
+		return nonEmptyColumns(constraint.Columns)
+	case catalog.ConstraintTypeUnique:
+		if notNullColumns(table, constraint.Columns) {
+			return nonEmptyColumns(constraint.Columns)
+		}
+	}
+	return nil, false
+}
+
+func appendUniqueIndexKeys(keys [][]string, table catalog.Table) [][]string {
+	for _, index := range table.Indexes {
+		columns, ok := uniqueIndexDeterminingColumns(table, index)
+		if ok {
+			keys = append(keys, columns)
+		}
+	}
+	return keys
+}
+
+func uniqueIndexDeterminingColumns(table catalog.Table, index catalog.Index) ([]string, bool) {
+	if !index.Unique {
+		return nil, false
+	}
+	columns := make([]string, 0, len(index.Parts))
+	for _, part := range index.Parts {
+		if part.Column == "" || part.PrefixLength != 0 || part.Expression != "" {
+			return nil, false
+		}
+		columns = append(columns, part.Column)
+	}
+	if !notNullColumns(table, columns) {
+		return nil, false
+	}
+	return nonEmptyColumns(columns)
+}
+
+func notNullColumns(table catalog.Table, columns []string) bool {
+	if len(columns) == 0 {
+		return false
+	}
+	indexes := make(map[string]int, len(table.Columns))
+	for index, name := range table.Columns {
+		indexes[catalog.Key(name)] = index
+	}
+	for _, column := range columns {
+		index, ok := indexes[catalog.Key(column)]
+		if !ok || catalog.ColumnAttributeAt(table, index).Nullable {
+			return false
+		}
+	}
+	return true
+}
+
+func nonEmptyColumns(columns []string) ([]string, bool) {
+	if len(columns) == 0 {
+		return nil, false
+	}
+	return columns, true
 }
 
 func (p *relationalSelectPlan) requiresGrouping() bool {
