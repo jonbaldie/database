@@ -186,7 +186,7 @@ func parseCTETableSource(s *relationExecutor, parts []string, remainder string) 
 }
 
 func parseCatalogTableSource(s *relationExecutor, parts []string, remainder string) (relationalTableSource, string, error) {
-	namespace, name, err := tableTarget(s, parts)
+	namespace, name, err := tableTarget(s, parts, "DATA_READ")
 	if err != nil {
 		return relationalTableSource{}, "", err
 	}
