@@ -51,6 +51,59 @@ func TestIssue251OrderUsesAliasWithinExpression(t *testing.T) {
 	}
 }
 
+func TestIssue251OrderResolvesAliasesAcrossProjectionKinds(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	store := executor.server.config.Catalog
+	if err := store.CreateTableWithTypes("app", "issue251_kinds", []string{"id", "a", "b"}, []string{"INT", "INT", "INT"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range [][]string{{"1", "10", "3"}, {"2", "20", "1"}, {"3", "30", "2"}} {
+		if err := store.Insert("app", "issue251_kinds", row); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := executeStatement(executor, "SELECT b, SUM(a) AS s FROM issue251_kinds GROUP BY b ORDER BY s + 1 DESC")
+	if err != nil {
+		t.Fatalf("ORDER BY aggregate alias in expression: %v", err)
+	}
+	if want := [][]string{{"2", "30"}, {"1", "20"}, {"3", "10"}}; !reflect.DeepEqual(result.rows, want) {
+		t.Fatalf("ORDER BY aggregate alias in expression rows = %#v, want %#v", result.rows, want)
+	}
+
+	result, err = executeStatement(executor, "SELECT id, RANK() OVER (ORDER BY a) AS r FROM issue251_kinds ORDER BY r + 1 DESC")
+	if err != nil {
+		t.Fatalf("ORDER BY window alias in expression: %v", err)
+	}
+	if want := [][]string{{"3", "3"}, {"2", "2"}, {"1", "1"}}; !reflect.DeepEqual(result.rows, want) {
+		t.Fatalf("ORDER BY window alias in expression rows = %#v, want %#v", result.rows, want)
+	}
+
+	result, err = executeStatement(executor, "SELECT id, RANK() OVER (ORDER BY a) AS r FROM issue251_kinds ORDER BY id + 1 DESC")
+	if err != nil {
+		t.Fatalf("ORDER BY expression with window projection: %v", err)
+	}
+	if want := [][]string{{"3", "3"}, {"2", "2"}, {"1", "1"}}; !reflect.DeepEqual(result.rows, want) {
+		t.Fatalf("ORDER BY expression with window projection rows = %#v, want %#v", result.rows, want)
+	}
+
+	result, err = executeStatement(executor, "SELECT id, b AS a FROM issue251_kinds ORDER BY a + 1")
+	if err != nil {
+		t.Fatalf("ORDER BY alias shadowing a column in expression: %v", err)
+	}
+	if want := [][]string{{"2", "1"}, {"3", "2"}, {"1", "3"}}; !reflect.DeepEqual(result.rows, want) {
+		t.Fatalf("ORDER BY alias shadowing a column rows = %#v, want %#v", result.rows, want)
+	}
+
+	result, err = executeStatement(executor, "SELECT id, b AS a FROM issue251_kinds ORDER BY a DESC")
+	if err != nil {
+		t.Fatalf("ORDER BY shadowing alias: %v", err)
+	}
+	if want := [][]string{{"1", "3"}, {"3", "2"}, {"2", "1"}}; !reflect.DeepEqual(result.rows, want) {
+		t.Fatalf("ORDER BY shadowing alias rows = %#v, want %#v", result.rows, want)
+	}
+}
+
 func TestIssue251UnknownIdentifierInOrderExpressionStillRejected(t *testing.T) {
 	executor := relationalSelectExecutor(t)
 	store := executor.server.config.Catalog
