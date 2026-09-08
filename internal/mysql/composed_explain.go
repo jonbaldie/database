@@ -100,7 +100,8 @@ func (s *textStatementExecutor) explainSelectTerm(context *composedQueryContext,
 		context.rendering = true
 		defer func() { context.rendering = wasRendering }()
 		termKey := context.selectRuntimeKey(query)
-		items := splitCSV(expression)
+		projectionText, _, _, _ := splitScalarSelect(expression)
+		items := splitCSV(projectionText)
 		root := queryexplanation.PlanScalarSelect(s.server.config.Version, query, s.database, items).Plan
 		root.RuntimeKey = queryexplanation.RuntimeOperatorKey(termKey, "values", 0)
 		return s.decorateSubqueryText(context, root, expression, outer, "derived", nil, termKey)

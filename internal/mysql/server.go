@@ -4460,6 +4460,8 @@ func restorePreparedColumnNames(query string, metadata []columnMetadata) []colum
 	expression := strings.TrimSpace(query[len("select "):])
 	if from := keywordAt(expression, "from"); from >= 0 {
 		expression = strings.TrimSpace(expression[:from])
+	} else if at := firstScalarClauseAt(expression); at >= 0 {
+		expression = strings.TrimSpace(expression[:at])
 	}
 	_, expression = parseDistinctProjection(expression)
 	items := splitCSV(expression)
