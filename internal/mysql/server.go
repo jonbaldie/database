@@ -907,24 +907,6 @@ func (s *queryExecutor) databaseExists(name string) error {
 	return selector.databaseExists(name)
 }
 
-// stripLeadingSQLComments removes comments that clients use to annotate an
-// otherwise ordinary statement. Connector/J prefixes its server-variable
-// probe with a block comment containing its version. Only comments before the
-// first statement keyword are removed.
-func stripLeadingSQLComments(query string) string {
-	for {
-		query = strings.TrimSpace(query)
-		if !strings.HasPrefix(query, "/*") {
-			return query
-		}
-		end := strings.Index(query[2:], "*/")
-		if end < 0 {
-			return query
-		}
-		query = query[end+4:]
-	}
-}
-
 type statementHandler func(query, lower string) (*queryResult, bool, error)
 
 func (s *textStatementExecutor) statementHandlers() []statementHandler {
