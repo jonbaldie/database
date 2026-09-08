@@ -3,6 +3,7 @@ package mysql
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jonbaldie/database/internal/catalog"
@@ -49,7 +50,7 @@ func (s *textStatementExecutor) ddlStatement(query, lower string) (*queryResult,
 	case strings.HasPrefix(lower, "drop table "):
 		return nil, true, executor.dropTable(query)
 	case strings.HasPrefix(lower, "truncate table "):
-		return nil, true, executor.truncateTable(query)
+		return nil, true, truncateTable(s.session, query)
 	case strings.HasPrefix(lower, "rename table "):
 		return nil, true, executor.renameTable(query)
 	case strings.HasPrefix(lower, "alter table "):
@@ -262,23 +263,59 @@ func (s *ddlExecutor) dropTable(query string) error {
 	return nil
 }
 
+func sortedCatalogKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func matchingTableReference(tbl catalog.Table, nsKey, tKey, targetNamespaceKey, targetTableKey string, skipSelf bool) (catalog.Constraint, string, bool) {
+	if skipSelf && nsKey == targetNamespaceKey && tKey == targetTableKey {
+		return catalog.Constraint{}, "", false
+	}
+	constraint, found := tableReferencesTarget(tbl, nsKey, targetNamespaceKey, targetTableKey)
+	if !found {
+		return catalog.Constraint{}, "", false
+	}
+	childName := tbl.Name
+	if childName == "" {
+		childName = string(tKey)
+	}
+	return constraint, childName, true
+}
+
+func findForeignKeyReferencingTable(definition *catalog.Definition, targetNamespaceKey, targetTableKey string, skipSelf bool) (catalog.Constraint, string, bool) {
+	for _, nsKey := range sortedCatalogKeys(definition.Namespaces) {
+		ns := definition.Namespaces[nsKey]
+		for _, tKey := range sortedCatalogKeys(ns.Tables) {
+			if constraint, childName, found := matchingTableReference(ns.Tables[tKey], nsKey, tKey, targetNamespaceKey, targetTableKey, skipSelf); found {
+				return constraint, childName, true
+			}
+		}
+	}
+	return catalog.Constraint{}, "", false
+}
+
 func checkTableNotReferencedByForeignKey(definition *catalog.Definition, targetNamespaceKey, targetTableKey, tableName string) error {
-	for nsKey, ns := range definition.Namespaces {
-		for tKey, tbl := range ns.Tables {
-			if nsKey == targetNamespaceKey && tKey == targetTableKey {
-				continue
-			}
-			if constraint, found := tableReferencesTarget(tbl, nsKey, targetNamespaceKey, targetTableKey); found {
-				childName := tbl.Name
-				if childName == "" {
-					childName = string(tKey)
-				}
-				return sqlFailure{
-					code:    3730,
-					state:   "HY000",
-					message: fmt.Sprintf("Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'", tableName, constraint.Name, childName),
-				}
-			}
+	if constraint, childName, found := findForeignKeyReferencingTable(definition, targetNamespaceKey, targetTableKey, true); found {
+		return sqlFailure{
+			code:    3730,
+			state:   "HY000",
+			message: fmt.Sprintf("Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'", tableName, constraint.Name, childName),
+		}
+	}
+	return nil
+}
+
+func checkTableNotReferencedByForeignKeyForTruncate(definition *catalog.Definition, targetNamespaceKey, targetTableKey string) error {
+	if constraint, childName, found := findForeignKeyReferencingTable(definition, targetNamespaceKey, targetTableKey, false); found {
+		return sqlFailure{
+			code:    1701,
+			state:   "42000",
+			message: fmt.Sprintf("Cannot truncate a table referenced in a foreign key constraint ('%s', CONSTRAINT '%s')", childName, constraint.Name),
 		}
 	}
 	return nil
@@ -312,13 +349,13 @@ func recordDropTableDiagnostic(session *session, namespace, name string, noOp bo
 	}
 }
 
-func (s *ddlExecutor) truncateTable(query string) error {
+func truncateTable(s *session, query string) error {
 	target := strings.TrimSpace(query[len("TRUNCATE TABLE "):])
 	parts, valid := splitQualifiedIdentifier(target)
 	if !valid || len(parts) == 0 || len(parts) > 2 {
 		return sqlFailure{1064, "42000", "malformed TRUNCATE TABLE"}
 	}
-	namespace, name, err := ddlTableTarget(s.session, target)
+	namespace, name, err := ddlTableTarget(s, target)
 	if err != nil {
 		return err
 	}
@@ -330,6 +367,9 @@ func (s *ddlExecutor) truncateTable(query string) error {
 		table, found := namespaceDefinition.Tables[catalog.Key(name)]
 		if !found {
 			return errors.New("table does not exist")
+		}
+		if err := checkTableNotReferencedByForeignKeyForTruncate(definition, catalog.Key(namespace), catalog.Key(name)); err != nil {
+			return err
 		}
 		table.Rows = nil
 		namespaceDefinition.Tables[catalog.Key(name)] = table
