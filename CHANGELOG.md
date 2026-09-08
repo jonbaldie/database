@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Returned a DECIMAL result for `DIV` when the truncated quotient exceeds the signed 64-bit range, instead of MySQL error 1690.
 - Recognized `UNIQUE` table constraints without whitespace before opening parentheses in `CREATE TABLE` and `ALTER TABLE` statements.
 - Returned an empty result set for queries combining `ORDER BY` with `LIMIT 0` while preserving column metadata.
 
