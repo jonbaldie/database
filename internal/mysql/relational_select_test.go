@@ -526,3 +526,105 @@ func TestRelationalSelectExplanationTracesProjectionExpression(t *testing.T) {
 		t.Fatalf("project output = %#v", columns)
 	}
 }
+
+func TestRelationalSelectFullAndNaturalJoinMisparse(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+
+	assertUnsupportedJoin := func(t *testing.T, query, expectedMessage string) {
+		t.Helper()
+		_, err := executeStatement(executor, query)
+		if err == nil {
+			t.Fatalf("query %q succeeded, want error", query)
+		}
+		fail, ok := err.(sqlFailure)
+		if !ok {
+			t.Fatalf("query %q returned non-sqlFailure: %T (%v)", query, err, err)
+		}
+		if fail.code != 1064 || fail.state != "42000" {
+			t.Fatalf("query %q got code=%d state=%s, want 1064 42000", query, fail.code, fail.state)
+		}
+		if fail.message != expectedMessage {
+			t.Fatalf("query %q message=%q, want %q", query, fail.message, expectedMessage)
+		}
+	}
+
+	t.Run("FullJoinKeywordAsAlias", func(t *testing.T) {
+		// Previously, "full" was consumed as an alias for "authors" and executed as an INNER JOIN,
+		// returning only matched rows and dropping unmatched row (id=3, Linus).
+		assertUnsupportedJoin(t, "SELECT * FROM authors FULL JOIN posts ON full.id = posts.author_id", "FULL JOIN is not supported")
+	})
+
+	t.Run("FullJoinOriginalTableName", func(t *testing.T) {
+		// When referencing original table name in ON clause.
+		assertUnsupportedJoin(t, "SELECT * FROM authors FULL JOIN posts ON authors.id = posts.author_id", "FULL JOIN is not supported")
+	})
+
+	t.Run("FullOuterJoin", func(t *testing.T) {
+		assertUnsupportedJoin(t, "SELECT * FROM authors FULL OUTER JOIN posts ON authors.id = posts.author_id", "FULL OUTER JOIN is not supported")
+	})
+
+	t.Run("NaturalJoinKeywordAsAlias", func(t *testing.T) {
+		// Previously, "natural" was consumed as an alias for "authors" and executed as an INNER JOIN.
+		assertUnsupportedJoin(t, "SELECT * FROM authors NATURAL JOIN posts ON natural.id = posts.author_id", "NATURAL JOIN is not supported")
+	})
+
+	t.Run("NaturalJoinWithoutOn", func(t *testing.T) {
+		// Previously failed with "JOIN requires ON or USING" because "natural" was treated as an alias.
+		assertUnsupportedJoin(t, "SELECT * FROM authors NATURAL JOIN posts", "NATURAL JOIN is not supported")
+	})
+
+	t.Run("NaturalJoinVariants", func(t *testing.T) {
+		assertUnsupportedJoin(t, "SELECT * FROM authors NATURAL INNER JOIN posts", "NATURAL JOIN is not supported")
+		assertUnsupportedJoin(t, "SELECT * FROM authors NATURAL LEFT JOIN posts", "NATURAL JOIN is not supported")
+		assertUnsupportedJoin(t, "SELECT * FROM authors NATURAL RIGHT JOIN posts", "NATURAL JOIN is not supported")
+		assertUnsupportedJoin(t, "SELECT * FROM authors NATURAL LEFT OUTER JOIN posts", "NATURAL JOIN is not supported")
+		assertUnsupportedJoin(t, "SELECT * FROM authors NATURAL RIGHT OUTER JOIN posts", "NATURAL JOIN is not supported")
+	})
+
+	t.Run("SupportedExplicitAliasesContinueToWork", func(t *testing.T) {
+		// Explicit AS full
+		res, err := executeStatement(executor, "SELECT full.name, posts.title FROM authors AS full JOIN posts ON full.id = posts.author_id WHERE full.id = 1 ORDER BY posts.id LIMIT 1")
+		if err != nil {
+			t.Fatalf("AS full query failed: %v", err)
+		}
+		if len(res.rows) != 1 || res.rows[0][0] != "Ada" {
+			t.Fatalf("AS full unexpected rows: %#v", res.rows)
+		}
+
+		// Explicit AS natural
+		res, err = executeStatement(executor, "SELECT natural.name, posts.title FROM authors AS natural JOIN posts ON natural.id = posts.author_id WHERE natural.id = 1 ORDER BY posts.id LIMIT 1")
+		if err != nil {
+			t.Fatalf("AS natural query failed: %v", err)
+		}
+		if len(res.rows) != 1 || res.rows[0][0] != "Ada" {
+			t.Fatalf("AS natural unexpected rows: %#v", res.rows)
+		}
+
+		// Backtick `full`
+		res, err = executeStatement(executor, "SELECT `full`.name, posts.title FROM authors `full` JOIN posts ON `full`.id = posts.author_id WHERE `full`.id = 1 ORDER BY posts.id LIMIT 1")
+		if err != nil {
+			t.Fatalf("`full` query failed: %v", err)
+		}
+		if len(res.rows) != 1 || res.rows[0][0] != "Ada" {
+			t.Fatalf("`full` unexpected rows: %#v", res.rows)
+		}
+
+		// Backtick `natural`
+		res, err = executeStatement(executor, "SELECT `natural`.name, posts.title FROM authors `natural` JOIN posts ON `natural`.id = posts.author_id WHERE `natural`.id = 1 ORDER BY posts.id LIMIT 1")
+		if err != nil {
+			t.Fatalf("`natural` query failed: %v", err)
+		}
+		if len(res.rows) != 1 || res.rows[0][0] != "Ada" {
+			t.Fatalf("`natural` unexpected rows: %#v", res.rows)
+		}
+
+		// Ordinary implicit alias
+		res, err = executeStatement(executor, "SELECT full_alias.name, posts.title FROM authors full_alias JOIN posts ON full_alias.id = posts.author_id WHERE full_alias.id = 1 ORDER BY posts.id LIMIT 1")
+		if err != nil {
+			t.Fatalf("implicit alias query failed: %v", err)
+		}
+		if len(res.rows) != 1 || res.rows[0][0] != "Ada" {
+			t.Fatalf("implicit alias unexpected rows: %#v", res.rows)
+		}
+	})
+}
