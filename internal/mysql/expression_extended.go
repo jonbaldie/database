@@ -8,8 +8,8 @@ import (
 
 // roundValue implements the finite numeric ROUND function. Exact values keep
 // decimal arithmetic and round half away from zero; approximate values use
-// nearest-even rounding in the double domain. A NULL argument remains NULL and
-// character input requires an explicit cast.
+// the same half-away-from-zero rule in the double domain. A NULL argument
+// remains NULL and character input requires an explicit cast.
 func roundValue(arguments []exprValue) (exprValue, error) {
 	if roundHasNull(arguments) {
 		return nullValue(), nil
@@ -98,10 +98,10 @@ func roundDouble(value float64, places int) (exprValue, error) {
 		if factor == 0 || math.IsInf(factor, 0) || math.Abs(value) > math.MaxFloat64/factor {
 			return doubleValue(value), nil
 		}
-		return checkFinite(math.RoundToEven(value*factor) / factor)
+		return checkFinite(math.Round(value*factor) / factor)
 	}
 	factor := math.Pow10(-places)
-	return checkFinite(math.RoundToEven(value/factor) * factor)
+	return checkFinite(math.Round(value/factor) * factor)
 }
 
 func roundExact(value decimalValue, places int) decimalValue {
