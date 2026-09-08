@@ -396,7 +396,7 @@ func foreignKeyTargets(constraint catalog.Constraint, ownerNamespace, namespaceN
 }
 
 func explainTable(relations *relationExecutor, parts []string) (string, string, catalog.Table, error) {
-	namespace, tableName, err := tableTarget(relations, parts)
+	namespace, tableName, err := tableTarget(relations, parts, "DATA_READ")
 	if err != nil {
 		return "", "", catalog.Table{}, err
 	}

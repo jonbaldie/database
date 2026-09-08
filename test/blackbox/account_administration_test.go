@@ -77,3 +77,48 @@ func TestMySQLCatalogMetadataFollowsNamespaceGrants(t *testing.T) {
 		t.Fatalf("hidden namespace result: %#v", result)
 	}
 }
+
+func TestMySQLCrossDatabaseGrantAuthorizationViaWire(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "cross-db-secret")
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+
+	admin := newWireClient(t, address, "admin", "cross-db-secret")
+	defer admin.close()
+	mustQuery(t, admin, "CREATE DATABASE db_public")
+	mustQuery(t, admin, "CREATE DATABASE db_secret")
+	mustQuery(t, admin, "CREATE TABLE db_secret.confidential (secret_data VARCHAR(100) PRIMARY KEY)")
+	mustQuery(t, admin, "INSERT INTO db_secret.confidential VALUES ('nuclear_launch_codes')")
+	mustQuery(t, admin, "CREATE USER 'bob' IDENTIFIED BY 'password12345'")
+	mustQuery(t, admin, "GRANT DATA_READ ON db_public.* TO 'bob'")
+	mustQuery(t, admin, "GRANT DATA_WRITE ON db_public.* TO 'bob'")
+	mustQuery(t, admin, "GRANT SCHEMA_MANAGEMENT ON db_public.* TO 'bob'")
+
+	bob := newWireClient(t, address, "bob", "password12345")
+	defer bob.close()
+
+	if res := bob.query("SELECT * FROM db_secret.confidential"); res.errCode != 1044 && res.errCode != 1142 {
+		t.Fatalf("expected 1044 or 1142 on cross-db read without db, got %#v", res)
+	}
+
+	if res := bob.query("SELECT 1"); res.err != "" {
+		t.Fatalf("expected select 1 to succeed without db, got %#v", res)
+	}
+
+	mustQuery(t, bob, "USE db_public")
+
+	if res := bob.query("SELECT * FROM db_secret.confidential"); res.errCode != 1044 && res.errCode != 1142 {
+		t.Fatalf("expected 1044 or 1142 on cross-db read with use db_public, got %#v", res)
+	}
+	if res := bob.query("INSERT INTO db_secret.confidential VALUES ('unauthorized_row')"); res.errCode != 1044 && res.errCode != 1142 {
+		t.Fatalf("expected 1044 or 1142 on cross-db insert, got %#v", res)
+	}
+	if res := bob.query("CREATE TABLE db_secret.pwned (id INT)"); res.errCode != 1044 && res.errCode != 1142 {
+		t.Fatalf("expected 1044 or 1142 on cross-db create table, got %#v", res)
+	}
+	if res := bob.query("TRUNCATE TABLE db_secret.confidential"); res.errCode != 1044 && res.errCode != 1142 {
+		t.Fatalf("expected 1044 or 1142 on cross-db truncate table, got %#v", res)
+	}
+}

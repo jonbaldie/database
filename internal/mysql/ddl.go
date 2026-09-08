@@ -512,7 +512,7 @@ func ddlTableTarget(s *session, target string) (string, string, error) {
 			return "", "", err
 		}
 	}
-	return tableTarget(&relationExecutor{session: s}, parts)
+	return tableTarget(&relationExecutor{session: s}, parts, "SCHEMA_MANAGEMENT")
 }
 
 func parseAlterTableActions(value string) ([]ddlAction, error) {

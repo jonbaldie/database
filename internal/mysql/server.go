@@ -1277,7 +1277,7 @@ func createTable(s *relationExecutor, query string) error {
 	if err != nil {
 		return err
 	}
-	namespace, name, err := tableTarget(s, table.target)
+	namespace, name, err := tableTarget(s, table.target, "SCHEMA_MANAGEMENT")
 	if err != nil {
 		return err
 	}
@@ -2500,7 +2500,7 @@ func makeInsertPlan(s *relationExecutor, query string) (insertPlan, error) {
 }
 
 func makeExplicitInsertPlan(s *relationExecutor, parts, columns []string, groups [][]string) (insertPlan, error) {
-	namespace, name, err := tableTarget(s, parts)
+	namespace, name, err := tableTarget(s, parts, "DATA_WRITE")
 	if err != nil {
 		return insertPlan{}, err
 	}
@@ -2956,7 +2956,7 @@ func planTable(s *relationExecutor, target string) (string, string, catalog.Tabl
 	if !valid || len(parts) == 0 || len(parts) > 2 {
 		return "", "", catalog.Table{}, sqlFailure{1064, "42000", "invalid table name"}
 	}
-	namespace, name, err := tableTarget(s, parts)
+	namespace, name, err := tableTarget(s, parts, "DATA_WRITE")
 	if err != nil {
 		return "", "", catalog.Table{}, err
 	}
@@ -3738,7 +3738,7 @@ func isInformationSchemaSource(source string) bool {
 }
 
 func selectRows(s *relationExecutor, projection string, parts []string, where string) (*queryResult, error) {
-	namespace, tableName, err := tableTarget(s, parts)
+	namespace, tableName, err := tableTarget(s, parts, "DATA_READ")
 	if err != nil {
 		return nil, err
 	}
@@ -3943,15 +3943,10 @@ func validateIdentifierLength(name string) error {
 // tableTarget resolves an unqualified table against the current namespace and
 // a qualified table against its named namespace. Keeping this resolution at
 // the protocol seam makes DDL, writes, and reads agree about namespace scope.
-func tableTarget(s *relationExecutor, parts []string) (string, string, error) {
-	namespace, table := s.database, ""
-	if len(parts) == 2 {
-		namespace, table = parts[0], parts[1]
-	} else if len(parts) == 1 {
-		table = parts[0]
-	}
-	if namespace == "" || table == "" {
-		return "", "", sqlFailure{1046, "3D000", "no database selected"}
+func tableTarget(s *relationExecutor, parts []string, privilege string) (string, string, error) {
+	namespace, table, err := resolveTargetParts(parts, s.database)
+	if err != nil {
+		return "", "", err
 	}
 	if strings.EqualFold(namespace, informationSchemaName) {
 		return "", "", sqlFailure{1044, "42000", "information_schema is read-only"}
@@ -3960,6 +3955,24 @@ func tableTarget(s *relationExecutor, parts []string) (string, string, error) {
 	// a literal dot or backtick in a quoted identifier into syntax.
 	if err := (&databaseSelector{s.session}).databaseExists(namespace); err != nil {
 		return "", "", err
+	}
+	if s != nil && s.session != nil && privilege != "" {
+		if err := s.session.requireGrant(privilege, namespace); err != nil {
+			return "", "", err
+		}
+	}
+	return namespace, table, nil
+}
+
+func resolveTargetParts(parts []string, defaultNamespace string) (string, string, error) {
+	namespace, table := defaultNamespace, ""
+	if len(parts) == 2 {
+		namespace, table = parts[0], parts[1]
+	} else if len(parts) == 1 {
+		table = parts[0]
+	}
+	if namespace == "" || table == "" {
+		return "", "", sqlFailure{1046, "3D000", "no database selected"}
 	}
 	return namespace, table, nil
 }

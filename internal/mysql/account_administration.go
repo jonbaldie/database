@@ -67,7 +67,7 @@ func accountSeesAllNamespaces(account catalog.Account) bool {
 
 func accountSeesNamespace(account catalog.Account, namespace string) bool {
 	for _, grant := range account.Grants {
-		if grant.Namespace == namespace {
+		if catalog.Key(grant.Namespace) == catalog.Key(namespace) {
 			return true
 		}
 	}
@@ -99,16 +99,85 @@ func (s *textStatementExecutor) statementGrant(lower string) (string, string) {
 	if startsStatement(lower, namespaceStatements) {
 		return "NAMESPACE_MANAGER", ""
 	}
+	targetNamespace := s.statementTargetNamespace(lower)
 	if isDataDefinition(lower) {
-		return schemaGrant(s.session.database)
+		return schemaGrant(targetNamespace)
 	}
 	if startsStatement(lower, writeStatements) {
-		return "DATA_WRITE", s.session.database
+		return writeGrant(targetNamespace)
 	}
 	if isComposedSelectStatement(lower) {
-		return readGrant(s.session.database)
+		return readGrant(targetNamespace)
 	}
 	return "", ""
+}
+
+func (s *textStatementExecutor) statementTargetNamespace(lower string) string {
+	target := extractStatementTarget(lower)
+	if target != "" {
+		parts, ok := splitQualifiedIdentifier(target)
+		if ok && len(parts) == 2 {
+			return parts[0]
+		}
+	}
+	return s.session.database
+}
+
+func extractStatementTarget(lower string) string {
+	lower = strings.TrimSpace(lower)
+	if isDataDefinition(lower) {
+		return extractDataDefinitionTarget(lower)
+	}
+	if startsStatement(lower, writeStatements) {
+		return extractWriteTarget(lower)
+	}
+	if isComposedSelectStatement(lower) {
+		return extractSelectTarget(lower)
+	}
+	return ""
+}
+
+func extractDataDefinitionTarget(lower string) string {
+	for _, prefix := range []string{"create table ", "drop table ", "truncate table ", "truncate ", "alter table ", "rename table "} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := strings.TrimSpace(lower[len(prefix):])
+			rest = trimLeadingKeywords(rest, []string{"if not exists ", "if exists "})
+			target, _, _ := splitDDLTargetAndRest(rest)
+			return target
+		}
+	}
+	return ""
+}
+
+func extractWriteTarget(lower string) string {
+	for _, prefix := range []string{"insert into ", "replace into ", "replace ", "update ", "delete from "} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := strings.TrimSpace(lower[len(prefix):])
+			rest = trimLeadingKeywords(rest, []string{"ignore "})
+			target, _, _ := splitDDLTargetAndRest(rest)
+			return target
+		}
+	}
+	return ""
+}
+
+func extractSelectTarget(lower string) string {
+	from := keywordAt(lower, "from")
+	if from < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(lower[from+len("from"):])
+	target, _, _ := splitDDLTargetAndRest(rest)
+	return target
+}
+
+func trimLeadingKeywords(value string, keywords []string) string {
+	for _, keyword := range keywords {
+		if strings.HasPrefix(value, keyword) {
+			return strings.TrimSpace(value[len(keyword):])
+		}
+	}
+	return value
 }
 
 var namespaceStatements = []string{"create database ", "create schema ", "drop database ", "drop schema "}
@@ -127,8 +196,15 @@ func startsStatement(lower string, prefixes []string) bool {
 	return false
 }
 
+func writeGrant(namespace string) (string, string) {
+	if namespace == "" || strings.EqualFold(namespace, informationSchemaName) {
+		return "", ""
+	}
+	return "DATA_WRITE", namespace
+}
+
 func schemaGrant(namespace string) (string, string) {
-	if strings.EqualFold(namespace, informationSchemaName) {
+	if namespace == "" || strings.EqualFold(namespace, informationSchemaName) {
 		return "", ""
 	}
 	return "SCHEMA_MANAGEMENT", namespace
@@ -141,27 +217,43 @@ func readGrant(namespace string) (string, string) {
 	return "DATA_READ", namespace
 }
 
-func (s *textStatementExecutor) requireGrant(privilege, namespace string) error {
-	if s.session.server.config.Catalog == nil {
-		return sqlFailure{1227, "42000", "access denied"}
+func grantFailure(namespace string) error {
+	if namespace != "" {
+		return sqlFailure{1044, "42000", "access denied"}
 	}
-	account, found := s.session.server.config.Catalog.Account(s.session.username)
+	return sqlFailure{1227, "42000", "access denied"}
+}
+
+func (s *session) sessionAccount() (catalog.Account, bool) {
+	if s == nil || s.username == "" || s.server == nil || s.server.config.Catalog == nil {
+		return catalog.Account{}, false
+	}
+	return s.server.config.Catalog.Account(s.username)
+}
+
+func (s *session) unconfiguredAccountPermitted() bool {
+	return s.server != nil && s.server.config.Username == s.username && s.server.config.PasswordHash != ""
+}
+
+func (s *session) requireGrant(privilege, namespace string) error {
+	if s == nil || s.username == "" {
+		return nil
+	}
+	account, found := s.sessionAccount()
 	if !found {
-		// Package tests construct sessions without the serving lifecycle. A real
-		// server always provisions this configured account before it accepts a
-		// connection.
-		if s.session.server.config.Username == s.session.username && s.session.server.config.PasswordHash != "" {
+		if s.unconfiguredAccountPermitted() {
 			return nil
 		}
-		return sqlFailure{1227, "42000", "access denied"}
+		return grantFailure(namespace)
 	}
-	if account.Locked {
-		return sqlFailure{1227, "42000", "access denied"}
-	}
-	if accountGrantIndex(account, privilege, namespace) < 0 {
-		return sqlFailure{1227, "42000", "access denied"}
+	if account.Locked || accountGrantIndex(account, privilege, namespace) < 0 {
+		return grantFailure(namespace)
 	}
 	return nil
+}
+
+func (s *textStatementExecutor) requireGrant(privilege, namespace string) error {
+	return s.session.requireGrant(privilege, namespace)
 }
 
 func (s *textStatementExecutor) accountStatement(query, lower string) (*queryResult, bool, error) {
@@ -472,7 +564,7 @@ func grantChange(privilege, namespace string, grant bool) func(*catalog.Account)
 
 func accountGrantIndex(account catalog.Account, privilege, namespace string) int {
 	for index, grant := range account.Grants {
-		if grant.Privilege == privilege && grant.Namespace == namespace {
+		if grant.Privilege == privilege && catalog.Key(grant.Namespace) == catalog.Key(namespace) {
 			return index
 		}
 	}
