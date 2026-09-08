@@ -392,6 +392,29 @@ func (p *relationalSelectPlan) windowAggregatePartitionValues(rows []relationalR
 }
 
 func (state *rollingWindowAggregate) advance(frame windowFrameRange, activeStart, activeEnd *int) error {
+	if frame.empty() {
+		return advanceEmptyWindow(state, frame, activeStart, activeEnd)
+	}
+	return state.advanceActive(frame, activeStart, activeEnd)
+}
+
+func advanceEmptyWindow(state *rollingWindowAggregate, frame windowFrameRange, activeStart, activeEnd *int) error {
+	for *activeStart <= *activeEnd {
+		if err := state.remove(*activeStart); err != nil {
+			return err
+		}
+		*activeStart++
+	}
+	if *activeStart < frame.start {
+		*activeStart = frame.start
+	}
+	if *activeEnd < frame.end {
+		*activeEnd = frame.end
+	}
+	return nil
+}
+
+func (state *rollingWindowAggregate) advanceActive(frame windowFrameRange, activeStart, activeEnd *int) error {
 	if frame.start < *activeStart || frame.end < *activeEnd {
 		return sqlFailure{1105, "HY000", "window frame bounds moved backwards"}
 	}
@@ -405,6 +428,9 @@ func (state *rollingWindowAggregate) advance(frame windowFrameRange, activeStart
 			}
 		}
 		*activeStart++
+	}
+	if *activeEnd < frame.start-1 {
+		*activeEnd = frame.start - 1
 	}
 	for *activeEnd < frame.end {
 		*activeEnd++

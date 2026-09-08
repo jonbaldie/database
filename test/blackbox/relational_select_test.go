@@ -242,6 +242,14 @@ func TestMySQLAggregatesAndWindowsUseThePublicWireContract(t *testing.T) {
 	if emptyAndBounded.err != "" || !reflect.DeepEqual(emptyAndBounded.rows, [][]string{{"1", "0", ""}, {"2", "1", "1"}, {"3", "2", "3"}}) {
 		t.Fatalf("empty and bounded window frames: %#v", emptyAndBounded)
 	}
+	emptyPreceding := client.query("SELECT n, COUNT(*) OVER bounded, SUM(n) OVER bounded FROM numbers WINDOW bounded AS (ORDER BY n ROWS BETWEEN 5 PRECEDING AND 2 PRECEDING) ORDER BY n")
+	if emptyPreceding.err != "" || !reflect.DeepEqual(emptyPreceding.rows, [][]string{{"1", "0", ""}, {"2", "0", ""}, {"3", "1", "1"}}) {
+		t.Fatalf("empty preceding window frames: %#v", emptyPreceding)
+	}
+	emptyFollowing := client.query("SELECT n, COUNT(*) OVER bounded, SUM(n) OVER bounded FROM numbers WINDOW bounded AS (ORDER BY n ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING) ORDER BY n")
+	if emptyFollowing.err != "" || !reflect.DeepEqual(emptyFollowing.rows, [][]string{{"1", "1", "3"}, {"2", "0", ""}, {"3", "0", ""}}) {
+		t.Fatalf("empty following window frames: %#v", emptyFollowing)
+	}
 	rollingAggregates := client.query("SELECT n, COUNT(n) OVER bounded, SUM(n) OVER bounded, AVG(n) OVER bounded, MIN(n) OVER bounded, MAX(n) OVER bounded FROM numbers WINDOW bounded AS (ORDER BY n ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) ORDER BY n")
 	if rollingAggregates.err != "" || !reflect.DeepEqual(rollingAggregates.rows, [][]string{{"1", "1", "1", "1.0000", "1", "1"}, {"2", "2", "3", "1.5000", "1", "2"}, {"3", "2", "5", "2.5000", "2", "3"}}) {
 		t.Fatalf("rolling window aggregates: %#v", rollingAggregates)
