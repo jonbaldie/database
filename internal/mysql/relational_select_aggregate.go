@@ -1917,6 +1917,11 @@ func collectWindowRows(plan *relationalSelectPlan, sourceRows []relationRow) ([]
 	if err := plan.applyWindows(rows); err != nil {
 		return nil, err
 	}
+	for index := range rows {
+		if err := plan.projectOrderValues(rows[index].source, &rows[index]); err != nil {
+			return nil, err
+		}
+	}
 	if plan.runtime != nil {
 		plan.runtime.record(plan.runtime.window, len(sourceRows), len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))
 		plan.runtime.record(plan.runtime.project, len(rows), len(rows), 0, 0, 0, resultMemory(rows), time.Since(started))

@@ -272,13 +272,26 @@ func (p *relationalSelectPlan) projectOrderValues(row relationRow, result *relat
 		if !order.computed {
 			continue
 		}
-		value, err := evaluateRelationExpressionContext(order.expression, p.source.columns, row, p.outer, p.session)
+		value, err := p.evaluateOrderValue(order.expression, row, result)
 		if err != nil {
 			return err
 		}
 		result.orders[index] = value
 	}
 	return nil
+}
+
+// evaluateOrderValue evaluates a computed ORDER BY expression for one row. An
+// identifier naming a projection resolves to that projection's value before the
+// source columns, so a SELECT alias sorts the same inside a larger expression
+// as it does on its own.
+func (p *relationalSelectPlan) evaluateOrderValue(expression string, row relationRow, result *relationalResultRow) (exprValue, error) {
+	return evaluateScalarResolved(expression, func(name string) (exprValue, error) {
+		if index, found := projectionIndex(p.projection, name); found {
+			return result.projections[index], nil
+		}
+		return evaluateRelationExpressionContext(name, p.source.columns, row, p.outer, p.session)
+	}, p.session)
 }
 
 func relationExpressionMetadata(expression string, columns []relationColumn) (columnMetadata, error) {
@@ -423,14 +436,9 @@ func parseRelationalOrder(text string, projections []relationalProjection, colum
 func parseRelationalOrderItem(item string, projections []relationalProjection, columns []relationColumn) (relationalOrder, error) {
 	expression, direction := splitOrderDirection(item)
 	order := relationalOrder{expression: expression, direction: direction, column: -1, projection: -1}
-	if ordinal, err := strconv.Atoi(expression); err == nil {
-		if ordinal == 0 || ordinal > len(projections) {
-			return relationalOrder{}, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
-		}
-		if ordinal > 0 {
-			order.projection, order.fromProjection = ordinal-1, true
-			return order, nil
-		}
+	resolved, handled, err := relationalOrderOrdinal(expression, order, projections)
+	if err != nil || handled {
+		return resolved, err
 	}
 	if projection, ok := projectionIndex(projections, expression); ok {
 		order.projection, order.fromProjection = projection, true
@@ -443,11 +451,56 @@ func parseRelationalOrderItem(item string, projections []relationalProjection, c
 		order.column = column
 		return order, nil
 	}
-	if _, err := evaluateRelationExpression(expression, columns, sampleRelationRow(columns)); err != nil {
-		return relationalOrder{}, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
+	if _, err := evaluateRelationExpression(expression, columns, sampleRelationRow(columns)); err == nil {
+		order.computed = true
+		return order, nil
 	}
-	order.computed = true
-	return order, nil
+	if _, err := evaluateOrderExpression(expression, projections, columns); err == nil {
+		order.computed = true
+		return order, nil
+	}
+	return relationalOrder{}, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
+}
+
+// evaluateOrderExpression validates an ORDER BY expression whose identifiers
+// may name SELECT projections. A projection alias resolves before the source
+// columns, matching how a bare alias sorts, so an alias sorts the same whether
+// it is the whole expression or part of a larger one. Window, subquery and
+// aggregate projections take their value at execution, so only the surrounding
+// expression is validated here.
+func evaluateOrderExpression(expression string, projections []relationalProjection, columns []relationColumn) (exprValue, error) {
+	row := sampleRelationRow(columns)
+	return evaluateScalarWithResolver(expression, func(name string) (exprValue, error) {
+		index, found := projectionIndex(projections, name)
+		if !found {
+			return evaluateRelationExpression(name, columns, row)
+		}
+		projection := projections[index]
+		if projection.window != nil || projection.subquery != "" || projection.aggregate != nil {
+			return projection.value, nil
+		}
+		return evaluateRelationExpressionContext(projection.expression, columns, row, projection.outer, nil)
+	})
+}
+
+// relationalOrderOrdinal resolves an ORDER BY item that is a whole projection
+// ordinal. The second result reports whether the item was an ordinal, and the
+// error carries the unknown-column failure for an ordinal outside the
+// projection list.
+func relationalOrderOrdinal(expression string, order relationalOrder, projections []relationalProjection) (relationalOrder, bool, error) {
+	ordinal, err := strconv.Atoi(expression)
+	if err != nil {
+		return order, false, nil
+	}
+	if ordinal == 0 || ordinal > len(projections) {
+		return relationalOrder{}, true, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
+	}
+	if ordinal < 0 {
+		// A negative literal is a constant expression, not an ordinal.
+		return order, false, nil
+	}
+	order.projection, order.fromProjection = ordinal-1, true
+	return order, true, nil
 }
 
 func splitOrderDirection(item string) (string, string) {
