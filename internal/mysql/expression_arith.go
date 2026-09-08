@@ -2,10 +2,10 @@
 // scalar expression grammar. Addition, subtraction, and multiplication stay in
 // the tightest exact domain the operands share (integer, then decimal), widening
 // to approximate double only when a double operand is present. True division
-// produces an exact decimal or an approximate double; the integer DIV and MOD
-// operators require integer operands. A NULL operand propagates, a character
-// operand requires an explicit cast, and division by zero, integer overflow, or
-// a non-finite double all fail.
+// produces an exact decimal or an approximate double. DIV truncates toward zero
+// and returns DECIMAL when the quotient exceeds the signed 64-bit range. A NULL
+// operand propagates, a character operand requires an explicit cast, and
+// division by zero, integer overflow, or a non-finite double all fail.
 package mysql
 
 import (
@@ -218,10 +218,12 @@ func floatDivide(a, b exprValue) (exprValue, error) {
 	return checkFinite(toFloat(a) / divisor)
 }
 
-// integerDivide evaluates the integer-division operator DIV, whose result is
-// always an integer: the quotient truncated toward zero across the exact
-// numeric domains, or through double arithmetic when a double operand is
-// present. A character operand requires an explicit cast.
+// integerDivide evaluates the integer-division operator DIV. The result is the
+// quotient truncated toward zero. Exact operands yield a signed integer when
+// the quotient fits in int64, an unsigned integer when an unsigned operand is
+// present and the quotient fits in uint64, or DECIMAL when the truncated
+// quotient exceeds the signed 64-bit range. A double operand uses double
+// arithmetic. A character operand requires an explicit cast.
 func integerDivide(a, b exprValue) (exprValue, error) {
 	if a.kind == valueString || b.kind == valueString {
 		return exprValue{}, strictConversionError()
@@ -243,10 +245,10 @@ func finishIntegerDivide(a, b exprValue, quotient *big.Int) (exprValue, error) {
 		}
 		return uintValue(quotient.Uint64()), nil
 	}
-	if !quotient.IsInt64() {
-		return exprValue{}, outOfRangeValue()
+	if quotient.IsInt64() {
+		return intValue(quotient.Int64()), nil
 	}
-	return intValue(quotient.Int64()), nil
+	return boundedDecimal(decimalValue{unscaled: quotient, scale: 0})
 }
 
 func floatIntegerDivide(a, b exprValue) (exprValue, error) {

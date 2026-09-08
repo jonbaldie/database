@@ -86,6 +86,50 @@ func TestEvaluateArithmetic(t *testing.T) {
 	}
 }
 
+func TestEvaluateIntegerDivideKeepsIntegerDomain(t *testing.T) {
+	for expression, want := range map[string]int64{
+		"7 DIV 2":                   3,
+		"-7 DIV 2":                  -3,
+		"5.5 DIV 2":                 2,
+		"9223372036854775807 DIV 1": 9223372036854775807,
+	} {
+		value, err := evaluateScalar(expression)
+		if err != nil {
+			t.Errorf("evaluateScalar(%q) unexpected error: %v", expression, err)
+			continue
+		}
+		if value.kind != valueInt || value.i != want {
+			t.Errorf("evaluateScalar(%q) = %#v, want signed %d", expression, value, want)
+		}
+	}
+}
+
+func TestEvaluateIntegerDivideWidensToDecimal(t *testing.T) {
+	cases := map[string]string{
+		"999999999999999999999999999 DIV 1":    "999999999999999999999999999",
+		"-999999999999999999999999999 DIV 1":   "-999999999999999999999999999",
+		"999999999999999999999999999 DIV -1":   "-999999999999999999999999999",
+		"-999999999999999999999999999 DIV -1":  "999999999999999999999999999",
+		"999999999999999999999999999 DIV 2":    "499999999999999999999999999",
+		"999999999999999999999999999.9 DIV 1":  "999999999999999999999999999",
+		"-999999999999999999999999999.9 DIV 2": "-499999999999999999999999999",
+		"(-9223372036854775807 - 1) DIV -1":    "9223372036854775808",
+	}
+	for expression, want := range cases {
+		value, err := evaluateScalar(expression)
+		if err != nil {
+			t.Errorf("evaluateScalar(%q) unexpected error: %v", expression, err)
+			continue
+		}
+		if value.kind != valueDecimal {
+			t.Errorf("evaluateScalar(%q) kind = %v, want decimal", expression, value.kind)
+		}
+		if got := value.render(); got != want {
+			t.Errorf("evaluateScalar(%q) = %q, want %q", expression, got, want)
+		}
+	}
+}
+
 func TestEvaluateArithmeticFailsClosed(t *testing.T) {
 	for _, expression := range []string{
 		"9223372036854775807 + 1",
