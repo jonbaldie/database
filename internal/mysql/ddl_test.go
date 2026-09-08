@@ -205,6 +205,104 @@ func TestDropTableReferencedByForeignKeyFails(t *testing.T) {
 	}
 }
 
+func TestTruncateTableReferencedByForeignKeyFails(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE parent (id INT PRIMARY KEY)",
+		"CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, CONSTRAINT fk_child_parent FOREIGN KEY (parent_id) REFERENCES parent(id))",
+		"INSERT INTO parent VALUES (1)",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("setup query %q: %v", query, err)
+		}
+	}
+
+	// Case 1: Child table is empty
+	_, err := executeStatement(executor, "TRUNCATE TABLE parent")
+	if err == nil {
+		t.Fatal("expected error truncating parent table when child is empty, got nil")
+	}
+	failure, ok := err.(sqlFailure)
+	if !ok || failure.code != 1701 {
+		t.Fatalf("expected error code 1701, got: %v", err)
+	}
+	expectedMessage := "Cannot truncate a table referenced in a foreign key constraint ('child', CONSTRAINT 'fk_child_parent')"
+	if failure.message != expectedMessage {
+		t.Fatalf("expected message %q, got %q", expectedMessage, failure.message)
+	}
+
+	// Case 2: Child table contains a row with NULL foreign key
+	if _, err := executeStatement(executor, "INSERT INTO child VALUES (10, NULL)"); err != nil {
+		t.Fatalf("insert null child: %v", err)
+	}
+	_, err = executeStatement(executor, "TRUNCATE TABLE parent")
+	if err == nil {
+		t.Fatal("expected error truncating parent table when child has null foreign key, got nil")
+	}
+	failure, ok = err.(sqlFailure)
+	if !ok || failure.code != 1701 {
+		t.Fatalf("expected error code 1701, got: %v", err)
+	}
+
+	// Case 3: Child table contains matching non-null rows
+	if _, err := executeStatement(executor, "INSERT INTO child VALUES (1, 1)"); err != nil {
+		t.Fatalf("insert matching child: %v", err)
+	}
+	_, err = executeStatement(executor, "TRUNCATE TABLE parent")
+	if err == nil {
+		t.Fatal("expected error truncating parent table when child has matching row, got nil")
+	}
+	failure, ok = err.(sqlFailure)
+	if !ok || failure.code != 1701 {
+		t.Fatalf("expected error code 1701, got: %v", err)
+	}
+
+	// Case 4: Non-referenced table (child) succeeds
+	if _, err := executeStatement(executor, "TRUNCATE TABLE child"); err != nil {
+		t.Fatalf("expected truncate of child table to succeed, got: %v", err)
+	}
+
+	// Case 5: Self-referencing table fails truncate
+	for _, query := range []string{
+		"CREATE TABLE self_ref (id INT PRIMARY KEY, parent_id INT, CONSTRAINT fk_self FOREIGN KEY (parent_id) REFERENCES self_ref(id))",
+		"INSERT INTO self_ref VALUES (1, NULL)",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("setup self_ref %q: %v", query, err)
+		}
+	}
+	_, err = executeStatement(executor, "TRUNCATE TABLE self_ref")
+	if err == nil {
+		t.Fatal("expected error truncating self-referencing table, got nil")
+	}
+	failure, ok = err.(sqlFailure)
+	if !ok || failure.code != 1701 {
+		t.Fatalf("expected error code 1701 for self_ref, got: %v", err)
+	}
+	expectedSelfMessage := "Cannot truncate a table referenced in a foreign key constraint ('self_ref', CONSTRAINT 'fk_self')"
+	if failure.message != expectedSelfMessage {
+		t.Fatalf("expected message %q, got %q", expectedSelfMessage, failure.message)
+	}
+
+	// Case 6: Standalone table truncate succeeds and clears rows
+	if _, err := executeStatement(executor, "CREATE TABLE standalone (id INT PRIMARY KEY)"); err != nil {
+		t.Fatalf("create standalone: %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO standalone VALUES (1)"); err != nil {
+		t.Fatalf("insert standalone: %v", err)
+	}
+	if _, err := executeStatement(executor, "TRUNCATE TABLE standalone"); err != nil {
+		t.Fatalf("truncate standalone: %v", err)
+	}
+	rows, err := executeStatement(executor, "SELECT * FROM standalone")
+	if err != nil {
+		t.Fatalf("select standalone: %v", err)
+	}
+	if len(rows.rows) != 0 {
+		t.Fatalf("expected 0 rows after truncate, got %d", len(rows.rows))
+	}
+}
+
 func equalStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
