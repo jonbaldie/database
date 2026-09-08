@@ -5,11 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.8] - 2026-09-07
+## [0.2.9] - 2026-09-08
 
 ### Fixed
 
 - Returned a DECIMAL result for `DIV` when the truncated quotient exceeds the signed 64-bit range, instead of MySQL error 1690.
+- Resolved SELECT aliases that appear inside larger `ORDER BY` expressions.
+- Treated negative integer literals in `ORDER BY` and `GROUP BY` as constant expressions rather than column ordinals.
+- Rounded `DOUBLE` values half away from zero.
+- Evaluated indexed column comparisons in cross-join `WHERE` clauses against columns from other tables.
+- Allowed non-aggregated columns that are functionally dependent on a grouped primary key or unique NOT NULL key.
+- Stripped `--`, `#`, and in-statement `/* */` comments from SQL before dispatch.
+- Clamped empty window `ROWS` frames so frame bounds do not move backwards.
+- Rejected unsupported `FULL JOIN` and `NATURAL JOIN` instead of parsing them as table aliases.
+- Preserved `WHERE` clauses in `EXISTS` subqueries that omit `FROM`.
+- Enforced grant authorization for cross-database operations.
+- Rejected `TRUNCATE TABLE` on parent tables referenced by foreign keys with MySQL error 1701.
+
+## [0.2.8] - 2026-09-07
+
+### Fixed
+
 - Recognized `UNIQUE` table constraints without whitespace before opening parentheses in `CREATE TABLE` and `ALTER TABLE` statements.
 - Returned an empty result set for queries combining `ORDER BY` with `LIMIT 0` while preserving column metadata.
 
@@ -206,6 +222,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.9]: https://github.com/jonbaldie/database/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/jonbaldie/database/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/jonbaldie/database/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/jonbaldie/database/compare/v0.2.5...v0.2.6
