@@ -131,8 +131,8 @@ func parseRelationalGroups(text string, columns []relationColumn, projections []
 }
 
 func resolveRelationalGroupExpression(expression string, columns []relationColumn, projections []relationalProjection) (string, error) {
-	if ordinal, err := strconv.Atoi(expression); err == nil {
-		if ordinal < 1 || ordinal > len(projections) {
+	if ordinal, err := strconv.Atoi(expression); err == nil && ordinal > 0 {
+		if ordinal > len(projections) {
 			return "", sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'group statement'"}
 		}
 		return groupProjectionExpression(projections[ordinal-1])

@@ -424,11 +424,13 @@ func parseRelationalOrderItem(item string, projections []relationalProjection, c
 	expression, direction := splitOrderDirection(item)
 	order := relationalOrder{expression: expression, direction: direction, column: -1, projection: -1}
 	if ordinal, err := strconv.Atoi(expression); err == nil {
-		if ordinal < 1 || ordinal > len(projections) {
+		if ordinal == 0 || ordinal > len(projections) {
 			return relationalOrder{}, sqlFailure{1054, "42S22", "Unknown column '" + expression + "' in 'order clause'"}
 		}
-		order.projection, order.fromProjection = ordinal-1, true
-		return order, nil
+		if ordinal > 0 {
+			order.projection, order.fromProjection = ordinal-1, true
+			return order, nil
+		}
 	}
 	if projection, ok := projectionIndex(projections, expression); ok {
 		order.projection, order.fromProjection = projection, true
