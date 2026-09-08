@@ -2045,6 +2045,12 @@ func windowFrameBounds(position, length int, frame relationalWindowFrame) (int, 
 	if start < 0 {
 		start = 0
 	}
+	if start > length {
+		start = length
+	}
+	if end < -1 {
+		end = -1
+	}
 	if end >= length {
 		end = length - 1
 	}
