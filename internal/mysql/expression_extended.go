@@ -188,14 +188,7 @@ func integerFromDecimal(value decimalValue) (int64, error) {
 }
 
 func integerFromDouble(value float64) (int64, error) {
-	if !isFinite(value) {
-		return 0, outOfRangeValue()
-	}
-	rounded := math.Round(value)
-	if rounded >= maxInt64AsFloat || rounded < minInt64AsFloat {
-		return 0, outOfRangeValue()
-	}
-	return int64(rounded), nil
+	return int64FromBoundedFloat(math.Round(value))
 }
 
 func isFinite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
