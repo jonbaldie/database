@@ -123,6 +123,12 @@ compatible families and a lossless common numeric type where one exists.
 Character-to-numeric and character-to-temporal comparison require explicit
 conversion. MySQL null-safe equality (`<=>`) is supported.
 
+Unary minus negates in the signed `BIGINT` domain: an unsigned operand above
+`MaxInt64 + 1` fails with MySQL error 1690, an operand at `MaxInt64 + 1`
+negates to `-9223372036854775808`, and a smaller operand negates to a signed
+value. This is an intentional deviation from MySQL, which promotes a constant
+unsigned operand to an exact `DECIMAL` result instead of raising error 1690.
+
 `utf8mb4_0900_ai_ci` and `utf8mb4_bin` follow MySQL 8.4.11 comparison,
 trailing-space, coercibility, and `LIKE` behaviour. Mixed collations use MySQL
 coercibility rules and fail when there is no unambiguous result. Invalid UTF-8

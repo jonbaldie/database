@@ -60,7 +60,17 @@ func arithmetic(operator string, a, b exprValue) (exprValue, error) {
 	}
 }
 
+// negateValue negates in the signed BIGINT domain, as MySQL's unary minus
+// does, rather than the unsigned arithmetic domain: an unsigned operand above
+// MaxInt64 + 1 has no representable negation and fails with an out-of-range
+// error, while an operand at or below it negates to a signed value.
 func negateValue(value exprValue) (exprValue, error) {
+	if value.kind == valueUint {
+		if value.u > uint64(math.MaxInt64)+1 {
+			return exprValue{}, outOfRangeValue()
+		}
+		return intValue(-int64(value.u)), nil
+	}
 	return arithmetic("-", intValue(0), value)
 }
 

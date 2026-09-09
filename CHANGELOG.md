@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Fixed
+
+- Negated unsigned values in the signed `BIGINT` domain: a value at or below `MaxInt64 + 1` negates to a signed result, and only a value above that fails with MySQL error 1690, instead of rejecting every unary minus on an unsigned value.
+
 ## [0.2.9] - 2026-09-08
 
 ### Fixed
