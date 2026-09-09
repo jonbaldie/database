@@ -122,20 +122,19 @@ func wildcardProjections(expression string, columns []relationColumn) ([]relatio
 }
 
 func scalarProjection(expression, alias string) ([]relationalProjection, error) {
-	rendered, isNull, metadata, scalarErr := scalarColumn(expression)
+	value, _, metadata, scalarErr := scalarColumnValue(expression)
 	if scalarErr != nil {
 		return nil, scalarErr
 	}
-	value := literalQueryResult{value: rendered, isNull: isNull, metadata: metadata, supported: true}
 	name := expression
 	if alias != "" {
 		name = alias
-		value.metadata.originalName = value.metadata.name
+		metadata.originalName = metadata.name
 	}
-	value.metadata.name = name
+	metadata.name = name
 	return []relationalProjection{{
 		expression: expression, name: name, alias: alias, column: -1,
-		scalar: true, value: literalExprValue(value), metadata: value.metadata,
+		scalar: true, value: value, metadata: metadata,
 	}}, nil
 }
 
@@ -186,17 +185,6 @@ func splitProjectionAlias(item string) (string, string, error) {
 		return strings.TrimSpace(expression), name, nil
 	}
 	return item, "", nil
-}
-
-func literalExprValue(value literalQueryResult) exprValue {
-	if value.isNull {
-		return nullValue()
-	}
-	parsed, err := evaluateScalar(value.value)
-	if err == nil {
-		return parsed
-	}
-	return stringValue(value.value)
 }
 
 func (p relationalProjection) resolveName(columns []relationColumn) relationalProjection {
@@ -313,6 +301,11 @@ func relationExpressionMetadataContext(expression string, columns []relationColu
 	case valueDouble:
 		metadata.length = 22
 	case valueString:
+		// A temporal or binary value already carries its family's wire type,
+		// length, and character set, so the character tuning does not apply.
+		if value.temporal != temporalNone || value.binary {
+			break
+		}
 		metadata.length = relationStringExpressionLength(expression, columns, value.render())
 		metadata.characterSet, metadata.coercibility = relationExpressionCharacterMetadata(expression, columns)
 	}
@@ -368,9 +361,22 @@ func representativeExpressionValueContext(expression string, columns []relationC
 }
 
 func relationMetadataValue(column relationColumn, sample int64) exprValue {
+	if value, ok := relationNumericMetadataValue(column, sample); ok {
+		return value
+	}
+	if value, ok := relationTemporalMetadataValue(column); ok {
+		return value
+	}
+	return stringValue("x")
+}
+
+// relationNumericMetadataValue spells the numeric sample a column of a numeric
+// family contributes when a projection's metadata is planned before real rows
+// are read.
+func relationNumericMetadataValue(column relationColumn, sample int64) (exprValue, bool) {
 	typ, err := parseNumericType(column.typeName)
 	if err != nil {
-		return stringValue("x")
+		return exprValue{}, false
 	}
 	switch typ.kind {
 	case numericInteger:
@@ -378,19 +384,47 @@ func relationMetadataValue(column relationColumn, sample int64) exprValue {
 			if sample < 0 {
 				sample = -sample
 			}
-			return uintValue(uint64(sample))
+			return uintValue(uint64(sample)), true
 		}
-		return intValue(sample)
+		return intValue(sample), true
 	case numericDecimal:
 		value, _ := parseDecimalText(strconv.FormatInt(sample, 10) + strings.Repeat("0", typ.scale))
 		value.scale = typ.scale
-		return decimalValueOf(value)
+		return decimalValueOf(value), true
 	case numericFloat:
-		return doubleValue(float64(sample))
+		return doubleValue(float64(sample)), true
 	case numericBoolean, numericBit:
-		return intValue(sample)
+		return intValue(sample), true
 	default:
-		return stringValue("x")
+		return exprValue{}, false
+	}
+}
+
+// relationTemporalMetadataValue tags a temporal column's canonical sample value
+// with its family, so metadata planning sees the shape a real row would carry.
+func relationTemporalMetadataValue(column relationColumn) (exprValue, bool) {
+	temporal, err := parseTemporalType(column.typeName)
+	if err != nil || temporal.kind == temporalNone {
+		return exprValue{}, false
+	}
+	return exprValue{kind: valueString, s: representativeTemporalSample(temporal.kind), temporal: temporal.kind}, true
+}
+
+// representativeTemporalSample spells the canonical sample value a temporal
+// column contributes when a projection's metadata is planned before real rows
+// are read.
+func representativeTemporalSample(kind temporalKind) string {
+	switch kind {
+	case temporalDate:
+		return "2000-01-01"
+	case temporalDatetime, temporalTimestamp:
+		return "2000-01-01 00:00:00"
+	case temporalTime:
+		return "01:00:00"
+	case temporalYear:
+		return "2000"
+	default:
+		return "x"
 	}
 }
 
