@@ -486,7 +486,7 @@ func (p *relationalSelectPlan) validateGroupedOrders(orders []relationalOrder) e
 		return nil
 	}
 	for _, order := range orders {
-		if order.fromProjection {
+		if order.fromProjection || groupExpressionMatches(order.expression, p.aggregation.groups) {
 			continue
 		}
 		if err := p.validateGroupedExpression(order.expression); err != nil {
