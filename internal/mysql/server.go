@@ -1494,7 +1494,7 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 			parsed.constraints = append(parsed.constraints, constraint)
 			continue
 		}
-		column, typeName, attribute, columnConstraints, err := parseTableColumn(part)
+		column, typeName, attribute, _, columnConstraints, err := parseTableColumn(part)
 		if err != nil {
 			return parsedTableColumns{}, err
 		}
@@ -1506,31 +1506,31 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 	return parsed, nil
 }
 
-func parseTableColumn(part string) (string, string, catalog.ColumnAttribute, []catalog.Constraint, error) {
+func parseTableColumn(part string) (string, string, catalog.ColumnAttribute, bool, []catalog.Constraint, error) {
 	column, remainder, valid := consumeIdentifier(part)
 	if !valid {
-		return "", "", catalog.ColumnAttribute{}, nil, sqlFailure{1064, "42000", "invalid column definition"}
+		return "", "", catalog.ColumnAttribute{}, false, nil, sqlFailure{1064, "42000", "invalid column definition"}
 	}
 	if err := validateIdentifierLength(column); err != nil {
-		return "", "", catalog.ColumnAttribute{}, nil, err
+		return "", "", catalog.ColumnAttribute{}, false, nil, err
 	}
 	typePart, modifiers := splitColumnTypeAndModifiers(remainder)
 	fields := strings.Fields(typePart)
 	if len(fields) == 0 {
 		if strings.TrimSpace(modifiers) != "" {
-			return "", "", catalog.ColumnAttribute{}, nil, sqlFailure{1064, "42000", "column type is required"}
+			return "", "", catalog.ColumnAttribute{}, false, nil, sqlFailure{1064, "42000", "column type is required"}
 		}
-		return column, "", catalog.ColumnAttribute{Nullable: true}, nil, nil
+		return column, "", catalog.ColumnAttribute{Nullable: true}, false, nil, nil
 	}
 	typeName, err := columnTypeName(fields)
 	if err != nil {
-		return "", "", catalog.ColumnAttribute{}, nil, err
+		return "", "", catalog.ColumnAttribute{}, false, nil, err
 	}
-	attribute, constraints, err := parseColumnModifiers(column, modifiers)
+	attribute, statesNullability, constraints, err := parseColumnModifiers(column, modifiers)
 	if err != nil {
-		return "", "", catalog.ColumnAttribute{}, nil, err
+		return "", "", catalog.ColumnAttribute{}, false, nil, err
 	}
-	return column, typeName, attribute, constraints, nil
+	return column, typeName, attribute, statesNullability, constraints, nil
 }
 
 // columnTypeName folds a trailing UNSIGNED modifier into the declared type and

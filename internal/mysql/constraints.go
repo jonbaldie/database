@@ -50,16 +50,18 @@ func minConstraintLength(left, right int) int {
 	return right
 }
 
-func parseColumnModifiers(column, value string) (catalog.ColumnAttribute, []catalog.Constraint, error) {
+func parseColumnModifiers(column, value string) (catalog.ColumnAttribute, bool, []catalog.Constraint, error) {
 	attribute := catalog.ColumnAttribute{Nullable: true}
 	constraints := []catalog.Constraint{}
+	statesNullability := false
 	for strings.TrimSpace(value) != "" {
-		next, update, constraint, matched, err := parseColumnModifier(column, value, attribute)
+		next, update, constraint, matched, modifierStatesNullability, err := parseColumnModifier(column, value, attribute)
+		statesNullability = statesNullability || modifierStatesNullability
 		if err != nil {
-			return catalog.ColumnAttribute{}, nil, err
+			return catalog.ColumnAttribute{}, false, nil, err
 		}
 		if !matched {
-			return catalog.ColumnAttribute{}, nil, sqlFailure{1235, "42000", "unsupported column modifier"}
+			return catalog.ColumnAttribute{}, false, nil, sqlFailure{1235, "42000", "unsupported column modifier"}
 		}
 		value = next
 		if update != nil {
@@ -69,21 +71,35 @@ func parseColumnModifiers(column, value string) (catalog.ColumnAttribute, []cata
 			constraints = append(constraints, constraint)
 		}
 	}
-	return attribute, constraints, nil
+	return attribute, statesNullability, constraints, nil
 }
 
-func parseColumnModifier(column, value string, attribute catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error) {
+type columnModifierParser struct {
+	statesNullability bool
+	parse             func(string, catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error)
+}
+
+func parseColumnModifier(column, value string, attribute catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, bool, error) {
 	value = strings.TrimSpace(value)
-	for _, parser := range []func(string, catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error){notNullModifier, nullModifier, defaultModifier, primaryModifier, uniqueModifier, checkModifier} {
-		next, update, constraint, matched, err := parser(value, attribute)
+	for _, parser := range columnModifierParsers {
+		next, update, constraint, matched, err := parser.parse(value, attribute)
 		if matched || err != nil {
 			if constraint.Type == catalog.ConstraintTypePrimary || constraint.Type == catalog.ConstraintTypeUnique {
 				constraint.Columns = []string{column}
 			}
-			return next, update, constraint, matched, err
+			return next, update, constraint, matched, parser.statesNullability, err
 		}
 	}
-	return "", nil, catalog.Constraint{}, false, nil
+	return "", nil, catalog.Constraint{}, false, false, nil
+}
+
+var columnModifierParsers = []columnModifierParser{
+	{statesNullability: true, parse: notNullModifier},
+	{statesNullability: true, parse: nullModifier},
+	{parse: defaultModifier},
+	{parse: primaryModifier},
+	{parse: uniqueModifier},
+	{parse: checkModifier},
 }
 
 func notNullModifier(value string, attribute catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error) {
