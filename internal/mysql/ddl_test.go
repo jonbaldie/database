@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jonbaldie/database/internal/catalog"
@@ -59,6 +60,81 @@ func TestTableDefinitionEvolutionThroughSQL(t *testing.T) {
 	}
 	if _, err := executeStatement(executor, "USE scratch"); err == nil {
 		t.Fatal("dropped database remains selectable")
+	}
+}
+
+func TestModifyColumnPreservesStoredStringValues(t *testing.T) {
+	cases := []struct {
+		name      string
+		setup     []string
+		alter     string
+		selectSQL string
+		want      [][]string
+	}{
+		{
+			name:      "widen_varchar",
+			setup:     []string{"CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(10) NOT NULL)", "INSERT INTO t VALUES (1, 'alice')"},
+			alter:     "ALTER TABLE t MODIFY name VARCHAR(20)",
+			selectSQL: "SELECT id, name FROM t",
+			want:      [][]string{{"1", "alice"}},
+		},
+		{
+			name:      "change_column",
+			setup:     []string{"CREATE TABLE t (name VARCHAR(10))", "INSERT INTO t VALUES ('alice')"},
+			alter:     "ALTER TABLE t CHANGE name label VARCHAR(20)",
+			selectSQL: "SELECT label FROM t",
+			want:      [][]string{{"alice"}},
+		},
+		{
+			name:      "numeric_looking_text",
+			setup:     []string{"CREATE TABLE t (name VARCHAR(10))", "INSERT INTO t VALUES ('42')"},
+			alter:     "ALTER TABLE t MODIFY name VARCHAR(20)",
+			selectSQL: "SELECT name FROM t",
+			want:      [][]string{{"42"}},
+		},
+		{
+			name:      "null_value",
+			setup:     []string{"CREATE TABLE t (name VARCHAR(10))", "INSERT INTO t VALUES (NULL)"},
+			alter:     "ALTER TABLE t MODIFY name VARCHAR(20)",
+			selectSQL: "SELECT name FROM t",
+			want:      [][]string{{"NULL"}},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			executor := ddlExecutorForTest(t)
+			for _, query := range test.setup {
+				if _, err := executeStatement(executor, query); err != nil {
+					t.Fatalf("execute %q: %v", query, err)
+				}
+			}
+			if _, err := executeStatement(executor, test.alter); err != nil {
+				t.Fatalf("alter %q: %v", test.alter, err)
+			}
+			result, err := executeStatement(executor, test.selectSQL)
+			if err != nil || !equalRows(result.rows, test.want) {
+				t.Fatalf("rows = %#v, err = %v, want %#v", result.rows, err, test.want)
+			}
+		})
+	}
+}
+
+func TestModifyColumnRejectsIncompatibleStoredString(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE t (name VARCHAR(10))",
+		"INSERT INTO t VALUES ('alice')",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	_, err := executeStatement(executor, "ALTER TABLE t MODIFY name VARCHAR(3)")
+	if err == nil {
+		t.Fatal("too-long stored value accepted")
+	}
+	if !strings.Contains(err.Error(), "Data too long") {
+		t.Fatalf("error = %v, want data too long", err)
 	}
 }
 
