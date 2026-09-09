@@ -23,15 +23,19 @@ const (
 )
 
 type ddlAction struct {
-	kind        ddlActionKind
-	name        string
-	newName     string
-	typeName    string
-	attribute   catalog.ColumnAttribute
-	ifExists    bool
-	ifNotExists bool
-	constraint  catalog.Constraint
-	index       catalog.Index
+	kind      ddlActionKind
+	name      string
+	newName   string
+	typeName  string
+	attribute catalog.ColumnAttribute
+	// statesNullability records whether the column definition explicitly used
+	// NULL or NOT NULL; MODIFY and CHANGE preserve the existing constraint
+	// when it is omitted.
+	statesNullability bool
+	ifExists          bool
+	ifNotExists       bool
+	constraint        catalog.Constraint
+	index             catalog.Index
 }
 
 const maxTableColumns = 1024
@@ -602,7 +606,7 @@ func parseAddColumnAction(value string) (ddlAction, error) {
 		ifNotExists = true
 		value = strings.TrimSpace(value[len("IF NOT EXISTS "):])
 	}
-	column, typeName, attribute, err := parseAlterColumnDefinition(value)
+	column, typeName, attribute, _, err := parseAlterColumnDefinition(value)
 	if err != nil {
 		return ddlAction{}, err
 	}
@@ -646,20 +650,20 @@ func parseChangeColumnAction(value string) (ddlAction, error) {
 	if !ok {
 		return ddlAction{}, sqlFailure{1064, "42000", "invalid column name"}
 	}
-	newName, typeName, attribute, err := parseAlterColumnDefinition(remainder)
+	newName, typeName, attribute, statesNullability, err := parseAlterColumnDefinition(remainder)
 	if err != nil {
 		return ddlAction{}, err
 	}
-	return ddlAction{kind: ddlModifyColumn, name: oldName, newName: newName, typeName: typeName, attribute: attribute}, nil
+	return ddlAction{kind: ddlModifyColumn, name: oldName, newName: newName, typeName: typeName, attribute: attribute, statesNullability: statesNullability}, nil
 }
 
 func parseModifyColumnAction(value string) (ddlAction, error) {
 	value = stripOptionalKeyword(value, "column")
-	name, typeName, attribute, err := parseAlterColumnDefinition(value)
+	name, typeName, attribute, statesNullability, err := parseAlterColumnDefinition(value)
 	if err != nil {
 		return ddlAction{}, err
 	}
-	return ddlAction{kind: ddlModifyColumn, name: name, typeName: typeName, attribute: attribute}, nil
+	return ddlAction{kind: ddlModifyColumn, name: name, typeName: typeName, attribute: attribute, statesNullability: statesNullability}, nil
 }
 
 func stripOptionalKeyword(value, keyword string) string {
@@ -670,18 +674,18 @@ func stripOptionalKeyword(value, keyword string) string {
 	return strings.TrimSpace(value)
 }
 
-func parseAlterColumnDefinition(value string) (string, string, catalog.ColumnAttribute, error) {
-	column, typeName, attribute, constraints, err := parseTableColumn(value)
+func parseAlterColumnDefinition(value string) (string, string, catalog.ColumnAttribute, bool, error) {
+	column, typeName, attribute, statesNullability, constraints, err := parseTableColumn(value)
 	if err != nil {
-		return "", "", catalog.ColumnAttribute{}, err
+		return "", "", catalog.ColumnAttribute{}, false, err
 	}
 	if len(constraints) != 0 {
-		return "", "", catalog.ColumnAttribute{}, sqlFailure{1235, "42000", "column constraints require ADD CONSTRAINT"}
+		return "", "", catalog.ColumnAttribute{}, false, sqlFailure{1235, "42000", "column constraints require ADD CONSTRAINT"}
 	}
 	if typeName == "" {
-		return "", "", catalog.ColumnAttribute{}, sqlFailure{1064, "42000", "column type is required"}
+		return "", "", catalog.ColumnAttribute{}, false, sqlFailure{1064, "42000", "column type is required"}
 	}
-	return column, typeName, attribute, nil
+	return column, typeName, attribute, statesNullability, nil
 }
 
 func applyTableDefinitionActions(table catalog.Table, actions []ddlAction) (catalog.Table, error) {
@@ -847,12 +851,20 @@ func modifyTableColumn(table *catalog.Table, action ddlAction) error {
 		renameTableIndexColumns(table, action.name, action.newName)
 	}
 	ensureColumnAttributes(table)
+	return applyModifiedColumnAttribute(table, index, action)
+}
+
+func applyModifiedColumnAttribute(table *catalog.Table, index int, action ddlAction) error {
 	if action.attribute.HasDefault {
 		canonical, err := canonicalColumnValue(*table, index, action.attribute.Default, 1)
 		if err != nil {
 			return err
 		}
 		action.attribute.Default = canonical
+	}
+	if !action.statesNullability {
+		// An omitted NULL/NOT NULL clause preserves the existing constraint.
+		action.attribute.Nullable = table.ColumnAttributes[index].Nullable
 	}
 	table.ColumnAttributes[index] = action.attribute
 	return nil
