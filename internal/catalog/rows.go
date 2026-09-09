@@ -52,6 +52,10 @@ func (s storageRows) SnapshotRows(namespace, name string) ([][]string, bool) {
 	return s.engine.SnapshotRows(namespace, name)
 }
 
+func (s storageRows) Checkpoint() error {
+	return s.engine.Checkpoint()
+}
+
 func (s storageRows) Close() error {
 	return s.engine.Close()
 }

@@ -139,6 +139,7 @@ type rowEngine interface {
 	LookupPrimary(namespace, name, key string) ([]string, bool)
 	LookupUnique(namespace, name, column, key string) ([]string, bool)
 	SnapshotRows(namespace, name string) ([][]string, bool)
+	Checkpoint() error
 	Close() error
 }
 

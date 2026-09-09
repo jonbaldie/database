@@ -936,6 +936,7 @@ func tableColumnIndex(columns []string, name string) int {
 }
 
 func removeTableColumn(table *catalog.Table, index int) {
+	column := table.Columns[index]
 	table.Columns = append(table.Columns[:index], table.Columns[index+1:]...)
 	if len(table.ColumnTypes) > index {
 		table.ColumnTypes = append(table.ColumnTypes[:index], table.ColumnTypes[index+1:]...)
@@ -946,4 +947,56 @@ func removeTableColumn(table *catalog.Table, index int) {
 	for rowIndex, row := range table.Rows {
 		table.Rows[rowIndex] = append(row[:index], row[index+1:]...)
 	}
+	// MySQL removes a dropped column from every key of which it is a part and
+	// removes the key itself once none of its parts remain.
+	table.Indexes = withoutTableColumnIndexes(table.Indexes, column)
+	table.Constraints = withoutTableColumnConstraints(table.Constraints, column)
+}
+
+// withoutTableColumnIndexes strips the column's parts from every index and
+// drops each index that no longer has any parts.
+func withoutTableColumnIndexes(indexes []catalog.Index, column string) []catalog.Index {
+	key := catalog.Key(column)
+	kept := make([]catalog.Index, 0, len(indexes))
+	for _, index := range indexes {
+		parts := make([]catalog.IndexPart, 0, len(index.Parts))
+		for _, part := range index.Parts {
+			if part.Column != "" && catalog.Key(part.Column) == key {
+				continue
+			}
+			parts = append(parts, part)
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		index.Parts = parts
+		kept = append(kept, index)
+	}
+	return kept
+}
+
+// withoutTableColumnConstraints strips the column from every primary and
+// unique constraint and drops each constraint that no longer has any columns.
+func withoutTableColumnConstraints(constraints []catalog.Constraint, column string) []catalog.Constraint {
+	key := catalog.Key(column)
+	kept := make([]catalog.Constraint, 0, len(constraints))
+	for _, constraint := range constraints {
+		if constraint.Type != catalog.ConstraintTypePrimary && constraint.Type != catalog.ConstraintTypeUnique {
+			kept = append(kept, constraint)
+			continue
+		}
+		columns := make([]string, 0, len(constraint.Columns))
+		for _, name := range constraint.Columns {
+			if catalog.Key(name) == key {
+				continue
+			}
+			columns = append(columns, name)
+		}
+		if len(columns) == 0 {
+			continue
+		}
+		constraint.Columns = columns
+		kept = append(kept, constraint)
+	}
+	return kept
 }
