@@ -248,6 +248,60 @@ func TestParseAlterTableActions(t *testing.T) {
 	}
 }
 
+func TestAlterTableRenamePreservesTableDefinition(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		alter string
+	}{
+		{name: "without_to", alter: "ALTER TABLE users RENAME accounts"},
+		{name: "with_to", alter: "ALTER TABLE users RENAME TO accounts"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executor := ddlExecutorForTest(t)
+			for _, query := range []string{
+				"CREATE TABLE users (id INT PRIMARY KEY, value INT NOT NULL)",
+				"CREATE INDEX users_value_idx ON users (value)",
+				"INSERT INTO users VALUES (1, 100)",
+			} {
+				if _, err := executeStatement(executor, query); err != nil {
+					t.Fatalf("execute %q: %v", query, err)
+				}
+			}
+
+			if _, err := executeStatement(executor, test.alter); err != nil {
+				t.Fatalf("rename table: %v", err)
+			}
+			result, err := executeStatement(executor, "SELECT id, value FROM accounts")
+			if err != nil || !equalRows(result.rows, [][]string{{"1", "100"}}) {
+				t.Fatalf("renamed rows = %#v, err = %v", result.rows, err)
+			}
+			if _, err := executeStatement(executor, "SELECT * FROM users"); !isFailureCode(err, 1146) {
+				t.Fatalf("old table lookup error = %v, want code 1146", err)
+			}
+
+			table, found := executor.server.config.Catalog.Snapshot().Namespaces["app"].Tables["accounts"]
+			if !found {
+				t.Fatal("renamed table is missing from the catalog")
+			}
+			if table.Name != "accounts" {
+				t.Fatalf("table name = %q, want accounts", table.Name)
+			}
+			if !equalStrings(table.Columns, []string{"id", "value"}) || !equalStrings(table.ColumnTypes, []string{"INT", "INT"}) {
+				t.Fatalf("table columns = %#v types = %#v", table.Columns, table.ColumnTypes)
+			}
+			if !equalRows(table.Rows, [][]string{{"1", "100"}}) || len(table.Constraints) != 1 || len(table.Indexes) != 1 {
+				t.Fatalf("renamed table definition = %#v", table)
+			}
+			if table.Constraints[0].Name != "PRIMARY" || !equalStrings(table.Constraints[0].Columns, []string{"id"}) {
+				t.Fatalf("renamed table constraint = %#v", table.Constraints[0])
+			}
+			if table.Indexes[0].Name != "users_value_idx" || len(table.Indexes[0].Parts) != 1 || table.Indexes[0].Parts[0].Column != "value" {
+				t.Fatalf("renamed table index = %#v", table.Indexes[0])
+			}
+		})
+	}
+}
+
 func TestForeignKeyReferenceAllowsNoSpaceBeforeColumnList(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	if _, err := executeStatement(executor, "CREATE TABLE parents (id INT PRIMARY KEY)"); err != nil {
