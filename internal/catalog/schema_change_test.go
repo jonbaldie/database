@@ -88,6 +88,91 @@ func TestOpenAfterSchemaChangeReplaysDurableRows(t *testing.T) {
 	}
 }
 
+func TestApplyDurablePersistsTypeOnlyAndAttributeOnlyChanges(t *testing.T) {
+	cases := []struct {
+		name   string
+		seed   func(Table) Table
+		mutate func(Definition) (Definition, error)
+		check  func(*testing.T, Table)
+	}{
+		{
+			name: "type_only",
+			mutate: func(definition Definition) (Definition, error) {
+				table := definition.Namespaces["app"].Tables["v"]
+				types := append([]string(nil), table.ColumnTypes...)
+				types[1] = "BIGINT"
+				table.ColumnTypes = types
+				definition.Namespaces["app"].Tables["v"] = table
+				return definition, nil
+			},
+			check: func(t *testing.T, table Table) {
+				t.Helper()
+				if len(table.ColumnTypes) != 2 || table.ColumnTypes[1] != "BIGINT" {
+					t.Fatalf("column types after reopen = %#v, want [INT BIGINT]", table.ColumnTypes)
+				}
+			},
+		},
+		{
+			name: "attribute_only",
+			seed: func(table Table) Table {
+				table.ColumnAttributes = []ColumnAttribute{{Nullable: false}, {Nullable: true}}
+				return table
+			},
+			mutate: func(definition Definition) (Definition, error) {
+				table := definition.Namespaces["app"].Tables["v"]
+				attributes := append([]ColumnAttribute(nil), table.ColumnAttributes...)
+				attributes[1].Nullable = false
+				table.ColumnAttributes = attributes
+				definition.Namespaces["app"].Tables["v"] = table
+				return definition, nil
+			},
+			check: func(t *testing.T, table Table) {
+				t.Helper()
+				if len(table.ColumnAttributes) != 2 || table.ColumnAttributes[1].Nullable {
+					t.Fatalf("column attributes after reopen = %#v, want val NOT NULL", table.ColumnAttributes)
+				}
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			store, err := Open(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateNamespace("app"); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateTableWithTypes("app", "v", []string{"id", "val"}, []string{"INT", "INT"}); err != nil {
+				t.Fatal(err)
+			}
+			if test.seed != nil {
+				if err := store.mutate(func(definition *Definition) error {
+					table := definition.Namespaces["app"].Tables["v"]
+					definition.Namespaces["app"].Tables["v"] = test.seed(table)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.ApplyDurable(test.mutate); err != nil {
+				t.Fatalf("apply schema change: %v", err)
+			}
+			if err := store.Rows().Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			reopened, err := Open(directory)
+			if err != nil {
+				t.Fatalf("reopen after schema change: %v", err)
+			}
+			defer reopened.Rows().Close()
+			test.check(t, reopened.Snapshot().Namespaces["app"].Tables["v"])
+		})
+	}
+}
+
 func sameRows(left, right [][]string) bool {
 	if len(left) != len(right) {
 		return false
