@@ -20,6 +20,7 @@ const (
 	ddlAddIndex
 	ddlDropIndex
 	ddlAlterIndex
+	ddlRenameTable
 )
 
 type ddlAction struct {
@@ -458,13 +459,39 @@ func (s *ddlExecutor) alterTable(query string) error {
 		if err != nil {
 			return err
 		}
-		namespaceDefinition.Tables[catalog.Key(name)] = updated
+		namespaceDefinition, err = storeAlteredTableDefinition(namespaceDefinition, name, updated, actions)
+		if err != nil {
+			return err
+		}
 		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
 		return nil
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1025, "HY000", err.Error()})
 	}
 	return nil
+}
+
+func storeAlteredTableDefinition(namespace catalog.Namespace, oldName string, table catalog.Table, actions []ddlAction) (catalog.Namespace, error) {
+	newName := alteredTableName(oldName, actions)
+	oldKey := catalog.Key(oldName)
+	newKey := catalog.Key(newName)
+	if newKey != oldKey {
+		if _, found := namespace.Tables[newKey]; found {
+			return catalog.Namespace{}, errors.New("table already exists")
+		}
+		delete(namespace.Tables, oldKey)
+	}
+	namespace.Tables[newKey] = table
+	return namespace, nil
+}
+
+func alteredTableName(oldName string, actions []ddlAction) string {
+	for _, action := range actions {
+		if action.kind == ddlRenameTable {
+			oldName = action.newName
+		}
+	}
+	return oldName
 }
 
 func parseDropObject(value string) (string, bool, bool) {
@@ -548,7 +575,11 @@ func parseAlterTableAction(value string) (ddlAction, error) {
 	case strings.HasPrefix(lower, "alter index "):
 		return parseAlterIndexAction(strings.TrimSpace(value[len("ALTER INDEX "):]))
 	case strings.HasPrefix(lower, "rename "):
-		return parseRenameColumnAction(strings.TrimSpace(value[len("RENAME "):]))
+		value = strings.TrimSpace(value[len("RENAME "):])
+		if strings.HasPrefix(strings.ToLower(value), "column ") {
+			return parseRenameColumnAction(value)
+		}
+		return parseRenameTableAction(value)
 	case strings.HasPrefix(lower, "change "):
 		return parseChangeColumnAction(strings.TrimSpace(value[len("CHANGE "):]))
 	case strings.HasPrefix(lower, "modify "):
@@ -646,6 +677,18 @@ func parseRenameColumnAction(value string) (ddlAction, error) {
 	return ddlAction{kind: ddlRenameColumn, name: oldName, newName: newName}, nil
 }
 
+func parseRenameTableAction(value string) (ddlAction, error) {
+	value = stripOptionalKeyword(value, "to")
+	name, ok := singleIdentifier(value)
+	if !ok {
+		return ddlAction{}, sqlFailure{1064, "42000", "invalid table name"}
+	}
+	if err := validateIdentifierLength(name); err != nil {
+		return ddlAction{}, err
+	}
+	return ddlAction{kind: ddlRenameTable, newName: name}, nil
+}
+
 func parseChangeColumnAction(value string) (ddlAction, error) {
 	value = stripOptionalKeyword(value, "column")
 	oldName, remainder, ok := consumeIdentifier(value)
@@ -693,6 +736,10 @@ func parseAlterColumnDefinition(value string) (string, string, catalog.ColumnAtt
 func applyTableDefinitionActions(table catalog.Table, actions []ddlAction) (catalog.Table, error) {
 	updated := cloneCatalogTable(table)
 	for _, action := range actions {
+		if action.kind == ddlRenameTable {
+			updated.Name = action.newName
+			continue
+		}
 		if err := applyTableDefinitionAction(&updated, action); err != nil {
 			return catalog.Table{}, err
 		}
