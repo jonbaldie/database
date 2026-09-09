@@ -21,7 +21,7 @@ func BenchmarkValidateForeignKeyRows(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				if err := validateForeignKeyRows(catalog.Definition{}, "app", "child", child, parent, constraint, []int{1}, []int{0}); err != nil {
+				if err := validateForeignKeyRows(catalog.Definition{}, "app", child, parent, constraint, []int{1}, []int{0}); err != nil {
 					b.Fatal(err)
 				}
 			}

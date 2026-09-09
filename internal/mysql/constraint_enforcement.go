@@ -267,7 +267,7 @@ func validateConstraintRows(previous, definition catalog.Definition, namespaceNa
 	case catalog.ConstraintTypeCheck:
 		return validateCheckConstraint(namespaceName, tableName, table, constraint)
 	case catalog.ConstraintTypeForeignKey:
-		return validateForeignKeyConstraint(previous, definition, namespaceName, tableName, table, constraint, indexes)
+		return validateForeignKeyConstraint(previous, definition, namespaceName, table, constraint, indexes)
 	default:
 		return errorsConstraintDefinition("unknown constraint type '" + constraint.Type + "'")
 	}
@@ -596,7 +596,7 @@ func validateCheckConstraint(namespaceName, tableName string, table catalog.Tabl
 	return nil
 }
 
-func validateForeignKeyConstraint(previous, definition catalog.Definition, namespaceName, tableName string, child catalog.Table, constraint catalog.Constraint, childIndexes map[string]int) error {
+func validateForeignKeyConstraint(previous, definition catalog.Definition, namespaceName string, child catalog.Table, constraint catalog.Constraint, childIndexes map[string]int) error {
 	if len(constraint.Columns) != len(constraint.ReferencedColumns) || len(constraint.ReferencedColumns) == 0 {
 		return errorsConstraintDefinition("foreign key '" + constraint.Name + "' has incompatible columns")
 	}
@@ -605,7 +605,7 @@ func validateForeignKeyConstraint(previous, definition catalog.Definition, names
 		return err
 	}
 	childColumns, parentColumns := constraintIndexes(constraint.Columns, childIndexes), constraintIndexes(constraint.ReferencedColumns, parentIndexes)
-	return validateForeignKeyRows(previous, namespaceName, tableName, child, parent, constraint, childColumns, parentColumns)
+	return validateForeignKeyRows(previous, namespaceName, child, parent, constraint, childColumns, parentColumns)
 }
 
 func foreignKeyParent(definition catalog.Definition, namespaceName string, constraint catalog.Constraint) (catalog.Table, map[string]int, error) {
@@ -636,7 +636,7 @@ func foreignKeyParent(definition catalog.Definition, namespaceName string, const
 	return parent, parentIndexes, nil
 }
 
-func validateForeignKeyRows(previous catalog.Definition, namespaceName, tableName string, child, parent catalog.Table, constraint catalog.Constraint, childColumns, parentColumns []int) error {
+func validateForeignKeyRows(previous catalog.Definition, namespaceName string, child, parent catalog.Table, constraint catalog.Constraint, childColumns, parentColumns []int) error {
 	parentKeys := make(map[string]struct{}, len(parent.Rows))
 	for _, row := range parent.Rows {
 		key, nullable := constraintRowKey(parent, row, parentColumns)
@@ -650,28 +650,27 @@ func validateForeignKeyRows(previous catalog.Definition, namespaceName, tableNam
 			continue
 		}
 		if _, matched := parentKeys[key]; !matched {
-			return foreignKeyViolation(previous, namespaceName, tableName, parent, constraint)
+			return foreignKeyViolation(previous, namespaceName, constraint, parentColumns, key)
 		}
 	}
 	return nil
 }
 
-func foreignKeyViolation(previous catalog.Definition, namespaceName, tableName string, parent catalog.Table, constraint catalog.Constraint) error {
-	if foreignKeyParentRowsChanged(previous, namespaceName, tableName, parent, constraint) {
+// foreignKeyViolation reports either MySQL 1451, for a parent row that was
+// deleted or updated while child rows still referenced it, or 1452, for a new
+// or changed child row without a parent. The violating child key decides:
+// when the parent matched it before the statement ran, only a parent-row
+// change can have removed it. Comparing whole parent row sets cannot decide,
+// because a self-referencing constraint is its own parent, so the parent rows
+// change with the child rows on every child-side write.
+func foreignKeyViolation(previous catalog.Definition, namespaceName string, constraint catalog.Constraint, parentColumns []int, childKey string) error {
+	if foreignKeyParentKeyRemoved(previous, namespaceName, constraint, parentColumns, childKey) {
 		return sqlFailure{1451, "23000", "Cannot delete or update a parent row: a foreign key constraint fails ('" + constraint.Name + "')"}
 	}
 	return sqlFailure{1452, "23000", "Cannot add or update a child row: a foreign key constraint fails ('" + constraint.Name + "')"}
 }
 
-func foreignKeyParentRowsChanged(previous catalog.Definition, namespaceName, tableName string, parent catalog.Table, constraint catalog.Constraint) bool {
-	previousNamespace, found := previous.Namespaces[catalog.Key(namespaceName)]
-	if !found {
-		return false
-	}
-	previousChild, found := previousNamespace.Tables[catalog.Key(tableName)]
-	if !found || !hasForeignKeyConstraint(previousChild, constraint) {
-		return false
-	}
+func foreignKeyParentKeyRemoved(previous catalog.Definition, namespaceName string, constraint catalog.Constraint, parentColumns []int, childKey string) bool {
 	parentNamespace := constraint.ReferencedNamespace
 	if parentNamespace == "" {
 		parentNamespace = namespaceName
@@ -681,33 +680,16 @@ func foreignKeyParentRowsChanged(previous catalog.Definition, namespaceName, tab
 		return false
 	}
 	previousParent, found := previousParentNamespace.Tables[catalog.Key(constraint.ReferencedTable)]
-	return found && !equalConstraintRows(previousParent.Rows, parent.Rows)
-}
-
-func hasForeignKeyConstraint(table catalog.Table, wanted catalog.Constraint) bool {
-	for _, constraint := range table.Constraints {
-		if constraint.Type == catalog.ConstraintTypeForeignKey && catalog.Key(constraint.Name) == catalog.Key(wanted.Name) {
+	if !found {
+		return false
+	}
+	for _, row := range previousParent.Rows {
+		key, nullable := constraintRowKey(previousParent, row, parentColumns)
+		if !nullable && key == childKey {
 			return true
 		}
 	}
 	return false
-}
-
-func equalConstraintRows(left, right [][]string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for rowIndex := range left {
-		if len(left[rowIndex]) != len(right[rowIndex]) {
-			return false
-		}
-		for columnIndex := range left[rowIndex] {
-			if left[rowIndex][columnIndex] != right[rowIndex][columnIndex] {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func tableHasReferencedKey(table catalog.Table, columns []string) bool {
