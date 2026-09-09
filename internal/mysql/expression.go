@@ -155,6 +155,12 @@ func unsupportedExpression() error {
 	return sqlFailure{1064, "42000", "unsupported expression"}
 }
 
+// incorrectEscapeArguments mirrors MySQL's ER_WRONG_ARGUMENTS rejection of a
+// LIKE escape sequence longer than one character.
+func incorrectEscapeArguments() error {
+	return sqlFailure{1210, "HY000", "Incorrect arguments to ESCAPE"}
+}
+
 // expressionTooDeep reports that an expression's parenthesisation, NOT
 // chain, or unary sign run exceeded maxExpressionDepth. MySQL's own error
 // for this situation is ER_STACK_OVERRUN_NEED_MORE (1436); we reuse its code

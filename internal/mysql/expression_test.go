@@ -413,4 +413,27 @@ func TestEvaluateLike(t *testing.T) {
 	}
 	evalNull(t, "NULL LIKE 'a%'")
 	evalNull(t, "'abc' LIKE NULL")
+	evalNull(t, "'abc' LIKE 'a%' ESCAPE NULL")
+}
+
+func TestEvaluateLikeEscapeClause(t *testing.T) {
+	cases := map[string]string{
+		"'abc' LIKE 'a%' ESCAPE '#'":       "1",
+		"'abc' LIKE 'a%' ESCAPE ''":        "1",
+		"'axb' LIKE 'a%b' ESCAPE ''":       "1",
+		"'a%b' LIKE 'a_b' ESCAPE ''":       "1",
+		"'a_b' LIKE 'a\\_b' ESCAPE ''":     "0",
+		"'a%b' LIKE 'a\\%b' ESCAPE ''":     "0",
+		"'a\\\\b' LIKE 'a\\\\b' ESCAPE ''": "1",
+		"'a%b' LIKE 'a\\%b' ESCAPE '%'":    "0",
+	}
+	for expression, want := range cases {
+		if got := evalRender(t, expression); got != want {
+			t.Errorf("evaluateScalar(%q) = %q, want %q", expression, got, want)
+		}
+	}
+	_, err := evaluateScalar("'abc' LIKE 'a%' ESCAPE 'ab'")
+	if !isFailureCode(err, 1210) {
+		t.Fatalf("'abc' LIKE 'a%%' ESCAPE 'ab' error = %v, want 1210", err)
+	}
 }

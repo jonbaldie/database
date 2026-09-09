@@ -207,9 +207,6 @@ func parseLikeComparison(p *exprParser, left exprValue, negate bool) (exprValue,
 			return nullValue(), nil
 		}
 		escape = value.render()
-		if escape == "" {
-			return exprValue{}, unsupportedExpression()
-		}
 	}
 	return evalLike(left, right, escape, negate)
 }
