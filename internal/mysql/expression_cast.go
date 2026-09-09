@@ -123,19 +123,19 @@ func unsignedCastTarget(p *exprParser) (castTarget, error) {
 }
 
 func doubleCastTarget(p *exprParser) (castTarget, error) {
-	return unboundedNumericCastTarget(p, false)
+	return argumentlessCastTarget(p, castTarget{kind: valueDouble})
 }
 
 func floatCastTarget(p *exprParser) (castTarget, error) {
-	return unboundedNumericCastTarget(p, true)
+	return argumentlessCastTarget(p, castTarget{kind: valueDouble, single: true})
 }
 
 func dateCastTarget(p *exprParser) (castTarget, error) {
-	return unboundedCastTarget(p, temporalDate)
+	return argumentlessCastTarget(p, castTarget{kind: valueString, temporal: temporalDate})
 }
 
 func yearCastTarget(p *exprParser) (castTarget, error) {
-	return unboundedCastTarget(p, temporalYear)
+	return argumentlessCastTarget(p, castTarget{kind: valueString, temporal: temporalYear})
 }
 
 func datetimeCastTarget(p *exprParser) (castTarget, error) {
@@ -185,13 +185,18 @@ func temporalPrecisionCastTarget(p *exprParser, kind temporalKind) (castTarget, 
 	return castTarget{kind: valueString, temporal: kind, precision: precision}, nil
 }
 
-// unboundedCastTarget reads a temporal destination that accepts no
-// parenthesised arguments.
-func unboundedCastTarget(p *exprParser, kind temporalKind) (castTarget, error) {
-	if _, _, bounded, err := readTypeArguments(p); err != nil || bounded {
+// argumentlessCastTarget reads a destination that accepts no parenthesised
+// arguments. Any argument list is an unsupported spelling, and a malformed
+// argument list keeps its own error.
+func argumentlessCastTarget(p *exprParser, target castTarget) (castTarget, error) {
+	_, _, bounded, err := readTypeArguments(p)
+	if err != nil {
+		return castTarget{}, err
+	}
+	if bounded {
 		return castTarget{}, unsupportedExpression()
 	}
-	return castTarget{kind: valueString, temporal: kind}, nil
+	return target, nil
 }
 
 // binaryCastTarget reads the BINARY destination with its optional length. A
@@ -203,16 +208,6 @@ func binaryCastTarget(p *exprParser) (castTarget, error) {
 		return castTarget{}, err
 	}
 	return castTarget{kind: valueString, length: length, bounded: bounded, binary: true}, nil
-}
-
-// unboundedNumericCastTarget reads an approximate-numeric destination that
-// accepts no parenthesised arguments. FLOAT is the single-precision spelling;
-// DOUBLE and REAL convert in the double-precision domain.
-func unboundedNumericCastTarget(p *exprParser, single bool) (castTarget, error) {
-	if _, _, bounded, err := readTypeArguments(p); err != nil || bounded {
-		return castTarget{}, unsupportedExpression()
-	}
-	return castTarget{kind: valueDouble, single: single}, nil
 }
 
 // readTypeArguments reads an optional ( first [, second] ) argument list of
@@ -353,6 +348,12 @@ func castFloatInput(value exprValue) (float64, error) {
 	default:
 		parsed, err := strconv.ParseFloat(strings.TrimSpace(value.s), 64)
 		if err != nil {
+			// A range failure means the spelling names a non-finite magnitude,
+			// which follows the non-finite input rule rather than the
+			// malformed-spelling rule.
+			if errors.Is(err, strconv.ErrRange) {
+				return 0, nonFiniteResult()
+			}
 			return 0, incorrectCastValue(value.s)
 		}
 		return parsed, nil
@@ -391,22 +392,15 @@ func castDatetimeSource(target temporalKind, text string) string {
 	return datePart
 }
 
-// castTemporalValue validates a cast input against one temporal family. Unlike
-// the column-literal path it never treats the text 'null' as a NULL keyword,
-// because the expression engine represents NULL before the cast runs.
+// castTemporalValue validates a cast input against one temporal family through
+// the same canonical contracts a column write uses. The text 'null' is data
+// here, not a NULL keyword, because the expression engine represents NULL
+// before the cast runs, so it fails like any other malformed spelling.
 func castTemporalValue(typ temporalType, text string) (string, error) {
-	switch typ.kind {
-	case temporalDate:
-		return canonicalDateValue(text, "", 0)
-	case temporalTime:
-		return canonicalTimeValue(typ, text, "", 0)
-	case temporalDatetime:
-		return canonicalDatetimeValue(typ, text, "", 0, false)
-	case temporalYear:
-		return canonicalYearValue(text, "", 0)
-	default:
-		return "", unsupportedExpression()
+	if strings.EqualFold(strings.TrimSpace(text), "null") {
+		return "", incorrectCastTemporal(typ.kind, text)
 	}
+	return canonicalTemporalValueAtOffset(typ, text, "", 0, 0)
 }
 
 func castToSigned(value exprValue) (exprValue, error) {

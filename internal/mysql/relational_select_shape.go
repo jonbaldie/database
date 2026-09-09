@@ -400,9 +400,8 @@ func relationNumericMetadataValue(column relationColumn, sample int64) (exprValu
 	}
 }
 
-// relationTemporalMetadataValue spells the canonical sample value a temporal
-// column contributes when a projection's metadata is planned before real rows
-// are read.
+// relationTemporalMetadataValue tags a temporal column's canonical sample value
+// with its family, so metadata planning sees the shape a real row would carry.
 func relationTemporalMetadataValue(column relationColumn) (exprValue, bool) {
 	temporal, err := parseTemporalType(column.typeName)
 	if err != nil || temporal.kind == temporalNone {

@@ -198,13 +198,17 @@ func TestIssue275CastsTableColumns(t *testing.T) {
 
 func TestIssue275RejectsMalformedAndOutOfRangeCasts(t *testing.T) {
 	cases := map[string]uint16{
-		"CAST('abc' AS DATE)":         1292,
-		"CAST('2024-02-30' AS DATE)":  1292,
-		"CAST('abc' AS DATETIME)":     1292,
-		"CAST('abc' AS TIME)":         1292,
-		"CAST('abc' AS YEAR)":         1292,
-		"CAST('999:00:00' AS TIME)":   1264,
-		"CAST('99999-01-01' AS DATE)": 1292,
+		"CAST('abc' AS DATE)":               1292,
+		"CAST('2024-02-30' AS DATE)":        1292,
+		"CAST('abc' AS DATETIME)":           1292,
+		"CAST('abc' AS TIME)":               1292,
+		"CAST('abc' AS YEAR)":               1292,
+		"CAST('999:00:00' AS TIME)":         1264,
+		"CAST('99999-01-01' AS DATE)":       1292,
+		"CAST('2024-01-15' AS DATETIME(9))": 1426,
+		"CAST('nan' AS DOUBLE)":             1292,
+		"CAST('1e400' AS DOUBLE)":           1690,
+		"CAST(1e300 AS FLOAT)":              1690,
 	}
 	for expression, code := range cases {
 		_, err := evaluateScalar(expression)
