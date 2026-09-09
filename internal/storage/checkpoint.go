@@ -44,6 +44,22 @@ func (e *Engine) maybeCheckpointLocked() error {
 	return e.checkpointLocked(position)
 }
 
+// Checkpoint replaces the write-ahead log with a snapshot of the current rows.
+// Schema changes leave historical WAL records whose rows no longer match the
+// live column list, so replay after such a change must start from the snapshot.
+func (e *Engine) Checkpoint() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errClosed
+	}
+	position, err := e.wal.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	return e.checkpointLocked(position)
+}
+
 func (e *Engine) checkpointLocked(walOffset int64) error {
 	if err := e.publishCheckpointSnapshot(walOffset); err != nil {
 		return err

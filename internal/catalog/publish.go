@@ -23,8 +23,9 @@ func (s *Store) replaceLocked(definition Definition) error {
 }
 
 type preparedRowSync struct {
-	store *Store
-	txns  []rowTxn
+	store         *Store
+	txns          []rowTxn
+	schemaChanged bool
 }
 
 func (s *Store) prepareRowSync(previous, next Definition) (*preparedRowSync, error) {
@@ -54,9 +55,8 @@ func (s *Store) prepareNamespaceRowSync(prepared *preparedRowSync, previousNames
 }
 
 func (s *Store) prepareTableRowSync(prepared *preparedRowSync, previousNamespace Namespace, namespaceName, tableKey string, table Table) error {
-	previousTable, existed := previousNamespace.Tables[tableKey]
-	schemaChanged := !existed || !sameRowStorageSchema(previousTable, table)
-	rowsChanged := !sameRowSlice(previousTable.Rows, table.Rows)
+	schemaChanged := prepareRowSyncSchemaChange(prepared, previousNamespace, tableKey, table)
+	rowsChanged := !sameRowSlice(previousNamespace.Tables[tableKey].Rows, table.Rows)
 	if !schemaChanged && !rowsChanged {
 		return nil
 	}
@@ -68,7 +68,7 @@ func (s *Store) prepareTableRowSync(prepared *preparedRowSync, previousNamespace
 		tableName = tableKey
 	}
 	primary, _ := tableKeyColumns(table)
-	txn, err := s.stageTableRows(namespaceName, tableName, previousTable.Rows, table.Rows, table, primary)
+	txn, err := s.stageTableRows(namespaceName, tableName, previousNamespace.Tables[tableKey].Rows, table.Rows, table, primary)
 	if err == nil && txn != nil {
 		prepared.txns = append(prepared.txns, txn)
 	}
@@ -79,6 +79,17 @@ func sameRowStorageSchema(left, right Table) bool {
 	leftPrimary, leftUniques := tableKeyColumns(left)
 	rightPrimary, rightUniques := tableKeyColumns(right)
 	return sameCatalogStrings(left.Columns, right.Columns) && sameCatalogStrings(leftPrimary, rightPrimary) && sameCatalogStringMatrix(leftUniques, rightUniques)
+}
+
+// prepareRowSyncSchemaChange records whether the table's durable row schema is
+// about to change, so the commit can rebuild the row image from scratch.
+func prepareRowSyncSchemaChange(prepared *preparedRowSync, previousNamespace Namespace, tableKey string, table Table) bool {
+	previousTable, existed := previousNamespace.Tables[tableKey]
+	if existed && sameRowStorageSchema(previousTable, table) {
+		return false
+	}
+	prepared.schemaChanged = true
+	return true
 }
 
 func sameCatalogStringMatrix(left, right [][]string) bool {
@@ -194,6 +205,11 @@ func (p *preparedRowSync) commit() error {
 		if err := txn.Commit(); err != nil {
 			return err
 		}
+	}
+	// A schema change leaves historical WAL records whose rows no longer match
+	// the live column list, so replay must start from the current row image.
+	if p.schemaChanged {
+		return p.store.rows.Checkpoint()
 	}
 	return nil
 }
