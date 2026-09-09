@@ -96,25 +96,18 @@ func startsNumber(input string, cursor int) bool {
 	return input[cursor] == '.' && cursor+1 < len(input) && isDigit(input[cursor+1])
 }
 
-// scanString reads a single-quoted string, decoding a doubled quote into one
-// literal quote. An unterminated string is unsupported.
+// scanString reads a single-quoted string and applies MySQL's default
+// backslash escape rules. An unterminated string is unsupported.
 func scanString(input string, cursor int) (exprToken, int, error) {
-	var builder strings.Builder
-	index, length := cursor+1, len(input)
-	for index < length {
-		if input[index] != '\'' {
-			builder.WriteByte(input[index])
-			index++
-			continue
-		}
-		if index+1 < length && input[index+1] == '\'' {
-			builder.WriteByte('\'')
-			index += 2
-			continue
-		}
-		return exprToken{kind: tokenString, str: builder.String()}, index + 1, nil
+	end, ok := quotedSQLLiteralEnd(input, cursor)
+	if !ok {
+		return exprToken{}, 0, unsupportedExpression()
 	}
-	return exprToken{}, 0, unsupportedExpression()
+	decoded, ok := decodeMySQLStringValue(input[cursor+1 : end])
+	if !ok {
+		return exprToken{}, 0, unsupportedExpression()
+	}
+	return exprToken{kind: tokenString, str: decoded}, end + 1, nil
 }
 
 // scanNumber reads a numeric run: an integer part, an optional fractional part,
