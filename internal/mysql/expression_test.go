@@ -88,10 +88,13 @@ func TestEvaluateArithmetic(t *testing.T) {
 
 func TestEvaluateIntegerDivideKeepsIntegerDomain(t *testing.T) {
 	for expression, want := range map[string]int64{
-		"7 DIV 2":                   3,
-		"-7 DIV 2":                  -3,
-		"5.5 DIV 2":                 2,
-		"9223372036854775807 DIV 1": 9223372036854775807,
+		"7 DIV 2":                            3,
+		"-7 DIV 2":                           -3,
+		"5.5 DIV 2":                          2,
+		"9223372036854775807 DIV 1":          9223372036854775807,
+		"9223372036854775807 DIV 1.0":        9223372036854775807,
+		"9223372036854775807 DIV 1e0":        9223372036854775807,
+		"(-9223372036854775807 - 1) DIV 1e0": -9223372036854775808,
 	} {
 		value, err := evaluateScalar(expression)
 		if err != nil {
@@ -139,6 +142,8 @@ func TestEvaluateArithmeticFailsClosed(t *testing.T) {
 		"1 DIV 0",
 		"5 % 0",
 		"5.5 DIV 0",
+		"5.5e0 DIV 0",
+		"1e20 DIV 1e0",
 		"5.5 % 0",
 		"5.5e0 % 0",
 		"'a' + 1",

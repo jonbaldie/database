@@ -14,13 +14,26 @@ import (
 	"strings"
 )
 
-// maxInt64AsFloat and minInt64AsFloat bound the exclusive-high, inclusive-low
-// range a truncated double quotient must fall in to convert to int64 without
-// overflow.
+// maxInt64AsFloat is 2^63. float64 cannot represent MaxInt64, so that integer
+// rounds to this exact bound. minInt64AsFloat is -2^63, which is exact.
 const (
 	maxInt64AsFloat = float64(1 << 63)
 	minInt64AsFloat = -float64(1 << 63)
 )
+
+// int64FromBoundedFloat converts an integer-valued float64 to int64. Values
+// strictly outside [MinInt64, 2^63] overflow. The unrepresentable MaxInt64
+// rounds to 2^63, so that exact bound converts to MaxInt64 rather than failing
+// or depending on platform float-to-int conversion of 2^63.
+func int64FromBoundedFloat(value float64) (int64, error) {
+	if !isFinite(value) || value > maxInt64AsFloat || value < minInt64AsFloat {
+		return 0, outOfRangeValue()
+	}
+	if value == maxInt64AsFloat {
+		return math.MaxInt64, nil
+	}
+	return int64(value), nil
+}
 
 var defaultStringType = characterType{kind: characterText, collation: collation0900AICI, wire: mysqlTypeVarString}
 
@@ -256,11 +269,11 @@ func floatIntegerDivide(a, b exprValue) (exprValue, error) {
 	if divisor == 0 {
 		return exprValue{}, divisionByZero()
 	}
-	quotient := math.Trunc(toFloat(a) / divisor)
-	if math.IsInf(quotient, 0) || math.IsNaN(quotient) || quotient >= maxInt64AsFloat || quotient < minInt64AsFloat {
-		return exprValue{}, outOfRangeValue()
+	converted, err := int64FromBoundedFloat(math.Trunc(toFloat(a) / divisor))
+	if err != nil {
+		return exprValue{}, err
 	}
-	return intValue(int64(quotient)), nil
+	return intValue(converted), nil
 }
 
 // moduloArithmetic evaluates the modulus operator (% and MOD), preserving the
