@@ -485,18 +485,11 @@ func sameSchema(left, right Definition) bool {
 }
 
 func sameSchemaTable(left, right Table) bool {
-	if len(left.Columns) != len(right.Columns) || len(left.ColumnTypes) != len(right.ColumnTypes) {
-		return false
-	}
-	if len(left.Constraints) != len(right.Constraints) || len(left.Indexes) != len(right.Indexes) {
-		return false
-	}
-	for index := range left.Columns {
-		if left.Columns[index] != right.Columns[index] {
-			return false
-		}
-	}
-	return true
+	return sameCatalogStrings(left.Columns, right.Columns) &&
+		sameCatalogStrings(left.ColumnTypes, right.ColumnTypes) &&
+		len(left.Constraints) == len(right.Constraints) &&
+		len(left.Indexes) == len(right.Indexes) &&
+		sameColumnAttributes(left.ColumnAttributes, right.ColumnAttributes)
 }
 
 func (s *Store) persistLocked(definition Definition) error {

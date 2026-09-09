@@ -145,6 +145,18 @@ func sameCatalogStrings(left, right []string) bool {
 	return true
 }
 
+func sameColumnAttributes(left, right []ColumnAttribute) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Store) stageTableRows(namespace, name string, previous, next [][]string, table Table, primary []string) (rowTxn, error) {
 	txn, err := s.rows.Begin()
 	if err != nil {
