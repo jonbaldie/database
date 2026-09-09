@@ -376,6 +376,8 @@ func truncateTable(s *session, query string) error {
 			return err
 		}
 		table.Rows = nil
+		table.PrimaryIndex = nil
+		table.OrderedIndexes = nil
 		namespaceDefinition.Tables[catalog.Key(name)] = table
 		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
 		return nil
