@@ -207,10 +207,13 @@ func canonicalDateValue(value, column string, row int) (string, error) {
 }
 
 // parseCalendarDate reads the canonical YYYY-MM-DD spelling and enforces the
-// supported calendar. A two-digit year, an alternate separator, a zero month or
-// day, an out-of-range year, and an impossible calendar date all fail.
+// supported calendar. The year keeps its four-digit width; the month and day
+// may carry one or two digits, matching MySQL's normalization of a
+// non-zero-padded spelling. A two-digit year, an alternate separator, a zero
+// month or day, an over-long component, an out-of-range year, and an impossible
+// calendar date all fail.
 func parseCalendarDate(value, column string, row int) (int, int, int, error) {
-	comps, ok := fixedComponents(value, "-", []int{4, 2, 2})
+	comps, ok := boundedComponents(value, "-", []int{4, 1, 1}, []int{4, 2, 2})
 	if !ok {
 		return 0, 0, 0, incorrectTemporal("DATE", column, value, row)
 	}
@@ -228,18 +231,21 @@ func validCalendarDay(year, month, day int) bool {
 	return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month)
 }
 
-// fixedComponents splits value on sep into exactly len(widths) numeric fields,
-// each of its required character width, returning the parsed integers. The
-// second result is false when the field count, a field width, or a digit run is
-// malformed, which is how an ambiguous or alternately spelled value is rejected.
-func fixedComponents(value, sep string, widths []int) ([]int, bool) {
+// boundedComponents splits value on sep into exactly len(maxWidths) numeric
+// fields, each carrying at least its minimum and at most its maximum digit
+// width, returning the parsed integers. A field may be shorter than its
+// maximum, which is how a non-zero-padded spelling is accepted; an empty field,
+// an over-long field, or a non-digit run is rejected as malformed. The second
+// result is false when the field count or any field is malformed, which is how
+// an ambiguous or alternately spelled value is rejected.
+func boundedComponents(value, sep string, minWidths, maxWidths []int) ([]int, bool) {
 	parts := strings.Split(value, sep)
-	if len(parts) != len(widths) {
+	if len(parts) != len(maxWidths) {
 		return nil, false
 	}
 	values := make([]int, len(parts))
 	for index, part := range parts {
-		if len(part) != widths[index] {
+		if len(part) < minWidths[index] || len(part) > maxWidths[index] {
 			return nil, false
 		}
 		parsed, ok := parseFixedDigits(part)
@@ -366,7 +372,7 @@ func parseCanonicalInstant(value, column string, row int) (time.Time, error) {
 }
 
 func parseClock(clock, label, column, value string, row int) (int, int, int, error) {
-	comps, ok := fixedComponents(clock, ":", []int{2, 2, 2})
+	comps, ok := boundedComponents(clock, ":", []int{1, 1, 1}, []int{2, 2, 2})
 	if !ok {
 		return 0, 0, 0, incorrectTemporal(label, column, value, row)
 	}
