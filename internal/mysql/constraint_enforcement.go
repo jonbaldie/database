@@ -79,9 +79,82 @@ func samePublishedRows(left, right [][]string) bool {
 	return &left[0] == &right[0]
 }
 
+// sameTableShape reports whether a table's definition is untouched. Comparing
+// only slice lengths let a column rename look unchanged, so a table with no
+// rows skipped re-validation and published constraints naming a column that no
+// longer exists.
 func sameTableShape(left, right catalog.Table) bool {
-	if len(left.Columns) != len(right.Columns) || len(left.Constraints) != len(right.Constraints) || len(left.Indexes) != len(right.Indexes) {
+	return sameColumnShape(left, right) && sameConstraints(left.Constraints, right.Constraints) && sameIndexes(left.Indexes, right.Indexes)
+}
+
+func sameColumnShape(left, right catalog.Table) bool {
+	if !sameStrings(left.Columns, right.Columns) || !sameStrings(left.ColumnTypes, right.ColumnTypes) {
 		return false
+	}
+	if len(left.ColumnAttributes) != len(right.ColumnAttributes) {
+		return false
+	}
+	for index := range left.ColumnAttributes {
+		if left.ColumnAttributes[index] != right.ColumnAttributes[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameConstraints(left, right []catalog.Constraint) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !sameConstraint(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameIndexes(left, right []catalog.Index) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !sameIndex(left[index], right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameConstraint(left, right catalog.Constraint) bool {
+	return left.Name == right.Name && left.Type == right.Type && left.Check == right.Check &&
+		left.ReferencedNamespace == right.ReferencedNamespace && left.ReferencedTable == right.ReferencedTable &&
+		sameStrings(left.Columns, right.Columns) && sameStrings(left.ReferencedColumns, right.ReferencedColumns)
+}
+
+func sameIndex(left, right catalog.Index) bool {
+	if left.Name != right.Name || left.Unique != right.Unique || left.Invisible != right.Invisible {
+		return false
+	}
+	if len(left.Parts) != len(right.Parts) {
+		return false
+	}
+	for index := range left.Parts {
+		if left.Parts[index] != right.Parts[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
 	}
 	return true
 }

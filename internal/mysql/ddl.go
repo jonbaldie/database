@@ -464,11 +464,72 @@ func (s *ddlExecutor) alterTable(query string) error {
 			return err
 		}
 		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
+		renameForeignKeyReferences(definition, namespace, name, columnRenames(actions))
 		return nil
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1025, "HY000", err.Error()})
 	}
 	return nil
+}
+
+// columnRenames reports the old-to-new column renames an ALTER TABLE performs,
+// in statement order so chained renames apply the same way references do.
+func columnRenames(actions []ddlAction) [][2]string {
+	renames := [][2]string{}
+	for _, action := range actions {
+		if action.kind != ddlRenameColumn && action.kind != ddlModifyColumn {
+			continue
+		}
+		if action.newName == "" || catalog.Key(action.newName) == catalog.Key(action.name) {
+			continue
+		}
+		renames = append(renames, [2]string{action.name, action.newName})
+	}
+	return renames
+}
+
+// renameForeignKeyReferences rewrites the referenced column names recorded by
+// every foreign key pointing at the altered table, including the table's own
+// self-references, so a renamed parent column keeps its child constraints
+// resolvable.
+func renameForeignKeyReferences(definition *catalog.Definition, namespaceName, tableName string, renames [][2]string) {
+	if len(renames) == 0 {
+		return
+	}
+	target := catalog.Key(namespaceName) + "\x00" + catalog.Key(tableName)
+	for namespaceKey, namespace := range definition.Namespaces {
+		for tableKey, table := range namespace.Tables {
+			if renameTableForeignKeyReferences(table, namespaceKey, target, renames) {
+				namespace.Tables[tableKey] = table
+			}
+		}
+	}
+}
+
+func renameTableForeignKeyReferences(table catalog.Table, namespaceKey, target string, renames [][2]string) bool {
+	changed := false
+	for index := range table.Constraints {
+		constraint := &table.Constraints[index]
+		if constraint.Type != catalog.ConstraintTypeForeignKey {
+			continue
+		}
+		if foreignKeyTarget(*constraint, namespaceKey) != target {
+			continue
+		}
+		for _, rename := range renames {
+			renameColumnList(constraint.ReferencedColumns, rename[0], rename[1])
+		}
+		changed = true
+	}
+	return changed
+}
+
+func foreignKeyTarget(constraint catalog.Constraint, namespaceKey string) string {
+	referenced := catalog.Key(constraint.ReferencedNamespace)
+	if referenced == "" {
+		referenced = namespaceKey
+	}
+	return referenced + "\x00" + catalog.Key(constraint.ReferencedTable)
 }
 
 func storeAlteredTableDefinition(namespace catalog.Namespace, oldName string, table catalog.Table, actions []ddlAction) (catalog.Namespace, error) {
@@ -880,7 +941,7 @@ func renameTableColumn(table *catalog.Table, action ddlAction) error {
 		return errors.New("column already exists")
 	}
 	table.Columns[index] = action.newName
-	renameTableIndexColumns(table, action.name, action.newName)
+	renameTableColumnReferences(table, action.name, action.newName)
 	return nil
 }
 
@@ -897,7 +958,7 @@ func modifyTableColumn(table *catalog.Table, action ddlAction) error {
 	}
 	if action.newName != "" {
 		table.Columns[index] = action.newName
-		renameTableIndexColumns(table, action.name, action.newName)
+		renameTableColumnReferences(table, action.name, action.newName)
 	}
 	ensureColumnAttributes(table)
 	return applyModifiedColumnAttribute(table, index, action)
@@ -917,6 +978,29 @@ func applyModifiedColumnAttribute(table *catalog.Table, index int, action ddlAct
 	}
 	table.ColumnAttributes[index] = action.attribute
 	return nil
+}
+
+// renameTableColumnReferences rewrites every place inside the table that
+// records the column by name. Index parts and constraint column lists both
+// stop matching table.Columns otherwise, which surfaces as MySQL error 1072
+// when the altered definition is validated.
+func renameTableColumnReferences(table *catalog.Table, oldName, newName string) {
+	renameTableIndexColumns(table, oldName, newName)
+	renameTableConstraintColumns(table, oldName, newName)
+}
+
+func renameTableConstraintColumns(table *catalog.Table, oldName, newName string) {
+	for index := range table.Constraints {
+		renameColumnList(table.Constraints[index].Columns, oldName, newName)
+	}
+}
+
+func renameColumnList(columns []string, oldName, newName string) {
+	for index := range columns {
+		if catalog.Key(columns[index]) == catalog.Key(oldName) {
+			columns[index] = newName
+		}
+	}
 }
 
 func renameTableIndexColumns(table *catalog.Table, oldName, newName string) {
