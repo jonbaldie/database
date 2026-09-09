@@ -17,7 +17,7 @@ func evalLike(value, pattern exprValue, escape string, negate bool) (exprValue, 
 	}
 	escapeRune, ok := likeEscapeRune(escape)
 	if !ok {
-		return exprValue{}, unsupportedExpression()
+		return exprValue{}, incorrectEscapeArguments()
 	}
 	matched := likeMatch(value.render(), pattern.render(), escapeRune, value.collation != collationBin)
 	return boolValue(matched != negate), nil
@@ -30,9 +30,14 @@ func requireCharacterLikeOperand(value exprValue) error {
 	return strictConversionError()
 }
 
+// noLikeEscape marks a disabled escape character, which MySQL selects with an
+// empty ESCAPE sequence. Value and pattern runes always come from decoded
+// string content, so a negative rune can never collide with pattern text.
+const noLikeEscape = rune(-1)
+
 func likeEscapeRune(escape string) (rune, bool) {
 	if escape == "" {
-		return '\\', true
+		return noLikeEscape, true
 	}
 	r, size := utf8.DecodeRuneInString(escape)
 	if r == utf8.RuneError || size != len(escape) {
