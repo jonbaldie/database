@@ -3,9 +3,11 @@ package mysql
 import "testing"
 
 // Issue 271: mulInt64 evaluated its overflow guard as product/b != a before
-// the MinInt64 * -1 special case, so the guard's own division panicked on
-// x86_64. integerModulo must keep returning 0 for a divisor of -1, matching
-// MySQL, instead of relying on native MinInt64 % -1 behavior.
+// the MinInt64 * -1 special case. For a = MinInt64 and b = -1 that guard
+// division is itself MinInt64 / -1, which overflows, so the function's
+// correctness must not depend on the toolchain compiling it without a
+// hardware trap. integerModulo must keep returning 0 for a divisor of -1,
+// matching MySQL, instead of relying on native MinInt64 % -1 behavior.
 func TestIssue271MinInt64MultiplyAndModulo(t *testing.T) {
 	value, err := evaluateScalar("(-9223372036854775807 - 1) * -1")
 	if !isFailureCode(err, 1690) {
