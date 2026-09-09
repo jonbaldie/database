@@ -201,7 +201,11 @@ func mulInt64(a, b int64) (int64, bool) {
 		return 0, true
 	}
 	product := a * b
-	if product/b != a || (a == math.MinInt64 && b == -1) {
+	// The MinInt64 * -1 guard runs first because the overflow check below
+	// divides by b: for a = MinInt64 and b = -1 that division is itself
+	// MinInt64 / -1, which overflows. Guarding first keeps this correct on
+	// any target, without relying on the toolchain's trap-free division.
+	if (a == math.MinInt64 && b == -1) || product/b != a {
 		return 0, false
 	}
 	return product, true
