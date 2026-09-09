@@ -135,6 +135,7 @@ func (s *Store) SetPublishValidator(validator func(previous, next Definition) er
 // rowEngine is the durable row image used beside schema metadata.
 type rowEngine interface {
 	EnsureTable(namespace, name string, columns, primary []string, uniques [][]string) error
+	DropTable(namespace, name string) error
 	Begin() (rowTxn, error)
 	LookupPrimary(namespace, name, key string) ([]string, bool)
 	LookupUnique(namespace, name, column, key string) ([]string, bool)

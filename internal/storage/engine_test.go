@@ -698,3 +698,47 @@ func TestEngineRejectedUpdateDoesNotPartiallyMutateIndexes(t *testing.T) {
 		t.Fatalf("reopened row after rejected update = (%v, %v)", row, ok)
 	}
 }
+
+func TestDropTableRemovesRowsAcrossReopen(t *testing.T) {
+	directory := t.TempDir()
+	engine, err := storage.Open(directory)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := engine.EnsureTable("app", "t", []string{"id", "val"}, []string{"id"}, nil); err != nil {
+		t.Fatalf("ensure table: %v", err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := txn.Insert("app", "t", []string{"1", "100"}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := engine.DropTable("app", "t"); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	if _, found := engine.SnapshotRows("app", "t"); found {
+		t.Fatal("dropped table still readable")
+	}
+	if err := engine.DropTable("app", "t"); err != nil {
+		t.Fatalf("second drop table: %v", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	reopened, err := storage.Open(directory)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.EnsureTable("app", "t", []string{"id", "name"}, []string{"id"}, nil); err != nil {
+		t.Fatalf("recreate table: %v", err)
+	}
+	if rows, _ := reopened.SnapshotRows("app", "t"); len(rows) != 0 {
+		t.Fatalf("recreated table rows = %v", rows)
+	}
+}

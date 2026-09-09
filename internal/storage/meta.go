@@ -229,3 +229,36 @@ func cloneStringMatrix(values [][]string) [][]string {
 func errorsIsNotExist(err error) bool {
 	return err != nil && os.IsNotExist(err)
 }
+
+// DropTable removes a table's schema, rows, and indexes from the durable row
+// image. It is idempotent, and checkpoints so that historical WAL records for
+// the dropped table cannot resurrect it on replay.
+func (e *Engine) DropTable(namespace, name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed {
+		return errClosed
+	}
+	if _, found := e.tables[tableKey(namespace, name)]; !found {
+		return nil
+	}
+	delete(e.tables, tableKey(namespace, name))
+	if err := e.persistMetaLocked(); err != nil {
+		return err
+	}
+	if err := removeLegacyCheckpoint(e.directory, namespace, name); err != nil {
+		return err
+	}
+	position, err := e.wal.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	return e.checkpointLocked(position)
+}
+
+func removeLegacyCheckpoint(directory, namespace, name string) error {
+	if err := os.Remove(rowsCheckpointPath(directory, namespace, name)); err != nil && !errorsIsNotExist(err) {
+		return err
+	}
+	return nil
+}
