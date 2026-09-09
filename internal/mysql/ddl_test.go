@@ -456,3 +456,38 @@ func equalRows(left, right [][]string) bool {
 	}
 	return true
 }
+
+func TestDropDatabaseWithTableReferencedFromAnotherDatabaseFails(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE DATABASE parent_db",
+		"CREATE DATABASE child_db",
+		"CREATE TABLE parent_db.parent (id INT PRIMARY KEY)",
+		"CREATE TABLE child_db.child (id INT PRIMARY KEY, p_id INT, CONSTRAINT fk_child_parent FOREIGN KEY (p_id) REFERENCES parent_db.parent(id))",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("setup query %q: %v", query, err)
+		}
+	}
+	_, err := executeStatement(executor, "DROP DATABASE parent_db")
+	failure, ok := err.(sqlFailure)
+	if !ok || failure.code != 3730 {
+		t.Fatalf("expected error code 3730, got: %v", err)
+	}
+}
+
+func TestDropDatabaseWithSelfContainedForeignKeysSucceeds(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE DATABASE selfref_db",
+		"CREATE TABLE selfref_db.parent (id INT PRIMARY KEY)",
+		"CREATE TABLE selfref_db.child (id INT PRIMARY KEY, p_id INT, CONSTRAINT fk_child_parent FOREIGN KEY (p_id) REFERENCES selfref_db.parent(id))",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("setup query %q: %v", query, err)
+		}
+	}
+	if _, err := executeStatement(executor, "DROP DATABASE selfref_db"); err != nil {
+		t.Fatalf("drop selfref_db: %v", err)
+	}
+}

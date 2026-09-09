@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Rejected `DROP DATABASE` with MySQL error 3730 when a table in the database is referenced by a foreign key constraint in another database, instead of dropping it and leaving the child table's constraint pointing at an unknown database.
 - Renamed the column references held by `PRIMARY KEY`, `UNIQUE`, and `FOREIGN KEY` constraints when `ALTER TABLE ... RENAME COLUMN` or `CHANGE COLUMN` renames a column, instead of failing with MySQL error 1072 or publishing constraints that name a column that no longer exists.
 - Negated unsigned values in the signed `BIGINT` domain: a value at or below `MaxInt64 + 1` negates to a signed result, and only a value above that fails with MySQL error 1690, instead of rejecting every unary minus on an unsigned value.
 
