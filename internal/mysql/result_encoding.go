@@ -201,12 +201,14 @@ func setBinaryNull(payload []byte, index int) {
 
 func encodeBinaryValue(value string, definition columnMetadata) ([]byte, error) {
 	switch definition.typ {
+	case mysqlTypeTiny, mysqlTypeShort, mysqlTypeInt24:
+		return encodeBinaryInteger(value, binaryIntegerBitSize(definition.typ), definition.flags&mysqlUnsignedFlag != 0)
+	case mysqlTypeFloat, mysqlTypeDouble:
+		return encodeBinaryFloatingPoint(value, definition.typ)
 	case mysqlTypeLongLong:
 		return encodeBinaryLongLong(value, definition.flags&mysqlUnsignedFlag != 0)
 	case mysqlTypeLong:
 		return encodeBinaryLong(value)
-	case mysqlTypeDouble:
-		return encodeBinaryDouble(value)
 	case mysqlTypeBit:
 		encoded, err := encodeBitResultValue(value, definition.length)
 		if err != nil {
@@ -219,6 +221,20 @@ func encodeBinaryValue(value string, definition columnMetadata) ([]byte, error) 
 		return encodeBinaryYear(value)
 	default:
 		return lengthEncodedString(value), nil
+	}
+}
+
+func binaryIntegerBitSize(wire byte) int {
+	switch wire {
+	case mysqlTypeTiny:
+		return 8
+	case mysqlTypeShort:
+		return 16
+	case mysqlTypeInt24:
+		// MySQL uses the four-byte integer slot for INT24 result values.
+		return 32
+	default:
+		return 0
 	}
 }
 
@@ -409,6 +425,37 @@ func encodeBinaryLong(value string) ([]byte, error) {
 	encoded := make([]byte, 4)
 	binary.LittleEndian.PutUint32(encoded, uint32(parsed))
 	return encoded, err
+}
+
+func encodeBinaryInteger(value string, bitSize int, unsigned bool) ([]byte, error) {
+	var parsed uint64
+	var err error
+	if unsigned {
+		parsed, err = strconv.ParseUint(value, 10, bitSize)
+	} else {
+		var signed int64
+		signed, err = strconv.ParseInt(value, 10, bitSize)
+		parsed = uint64(signed)
+	}
+	encoded := make([]byte, bitSize/8)
+	for index := range encoded {
+		encoded[index] = byte(parsed >> uint(index*8))
+	}
+	return encoded, err
+}
+
+func encodeBinaryFloat(value string) ([]byte, error) {
+	parsed, err := strconv.ParseFloat(value, 32)
+	encoded := make([]byte, 4)
+	binary.LittleEndian.PutUint32(encoded, math.Float32bits(float32(parsed)))
+	return encoded, err
+}
+
+func encodeBinaryFloatingPoint(value string, wire byte) ([]byte, error) {
+	if wire == mysqlTypeFloat {
+		return encodeBinaryFloat(value)
+	}
+	return encodeBinaryDouble(value)
 }
 
 func encodeBinaryDouble(value string) ([]byte, error) {
