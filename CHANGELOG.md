@@ -5,14 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-# Changelog
-
-All notable changes to this project are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
+## [0.2.10] - 2026-09-09
 
 ### Added
 
@@ -20,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Dropped a table's durable rows and indexes with `DROP TABLE` instead of keeping them until a later `CREATE TABLE` of the same name adopted them.
+- Accepted `LIKE 'pattern' ESCAPE ''` as disabling the escape character instead of failing with error 1064.
+- Returned the BIGINT result for `DIV` by a floating-point value when the truncated quotient equals `MaxInt64`, instead of a false overflow error 1690.
+- Prevented the overflow guard for `MinInt64 * -1` from trapping on x86_64; the expression now returns `MinInt64` as MySQL does.
+- Persisted `ALTER TABLE` changes that modify only a column type or nullability so they survive a graceful restart.
 - Reported MySQL error 1452 for foreign key violations on new or changed child rows in self-referencing tables, including orphan `INSERT` values, instead of MySQL error 1451, which stays reserved for deleted or updated parent rows.
 - Rejected `DROP DATABASE` with MySQL error 3730 when a table in the database is referenced by a foreign key constraint in another database, instead of dropping it and leaving the child table's constraint pointing at an unknown database.
 - Renamed the column references held by `PRIMARY KEY`, `UNIQUE`, and `FOREIGN KEY` constraints when `ALTER TABLE ... RENAME COLUMN` or `CHANGE COLUMN` renames a column, instead of failing with MySQL error 1072 or publishing constraints that name a column that no longer exists.
@@ -242,6 +240,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.10]: https://github.com/jonbaldie/database/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/jonbaldie/database/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/jonbaldie/database/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/jonbaldie/database/compare/v0.2.6...v0.2.7
