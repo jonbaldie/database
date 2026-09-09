@@ -32,25 +32,13 @@ func stripSQLComments(query string) string {
 }
 
 func consumeSQLQuoted(query string, index int) (int, bool) {
-	if index >= len(query) {
+	if index >= len(query) || !isSQLQuote(query[index]) {
 		return 0, false
 	}
-	quote := query[index]
-	if quote != '\'' && quote != '"' && quote != '`' {
-		return 0, false
+	if end, ok := quotedSQLLiteralEnd(query, index); ok {
+		return end + 1, true
 	}
-	length := len(query)
-	for next := index + 1; next < length; next++ {
-		if query[next] != quote {
-			continue
-		}
-		if next+1 < length && query[next+1] == quote {
-			next++
-			continue
-		}
-		return next + 1, true
-	}
-	return length, true
+	return len(query), true
 }
 
 func consumeSQLLineComment(query string, index int) (int, bool) {

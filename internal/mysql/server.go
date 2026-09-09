@@ -3425,7 +3425,7 @@ func matchingParenthesis(value string, open int) (int, bool) {
 	depth := 0
 	limit := len(value)
 	for index := open; index < limit; index++ {
-		if value[index] == '\'' {
+		if isSQLQuote(value[index]) {
 			index = skipQuoted(value, index)
 			continue
 		}
@@ -3447,7 +3447,7 @@ func keywordAt(value, keyword string) int {
 	limit := len(lower) - len(keyword)
 	depth := 0
 	for index := 0; index <= limit; index++ {
-		if lower[index] == '\'' {
+		if isSQLQuote(lower[index]) {
 			index = skipQuoted(lower, index)
 			continue
 		}
@@ -3473,16 +3473,8 @@ func keywordAt(value, keyword string) int {
 }
 
 func skipQuoted(value string, start int) int {
-	limit := len(value)
-	for index := start + 1; index < limit; index++ {
-		if value[index] != '\'' {
-			continue
-		}
-		if index+1 < len(value) && value[index+1] == '\'' {
-			index++
-			continue
-		}
-		return index
+	if end, ok := quotedSQLLiteralEnd(value, start); ok {
+		return end
 	}
 	return len(value) - 1
 }
@@ -3503,18 +3495,15 @@ func splitWhere(value string) (string, string, bool) {
 }
 
 func splitEquals(value string) (string, string, bool) {
-	quoted := false
 	limit := len(value)
 	for index := 0; index < limit; index++ {
-		if value[index] == '\'' {
-			if quoted && index+1 < len(value) && value[index+1] == '\'' {
-				index++
-				continue
+		if isSQLQuote(value[index]) {
+			if end, ok := quotedSQLLiteralEnd(value, index); ok {
+				index = end
 			}
-			quoted = !quoted
 			continue
 		}
-		if !quoted && value[index] == '=' {
+		if value[index] == '=' {
 			left, right := strings.TrimSpace(value[:index]), strings.TrimSpace(value[index+1:])
 			return left, right, left != "" && right != ""
 		}
@@ -4941,23 +4930,16 @@ func bindPreparedQuery(query string, values []string) (string, error) {
 	return result.String(), nil
 }
 
-func scalar(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
-	}
-	return strings.Trim(value, "`")
-}
-func quote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 func splitCSV(value string) []string {
 	var result []string
 	start, depth := 0, 0
-	quoted := false
-	for i, character := range value {
-		if character == '\'' {
-			quoted = !quoted
-		}
-		if quoted {
+	valueLength := len(value)
+	for index := 0; index < valueLength; index++ {
+		character := value[index]
+		if isSQLQuote(character) {
+			if end, ok := quotedSQLLiteralEnd(value, index); ok {
+				index = end
+			}
 			continue
 		}
 		switch character {
@@ -4969,8 +4951,8 @@ func splitCSV(value string) []string {
 			}
 		case ',':
 			if depth == 0 {
-				result = append(result, strings.TrimSpace(value[start:i]))
-				start = i + 1
+				result = append(result, strings.TrimSpace(value[start:index]))
+				start = index + 1
 			}
 		}
 	}

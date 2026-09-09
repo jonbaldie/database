@@ -1254,6 +1254,9 @@ func (state *queryScanState) advance(value string, index int) int {
 }
 
 func (state *queryScanState) advanceQuoted(value string, index int, character byte) int {
+	if character == '\\' && state.quote != '`' && index+1 < len(value) {
+		return index + 1
+	}
 	if character != state.quote {
 		return index
 	}
@@ -1265,7 +1268,7 @@ func (state *queryScanState) advanceQuoted(value string, index int, character by
 }
 
 func isQueryQuote(character byte) bool {
-	return character == '\'' || character == '`' || character == '"'
+	return isSQLQuote(character)
 }
 
 func (state *queryScanState) advanceParenthesis(character byte) {

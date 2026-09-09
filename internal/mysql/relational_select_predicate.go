@@ -568,7 +568,7 @@ func splitRelationKeyword(value, keyword string) []string {
 	keywordLength := len(keyword)
 	state := relationDepthState{}
 	for index := 0; index+1+keywordLength <= length; index++ {
-		if state.quoted || state.depth != 0 || !relationKeywordCandidate(value, keyword, index) {
+		if state.quote != 0 || state.depth != 0 || !relationKeywordCandidate(value, keyword, index) {
 			index = state.advance(value, index, length)
 			continue
 		}
@@ -614,19 +614,16 @@ func isRelationWordByte(value byte) bool {
 }
 
 type relationDepthState struct {
-	depth  int
-	quoted bool
+	depth int
+	quote byte
 }
 
 func (state *relationDepthState) advance(value string, index, length int) int {
-	if value[index] == '\'' {
-		if state.quoted && index+1 < length && value[index+1] == '\'' {
-			return index + 1
-		}
-		state.quoted = !state.quoted
-		return index
+	if state.quote != 0 {
+		return state.advanceQuoted(value, index, length)
 	}
-	if state.quoted {
+	if isSQLQuote(value[index]) {
+		state.quote = value[index]
 		return index
 	}
 	switch value[index] {
@@ -640,13 +637,27 @@ func (state *relationDepthState) advance(value string, index, length int) int {
 	return index
 }
 
+func (state *relationDepthState) advanceQuoted(value string, index, length int) int {
+	if escapedSQLCharacter(value, index, state.quote) {
+		return index + 1
+	}
+	if value[index] != state.quote {
+		return index
+	}
+	if doubledSQLQuote(value, index, state.quote) {
+		return index + 1
+	}
+	state.quote = 0
+	return index
+}
+
 func findRelationComparison(value string) (string, string, string, bool) {
 	operators := []string{"<=>", "<=", ">=", "<>", "!=", "=", "<", ">"}
 	state := relationDepthState{}
 	length := len(value)
 	for index := 0; index < length; index++ {
 		index = state.advance(value, index, length)
-		if state.quoted || state.depth != 0 {
+		if state.quote != 0 || state.depth != 0 {
 			continue
 		}
 		if operator, left, right, ok := relationOperatorAt(value, index, operators); ok {
@@ -696,15 +707,15 @@ func relationParenthesisMatches(value string) []int {
 		matches[index] = -1
 	}
 	stack := make([]int, 0)
-	quoted := false
+	quote := byte(0)
 	length := len(value)
 	for index := 0; index < length; index++ {
-		next, nextQuoted, handled := advanceRelationParenthesisQuote(value, index, quoted)
+		next, nextQuote, handled := advanceRelationParenthesisQuote(value, index, quote)
 		if handled {
-			index, quoted = next, nextQuoted
+			index, quote = next, nextQuote
 			continue
 		}
-		if quoted {
+		if quote != 0 {
 			continue
 		}
 		stack = recordRelationParenthesis(value[index], index, stack, matches)
@@ -712,14 +723,23 @@ func relationParenthesisMatches(value string) []int {
 	return matches
 }
 
-func advanceRelationParenthesisQuote(value string, index int, quoted bool) (int, bool, bool) {
-	if value[index] != '\'' {
-		return index, quoted, false
+func advanceRelationParenthesisQuote(value string, index int, quote byte) (int, byte, bool) {
+	if quote != 0 {
+		if value[index] == '\\' && quote != '`' && index+1 < len(value) {
+			return index + 1, quote, true
+		}
+		if value[index] != quote {
+			return index, quote, false
+		}
+		if index+1 < len(value) && value[index+1] == quote {
+			return index + 1, quote, true
+		}
+		return index, 0, true
 	}
-	if quoted && index+1 < len(value) && value[index+1] == '\'' {
-		return index + 1, quoted, true
+	if isSQLQuote(value[index]) {
+		return index, value[index], true
 	}
-	return index, !quoted, true
+	return index, quote, false
 }
 
 func recordRelationParenthesis(character byte, index int, stack, matches []int) []int {

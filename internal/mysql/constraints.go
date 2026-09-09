@@ -193,16 +193,8 @@ func consumeConstraintValue(value string) (string, string, bool) {
 		}
 		return value, "", true
 	}
-	limit := len(value)
-	for index := 1; index < limit; index++ {
-		if value[index] != '\'' {
-			continue
-		}
-		if index+1 < len(value) && value[index+1] == '\'' {
-			index++
-			continue
-		}
-		return value[:index+1], value[index+1:], true
+	if end, ok := quotedSQLLiteralEnd(value, 0); ok {
+		return value[:end+1], value[end+1:], true
 	}
 	return "", "", false
 }
@@ -324,13 +316,15 @@ func consumeParenthesized(value string) (string, string, bool) {
 		return "", "", false
 	}
 	depth := 0
-	quoted := false
-	for index, character := range value {
-		if character == '\'' {
-			quoted = !quoted
-			continue
-		}
-		if quoted {
+	valueLength := len(value)
+	for index := 0; index < valueLength; index++ {
+		character := value[index]
+		if isSQLQuote(character) {
+			end, ok := quotedSQLLiteralEnd(value, index)
+			if !ok {
+				return "", "", false
+			}
+			index = end
 			continue
 		}
 		switch character {
