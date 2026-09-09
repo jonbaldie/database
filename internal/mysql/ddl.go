@@ -874,7 +874,7 @@ func convertTableColumn(table *catalog.Table, index int, typeName string) error 
 		if row[index] == storedSQLNullValue {
 			continue
 		}
-		value, err := canonicalColumnValueAtOffset(catalog.Table{Columns: []string{table.Columns[index]}, ColumnTypes: []string{typeName}}, 0, row[index], rowIndex+1, 0)
+		value, err := canonicalTypedValueAtOffset(typeName, row[index], table.Columns[index], rowIndex+1, 0)
 		if err != nil {
 			return fmt.Errorf("cannot convert column %q: %w", table.Columns[index], err)
 		}
