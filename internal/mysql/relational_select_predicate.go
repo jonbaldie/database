@@ -432,17 +432,8 @@ func sampleRelationValue(column relationColumn) string {
 		return "1"
 	}
 	temporal, temporalErr := parseTemporalType(column.typeName)
-	if temporalErr == nil {
-		switch temporal.kind {
-		case temporalDate:
-			return "2000-01-01"
-		case temporalDatetime, temporalTimestamp:
-			return "2000-01-01 00:00:00"
-		case temporalTime:
-			return "01:00:00"
-		case temporalYear:
-			return "2000"
-		}
+	if temporalErr == nil && temporal.kind != temporalNone {
+		return representativeTemporalSample(temporal.kind)
 	}
 	return "x"
 }

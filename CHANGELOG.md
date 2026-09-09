@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Accepted the remaining MySQL cast destinations in `CAST` and `CONVERT`: `BINARY` with its optional length, `DOUBLE`, `REAL`, `FLOAT`, `DATE`, `DATETIME` and `TIME` with their optional fractional-second precision, and `YEAR`. A temporal or approximate-numeric result advertises the target family's wire metadata, a temporal source contributes its date or clock part to a narrower target, and a malformed or out-of-range value still fails with the family's MySQL error identity.
+
 ### Fixed
 
 - Reported MySQL error 1452 for foreign key violations on new or changed child rows in self-referencing tables, including orphan `INSERT` values, instead of MySQL error 1451, which stays reserved for deleted or updated parent rows.

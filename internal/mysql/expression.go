@@ -28,8 +28,10 @@ const (
 	valueString            // character string
 )
 
-// exprValue is one evaluated scalar. Only the field selected by kind is
-// meaningful; a valueNull carries no payload.
+// exprValue is one evaluated scalar. Only the fields selected by kind are
+// meaningful; a valueNull carries no payload, a temporal character value
+// additionally carries its temporal kind and fractional-second precision, and
+// an approximate value carries its single-precision flag.
 type exprValue struct {
 	kind      valueKind
 	i         int64
@@ -39,6 +41,9 @@ type exprValue struct {
 	s         string
 	collation collationKind
 	temporal  temporalKind
+	precision int
+	single    bool
+	binary    bool
 }
 
 func nullValue() exprValue                    { return exprValue{kind: valueNull} }
@@ -70,6 +75,9 @@ func (v exprValue) render() string {
 	case valueDecimal:
 		return v.dec.renderDecimal()
 	case valueDouble:
+		if v.single {
+			return strconv.FormatFloat(v.f, 'f', -1, 32)
+		}
 		return renderDouble(v.f)
 	case valueString:
 		return v.s
@@ -117,15 +125,24 @@ func evaluateScalarResolved(text string, resolve func(string) (exprValue, error)
 // function of the expression text and the evaluated domain, so a text SELECT and
 // a prepared SELECT of the same expression advertise identical columns.
 func scalarColumn(text string) (string, bool, columnMetadata, error) {
+	value, isNull, metadata, err := scalarColumnValue(text)
+	return value.render(), isNull, metadata, err
+}
+
+// scalarColumnValue evaluates an expression for a SELECT projection and keeps
+// the evaluated value with its row value, null flag, and result-column
+// metadata, so a caller that needs the typed value does not re-parse the
+// rendered text.
+func scalarColumnValue(text string) (exprValue, bool, columnMetadata, error) {
 	value, err := evaluateScalar(text)
 	if err != nil {
-		return "", false, columnMetadata{}, err
+		return exprValue{}, false, columnMetadata{}, err
 	}
 	rendered := value.render()
 	if _, unwrapped, prepared := decodePreparedTemporalLiteral(rendered); prepared {
 		rendered = unwrapped
 	}
-	return rendered, value.isNull(), scalarMetadata(strings.TrimSpace(text), rendered, value), nil
+	return value, value.isNull(), scalarMetadata(strings.TrimSpace(text), rendered, value), nil
 }
 
 // scalarMetadata builds the result-column metadata for an evaluated value. A
@@ -133,20 +150,51 @@ func scalarColumn(text string) (string, bool, columnMetadata, error) {
 // advertises utf8mb4; a NULL advertises the NULL type. The column name is the
 // verbatim expression text, matching MySQL's default column labelling.
 func scalarMetadata(name, rendered string, value exprValue) columnMetadata {
+	if value.kind == valueString && value.temporal != temporalNone {
+		metadata := temporalResultMetadata(name, value.temporal, value.precision)
+		metadata.flags |= mysqlNotNullFlag
+		return metadata
+	}
+	if value.isNull() {
+		return columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetBinary, typ: mysqlTypeNull, flags: mysqlBinaryFlag}
+	}
+	return scalarNonNullMetadata(name, rendered, value)
+}
+
+// scalarNonNullMetadata describes the result shape of one evaluated non-NULL
+// scalar. The column name is the verbatim expression text, matching MySQL's
+// default column labelling.
+func scalarNonNullMetadata(name, rendered string, value exprValue) columnMetadata {
 	metadata := columnMetadata{catalog: "def", name: name, characterSet: mysqlCharsetBinary, flags: mysqlNotNullFlag | mysqlBinaryFlag}
 	switch value.kind {
-	case valueNull:
-		metadata.typ, metadata.flags = mysqlTypeNull, mysqlBinaryFlag
+	case valueString:
+		return scalarStringMetadata(rendered, value, metadata)
 	case valueUint:
 		metadata.typ, metadata.length, metadata.flags = mysqlTypeLongLong, uint32(len(rendered)), metadata.flags|mysqlUnsignedFlag
 	case valueInt:
 		metadata.typ, metadata.length = mysqlTypeLongLong, uint32(len(rendered))
 	case valueDecimal:
 		metadata.typ, metadata.length, metadata.decimals = mysqlTypeNewDecimal, uint32(len(rendered)), byte(value.dec.scale)
-	case valueDouble:
-		metadata.typ, metadata.length = mysqlTypeDouble, 8
 	default:
-		metadata.typ, metadata.length, metadata.characterSet, metadata.flags = mysqlTypeVarString, uint32(len([]rune(rendered))*4), mysqlCharsetUTF8MB40900AICI, mysqlNotNullFlag
+		metadata.typ, metadata.length = mysqlTypeDouble, 8
+		if value.single {
+			metadata.typ, metadata.length = mysqlTypeFloat, 12
+		}
+	}
+	return metadata
+}
+
+// scalarStringMetadata describes the character and binary result shapes. A
+// binary value advertises the binary character set and its byte length; a
+// character value advertises utf8mb4 sized for the widest rune encoding.
+func scalarStringMetadata(rendered string, value exprValue, metadata columnMetadata) columnMetadata {
+	metadata.typ = mysqlTypeVarString
+	metadata.flags = mysqlNotNullFlag
+	metadata.characterSet = mysqlCharsetUTF8MB40900AICI
+	metadata.length = uint32(len([]rune(rendered)) * 4)
+	if value.binary {
+		metadata.characterSet, metadata.flags = mysqlCharsetBinary, mysqlNotNullFlag|mysqlBinaryFlag
+		metadata.length = uint32(len(rendered))
 	}
 	return metadata
 }
