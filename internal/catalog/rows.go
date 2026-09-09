@@ -32,6 +32,10 @@ func (s storageRows) EnsureTable(namespace, name string, columns, primary []stri
 	return s.engine.EnsureTable(namespace, name, columns, primary, uniques)
 }
 
+func (s storageRows) DropTable(namespace, name string) error {
+	return s.engine.DropTable(namespace, name)
+}
+
 func (s storageRows) Begin() (rowTxn, error) {
 	txn, err := s.engine.Begin()
 	if err != nil {

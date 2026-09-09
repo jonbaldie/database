@@ -25,7 +25,15 @@ func (s *Store) replaceLocked(definition Definition) error {
 type preparedRowSync struct {
 	store         *Store
 	txns          []rowTxn
+	drops         []droppedTable
 	schemaChanged bool
+}
+
+// droppedTable names one table whose durable row image must disappear with its
+// catalog entry, so a later table of the same name starts empty.
+type droppedTable struct {
+	namespace string
+	name      string
 }
 
 func (s *Store) prepareRowSync(previous, next Definition) (*preparedRowSync, error) {
@@ -38,7 +46,28 @@ func (s *Store) prepareRowSync(previous, next Definition) (*preparedRowSync, err
 			return nil, err
 		}
 	}
+	collectDroppedTables(prepared, previous, next)
 	return prepared, nil
+}
+
+func collectDroppedTables(prepared *preparedRowSync, previous, next Definition) {
+	for namespaceKey, namespace := range previous.Namespaces {
+		nextNamespace := next.Namespaces[namespaceKey]
+		namespaceName := namespace.Name
+		if namespaceName == "" {
+			namespaceName = namespaceKey
+		}
+		for tableKey, table := range namespace.Tables {
+			if _, kept := nextNamespace.Tables[tableKey]; kept {
+				continue
+			}
+			tableName := table.Name
+			if tableName == "" {
+				tableName = tableKey
+			}
+			prepared.drops = append(prepared.drops, droppedTable{namespace: namespaceName, name: tableName})
+		}
+	}
 }
 
 func (s *Store) prepareNamespaceRowSync(prepared *preparedRowSync, previousNamespace, namespace Namespace, namespaceKey string) error {
@@ -203,6 +232,11 @@ func inPlaceRowUpdates(previous, next [][]string, table Table, primary []string)
 func (p *preparedRowSync) commit() error {
 	for _, txn := range p.txns {
 		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
+	for _, dropped := range p.drops {
+		if err := p.store.rows.DropTable(dropped.namespace, dropped.name); err != nil {
 			return err
 		}
 	}
