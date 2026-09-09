@@ -160,8 +160,8 @@ func TestEvaluateUnsignedArithmeticRejectsOutOfRange(t *testing.T) {
 	for _, expression := range []string{
 		"CAST(1 AS UNSIGNED) - 2",
 		"5 - CAST(10 AS UNSIGNED)",
-		"-CAST(1 AS UNSIGNED)",
 		"CAST(18446744073709551615 AS UNSIGNED) + 1",
+		"CAST(18446744073709551615 AS UNSIGNED) * 2",
 		"(CAST(10 AS UNSIGNED) DIV 2) - 10",
 		"CAST(10 AS UNSIGNED) DIV -2",
 		"-10 DIV CAST(2 AS UNSIGNED)",
