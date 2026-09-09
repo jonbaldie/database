@@ -219,6 +219,9 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 			}
 			return errors.New("unknown database")
 		}
+		if err := checkNamespaceNotReferencedByForeignKey(definition, key); err != nil {
+			return err
+		}
 		delete(definition.Namespaces, key)
 		removeNamespaceGrants(definition, name)
 		return nil
@@ -310,6 +313,34 @@ func checkTableNotReferencedByForeignKey(definition *catalog.Definition, targetN
 			code:    3730,
 			state:   "HY000",
 			message: fmt.Sprintf("Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'", tableName, constraint.Name, childName),
+		}
+	}
+	return nil
+}
+
+func checkNamespaceNotReferencedByForeignKey(definition *catalog.Definition, targetNamespaceKey string) error {
+	namespace := definition.Namespaces[targetNamespaceKey]
+	for _, targetTableKey := range sortedCatalogKeys(namespace.Tables) {
+		parentName := namespace.Tables[targetTableKey].Name
+		if parentName == "" {
+			parentName = targetTableKey
+		}
+		for _, nsKey := range sortedCatalogKeys(definition.Namespaces) {
+			if nsKey == targetNamespaceKey {
+				continue
+			}
+			ns := definition.Namespaces[nsKey]
+			for _, tKey := range sortedCatalogKeys(ns.Tables) {
+				constraint, childName, found := matchingTableReference(ns.Tables[tKey], nsKey, tKey, targetNamespaceKey, targetTableKey, false)
+				if !found {
+					continue
+				}
+				return sqlFailure{
+					code:    3730,
+					state:   "HY000",
+					message: fmt.Sprintf("Cannot drop table '%s' referenced by a foreign key constraint '%s' on table '%s'", parentName, constraint.Name, childName),
+				}
+			}
 		}
 	}
 	return nil
