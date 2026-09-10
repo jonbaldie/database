@@ -957,9 +957,24 @@ func compareInRow(left exprValue, result *queryResult, metadata columnMetadata, 
 }
 
 func compareInValues(left, right exprValue, metadata columnMetadata, operand relationOperand) (exprValue, error) {
-	if left.isNull() || right.isNull() || left.kind != valueString || right.kind != valueString {
+	if useGenericInComparison(left, right) {
 		return compareValues("=", left, right)
 	}
+	characterType := inComparisonCharacterType(metadata, operand)
+	return boolValue(characterComparisonKey(characterType, left.s) == characterComparisonKey(characterType, right.s)), nil
+}
+
+func useGenericInComparison(left, right exprValue) bool {
+	if left.isNull() || right.isNull() {
+		return true
+	}
+	if left.kind != valueString || right.kind != valueString {
+		return true
+	}
+	return left.binary || right.binary
+}
+
+func inComparisonCharacterType(metadata columnMetadata, operand relationOperand) characterType {
 	characterType := defaultStringType
 	if operand.isColumn {
 		if parsed, err := parseCharacterType(operand.definition.typeName); err == nil && parsed.kind == characterText {
@@ -968,7 +983,7 @@ func compareInValues(left, right exprValue, metadata columnMetadata, operand rel
 	} else if metadata.characterSet == mysqlCharsetUTF8MB4Bin {
 		characterType.collation = collationBin
 	}
-	return boolValue(characterComparisonKey(characterType, left.s) == characterComparisonKey(characterType, right.s)), nil
+	return characterType
 }
 
 func outerRelationValue(name string, outer *outerRelationScope) (exprValue, error) {
@@ -988,6 +1003,9 @@ func outerRelationValue(name string, outer *outerRelationScope) (exprValue, erro
 func expressionValueFromMetadata(raw string, metadata columnMetadata) (exprValue, error) {
 	if isNumericWireType(metadata.typ) {
 		return evaluateScalar(raw)
+	}
+	if metadata.characterSet == mysqlCharsetBinary {
+		return exprValue{kind: valueString, s: raw, binary: true}, nil
 	}
 	return stringValue(raw), nil
 }
@@ -1753,6 +1771,9 @@ func setComparisonKey(value string, metadata columnMetadata) string {
 		return normalized
 	}
 	if isCharacterWireType(metadata.typ) {
+		if metadata.characterSet == mysqlCharsetBinary {
+			return value
+		}
 		characterType := defaultStringType
 		if metadata.characterSet == mysqlCharsetUTF8MB4Bin {
 			characterType.collation = collationBin
