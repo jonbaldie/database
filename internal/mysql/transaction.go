@@ -140,7 +140,8 @@ func (s *textStatementExecutor) beginStatementTransaction(lower string) (stateme
 }
 
 func isLockingReadStatement(lower string) bool {
-	return strings.Contains(lower, " for update") || strings.Contains(lower, " for share") || strings.Contains(lower, "lock in share mode")
+	_, locking, _ := splitLockingRead(lower)
+	return locking != nil
 }
 
 func (s *textStatementExecutor) commitBeforeDefinition(dataDefinition bool) error {
