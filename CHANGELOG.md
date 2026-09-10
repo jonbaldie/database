@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.11] - 2026-09-10
+
+### Fixed
+
+- Accepted carriage returns at SQL keyword boundaries, including CRLF input.
+- Ignored locking marker text inside quoted strings when detecting read-only
+  statements.
+- Preserved bytewise semantics for `CAST AS BINARY` comparisons, distinct
+  values, aggregate keys, and set or subquery comparisons.
+- Preserved bytewise `LIKE` matching for binary values instead of folding case.
+- Preserved temporal type metadata for current-time projections.
+- Preserved binary result semantics through `CONCAT` and `SUBSTRING`.
+
 ## [0.2.10] - 2026-09-09
 
 ### Added
@@ -240,6 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.11]: https://github.com/jonbaldie/database/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/jonbaldie/database/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/jonbaldie/database/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/jonbaldie/database/compare/v0.2.7...v0.2.8
