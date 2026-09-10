@@ -600,6 +600,39 @@ func TestMySQLTransactionsEnforceAutocommitReadOnlyAndAtomicErrors(t *testing.T)
 			t.Fatalf("unsupported isolation accepted: %s", query)
 		}
 	}
+	for _, test := range []struct {
+		query string
+		want  string
+	}{
+		{query: "SELECT ' for update'", want: " for update"},
+		{query: "SELECT ' for share'", want: " for share"},
+		{query: "SELECT ' lock in share mode'", want: " lock in share mode"},
+		{query: "SELECT 1 /* for update */", want: "1"},
+		{query: "SELECT 1 -- for share\n", want: "1"},
+	} {
+		if result := first.query("SET TRANSACTION READ ONLY"); result.err != "" {
+			t.Fatalf("read-only scalar setup for %q: %#v", test.query, result)
+		}
+		if result := first.query(test.query); result.err != "" || len(result.rows) != 1 || len(result.rows[0]) != 1 || result.rows[0][0] != test.want {
+			t.Fatalf("read-only scalar %q: %#v", test.query, result)
+		}
+	}
+	for _, query := range []string{
+		"SELECT id FROM entries FOR UPDATE",
+		"SELECT id FROM entries FOR UPDATE NOWAIT",
+		"SELECT id FROM entries FOR UPDATE SKIP LOCKED",
+		"SELECT id FROM entries FOR SHARE",
+		"SELECT id FROM entries FOR SHARE NOWAIT",
+		"SELECT id FROM entries FOR SHARE SKIP LOCKED",
+		"SELECT id FROM entries LOCK IN SHARE MODE",
+	} {
+		if result := first.query("SET TRANSACTION READ ONLY"); result.err != "" {
+			t.Fatalf("read-only locking setup for %q: %#v", query, result)
+		}
+		if result := first.query(query); result.errCode != 1792 {
+			t.Fatalf("read-only locking read %q: %#v", query, result)
+		}
+	}
 	if result := first.query("START TRANSACTION READ ONLY"); result.err != "" {
 		t.Fatalf("read-only transaction: %#v", result)
 	}
