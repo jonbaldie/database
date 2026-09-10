@@ -19,7 +19,11 @@ func evalLike(value, pattern exprValue, escape string, negate bool) (exprValue, 
 	if !ok {
 		return exprValue{}, incorrectEscapeArguments()
 	}
-	matched := likeMatch(value.render(), pattern.render(), escapeRune, value.collation != collationBin)
+	// Binary operands compare byte-by-byte: a BINARY column value or a
+	// CAST AS BINARY result carries no text collation, so the matcher never
+	// folds case for it.
+	fold := value.collation != collationBin && !value.binary && !pattern.binary
+	matched := likeMatch(value.render(), pattern.render(), escapeRune, fold)
 	return boolValue(matched != negate), nil
 }
 

@@ -474,7 +474,7 @@ func relationStoredValue(column relationColumn, raw string) (exprValue, error) {
 			return exprValue{}, characterErr
 		}
 		if character.kind != characterNone {
-			return exprValue{kind: valueString, s: raw, collation: character.collation}, nil
+			return exprValue{kind: valueString, s: raw, collation: character.collation, binary: character.kind == characterBinary}, nil
 		}
 	}
 	return stringValue(raw), nil
