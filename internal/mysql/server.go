@@ -3480,8 +3480,8 @@ func skipQuoted(value string, start int) int {
 }
 
 func keywordBoundary(value string, index, length int) bool {
-	before := index == 0 || strings.ContainsRune(" \t\n", rune(value[index-1]))
-	after := index+length == len(value) || strings.ContainsRune(" \t\n", rune(value[index+length]))
+	before := index == 0 || isRelationSpace(value[index-1])
+	after := index+length == len(value) || isRelationSpace(value[index+length])
 	return before && after
 }
 
