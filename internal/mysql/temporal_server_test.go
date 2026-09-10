@@ -120,6 +120,41 @@ func TestCurrentTimeResultsExposeTemporalMetadata(t *testing.T) {
 	}
 }
 
+func TestCurrentTimeMixedProjectionsExposeTemporalMetadata(t *testing.T) {
+	executor := currentTimeExecutor(t, "UTC", time.Date(2026, 7, 18, 14, 5, 6, 123456000, time.UTC))
+	cases := map[string]struct {
+		kind      temporalKind
+		precision int
+		wire      byte
+	}{
+		"SELECT NOW(), 1":        {kind: temporalDatetime, wire: mysqlTypeDatetime},
+		"SELECT CURRENT_DATE, 1": {kind: temporalDate, wire: mysqlTypeDate},
+		"SELECT CURRENT_TIME, 1": {kind: temporalTime, wire: mysqlTypeTime},
+		"SELECT NOW(3), 1":       {kind: temporalDatetime, precision: 3, wire: mysqlTypeDatetime},
+	}
+	for query, want := range cases {
+		result, err := executeStatement(executor, query)
+		if err != nil {
+			t.Fatalf("execute(%q) error: %v", query, err)
+		}
+		if len(result.metadata) != 2 {
+			t.Fatalf("execute(%q) metadata = %#v, want two definitions", query, result.metadata)
+		}
+		definition := result.metadata[0]
+		if definition.typ != want.wire {
+			t.Errorf("execute(%q) type = %#x, want %#x", query, definition.typ, want.wire)
+		}
+		temporal := temporalTypeForKind(want.kind, want.precision)
+		_, length, charset := temporalWireType(temporal)
+		if definition.length != length || definition.decimals != byte(want.precision) || definition.characterSet != charset {
+			t.Errorf("execute(%q) metadata = %#v, want temporal metadata for %v(%d)", query, definition, want.kind, want.precision)
+		}
+		if result.metadata[1].typ != mysqlTypeLongLong {
+			t.Errorf("execute(%q) second type = %#x, want %#x", query, result.metadata[1].typ, mysqlTypeLongLong)
+		}
+	}
+}
+
 func TestCurrentTimePreservesRequestedFractionalPrecision(t *testing.T) {
 	instant := time.Date(2026, 7, 18, 22, 0, 0, 123456789, time.UTC)
 	executor := currentTimeExecutor(t, "+05:30", instant)
