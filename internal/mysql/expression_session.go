@@ -47,7 +47,7 @@ func sessionCurrentTime(s *session, kind temporalKind, name string, arguments []
 	if err != nil {
 		return exprValue{}, err
 	}
-	return stringValue(value), nil
+	return exprValue{kind: valueString, s: value, temporal: kind, precision: precision}, nil
 }
 
 func currentTimePrecision(name string, kind temporalKind, arguments []exprValue) (int, error) {
