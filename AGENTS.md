@@ -18,6 +18,27 @@ This is a single-context project using root `CONTEXT.md` and `docs/adr/`. See `d
 
 Use the `verify-database` skill to launch the server and prove user-visible behavior with evidence. Read `.agents/skills/verify-database/features/README.md` before you drive the product.
 
+### Resource-safe local verification
+
+Fleet shares one 8-core macOS host with other repositories. Leave capacity for
+the other repositories. For heavy local Go verification and mutation tests,
+limit Go to two runtime processors and two concurrent package jobs:
+
+```bash
+GOMAXPROCS=2 GOFLAGS='-p=2' make quality
+GOMAXPROCS=2 GOFLAGS='-p=2' make mutation
+```
+
+Run only one fuzz campaign at a time. Name one package and one fuzz target,
+and limit the campaign to 30 seconds. For example:
+
+```bash
+GOMAXPROCS=2 GOFLAGS='-p=2' go test ./internal/storage -run '^$' -fuzz '^FuzzWALPayloadRoundTrip$' -fuzztime=30s
+```
+
+`go test ./...` and `make test` run fuzz seed inputs as ordinary tests. They do
+not start fuzz campaigns. Do not call these ordinary test runs fuzz campaigns.
+
 ### Cleanup / litterbug rule
 
 Before stopping or handing off, delete disposable artifacts created by your work (temporary test directories, binaries, logs, and generated reports); do not move them to Trash. Never remove pre-existing or unowned files, dirty worktrees, or shared caches without explicit approval. Report every remaining generated artifact over 100 MB with its path and size.

@@ -13,6 +13,27 @@ and feature contributions through ordinary GitHub pull requests.
 Pull requests need passing project checks and maintainer approval before merge.
 The project is maintainer-led; see [GOVERNANCE.md](GOVERNANCE.md).
 
+## Local resource limits
+
+Heavy local Go verification can load a machine. Leave capacity for your other
+work. For the quality gate and mutation tests, limit Go to two runtime
+processors and two concurrent package jobs:
+
+```sh
+GOMAXPROCS=2 GOFLAGS='-p=2' make quality
+GOMAXPROCS=2 GOFLAGS='-p=2' make mutation
+```
+
+Run only one fuzz campaign at a time. A campaign needs one package, one fuzz
+target, and a time limit. Use 30 seconds. For example:
+
+```sh
+GOMAXPROCS=2 GOFLAGS='-p=2' go test ./internal/storage -run '^$' -fuzz '^FuzzWALPayloadRoundTrip$' -fuzztime=30s
+```
+
+`go test ./...` and `make test` run fuzz seed inputs as ordinary tests. They do
+not start fuzz campaigns. Do not call these ordinary test runs fuzz campaigns.
+
 ## Contribution terms
 
 By intentionally submitting a contribution for inclusion, you agree that it is
