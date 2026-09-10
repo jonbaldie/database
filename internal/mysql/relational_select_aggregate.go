@@ -2116,7 +2116,7 @@ func writeRelationalValueKey(builder *strings.Builder, expression string, value 
 		return
 	}
 	key := value.render()
-	if value.kind == valueString {
+	if value.kind == valueString && !value.binary {
 		key = relationalStringKey(expression, key, columns)
 	}
 	builder.WriteString(strconv.Itoa(int(value.kind)))

@@ -779,6 +779,9 @@ func distinctValueKey(row relationalResultRow, index int, value string, projecti
 	if index >= len(row.projections) || row.projections[index].kind != valueString {
 		return value
 	}
+	if row.projections[index].binary {
+		return value
+	}
 	projection := projections[index]
 	if projection.scalar || projection.column < 0 || projection.column >= len(columns) {
 		return characterComparisonKey(defaultStringType, value)

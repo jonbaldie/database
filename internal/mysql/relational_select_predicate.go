@@ -238,7 +238,7 @@ func compareRelationValues(operator string, leftOperand, rightOperand relationOp
 }
 
 func compareRelationOperands(leftOperand, rightOperand relationOperand, left, right exprValue) (int, error) {
-	if left.kind == valueString && right.kind == valueString {
+	if left.kind == valueString && right.kind == valueString && !left.binary && !right.binary {
 		typ, found, err := relationCharacterComparisonType(leftOperand, rightOperand)
 		if err != nil {
 			return 0, err
