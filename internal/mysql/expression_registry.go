@@ -253,6 +253,7 @@ func reverseValue(text string) (exprValue, error) {
 // non-character argument that would require an implicit conversion.
 func concatValue(arguments []exprValue) (exprValue, error) {
 	var builder strings.Builder
+	binary := false
 	for _, argument := range arguments {
 		if argument.isNull() {
 			return nullValue(), nil
@@ -260,9 +261,10 @@ func concatValue(arguments []exprValue) (exprValue, error) {
 		if argument.kind != valueString {
 			return exprValue{}, strictConversionError()
 		}
+		binary = binary || argument.binary
 		builder.WriteString(argument.s)
 	}
-	return stringValue(builder.String()), nil
+	return exprValue{kind: valueString, s: builder.String(), binary: binary}, nil
 }
 
 func coalesceValue(arguments []exprValue) (exprValue, error) {
