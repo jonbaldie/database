@@ -163,6 +163,9 @@ func validateTableConstraints(previous, definition catalog.Definition, namespace
 	if err := validateTableIndexes(table); err != nil {
 		return err
 	}
+	if err := validateAutoIncrement(table); err != nil {
+		return err
+	}
 	indexes, err := tableColumnIndexes(table)
 	if err != nil {
 		return err

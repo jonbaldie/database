@@ -144,9 +144,10 @@ query supplies `ORDER BY`.
 
 `information_schema.COLUMNS` exposes ordinal position, the declared and
 complete type, default, nullability, character set, collation, numeric and
-temporal precision, comment, key classification, `AUTO_INCREMENT`, and
-temporal `ON UPDATE` behaviour. Generated-column fields are empty because
-generated columns are outside v0.1.
+temporal precision, comment, key classification, `EXTRA`, and temporal `ON
+UPDATE` behaviour. For an auto-increment column, `EXTRA` is
+`auto_increment`; it is empty for other columns. Generated-column fields are
+empty because generated columns are outside v0.1.
 
 `COLUMNS.PRIVILEGES` projects the current account's namespace grants into
 MySQL-shaped column capabilities:

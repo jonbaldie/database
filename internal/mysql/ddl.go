@@ -410,6 +410,7 @@ func truncateTable(s *session, query string) error {
 		table.Rows = nil
 		table.PrimaryIndex = nil
 		table.OrderedIndexes = nil
+		resetAutoIncrementState(&table)
 		namespaceDefinition.Tables[catalog.Key(name)] = table
 		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
 		return nil
@@ -839,6 +840,9 @@ func applyTableDefinitionActions(table catalog.Table, actions []ddlAction) (cata
 	if err := validateTableIndexes(updated); err != nil {
 		return catalog.Table{}, err
 	}
+	if err := initializeAutoIncrementState(&updated); err != nil {
+		return catalog.Table{}, err
+	}
 	return updated, nil
 }
 
@@ -1062,13 +1066,15 @@ func convertTableColumn(table *catalog.Table, index int, typeName string) error 
 
 func cloneCatalogTable(table catalog.Table) catalog.Table {
 	return catalog.Table{
-		Name:             table.Name,
-		Columns:          append([]string(nil), table.Columns...),
-		ColumnTypes:      append([]string(nil), table.ColumnTypes...),
-		ColumnAttributes: append([]catalog.ColumnAttribute(nil), table.ColumnAttributes...),
-		Constraints:      catalog.CloneConstraints(table.Constraints),
-		Indexes:          catalog.CloneIndexes(table.Indexes),
-		Rows:             cloneRows(table.Rows),
+		Name:                   table.Name,
+		Columns:                append([]string(nil), table.Columns...),
+		ColumnTypes:            append([]string(nil), table.ColumnTypes...),
+		ColumnAttributes:       append([]catalog.ColumnAttribute(nil), table.ColumnAttributes...),
+		AutoIncrement:          table.AutoIncrement,
+		AutoIncrementExhausted: table.AutoIncrementExhausted,
+		Constraints:            catalog.CloneConstraints(table.Constraints),
+		Indexes:                catalog.CloneIndexes(table.Indexes),
+		Rows:                   cloneRows(table.Rows),
 	}
 }
 
