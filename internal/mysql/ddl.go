@@ -410,10 +410,7 @@ func truncateTable(s *session, query string) error {
 		table.Rows = nil
 		table.PrimaryIndex = nil
 		table.OrderedIndexes = nil
-		if _, autoIncrement := autoIncrementColumn(table); autoIncrement {
-			table.AutoIncrement = 1
-			table.AutoIncrementExhausted = false
-		}
+		resetAutoIncrementState(&table)
 		namespaceDefinition.Tables[catalog.Key(name)] = table
 		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
 		return nil

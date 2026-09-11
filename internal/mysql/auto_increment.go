@@ -50,34 +50,63 @@ func setAutoIncrementState(table *catalog.Table, state autoIncrementState) {
 	table.AutoIncrementExhausted = state.exhausted
 }
 
+func resetAutoIncrementState(table *catalog.Table) {
+	if _, ok := autoIncrementColumn(*table); !ok {
+		return
+	}
+	setAutoIncrementState(table, autoIncrementState{next: 1})
+}
+
 func validateAutoIncrement(table catalog.Table) error {
 	columns := autoIncrementColumns(table)
-	if len(columns) == 0 {
+	switch len(columns) {
+	case 0:
 		return nil
+	case 1:
+		return validateAutoIncrementColumn(table, columns[0])
+	default:
+		return autoIncrementKeyFailure()
 	}
-	if len(columns) > 1 {
-		return sqlFailure{1075, "42000", "Incorrect table definition; there can be only one auto column and it must be defined as a key"}
-	}
-	column := columns[0]
-	typeName, known := table.ColumnType(column)
-	if !known {
-		return incorrectAutoIncrementColumn(table.Columns[column])
-	}
-	numeric, err := parseNumericType(typeName)
-	if err != nil {
+}
+
+func validateAutoIncrementColumn(table catalog.Table, column int) error {
+	if _, err := autoIncrementType(table, column); err != nil {
 		return err
-	}
-	if numeric.kind != numericInteger {
-		return incorrectAutoIncrementColumn(table.Columns[column])
 	}
 	columnKey := catalog.Key(table.Columns[column])
 	for _, index := range effectiveTableIndexes(table) {
-		for _, part := range index.Parts {
-			if part.Column != "" && catalog.Key(part.Column) == columnKey {
-				return nil
-			}
+		if autoIncrementColumnIsIndexed(index, columnKey) {
+			return nil
 		}
 	}
+	return autoIncrementKeyFailure()
+}
+
+func autoIncrementColumnIsIndexed(index catalog.Index, columnKey string) bool {
+	for _, part := range index.Parts {
+		if part.Column != "" && catalog.Key(part.Column) == columnKey {
+			return true
+		}
+	}
+	return false
+}
+
+func autoIncrementType(table catalog.Table, column int) (numericType, error) {
+	typeName, known := table.ColumnType(column)
+	if !known {
+		return numericType{}, incorrectAutoIncrementColumn(table.Columns[column])
+	}
+	numeric, err := parseNumericType(typeName)
+	if err != nil {
+		return numericType{}, err
+	}
+	if numeric.kind != numericInteger {
+		return numericType{}, incorrectAutoIncrementColumn(table.Columns[column])
+	}
+	return numeric, nil
+}
+
+func autoIncrementKeyFailure() error {
 	return sqlFailure{1075, "42000", "Incorrect table definition; there can be only one auto column and it must be defined as a key"}
 }
 
@@ -116,16 +145,9 @@ func initializeAutoIncrementState(table *catalog.Table) error {
 }
 
 func autoIncrementLimit(table catalog.Table, column int) (uint64, error) {
-	typeName, known := table.ColumnType(column)
-	if !known {
-		return 0, incorrectAutoIncrementColumn(table.Columns[column])
-	}
-	numeric, err := parseNumericType(typeName)
+	numeric, err := autoIncrementType(table, column)
 	if err != nil {
 		return 0, err
-	}
-	if numeric.kind != numericInteger {
-		return 0, incorrectAutoIncrementColumn(table.Columns[column])
 	}
 	if numeric.unsigned {
 		return numeric.umax, nil

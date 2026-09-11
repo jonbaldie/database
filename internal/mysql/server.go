@@ -1349,21 +1349,29 @@ func builtCatalogTable(name string, table tableDefinition) (catalog.Table, error
 	if err := initializeAutoIncrementState(&tableDefinition); err != nil {
 		return catalog.Table{}, err
 	}
-	if table.initialAutoIncrementSet {
-		column, ok := autoIncrementColumn(tableDefinition)
-		if !ok {
-			return catalog.Table{}, sqlFailure{1075, "42000", "AUTO_INCREMENT table option requires an AUTO_INCREMENT column"}
-		}
-		limit, err := autoIncrementLimit(tableDefinition, column)
-		if err != nil {
-			return catalog.Table{}, err
-		}
-		if table.initialAutoIncrement > limit {
-			return catalog.Table{}, sqlFailure{1067, "42000", "invalid AUTO_INCREMENT value"}
-		}
-		setAutoIncrementState(&tableDefinition, autoIncrementState{next: table.initialAutoIncrement})
+	if err := initializeConfiguredAutoIncrement(&tableDefinition, table.initialAutoIncrement, table.initialAutoIncrementSet); err != nil {
+		return catalog.Table{}, err
 	}
 	return tableDefinition, nil
+}
+
+func initializeConfiguredAutoIncrement(table *catalog.Table, next uint64, configured bool) error {
+	if !configured {
+		return nil
+	}
+	column, ok := autoIncrementColumn(*table)
+	if !ok {
+		return sqlFailure{1075, "42000", "AUTO_INCREMENT table option requires an AUTO_INCREMENT column"}
+	}
+	limit, err := autoIncrementLimit(*table, column)
+	if err != nil {
+		return err
+	}
+	if next > limit {
+		return sqlFailure{1067, "42000", "invalid AUTO_INCREMENT value"}
+	}
+	setAutoIncrementState(table, autoIncrementState{next: next})
+	return nil
 }
 
 func applyPrimaryColumnRules(table *catalog.Table) error {
@@ -1813,9 +1821,7 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 			definition.WriteString(" DEFAULT ")
 			definition.WriteString(canonicalDefaultValue(columnType, attribute.Default))
 		}
-		if attribute.AutoIncrement {
-			definition.WriteString(" AUTO_INCREMENT")
-		}
+		appendCanonicalColumnAutoIncrement(&definition, attribute)
 	}
 	for _, constraint := range table.Constraints {
 		definition.WriteString(",\n  ")
@@ -1826,14 +1832,26 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 		definition.WriteString(canonicalIndexDefinition(index))
 	}
 	definition.WriteString("\n)")
-	if _, ok := autoIncrementColumn(table); ok {
-		state := autoIncrementStateForTable(table)
-		if !state.exhausted && state.next > 1 {
-			definition.WriteString("\nAUTO_INCREMENT=")
-			definition.WriteString(strconv.FormatUint(state.next, 10))
-		}
-	}
+	appendCanonicalTableAutoIncrement(&definition, table)
 	return definition.String(), nil
+}
+
+func appendCanonicalColumnAutoIncrement(definition *strings.Builder, attribute catalog.ColumnAttribute) {
+	if attribute.AutoIncrement {
+		definition.WriteString(" AUTO_INCREMENT")
+	}
+}
+
+func appendCanonicalTableAutoIncrement(definition *strings.Builder, table catalog.Table) {
+	if _, ok := autoIncrementColumn(table); !ok {
+		return
+	}
+	state := autoIncrementStateForTable(table)
+	if state.exhausted || state.next <= 1 {
+		return
+	}
+	definition.WriteString("\nAUTO_INCREMENT=")
+	definition.WriteString(strconv.FormatUint(state.next, 10))
 }
 
 func canonicalIndexDefinition(index catalog.Index) string {
@@ -2639,24 +2657,10 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, autoIncrementState, e
 	state := autoIncrementStateForTable(plan.table)
 	rowNumber := 1
 	for _, group := range plan.groups {
-		var row []string
-		if len(group) == 0 && plan.defaultValues {
-			row = defaultTableRow(plan.table)
-		} else {
-			if len(group) != len(plan.columns) {
-				return nil, 0, autoIncrementState{}, sqlFailure{1136, "21S01", "column count does not match value count"}
-			}
-			row = defaultTableRow(plan.table)
-			for valueIndex, value := range group {
-				columnIndex := plan.columns[valueIndex]
-				canonical, err := insertColumnValue(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
-				if err != nil {
-					return nil, 0, autoIncrementState{}, err
-				}
-				row[columnIndex] = canonical
-			}
+		row, err := insertPlanRow(plan, group, rowNumber)
+		if err != nil {
+			return nil, 0, autoIncrementState{}, err
 		}
-		var err error
 		state, err = fillAutoIncrementValue(plan.table, row, state, rowNumber)
 		if err != nil {
 			return nil, 0, autoIncrementState{}, err
@@ -2671,6 +2675,25 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, autoIncrementState, e
 		rows = owned
 	}
 	return append(rows, added...), uint64(len(added)), state, nil
+}
+
+func insertPlanRow(plan insertPlan, group []string, rowNumber int) ([]string, error) {
+	if len(group) == 0 && plan.defaultValues {
+		return defaultTableRow(plan.table), nil
+	}
+	if len(group) != len(plan.columns) {
+		return nil, sqlFailure{1136, "21S01", "column count does not match value count"}
+	}
+	row := defaultTableRow(plan.table)
+	for valueIndex, value := range group {
+		columnIndex := plan.columns[valueIndex]
+		canonical, err := insertColumnValue(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
+		if err != nil {
+			return nil, err
+		}
+		row[columnIndex] = canonical
+	}
+	return row, nil
 }
 
 func validateInsertColumnDefaults(table catalog.Table, columns []int) error {
