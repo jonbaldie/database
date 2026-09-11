@@ -271,10 +271,12 @@ func substringStart(length int, position int64) int {
 }
 
 func replaceValue(arguments []exprValue) (exprValue, error) {
+	binary := false
 	for _, argument := range arguments {
 		if argument.isNull() {
 			return nullValue(), nil
 		}
+		binary = binary || argument.binary
 	}
 	text, err := stringArgument(arguments[0])
 	if err != nil {
@@ -289,14 +291,17 @@ func replaceValue(arguments []exprValue) (exprValue, error) {
 		return exprValue{}, err
 	}
 	if search == "" {
-		return boundedStringValue(text)
+		return boundedStringValue(text, binary)
 	}
-	return boundedStringValue(strings.ReplaceAll(text, search, replacement))
+	return boundedStringValue(strings.ReplaceAll(text, search, replacement), binary)
 }
 
-func boundedStringValue(value string) (exprValue, error) {
+func boundedStringValue(value string, binary bool) (exprValue, error) {
 	if len(value) > characterScalarCeiling {
 		return exprValue{}, dataTooLong("REPLACE", 1)
+	}
+	if binary {
+		return binaryStringValue(value), nil
 	}
 	return stringValue(value), nil
 }
