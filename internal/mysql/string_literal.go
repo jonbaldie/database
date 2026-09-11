@@ -6,6 +6,10 @@ func isSQLQuote(character byte) bool {
 	return character == '\'' || character == '`' || character == '"'
 }
 
+func isSQLStringQuote(character byte) bool {
+	return character == '\'' || character == '"'
+}
+
 func quotedSQLLiteralEnd(value string, start int) (int, bool) {
 	length := len(value)
 	if start < 0 || start >= length || !isSQLQuote(value[start]) {
@@ -40,7 +44,9 @@ func doubledSQLQuote(value string, index int, quote byte) bool {
 	return index+1 < len(value) && value[index+1] == quote
 }
 
-func decodeMySQLStringValue(value string) (string, bool) {
+// decodeMySQLStringValue decodes the body of a string literal that the quote
+// character delimits. A doubled quote character decodes to one quote.
+func decodeMySQLStringValue(value string, quote byte) (string, bool) {
 	var builder strings.Builder
 	valueLength := len(value)
 	for index := 0; index < valueLength; index++ {
@@ -51,13 +57,11 @@ func decodeMySQLStringValue(value string) (string, bool) {
 			}
 			index++
 			appendMySQLStringEscape(&builder, value[index])
-		case '\'':
-			if index+1 < len(value) && value[index+1] == '\'' {
-				builder.WriteByte('\'')
+		case quote:
+			if index+1 < len(value) && value[index+1] == quote {
 				index++
-				continue
 			}
-			builder.WriteByte('\'')
+			builder.WriteByte(quote)
 		default:
 			builder.WriteByte(value[index])
 		}
@@ -95,8 +99,8 @@ var mySQLStringEscapeCharacters = map[byte]byte{
 
 func scalar(value string) string {
 	value = strings.TrimSpace(value)
-	if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-		if decoded, ok := decodeMySQLStringValue(value[1 : len(value)-1]); ok {
+	if len(value) >= 2 && isSQLStringQuote(value[0]) && value[len(value)-1] == value[0] {
+		if decoded, ok := decodeMySQLStringValue(value[1:len(value)-1], value[0]); ok {
 			return decoded
 		}
 	}

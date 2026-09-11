@@ -63,7 +63,7 @@ func isExpressionSpace(character byte) bool {
 func scanToken(input string, cursor int) (exprToken, int, error) {
 	character := input[cursor]
 	switch {
-	case character == '\'':
+	case character == '\'' || character == '"':
 		return scanString(input, cursor)
 	case startsNumber(input, cursor):
 		return scanNumber(input, cursor)
@@ -96,14 +96,15 @@ func startsNumber(input string, cursor int) bool {
 	return input[cursor] == '.' && cursor+1 < len(input) && isDigit(input[cursor+1])
 }
 
-// scanString reads a single-quoted string and applies MySQL's default
-// backslash escape rules. An unterminated string is unsupported.
+// scanString reads a single- or double-quoted string and applies MySQL's
+// default backslash escape rules. Without ANSI_QUOTES, MySQL treats both quote
+// characters as string delimiters. An unterminated string is unsupported.
 func scanString(input string, cursor int) (exprToken, int, error) {
 	end, ok := quotedSQLLiteralEnd(input, cursor)
 	if !ok {
 		return exprToken{}, 0, unsupportedExpression()
 	}
-	decoded, ok := decodeMySQLStringValue(input[cursor+1 : end])
+	decoded, ok := decodeMySQLStringValue(input[cursor+1:end], input[cursor])
 	if !ok {
 		return exprToken{}, 0, unsupportedExpression()
 	}

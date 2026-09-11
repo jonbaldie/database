@@ -18,9 +18,23 @@ func TestDecodeMySQLStringValue(t *testing.T) {
 		`a\xb`:    "axb",
 		`it''s`:   "it's",
 	} {
-		got, ok := decodeMySQLStringValue(input)
+		got, ok := decodeMySQLStringValue(input, '\'')
 		if !ok || got != want {
 			t.Errorf("decodeMySQLStringValue(%q) = %q, %v; want %q, true", input, got, ok, want)
+		}
+	}
+}
+
+func TestDecodeMySQLDoubleQuotedStringValue(t *testing.T) {
+	for input, want := range map[string]string{
+		`it""s`: `it"s`,
+		`it\"s`: `it"s`,
+		`it's`:  "it's",
+		`it''s`: "it''s",
+	} {
+		got, ok := decodeMySQLStringValue(input, '"')
+		if !ok || got != want {
+			t.Errorf("decodeMySQLStringValue(%q, '\"') = %q, %v; want %q, true", input, got, ok, want)
 		}
 	}
 }
