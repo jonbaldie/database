@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"strings"
@@ -319,7 +320,31 @@ func locateValue(arguments []exprValue) (exprValue, error) {
 	if start <= 0 {
 		return intValue(0), nil
 	}
+	if arguments[0].binary || arguments[1].binary {
+		return searchLocateBytes(haystack, needle, start-1), nil
+	}
 	return searchLocateNeedle([]rune(haystack), []rune(needle), needle, start-1), nil
+}
+
+func searchLocateBytes(haystack, needle string, startIndex int64) exprValue {
+	haystackBytes := []byte(haystack)
+	if startIndex < 0 {
+		return intValue(0)
+	}
+	if needle == "" {
+		if startIndex > int64(len(haystackBytes)) {
+			return intValue(0)
+		}
+		return intValue(startIndex + 1)
+	}
+	if startIndex >= int64(len(haystackBytes)) {
+		return intValue(0)
+	}
+	matchOffset := bytes.Index(haystackBytes[int(startIndex):], []byte(needle))
+	if matchOffset < 0 {
+		return intValue(0)
+	}
+	return intValue(startIndex + int64(matchOffset) + 1)
 }
 
 func searchLocateNeedle(haystackRunes, needleRunes []rune, needle string, startIndex int64) exprValue {
