@@ -53,6 +53,12 @@ func decimalValueOf(d decimalValue) exprValue { return exprValue{kind: valueDeci
 func doubleValue(value float64) exprValue     { return exprValue{kind: valueDouble, f: value} }
 func stringValue(value string) exprValue      { return exprValue{kind: valueString, s: value} }
 
+// binaryStringValue builds a binary character value: raw bytes with the binary
+// domain flag, so comparisons and metadata stay byte-exact.
+func binaryStringValue(value string) exprValue {
+	return exprValue{kind: valueString, s: value, binary: true}
+}
+
 // boolValue maps a Go boolean to the MySQL integer truth value 1 or 0. UNKNOWN
 // is represented separately by a valueNull, so three-valued logic never routes
 // through this helper.

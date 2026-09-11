@@ -110,7 +110,9 @@ func unaryNumericFunc(body func(exprValue) (exprValue, error)) func([]exprValue)
 
 // unaryStringFunc wraps a one-argument character function with NULL propagation
 // and the strict rule that a non-character argument requires an explicit cast.
-func unaryStringFunc(body func(string) (exprValue, error)) func([]exprValue) (exprValue, error) {
+// The body receives the whole value so it can keep the argument's binary
+// domain: a binary argument yields a binary result with byte semantics.
+func unaryStringFunc(body func(exprValue) (exprValue, error)) func([]exprValue) (exprValue, error) {
 	return func(arguments []exprValue) (exprValue, error) {
 		if arguments[0].isNull() {
 			return nullValue(), nil
@@ -118,7 +120,7 @@ func unaryStringFunc(body func(string) (exprValue, error)) func([]exprValue) (ex
 		if arguments[0].kind != valueString {
 			return exprValue{}, strictConversionError()
 		}
-		return body(arguments[0].s)
+		return body(arguments[0])
 	}
 }
 
@@ -231,22 +233,68 @@ func floatSign(value float64) int {
 	}
 }
 
-func lengthValue(text string) (exprValue, error)     { return intValue(int64(len(text))), nil }
-func charLengthValue(text string) (exprValue, error) { return intValue(int64(len([]rune(text)))), nil }
-func upperValue(text string) (exprValue, error)      { return stringValue(strings.ToUpper(text)), nil }
-func lowerValue(text string) (exprValue, error)      { return stringValue(strings.ToLower(text)), nil }
-func ltrimValue(text string) (exprValue, error)      { return stringValue(strings.TrimLeft(text, " ")), nil }
-func rtrimValue(text string) (exprValue, error) {
-	return stringValue(strings.TrimRight(text, " ")), nil
-}
-func trimValue(text string) (exprValue, error) { return stringValue(strings.Trim(text, " ")), nil }
+func lengthValue(text exprValue) (exprValue, error) { return intValue(int64(len(text.s))), nil }
 
-func reverseValue(text string) (exprValue, error) {
-	runes := []rune(text)
+func charLengthValue(text exprValue) (exprValue, error) {
+	if text.binary {
+		return intValue(int64(len(text.s))), nil
+	}
+	return intValue(int64(len([]rune(text.s)))), nil
+}
+
+func upperValue(text exprValue) (exprValue, error) {
+	if text.binary {
+		return binaryStringValue(text.s), nil
+	}
+	return stringValue(strings.ToUpper(text.s)), nil
+}
+
+func lowerValue(text exprValue) (exprValue, error) {
+	if text.binary {
+		return binaryStringValue(text.s), nil
+	}
+	return stringValue(strings.ToLower(text.s)), nil
+}
+
+func ltrimValue(text exprValue) (exprValue, error) {
+	if text.binary {
+		return binaryStringValue(strings.TrimLeft(text.s, " ")), nil
+	}
+	return stringValue(strings.TrimLeft(text.s, " ")), nil
+}
+
+func rtrimValue(text exprValue) (exprValue, error) {
+	if text.binary {
+		return binaryStringValue(strings.TrimRight(text.s, " ")), nil
+	}
+	return stringValue(strings.TrimRight(text.s, " ")), nil
+}
+
+func trimValue(text exprValue) (exprValue, error) {
+	if text.binary {
+		return binaryStringValue(strings.Trim(text.s, " ")), nil
+	}
+	return stringValue(strings.Trim(text.s, " ")), nil
+}
+
+func reverseValue(text exprValue) (exprValue, error) {
+	if text.binary {
+		return binaryStringValue(reverseBytes(text.s)), nil
+	}
+	runes := []rune(text.s)
 	for left, right := 0, len(runes)-1; left < right; left, right = left+1, right-1 {
 		runes[left], runes[right] = runes[right], runes[left]
 	}
 	return stringValue(string(runes)), nil
+}
+
+// reverseBytes reverses the raw byte sequence, as MySQL does for binary input.
+func reverseBytes(value string) string {
+	bytes := []byte(value)
+	for left, right := 0, len(bytes)-1; left < right; left, right = left+1, right-1 {
+		bytes[left], bytes[right] = bytes[right], bytes[left]
+	}
+	return string(bytes)
 }
 
 // concatValue joins character arguments, propagating NULL and rejecting a
