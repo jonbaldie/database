@@ -152,6 +152,13 @@ with `CONSTRAINT name`. `ALTER TABLE ... ADD CONSTRAINT` supports the same table
 constraints. A new constraint checks all existing rows before the schema
 changes. If a check fails, the previous schema definition remains in use.
 
+`AUTO_INCREMENT` is supported on one indexed integer column per table. An
+omitted value, `NULL`, or `DEFAULT` uses the next value, starting at `1`.
+An explicit positive integer at or above the current next value advances the
+sequence to that value plus one. Deletes do not reuse values, and
+`TRUNCATE TABLE` resets the sequence to `1`. Custom increment and offset
+settings are outside v0.1.
+
 Each insert, update, delete, and schema change checks the complete affected
 constraint surface before it becomes durable. Foreign keys require a primary or
 unique referenced key. No foreign-key action clause is supported. A write that

@@ -22,7 +22,7 @@ func splitColumnTypeAndModifiers(value string) (string, string) {
 		if !wordBoundary(value, index) {
 			continue
 		}
-		for _, keyword := range []string{"not", "null", "default", "primary", "unique", "references", "check"} {
+		for _, keyword := range []string{"not", "null", "default", "auto_increment", "primary", "unique", "references", "check"} {
 			if strings.EqualFold(value[index:index+minConstraintLength(len(value)-index, len(keyword))], keyword) && wordEnd(value, index+len(keyword)) {
 				return strings.TrimSpace(value[:index]), strings.TrimSpace(value[index:])
 			}
@@ -97,6 +97,7 @@ var columnModifierParsers = []columnModifierParser{
 	{statesNullability: true, parse: notNullModifier},
 	{statesNullability: true, parse: nullModifier},
 	{parse: defaultModifier},
+	{parse: autoIncrementModifier},
 	{parse: primaryModifier},
 	{parse: uniqueModifier},
 	{parse: checkModifier},
@@ -129,6 +130,18 @@ func defaultModifier(value string, attribute catalog.ColumnAttribute) (string, *
 	}
 	attribute.HasDefault, attribute.Default = true, defaultValue
 	return remainder, &attribute, catalog.Constraint{}, true, nil
+}
+
+func autoIncrementModifier(value string, attribute catalog.ColumnAttribute) (string, *catalog.ColumnAttribute, catalog.Constraint, bool, error) {
+	const keyword = "AUTO_INCREMENT"
+	if !strings.HasPrefix(strings.ToLower(value), strings.ToLower(keyword)) || !wordEnd(value, len(keyword)) {
+		return "", nil, catalog.Constraint{}, false, nil
+	}
+	if attribute.AutoIncrement {
+		return "", nil, catalog.Constraint{}, true, sqlFailure{1075, "42000", "Incorrect table definition; there can be only one auto column and it must be defined as a key"}
+	}
+	attribute.AutoIncrement = true
+	return value[len(keyword):], &attribute, catalog.Constraint{}, true, nil
 }
 
 func validDefaultLiteral(value string) bool {

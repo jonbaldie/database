@@ -787,6 +787,7 @@ var informationSchemaViews = []informationSchemaView{
 			{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
 			{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
 			{name: "TABLE_TYPE", typeName: "VARCHAR(64)"},
+			{name: "AUTO_INCREMENT", typeName: "BIGINT"},
 		},
 	},
 	{
@@ -798,6 +799,7 @@ var informationSchemaViews = []informationSchemaView{
 			{name: "ORDINAL_POSITION", typeName: "INT"},
 			{name: "DATA_TYPE", typeName: "VARCHAR(64)"},
 			{name: "COLUMN_TYPE", typeName: "VARCHAR(255)"},
+			{name: "EXTRA", typeName: "VARCHAR(30)"},
 		},
 	},
 	{name: "statistics", columns: []informationSchemaColumn{
@@ -1344,6 +1346,23 @@ func builtCatalogTable(name string, table tableDefinition) (catalog.Table, error
 	if err := validateTableIndexes(tableDefinition); err != nil {
 		return catalog.Table{}, err
 	}
+	if err := initializeAutoIncrementState(&tableDefinition); err != nil {
+		return catalog.Table{}, err
+	}
+	if table.initialAutoIncrementSet {
+		column, ok := autoIncrementColumn(tableDefinition)
+		if !ok {
+			return catalog.Table{}, sqlFailure{1075, "42000", "AUTO_INCREMENT table option requires an AUTO_INCREMENT column"}
+		}
+		limit, err := autoIncrementLimit(tableDefinition, column)
+		if err != nil {
+			return catalog.Table{}, err
+		}
+		if table.initialAutoIncrement > limit {
+			return catalog.Table{}, sqlFailure{1067, "42000", "invalid AUTO_INCREMENT value"}
+		}
+		setAutoIncrementState(&tableDefinition, autoIncrementState{next: table.initialAutoIncrement})
+	}
 	return tableDefinition, nil
 }
 
@@ -1382,13 +1401,15 @@ func canonicalizeTableDefaults(table *catalog.Table) error {
 }
 
 type tableDefinition struct {
-	target      []string
-	columns     []string
-	types       []string
-	attributes  []catalog.ColumnAttribute
-	constraints []catalog.Constraint
-	indexes     []catalog.Index
-	ifNotExists bool
+	target                  []string
+	columns                 []string
+	types                   []string
+	attributes              []catalog.ColumnAttribute
+	constraints             []catalog.Constraint
+	indexes                 []catalog.Index
+	initialAutoIncrement    uint64
+	initialAutoIncrementSet bool
+	ifNotExists             bool
 }
 
 type parsedTableColumns struct {
@@ -1400,7 +1421,11 @@ type parsedTableColumns struct {
 }
 
 func parseCreateTable(query string) (tableDefinition, error) {
-	head, body, err := createTableParts(query)
+	head, body, options, err := createTableParts(query)
+	if err != nil {
+		return tableDefinition{}, err
+	}
+	initialAutoIncrement, initialAutoIncrementSet, err := parseCreateTableOptions(options)
 	if err != nil {
 		return tableDefinition{}, err
 	}
@@ -1424,7 +1449,17 @@ func parseCreateTable(query string) (tableDefinition, error) {
 	if err != nil {
 		return tableDefinition{}, err
 	}
-	return tableDefinition{target: target, columns: columns.columns, types: columns.types, attributes: columns.attributes, constraints: constraints, indexes: columns.indexes, ifNotExists: ifNotExists}, nil
+	return tableDefinition{
+		target:                  target,
+		columns:                 columns.columns,
+		types:                   columns.types,
+		attributes:              columns.attributes,
+		constraints:             constraints,
+		indexes:                 columns.indexes,
+		initialAutoIncrement:    initialAutoIncrement,
+		initialAutoIncrementSet: initialAutoIncrementSet,
+		ifNotExists:             ifNotExists,
+	}, nil
 }
 
 func createTableTarget(head string) ([]string, error) {
@@ -1455,17 +1490,34 @@ func validateTableColumns(columns []string) error {
 	return nil
 }
 
-func createTableParts(query string) (string, string, error) {
+func createTableParts(query string) (string, string, string, error) {
 	open := strings.Index(query, "(")
 	close := strings.LastIndex(query, ")")
 	if open < 0 || close <= open {
-		return "", "", sqlFailure{1064, "42000", "malformed CREATE TABLE"}
-	}
-	if strings.TrimSpace(query[close+1:]) != "" {
-		return "", "", sqlFailure{1235, "42000", "unsupported table definition"}
+		return "", "", "", sqlFailure{1064, "42000", "malformed CREATE TABLE"}
 	}
 	head := strings.TrimSpace(query[len("CREATE TABLE "):open])
-	return head, query[open+1 : close], nil
+	return head, query[open+1 : close], strings.TrimSpace(query[close+1:]), nil
+}
+
+func parseCreateTableOptions(value string) (uint64, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false, nil
+	}
+	const keyword = "AUTO_INCREMENT"
+	if !strings.HasPrefix(strings.ToLower(value), strings.ToLower(keyword)) || !wordEnd(value, len(keyword)) {
+		return 0, false, sqlFailure{1235, "42000", "unsupported table definition"}
+	}
+	remainder := strings.TrimSpace(value[len(keyword):])
+	if !strings.HasPrefix(remainder, "=") || strings.TrimSpace(remainder[1:]) == "" {
+		return 0, false, sqlFailure{1064, "42000", "invalid AUTO_INCREMENT table option"}
+	}
+	parsed, err := strconv.ParseUint(strings.TrimSpace(remainder[1:]), 10, 64)
+	if err != nil || parsed == 0 {
+		return 0, false, sqlFailure{1067, "42000", "invalid AUTO_INCREMENT value"}
+	}
+	return parsed, true, nil
 }
 
 func parseTableColumns(body string) (parsedTableColumns, error) {
@@ -1761,6 +1813,9 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 			definition.WriteString(" DEFAULT ")
 			definition.WriteString(canonicalDefaultValue(columnType, attribute.Default))
 		}
+		if attribute.AutoIncrement {
+			definition.WriteString(" AUTO_INCREMENT")
+		}
 	}
 	for _, constraint := range table.Constraints {
 		definition.WriteString(",\n  ")
@@ -1771,6 +1826,13 @@ func canonicalCreateTable(table catalog.Table) (string, error) {
 		definition.WriteString(canonicalIndexDefinition(index))
 	}
 	definition.WriteString("\n)")
+	if _, ok := autoIncrementColumn(table); ok {
+		state := autoIncrementStateForTable(table)
+		if !state.exhausted && state.next > 1 {
+			definition.WriteString("\nAUTO_INCREMENT=")
+			definition.WriteString(strconv.FormatUint(state.next, 10))
+		}
+	}
 	return definition.String(), nil
 }
 
@@ -1849,7 +1911,7 @@ func quoteIdentifier(value string) string {
 	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
 
-func mutateTableRows(definition *catalog.Definition, namespaceName, tableName string, transform func(catalog.Table) ([][]string, error)) error {
+func mutateTableRows(definition *catalog.Definition, namespaceName, tableName string, transform func(*catalog.Table) error) error {
 	namespace, found := definition.Namespaces[catalog.Key(namespaceName)]
 	if !found {
 		return errors.New("namespace does not exist")
@@ -1860,11 +1922,9 @@ func mutateTableRows(definition *catalog.Definition, namespaceName, tableName st
 	}
 	previousLength := len(table.Rows)
 	previousIndex := table.PrimaryIndex
-	rows, err := transform(table)
-	if err != nil {
+	if err := transform(&table); err != nil {
 		return err
 	}
-	table.Rows = rows
 	catalog.MaintainPrimaryIndex(&table, previousLength, previousIndex)
 	namespace.Tables[catalog.Key(tableName)] = table
 	definition.Namespaces[catalog.Key(namespaceName)] = namespace
@@ -1885,12 +1945,17 @@ func insertRows(s *relationExecutor, query string) (uint64, error) {
 	}
 	var affected uint64
 	action := func(definition *catalog.Definition) error {
-		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
-			currentPlan.table = table
-			rows, count, err := applyInsertPlan(currentPlan)
+			currentPlan.table = *table
+			rows, count, state, err := applyInsertPlan(currentPlan)
+			if err != nil {
+				return err
+			}
+			table.Rows = rows
+			setAutoIncrementState(table, state)
 			affected = count
-			return rows, err
+			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
@@ -1920,16 +1985,21 @@ func upsertRows(s *relationExecutor, query, assignments string) (uint64, error) 
 	if err != nil {
 		return 0, err
 	}
-	_, affected, err := applyUpsertPlan(plan)
+	_, affected, _, err := applyUpsertPlan(plan)
 	if err != nil {
 		return 0, err
 	}
 	action := func(definition *catalog.Definition) error {
-		return mutateTableRows(definition, plan.insert.namespace, plan.insert.name, func(table catalog.Table) ([][]string, error) {
+		return mutateTableRows(definition, plan.insert.namespace, plan.insert.name, func(table *catalog.Table) error {
 			currentPlan := plan
-			currentPlan.insert.table = table
-			rows, _, err := applyUpsertPlan(currentPlan)
-			return rows, err
+			currentPlan.insert.table = *table
+			rows, _, state, err := applyUpsertPlan(currentPlan)
+			if err != nil {
+				return err
+			}
+			table.Rows = rows
+			setAutoIncrementState(table, state)
+			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
@@ -2036,27 +2106,27 @@ func upsertValuesReference(raw string, indexes map[string]int) (int, bool, error
 	return index, true, nil
 }
 
-func applyUpsertPlan(plan upsertPlan) ([][]string, uint64, error) {
+func applyUpsertPlan(plan upsertPlan) ([][]string, uint64, autoIncrementState, error) {
 	input := plan.insert
 	input.table.Rows = nil
-	candidates, _, err := applyInsertPlan(input)
+	candidates, _, state, err := applyInsertPlan(input)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, autoIncrementState{}, err
 	}
 	indexes, err := tableColumnIndexes(plan.insert.table)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, autoIncrementState{}, err
 	}
 	rows, affected := cloneRows(plan.insert.table.Rows), uint64(0)
 	for number, candidate := range candidates {
 		var changed uint64
 		rows, changed, err = applyUpsertCandidate(plan, indexes, rows, candidate, number+1)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, autoIncrementState{}, err
 		}
 		affected += changed
 	}
-	return rows, affected, nil
+	return rows, affected, state, nil
 }
 
 func applyUpsertCandidate(plan upsertPlan, indexes map[string]int, rows [][]string, candidate []string, rowNumber int) ([][]string, uint64, error) {
@@ -2139,19 +2209,24 @@ func replaceRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	_, affected, err := applyReplacePlan(plan)
+	_, affected, _, err := applyReplacePlan(plan)
 	if err != nil {
 		return 0, err
 	}
 	action := func(definition *catalog.Definition) error {
-		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
-			currentPlan.table = table
+			currentPlan.table = *table
 			if err := validateReplaceDeletePhases(*definition, currentPlan); err != nil {
-				return nil, err
+				return err
 			}
-			rows, _, err := applyReplacePlan(currentPlan)
-			return rows, err
+			rows, _, state, err := applyReplacePlan(currentPlan)
+			if err != nil {
+				return err
+			}
+			table.Rows = rows
+			setAutoIncrementState(table, state)
+			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
@@ -2176,32 +2251,32 @@ func replaceInsertInput(query string) string {
 	return "INSERT INTO " + rest
 }
 
-func applyReplacePlan(plan insertPlan) ([][]string, uint64, error) {
-	candidates, err := replacementCandidates(plan)
+func applyReplacePlan(plan insertPlan) ([][]string, uint64, autoIncrementState, error) {
+	candidates, state, err := replacementCandidates(plan)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, autoIncrementState{}, err
 	}
 	indexes, err := tableColumnIndexes(plan.table)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, autoIncrementState{}, err
 	}
 	rows, affected := cloneRows(plan.table.Rows), uint64(0)
 	for _, candidate := range candidates {
 		conflicts, err := conflictingUniqueRows(plan.table, indexes, rows, candidate)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, autoIncrementState{}, err
 		}
 		rows = append(rowsWithoutConflicts(rows, conflicts), candidate)
 		affected += uint64(len(conflicts) + 1)
 	}
-	return rows, affected, nil
+	return rows, affected, state, nil
 }
 
-func replacementCandidates(plan insertPlan) ([][]string, error) {
+func replacementCandidates(plan insertPlan) ([][]string, autoIncrementState, error) {
 	input := plan
 	input.table.Rows = nil
-	candidates, _, err := applyInsertPlan(input)
-	return candidates, err
+	candidates, _, state, err := applyInsertPlan(input)
+	return candidates, state, err
 }
 
 func rowsWithoutConflicts(rows [][]string, conflicts map[int]bool) [][]string {
@@ -2217,7 +2292,7 @@ func rowsWithoutConflicts(rows [][]string, conflicts map[int]bool) [][]string {
 // validateReplaceDeletePhases observes the delete stage of each replacement.
 // A later insert cannot repair a foreign-key violation that the delete caused.
 func validateReplaceDeletePhases(definition catalog.Definition, plan insertPlan) error {
-	candidates, err := replacementCandidates(plan)
+	candidates, _, err := replacementCandidates(plan)
 	if err != nil {
 		return err
 	}
@@ -2250,8 +2325,9 @@ func validateReplaceDeletePhases(definition catalog.Definition, plan insertPlan)
 
 func replaceDefinitionRows(definition catalog.Definition, plan insertPlan, rows [][]string) (catalog.Definition, error) {
 	return catalog.Apply(definition, func(staged *catalog.Definition) error {
-		return mutateTableRows(staged, plan.namespace, plan.name, func(catalog.Table) ([][]string, error) {
-			return rows, nil
+		return mutateTableRows(staged, plan.namespace, plan.name, func(table *catalog.Table) error {
+			table.Rows = rows
+			return nil
 		})
 	})
 }
@@ -2555,29 +2631,35 @@ func insertColumnIndexes(table catalog.Table, columns []string) ([]int, error) {
 	return result, nil
 }
 
-func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
+func applyInsertPlan(plan insertPlan) ([][]string, uint64, autoIncrementState, error) {
 	if err := validateInsertColumnDefaults(plan.table, plan.columns); err != nil {
-		return nil, 0, err
+		return nil, 0, autoIncrementState{}, err
 	}
 	added := make([][]string, 0, len(plan.groups))
+	state := autoIncrementStateForTable(plan.table)
 	rowNumber := 1
 	for _, group := range plan.groups {
+		var row []string
 		if len(group) == 0 && plan.defaultValues {
-			added = append(added, defaultTableRow(plan.table))
-			rowNumber++
-			continue
-		}
-		if len(group) != len(plan.columns) {
-			return nil, 0, sqlFailure{1136, "21S01", "column count does not match value count"}
-		}
-		row := defaultTableRow(plan.table)
-		for valueIndex, value := range group {
-			columnIndex := plan.columns[valueIndex]
-			canonical, err := insertColumnValue(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
-			if err != nil {
-				return nil, 0, err
+			row = defaultTableRow(plan.table)
+		} else {
+			if len(group) != len(plan.columns) {
+				return nil, 0, autoIncrementState{}, sqlFailure{1136, "21S01", "column count does not match value count"}
 			}
-			row[columnIndex] = canonical
+			row = defaultTableRow(plan.table)
+			for valueIndex, value := range group {
+				columnIndex := plan.columns[valueIndex]
+				canonical, err := insertColumnValue(plan.table, columnIndex, value, rowNumber, plan.offsetMinutes)
+				if err != nil {
+					return nil, 0, autoIncrementState{}, err
+				}
+				row[columnIndex] = canonical
+			}
+		}
+		var err error
+		state, err = fillAutoIncrementValue(plan.table, row, state, rowNumber)
+		if err != nil {
+			return nil, 0, autoIncrementState{}, err
 		}
 		added = append(added, row)
 		rowNumber++
@@ -2588,7 +2670,7 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, error) {
 		copy(owned, rows)
 		rows = owned
 	}
-	return append(rows, added...), uint64(len(added)), nil
+	return append(rows, added...), uint64(len(added)), state, nil
 }
 
 func validateInsertColumnDefaults(table catalog.Table, columns []int) error {
@@ -2598,7 +2680,7 @@ func validateInsertColumnDefaults(table catalog.Table, columns []int) error {
 	}
 	for column := range table.Columns {
 		attribute := catalog.ColumnAttributeAt(table, column)
-		if supplied[column] || attribute.HasDefault || attribute.Nullable {
+		if supplied[column] || attribute.HasDefault || attribute.Nullable || attribute.AutoIncrement {
 			continue
 		}
 		return sqlFailure{1364, "HY000", fmt.Sprintf("Field '%s' doesn't have a default value", table.Columns[column])}
@@ -2611,6 +2693,9 @@ func insertColumnValue(table catalog.Table, columnIndex int, raw string, row, of
 		return canonicalColumnValueAtOffset(table, columnIndex, raw, row, offsetMinutes)
 	}
 	attribute := catalog.ColumnAttributeAt(table, columnIndex)
+	if attribute.AutoIncrement {
+		return storedSQLNullValue, nil
+	}
 	if attribute.HasDefault {
 		return attribute.Default, nil
 	}
@@ -2624,7 +2709,9 @@ func defaultTableRow(table catalog.Table) []string {
 	row := make([]string, len(table.Columns))
 	for index := range row {
 		attribute := catalog.ColumnAttributeAt(table, index)
-		if attribute.HasDefault {
+		if attribute.AutoIncrement {
+			row[index] = storedSQLNullValue
+		} else if attribute.HasDefault {
 			row[index] = attribute.Default
 		} else {
 			row[index] = storedSQLNullValue
@@ -2862,11 +2949,15 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 		return 0, err
 	}
 	action := func(definition *catalog.Definition) error {
-		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
-			currentPlan.table = table
+			currentPlan.table = *table
 			rows, _, err := applyUpdatePlan(currentPlan)
-			return rows, err
+			if err != nil {
+				return err
+			}
+			table.Rows = rows
+			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
@@ -3156,11 +3247,15 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 		return 0, err
 	}
 	action := func(definition *catalog.Definition) error {
-		return mutateTableRows(definition, plan.namespace, plan.name, func(table catalog.Table) ([][]string, error) {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
-			currentPlan.table = table
+			currentPlan.table = *table
 			rows, _, err := applyDeletePlan(currentPlan)
-			return rows, err
+			if err != nil {
+				return err
+			}
+			table.Rows = rows
+			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
@@ -4141,7 +4236,7 @@ func informationSchemaTableRows(definition catalog.Definition) [][]metadataValue
 func informationSchemaVirtualTableRows() [][]metadataValue {
 	rows := make([][]metadataValue, len(informationSchemaViews))
 	for index, view := range informationSchemaViews {
-		rows[index] = []metadataValue{{value: informationSchemaName}, {value: view.name}, {value: "SYSTEM VIEW"}}
+		rows[index] = []metadataValue{{value: informationSchemaName}, {value: view.name}, {value: "SYSTEM VIEW"}, {null: true}}
 	}
 	return rows
 }
@@ -4150,7 +4245,7 @@ func informationSchemaNamespaceTableRows(namespace catalog.Namespace) [][]metada
 	tables := sortedTables(namespace)
 	rows := make([][]metadataValue, len(tables))
 	for index, table := range tables {
-		rows[index] = []metadataValue{{value: namespace.Name}, {value: table.Name}, {value: "BASE TABLE"}}
+		rows[index] = []metadataValue{{value: namespace.Name}, {value: table.Name}, {value: "BASE TABLE"}, informationSchemaAutoIncrement(table)}
 	}
 	return rows
 }
@@ -4167,7 +4262,7 @@ func informationSchemaVirtualColumnRows() [][]metadataValue {
 	rows := make([][]metadataValue, 0)
 	for _, view := range informationSchemaViews {
 		for index, column := range view.columns {
-			rows = append(rows, informationSchemaColumnRow(informationSchemaName, view.name, column.name, index, metadataValue{value: baseType(column.typeName)}, metadataValue{value: column.typeName}))
+			rows = append(rows, informationSchemaColumnRow(informationSchemaName, view.name, column.name, index, metadataValue{value: baseType(column.typeName)}, metadataValue{value: column.typeName}, metadataValue{value: ""}))
 		}
 	}
 	return rows
@@ -4178,16 +4273,34 @@ func informationSchemaNamespaceColumnRows(namespace catalog.Namespace) [][]metad
 	for _, table := range sortedTables(namespace) {
 		for index, column := range table.Columns {
 			dataType, columnType := informationSchemaType(table, index)
-			rows = append(rows, informationSchemaColumnRow(namespace.Name, table.Name, column, index, dataType, columnType))
+			rows = append(rows, informationSchemaColumnRow(namespace.Name, table.Name, column, index, dataType, columnType, informationSchemaColumnExtra(table, index)))
 		}
 	}
 	return rows
 }
 
-func informationSchemaColumnRow(namespace, table, column string, index int, dataType, columnType metadataValue) []metadataValue {
+func informationSchemaColumnRow(namespace, table, column string, index int, dataType, columnType, extra metadataValue) []metadataValue {
 	return []metadataValue{
-		{value: namespace}, {value: table}, {value: column}, {value: strconv.Itoa(index + 1)}, dataType, columnType,
+		{value: namespace}, {value: table}, {value: column}, {value: strconv.Itoa(index + 1)}, dataType, columnType, extra,
 	}
+}
+
+func informationSchemaAutoIncrement(table catalog.Table) metadataValue {
+	if _, ok := autoIncrementColumn(table); !ok {
+		return metadataValue{null: true}
+	}
+	state := autoIncrementStateForTable(table)
+	if state.exhausted {
+		return metadataValue{null: true}
+	}
+	return metadataValue{value: strconv.FormatUint(state.next, 10)}
+}
+
+func informationSchemaColumnExtra(table catalog.Table, index int) metadataValue {
+	if catalog.ColumnAttributeAt(table, index).AutoIncrement {
+		return metadataValue{value: "auto_increment"}
+	}
+	return metadataValue{value: ""}
 }
 
 func informationSchemaType(table catalog.Table, index int) (metadataValue, metadataValue) {

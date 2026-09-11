@@ -35,15 +35,17 @@ type Namespace struct {
 	Tables map[string]Table `json:"tables"`
 }
 type Table struct {
-	Name             string             `json:"name,omitempty"`
-	Columns          []string           `json:"columns"`
-	ColumnTypes      []string           `json:"column_types,omitempty"`
-	ColumnAttributes []ColumnAttribute  `json:"column_attributes,omitempty"`
-	Constraints      []Constraint       `json:"constraints,omitempty"`
-	Indexes          []Index            `json:"indexes,omitempty"`
-	Rows             [][]string         `json:"rows,omitempty"`
-	PrimaryIndex     map[string]int     `json:"-"`
-	OrderedIndexes   *OrderedIndexCache `json:"-"`
+	Name                   string             `json:"name,omitempty"`
+	Columns                []string           `json:"columns"`
+	ColumnTypes            []string           `json:"column_types,omitempty"`
+	ColumnAttributes       []ColumnAttribute  `json:"column_attributes,omitempty"`
+	AutoIncrement          uint64             `json:"auto_increment,omitempty"`
+	AutoIncrementExhausted bool               `json:"auto_increment_exhausted,omitempty"`
+	Constraints            []Constraint       `json:"constraints,omitempty"`
+	Indexes                []Index            `json:"indexes,omitempty"`
+	Rows                   [][]string         `json:"rows,omitempty"`
+	PrimaryIndex           map[string]int     `json:"-"`
+	OrderedIndexes         *OrderedIndexCache `json:"-"`
 }
 
 // Index is one declared B-tree access path. Primary and unique constraints
@@ -67,9 +69,10 @@ type IndexPart struct {
 // ColumnAttribute records rules that belong to one column. An absent attribute
 // list is compatible with catalogs written before column rules were supported.
 type ColumnAttribute struct {
-	Nullable   bool   `json:"nullable"`
-	HasDefault bool   `json:"has_default,omitempty"`
-	Default    string `json:"default,omitempty"`
+	Nullable      bool   `json:"nullable"`
+	HasDefault    bool   `json:"has_default,omitempty"`
+	Default       string `json:"default,omitempty"`
+	AutoIncrement bool   `json:"auto_increment,omitempty"`
 }
 
 const (
@@ -385,12 +388,14 @@ func cloneDefinition(source Definition) Definition {
 		cloned := Namespace{Name: value.Name, Tables: make(map[string]Table, len(value.Tables))}
 		for table, definition := range value.Tables {
 			cloned.Tables[table] = Table{
-				Name:             definition.Name,
-				Columns:          append([]string(nil), definition.Columns...),
-				ColumnTypes:      append([]string(nil), definition.ColumnTypes...),
-				ColumnAttributes: append([]ColumnAttribute(nil), definition.ColumnAttributes...),
-				Constraints:      CloneConstraints(definition.Constraints),
-				Indexes:          CloneIndexes(definition.Indexes),
+				Name:                   definition.Name,
+				Columns:                append([]string(nil), definition.Columns...),
+				ColumnTypes:            append([]string(nil), definition.ColumnTypes...),
+				ColumnAttributes:       append([]ColumnAttribute(nil), definition.ColumnAttributes...),
+				AutoIncrement:          definition.AutoIncrement,
+				AutoIncrementExhausted: definition.AutoIncrementExhausted,
+				Constraints:            CloneConstraints(definition.Constraints),
+				Indexes:                CloneIndexes(definition.Indexes),
 				// Row images and primary indexes are immutable after publication.
 				// Snapshots share both so validators and point lookups stay O(1);
 				// writers copy the index before mutating it.
@@ -489,7 +494,9 @@ func sameSchemaTable(left, right Table) bool {
 		sameCatalogStrings(left.ColumnTypes, right.ColumnTypes) &&
 		len(left.Constraints) == len(right.Constraints) &&
 		len(left.Indexes) == len(right.Indexes) &&
-		sameColumnAttributes(left.ColumnAttributes, right.ColumnAttributes)
+		sameColumnAttributes(left.ColumnAttributes, right.ColumnAttributes) &&
+		left.AutoIncrement == right.AutoIncrement &&
+		left.AutoIncrementExhausted == right.AutoIncrementExhausted
 }
 
 func (s *Store) persistLocked(definition Definition) error {
