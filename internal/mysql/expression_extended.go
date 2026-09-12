@@ -217,12 +217,19 @@ func substringValue(arguments []exprValue) (exprValue, error) {
 	if position == 0 {
 		return exprValue{kind: valueString, binary: binary}, nil
 	}
+	if binary {
+		start, end, err := substringBounds(len(text), position, arguments)
+		if err != nil {
+			return exprValue{}, err
+		}
+		return exprValue{kind: valueString, s: text[start:end], binary: true}, nil
+	}
 	runes := []rune(text)
 	start, end, err := substringBounds(len(runes), position, arguments)
 	if err != nil {
 		return exprValue{}, err
 	}
-	return exprValue{kind: valueString, s: string(runes[start:end]), binary: binary}, nil
+	return exprValue{kind: valueString, s: string(runes[start:end]), binary: false}, nil
 }
 
 func hasNullArgument(arguments []exprValue) bool {
