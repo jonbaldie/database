@@ -2137,7 +2137,7 @@ func applyUpsertPlan(plan upsertPlan) ([][]string, uint64, autoIncrementState, e
 	rows, affected := cloneRows(plan.insert.table.Rows), uint64(0)
 	for number, candidate := range candidates {
 		var changed uint64
-		rows, changed, err = applyUpsertCandidate(plan, indexes, rows, candidate, number+1)
+		rows, changed, state, err = applyUpsertCandidate(plan, indexes, rows, candidate, number+1, state)
 		if err != nil {
 			return nil, 0, autoIncrementState{}, err
 		}
@@ -2146,25 +2146,30 @@ func applyUpsertPlan(plan upsertPlan) ([][]string, uint64, autoIncrementState, e
 	return rows, affected, state, nil
 }
 
-func applyUpsertCandidate(plan upsertPlan, indexes map[string]int, rows [][]string, candidate []string, rowNumber int) ([][]string, uint64, error) {
+func applyUpsertCandidate(plan upsertPlan, indexes map[string]int, rows [][]string, candidate []string, rowNumber int, state autoIncrementState) ([][]string, uint64, autoIncrementState, error) {
 	conflicts, err := conflictingUniqueRows(plan.insert.table, indexes, rows, candidate)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, autoIncrementState{}, err
 	}
 	conflict := firstConflictingRow(rows, conflicts)
 	if conflict < 0 {
-		return append(rows, candidate), 1, nil
+		return append(rows, candidate), 1, state, nil
 	}
-	updated, err := applyUpsertAssignments(plan, rows[conflict], candidate, rowNumber)
+	existing := rows[conflict]
+	updated, err := applyUpsertAssignments(plan, existing, candidate, rowNumber)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, autoIncrementState{}, err
 	}
 	changed := uint64(0)
-	if !equalTableRow(updated, rows[conflict]) {
+	if !equalTableRow(updated, existing) {
 		changed = 2
 	}
 	rows[conflict] = updated
-	return rows, changed, nil
+	state, err = ratchetAutoIncrementForUpdatedRow(plan.insert.table, existing, updated, state)
+	if err != nil {
+		return nil, 0, autoIncrementState{}, err
+	}
+	return rows, changed, state, nil
 }
 
 func firstConflictingRow(rows [][]string, conflicts map[int]bool) int {
@@ -2966,7 +2971,7 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err := s.acquireWriteLocks(locks); err != nil {
 		return 0, err
 	}
-	_, affected, err := applyUpdatePlan(plan)
+	_, affected, _, err := applyUpdatePlan(plan)
 	if err != nil {
 		return 0, err
 	}
@@ -2974,11 +2979,12 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
 			currentPlan.table = *table
-			rows, _, err := applyUpdatePlan(currentPlan)
+			rows, _, state, err := applyUpdatePlan(currentPlan)
 			if err != nil {
 				return err
 			}
 			table.Rows = rows
+			setAutoIncrementState(table, state)
 			return nil
 		})
 	}
@@ -3099,28 +3105,29 @@ func assignmentValues(value string, indexes map[string]int) ([]updateAssignment,
 	return updates, nil
 }
 
-func applyUpdatePlan(plan updatePlan) ([][]string, uint64, error) {
+func applyUpdatePlan(plan updatePlan) ([][]string, uint64, autoIncrementState, error) {
+	state := autoIncrementStateForTable(plan.table)
 	if err := validateUpdateAssignments(plan); err != nil {
-		return nil, 0, err
+		return nil, 0, state, err
 	}
 	if key, ok := pointUpdatePrimaryKey(plan); ok {
 		if row, found := pointUpdateRow(plan); found {
 			matched, err := plan.matcher(row)
 			if err != nil {
-				return nil, 0, err
+				return nil, 0, state, err
 			}
 			if matched {
 				return applyPointUpdatePlan(plan, key)
 			}
-			return plan.table.Rows, 0, nil
+			return plan.table.Rows, 0, state, nil
 		}
 	}
 	changed, err := changedUpdateRows(plan)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, state, err
 	}
 	if len(changed) == 0 {
-		return plan.table.Rows, 0, nil
+		return plan.table.Rows, 0, state, nil
 	}
 	return applyChangedUpdateRows(plan, changed)
 }
@@ -3139,15 +3146,16 @@ func changedUpdateRows(plan updatePlan) ([]int, error) {
 	return changed, nil
 }
 
-func applyChangedUpdateRows(plan updatePlan, changed []int) ([][]string, uint64, error) {
+func applyChangedUpdateRows(plan updatePlan, changed []int) ([][]string, uint64, autoIncrementState, error) {
 	rows := make([][]string, len(plan.table.Rows))
 	copy(rows, plan.table.Rows)
+	state := autoIncrementStateForTable(plan.table)
 	affected := uint64(0)
 	for _, rowIndex := range changed {
 		next := append([]string(nil), rows[rowIndex]...)
 		assigned, err := assignUpdateRow(plan, next, rowIndex+1)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, autoIncrementState{}, err
 		}
 		rowChanged := false
 		for column, value := range assigned {
@@ -3160,8 +3168,12 @@ func applyChangedUpdateRows(plan updatePlan, changed []int) ([][]string, uint64,
 		if rowChanged {
 			affected++
 		}
+		state, err = ratchetAutoIncrementForUpdatedRow(plan.table, plan.table.Rows[rowIndex], next, state)
+		if err != nil {
+			return nil, 0, autoIncrementState{}, err
+		}
 	}
-	return rows, affected, nil
+	return rows, affected, state, nil
 }
 
 func pointUpdatePrimaryKey(plan updatePlan) (string, bool) {
@@ -3187,18 +3199,18 @@ func pointUpdatePrimaryKey(plan updatePlan) (string, bool) {
 	return plan.primaryKey, true
 }
 
-func applyPointUpdatePlan(plan updatePlan, key string) ([][]string, uint64, error) {
+func applyPointUpdatePlan(plan updatePlan, key string) ([][]string, uint64, autoIncrementState, error) {
 	index := catalog.EnsurePrimaryIndex(&plan.table)
 	position, ok := index[key]
 	if !ok {
-		return plan.table.Rows, 0, nil
+		return plan.table.Rows, 0, autoIncrementStateForTable(plan.table), nil
 	}
 	rows := make([][]string, len(plan.table.Rows))
 	copy(rows, plan.table.Rows)
 	next := append([]string(nil), rows[position]...)
 	assigned, err := assignUpdateRow(plan, next, position+1)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, autoIncrementState{}, err
 	}
 	changed := false
 	for column, value := range assigned {
@@ -3208,10 +3220,15 @@ func applyPointUpdatePlan(plan updatePlan, key string) ([][]string, uint64, erro
 		next[column] = value
 	}
 	rows[position] = next
+	state := autoIncrementStateForTable(plan.table)
 	if !changed {
-		return rows, 0, nil
+		return rows, 0, state, nil
 	}
-	return rows, 1, nil
+	state, err = ratchetAutoIncrementForUpdatedRow(plan.table, plan.table.Rows[position], next, state)
+	if err != nil {
+		return nil, 0, autoIncrementState{}, err
+	}
+	return rows, 1, state, nil
 }
 
 // validateUpdateAssignments type-checks assignment expressions that do not need

@@ -196,6 +196,22 @@ func advanceAutoIncrement(state autoIncrementState, value, limit uint64) autoInc
 	return state
 }
 
+func ratchetAutoIncrementForUpdatedRow(table catalog.Table, previous, current []string, state autoIncrementState) (autoIncrementState, error) {
+	column, ok := autoIncrementColumn(table)
+	if !ok || column >= len(previous) || column >= len(current) || previous[column] == current[column] {
+		return state, nil
+	}
+	value, positive := autoIncrementPositiveValue(current[column])
+	if !positive {
+		return state, nil
+	}
+	limit, err := autoIncrementLimit(table, column)
+	if err != nil {
+		return state, err
+	}
+	return advanceAutoIncrement(state, value, limit), nil
+}
+
 func autoIncrementPositiveValue(value string) (uint64, bool) {
 	if value == storedSQLNullValue {
 		return 0, false
