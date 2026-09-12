@@ -28,10 +28,17 @@ func sessionFunctionValue(s *session, name string, arguments []exprValue) (exprV
 		if len(arguments) != 0 {
 			return exprValue{}, true, wrongArgumentCount(name)
 		}
-		return stringValue(s.database), true, nil
+		return sessionDatabaseValue(s), true, nil
 	default:
 		return exprValue{}, false, nil
 	}
+}
+
+func sessionDatabaseValue(s *session) exprValue {
+	if s.database == "" {
+		return nullValue()
+	}
+	return stringValue(s.database)
 }
 
 func sessionVersionComment(s *session) string {
