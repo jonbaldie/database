@@ -350,7 +350,7 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	if err := client.reset(); err != nil {
 		t.Fatal(err)
 	}
-	if got := client.query("SELECT DATABASE()"); got.err != "" || got.rows[0][0] != "" {
+	if got := client.query("SELECT DATABASE()"); got.err != "" || len(got.rows) != 1 || len(got.nulls) != 1 || len(got.nulls[0]) != 1 || !got.nulls[0][0] {
 		t.Fatalf("reset did not restore initial namespace: %#v", got)
 	}
 

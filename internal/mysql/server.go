@@ -993,8 +993,7 @@ func (s *textStatementExecutor) builtinStatement(query, lower string) (*queryRes
 		return result, true, err
 	}
 	result, found := map[string]*queryResult{
-		"select version()":  {columns: []string{"VERSION()"}, rows: [][]string{{"8.4.11-database-" + s.server.config.Version}}},
-		"select database()": {columns: []string{"DATABASE()"}, rows: [][]string{{s.database}}},
+		"select version()": {columns: []string{"VERSION()"}, rows: [][]string{{"8.4.11-database-" + s.server.config.Version}}},
 	}[lower]
 	return result, found, nil
 }
