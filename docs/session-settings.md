@@ -30,6 +30,13 @@ restores all session values and the initial namespace.
 `SHOW SESSION VARIABLES` and `SHOW GLOBAL VARIABLES` show the same registry.
 Global values are server defaults. `SET GLOBAL` is unsupported.
 
+`SHOW STATUS`, `SHOW SESSION STATUS`, and `SHOW GLOBAL STATUS` return the
+non-sensitive server resource counters that the diagnostics listener publishes:
+execution and temporary-storage allocation and peaks, spill, cancellation,
+timeout, and exhaustion counts. Scope keywords are accepted but do not change
+the values, because these counters are server-wide. `LIKE 'pattern'` filters on
+`Variable_name`.
+
 `sql_mode` has the fixed value
 `STRICT_ALL_TABLES,ONLY_FULL_GROUP_BY,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO`.
 The client character values are fixed to `utf8mb4`. Server limits, server

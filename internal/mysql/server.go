@@ -1069,6 +1069,13 @@ func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryRes
 	if result, handled, err := showCatalog(&catalogQueries, query, lower); handled {
 		return result, true, err
 	}
+	if result, handled, err := showTableStructure(&catalogQueries, query, lower); handled {
+		return result, true, err
+	}
+	if target, ok := describeTarget(query, lower); ok {
+		result, err := catalogQueries.describe(query, target)
+		return result, true, err
+	}
 	if strings.HasPrefix(lower, "use ") {
 		selector := databaseSelector{s.session}
 		return nil, true, selector.use(strings.TrimSpace(query[4:]))
