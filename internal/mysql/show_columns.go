@@ -30,9 +30,9 @@ func (s *catalogExecutor) describe(query, target string) (*queryResult, error) {
 	return showColumns(table, false, ""), nil
 }
 
-// showTableStructure dispatches the structure-introspection statements that
-// report column shape and server counters: SHOW COLUMNS and SHOW STATUS.
-func showTableStructure(s *catalogExecutor, query, lower string) (*queryResult, bool, error) {
+// showColumnsAndStatusStatement dispatches the column-structure and server
+// counter statements: SHOW COLUMNS and SHOW STATUS.
+func showColumnsAndStatusStatement(s *catalogExecutor, query, lower string) (*queryResult, bool, error) {
 	switch {
 	case isShowColumnsStatement(lower):
 		result, err := s.showColumnsStatement(query, lower)
@@ -147,7 +147,8 @@ func (s *catalogExecutor) columnPrivileges(namespaceName string) string {
 // Scope keywords are accepted because this catalog's counters are server-wide,
 // so the session and global shapes agree.
 func isShowStatusStatement(lower string) bool {
-	return lower == "show status" || hasAnyPrefix(lower, "show status ", "show session status", "show global status")
+	return lower == "show status" || lower == "show session status" || lower == "show global status" ||
+		hasAnyPrefix(lower, "show status ", "show session status ", "show global status ")
 }
 
 // showStatus publishes the non-sensitive server counters that diagnostics
@@ -194,7 +195,7 @@ func showColumns(table catalog.Table, full bool, privileges string) *queryResult
 		if attribute.HasDefault && attribute.Default != storedSQLNullValue {
 			defaultCell, defaultNull = attribute.Default, false
 		}
-		row := []string{
+		shared := []string{
 			column,
 			columnType,
 			nullLabel(attribute),
@@ -202,20 +203,13 @@ func showColumns(table catalog.Table, full bool, privileges string) *queryResult
 			defaultCell,
 			showColumnExtra(attribute),
 		}
-		null := []bool{false, false, false, false, defaultNull, false}
+		sharedNull := []bool{false, false, false, false, defaultNull, false}
+		row, null := shared, sharedNull
 		if full {
-			row = []string{
-				column,
-				columnType,
-				"",
-				nullLabel(attribute),
-				showColumnKey(table, index),
-				defaultCell,
-				showColumnExtra(attribute),
-				privileges,
-				"",
-			}
-			null = []bool{false, false, true, false, false, defaultNull, false, false, false}
+			row = append([]string{column, columnType, ""}, shared[2:]...)
+			row = append(row, privileges, "")
+			null = append([]bool{false, false, true}, sharedNull[2:]...)
+			null = append(null, false, false)
 		}
 		rows = append(rows, row)
 		nulls = append(nulls, null)

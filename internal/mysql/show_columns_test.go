@@ -1,7 +1,7 @@
 package mysql
 
 import (
-	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -50,7 +50,7 @@ func TestDescribeReportsColumnStructure(t *testing.T) {
 }
 
 func equalSlices(left, right any) bool {
-	return fmt.Sprint(left) == fmt.Sprint(right)
+	return reflect.DeepEqual(left, right)
 }
 
 func TestShowColumnsMatchesDescribeShape(t *testing.T) {
@@ -167,6 +167,15 @@ func TestShowFullColumnsProjectsAccountGrants(t *testing.T) {
 	}
 	if len(result.rows) != 1 || result.rows[0][7] != "select" {
 		t.Fatalf("reader privileges = %#v, want select only", result.rows)
+	}
+}
+
+func TestShowStatusPrefixesStayExact(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{"SHOW SESSION STATUSX", "SHOW GLOBAL STATUSX", "SHOW STATUSX"} {
+		if _, err := executeStatement(executor, query); err == nil || !strings.Contains(err.Error(), "unsupported query") {
+			t.Fatalf("%s err = %v, want unsupported query", query, err)
+		}
 	}
 }
 
