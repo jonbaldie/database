@@ -461,6 +461,7 @@ func renameTableInDefinition(definition *catalog.Definition, namespaceName, oldN
 	table.Name = newName
 	namespace.Tables[catalog.Key(newName)] = table
 	definition.Namespaces[catalog.Key(namespaceName)] = namespace
+	renameForeignKeyTableReferences(definition, namespaceName, oldName, newName)
 	return nil
 }
 
@@ -497,6 +498,7 @@ func (s *ddlExecutor) alterTable(query string) error {
 		}
 		definition.Namespaces[catalog.Key(namespace)] = namespaceDefinition
 		renameForeignKeyReferences(definition, namespace, name, columnRenames(actions))
+		renameForeignKeyTableReferences(definition, namespace, name, alteredTableName(name, actions))
 		return nil
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1025, "HY000", err.Error()})
@@ -532,6 +534,32 @@ func renameForeignKeyReferences(definition *catalog.Definition, namespaceName, t
 	for namespaceKey, namespace := range definition.Namespaces {
 		for tableKey, table := range namespace.Tables {
 			if renameTableForeignKeyReferences(table, namespaceKey, target, renames) {
+				namespace.Tables[tableKey] = table
+			}
+		}
+	}
+}
+
+// renameForeignKeyTableReferences rewrites the referenced table name recorded
+// by every foreign key pointing at the renamed table, including self-
+// references and references from other namespaces.
+func renameForeignKeyTableReferences(definition *catalog.Definition, namespaceName, oldName, newName string) {
+	if oldName == newName {
+		return
+	}
+	target := catalog.Key(namespaceName) + "\x00" + catalog.Key(oldName)
+	for namespaceKey, namespace := range definition.Namespaces {
+		for tableKey, table := range namespace.Tables {
+			changed := false
+			for index := range table.Constraints {
+				constraint := &table.Constraints[index]
+				if constraint.Type != catalog.ConstraintTypeForeignKey || foreignKeyTarget(*constraint, namespaceKey) != target {
+					continue
+				}
+				constraint.ReferencedTable = newName
+				changed = true
+			}
+			if changed {
 				namespace.Tables[tableKey] = table
 			}
 		}
