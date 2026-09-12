@@ -99,9 +99,11 @@ SHOW COLLATION
 
 The supported forms use the MySQL 8.4.11 `FROM`/`IN`, `LIKE`, and `WHERE`
 clauses wherever those forms apply. `SHOW DATABASES` and `SCHEMATA` have the
-same visibility boundary. `SHOW [FULL] PROCESSLIST`, `SHOW WARNINGS`,
-`SHOW SESSION VARIABLES`, `SHOW GLOBAL VARIABLES`, and `SHOW GRANTS` remain
-governed by their owning contracts; this document does not redefine them.
+same visibility boundary. `DESCRIBE` and `DESC` report the plain `SHOW COLUMNS`
+shape. `SHOW [FULL] PROCESSLIST`, `SHOW WARNINGS`, `SHOW SESSION VARIABLES`,
+`SHOW GLOBAL VARIABLES`, `SHOW [SESSION|GLOBAL] STATUS`, and `SHOW GRANTS`
+remain governed by their owning contracts; this document does not redefine
+them.
 
 Other `SHOW` families, including `SHOW TABLE STATUS` and `SHOW ENGINES`, are
 unsupported and fail explicitly. The absence of `SHOW ENGINES` is deliberate:

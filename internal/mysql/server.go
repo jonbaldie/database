@@ -1069,6 +1069,13 @@ func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryRes
 	if result, handled, err := showCatalog(&catalogQueries, query, lower); handled {
 		return result, true, err
 	}
+	if result, handled, err := showColumnsAndStatusStatement(&catalogQueries, query, lower); handled {
+		return result, true, err
+	}
+	if target, ok := describeTarget(query, lower); ok {
+		result, err := catalogQueries.describe(query, target)
+		return result, true, err
+	}
 	if strings.HasPrefix(lower, "use ") {
 		selector := databaseSelector{s.session}
 		return nil, true, selector.use(strings.TrimSpace(query[4:]))
@@ -1649,20 +1656,10 @@ func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error)
 }
 
 func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
-	namespaceName, tableName, err := s.showTableTarget(query)
+	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
+	_, table, err := s.resolveShowTable(query, target)
 	if err != nil {
 		return nil, err
-	}
-	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
-	if !ok {
-		return nil, metadataNamespaceFailure(s.server.config.Catalog, namespaceName)
-	}
-	table, ok := namespace.Tables[catalog.Key(tableName)]
-	if !ok {
-		return nil, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
-	}
-	if table.Name == "" {
-		table.Name = strings.ToLower(tableName)
 	}
 	definition, err := canonicalCreateTable(table)
 	if err != nil {
@@ -1672,25 +1669,9 @@ func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 }
 
 func (s *catalogExecutor) showIndexes(query string) (*queryResult, error) {
-	target := showIndexTarget(query)
-	parts, valid := splitQualifiedIdentifier(target)
-	if !valid || len(parts) > 2 {
-		return nil, sqlFailure{1064, "42000", "invalid table name"}
-	}
-	namespaceName, tableName, err := s.qualifiedShowTableTarget(target, parts)
+	_, table, err := s.resolveShowTable(query, showIndexTarget(query))
 	if err != nil {
 		return nil, err
-	}
-	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
-	if !ok {
-		return nil, metadataNamespaceFailure(s.server.config.Catalog, namespaceName)
-	}
-	table, ok := namespace.Tables[catalog.Key(tableName)]
-	if !ok {
-		return nil, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
-	}
-	if table.Name == "" {
-		table.Name = strings.ToLower(tableName)
 	}
 	return showTableIndexes(table), nil
 }
@@ -1766,15 +1747,6 @@ func indexVisibility(index catalog.Index) string {
 		return "NO"
 	}
 	return "YES"
-}
-
-func (s *catalogExecutor) showTableTarget(query string) (string, string, error) {
-	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
-	parts, valid := splitQualifiedIdentifier(target)
-	if !valid || len(parts) > 2 {
-		return "", "", sqlFailure{1064, "42000", "invalid table name"}
-	}
-	return s.qualifiedShowTableTarget(target, parts)
 }
 
 func (s *catalogExecutor) qualifiedShowTableTarget(target string, parts []string) (string, string, error) {
