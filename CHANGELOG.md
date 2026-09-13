@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.12] - 2026-09-13
+
+### Added
+
+- Supported `AUTO_INCREMENT` on one indexed integer column per table. An
+  omitted value, `NULL`, or `DEFAULT` takes the next value, starting at `1`. An
+  explicit positive value at or above the next value advances the sequence.
+  Deletes do not reuse values, and `TRUNCATE TABLE` resets the sequence.
+- Supported the column-introspection statements `SHOW [FULL] COLUMNS FROM|IN`,
+  `SHOW [FULL] FIELDS FROM|IN`, `DESCRIBE`, and `DESC`, and supported
+  `SHOW [SESSION|GLOBAL] STATUS` with `LIKE` filtering. `SHOW FULL COLUMNS`
+  reports the session account's namespace grants in the `Privileges` column.
+
+### Fixed
+
+- Accepted double-quoted string literals in projections, predicates, and
+  `INSERT ... VALUES` instead of failing with MySQL error 1064.
+- Preserved bytewise `LOCATE` matching and byte offsets for binary operands.
+- Preserved binary semantics through `REPLACE`, `REVERSE`, `LTRIM`, `RTRIM`,
+  `TRIM`, `UPPER`, `LOWER`, and `CHAR_LENGTH`.
+- Made `SUBSTRING` byte-exact for binary arguments while keeping character
+  semantics for text.
+- Returned `NULL` from database functions when no database is selected.
+- Advanced the auto-increment counter when `UPDATE` or an
+  `ON DUPLICATE KEY UPDATE` conflict sets an explicit positive value, instead
+  of allocating a duplicate value on a later `INSERT`.
+- Updated every foreign key's referenced table name when a parent table is
+  renamed, including self-referencing and cross-namespace references.
+
 ## [0.2.11] - 2026-09-10
 
 ### Fixed
