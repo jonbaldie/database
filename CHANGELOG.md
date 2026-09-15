@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Returned MySQL error 1064 instead of ending the server process for a
+  statement that stops immediately after its target keyword, such as
+  `SELECT FROM`, or that carries a trailing dotted part, such as
+  ``SELECT 1 FROM `t` .``. The identifier reader indexed the first byte of an
+  empty value, so any authenticated account could stop every session.
+
 ## [0.2.12] - 2026-09-13
 
 ### Added
