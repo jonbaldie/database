@@ -44,11 +44,15 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		os.Exit(1)
 	}
-	executable = filepath.Join(directory, "database")
-	build := exec.Command("go", "build", "-trimpath", "-o", executable, "./cmd/database")
-	build.Dir = root
-	if err := build.Run(); err != nil {
-		os.Exit(1)
+	if configured := os.Getenv("DATABASE_BLACKBOX_EXECUTABLE"); configured != "" {
+		executable = configured
+	} else {
+		executable = filepath.Join(directory, "database")
+		build := exec.Command("go", "build", "-trimpath", "-o", executable, "./cmd/database")
+		build.Dir = root
+		if err := build.Run(); err != nil {
+			os.Exit(1)
+		}
 	}
 	code := m.Run()
 	os.RemoveAll(directory)
