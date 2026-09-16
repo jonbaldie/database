@@ -208,7 +208,7 @@ func parseLikeComparison(p *exprParser, left exprValue, negate bool) (exprValue,
 		}
 		escape = value.render()
 	}
-	return evalLike(left, right, escape, negate)
+	return evalLike(left, right, escape, negate, p.session)
 }
 
 func (p *exprParser) parseAdditive() (exprValue, error) {
