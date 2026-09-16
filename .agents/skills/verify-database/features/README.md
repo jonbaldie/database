@@ -41,9 +41,9 @@ the matching feature file as the recipe.
 - Wire proof includes the statement JSON line with `ok`, `columns`, `rows`, and
   `error_code` where relevant.
 - CLI proof includes the command, stdout, stderr, and exit code.
-- Mutation proof includes a second independent view of the stored value: the
-  on-disk `control.sh catalog <run>`, or a re-read after
-  `control.sh restart <run>`.
+- Mutation proof includes a second independent view: a re-read after
+  `control.sh restart <run>` for row data, or the on-disk
+  `control.sh catalog <run>` for schema and account metadata.
 - A privilege, constraint, or limit is proven only when the forbidden case
   fails with the documented `error_code`.
 - Write artifacts to `/tmp/verify-database-evidence/<run>/` and name the run

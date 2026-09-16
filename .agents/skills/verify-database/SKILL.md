@@ -168,9 +168,10 @@ Proof standards for this repository:
   substitute for the product surface.
 - **Capture the action and the resulting state**, not only the final read. Keep
   the mutating statement's JSON line as well as the reading one.
-- **Verify the side effect.** A write is proven by the on-disk `catalog.json`
-  (`control.sh catalog`), or by re-reading it after `control.sh restart`, not by
-  the `INSERT` returning `ok`.
+- **Verify the side effect.** A write is proven by re-reading it after
+  `control.sh restart`, not by the `INSERT` returning `ok`. The on-disk
+  `catalog.json` (`control.sh catalog`) proves schema and account metadata only,
+  not row data.
 - **No mocks.** The server has no external dependency to isolate. Everything is
   the real binary, real sockets, and a real data directory.
 - **Test the negative too.** A privilege, constraint, or limit is only proven
