@@ -46,9 +46,9 @@ Preconditions:
 - **Update and delete.** Run
   `control.sh sql <run> 'USE shop' 'INSERT INTO orders VALUES (2, 100)' 'UPDATE orders SET total = 300 WHERE id = 1' 'DELETE FROM orders WHERE id = 2' 'SELECT id, total FROM orders'`.
   The final read returns exactly `[["1","300"]]`.
-- **Confirm the side effect on disk.** Run `control.sh catalog <run>`. The JSON
-  has `namespaces.shop.tables.orders` with `columns`, `column_types`, the
-  `PRIMARY` constraint, and the stored `rows`.
+- **Confirm schema metadata on disk.** Run `control.sh catalog <run>`. The JSON
+  has `namespaces.shop.tables.orders` with `columns`, `column_types`,
+  `column_attributes`, and the `PRIMARY` constraint.
 - **Confirm durability.** Run `control.sh restart <run>`, then
   `control.sh sql <run> 'USE shop' 'SELECT id, total FROM orders'`. The same row
   comes back from the freshly started process.
@@ -68,8 +68,9 @@ Preconditions:
   becomes the literal `"NULL"`. Compare against `"250"`, not `250`.
 - `rows_affected` is not populated by this helper. Prove a mutation with a
   follow-up read, not with a row count.
-- `INSERT` returning `"ok":true` is not durability proof. Only the on-disk
-  catalog or a post-restart read proves the write landed.
+- `INSERT` returning `"ok":true` is not durability proof. A post-restart read
+  proves the write landed; the on-disk catalog stores schema and account
+  metadata, not row data.
 - The SQL surface is finite and documented in `docs/mysql-sql-behaviour.md`.
   Before reporting a bug, check that the statement is in scope for v0.1.
 

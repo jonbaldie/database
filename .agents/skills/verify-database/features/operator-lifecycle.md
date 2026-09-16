@@ -56,7 +56,7 @@ Preconditions:
 - **Refuse a second owner.** Run
   `bin/database serve --data-directory <DATA_DIR> --mysql-listen-address=127.0.0.1:34567 --format=json`
   while the run is live. The result object has
-  `"exit_class":"operation_failed"`, `"exit_code":6`, and the diagnostic summary
+  `"exit_class":"precondition"`, `"exit_code":3`, and the diagnostic summary
   `data directory is already in use`. The live instance keeps serving.
 - **Validate stored data.** Run
   `bin/database data validate --data-directory <DATA_DIR> --result=json`. The
