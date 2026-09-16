@@ -3,7 +3,9 @@ package blackbox_test
 import (
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonbaldie/database/test/blackbox"
 )
@@ -339,6 +341,22 @@ func TestMySQLLocksResourcesCancellationAndExplanationKeepWireContract(t *testin
 	if result := observer.query("SELECT id, value FROM entries ORDER BY id"); result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{"1", "10"}, {"2", "20"}}) {
 		t.Fatalf("transaction after resource failure = %#v", result)
 	}
+
+	mustQuery(t, worker, "SET statement_timeout_ms = 50")
+	likeStarted := time.Now()
+	likeQuery := "SELECT '" + strings.Repeat("a", 16384) + "' LIKE '" + strings.Repeat("%b", 16384) + "'"
+	likeResult := worker.query(likeQuery)
+	likeElapsed := time.Since(likeStarted)
+	if likeResult.errCode != 3024 || likeResult.errState != "HY000" {
+		t.Fatalf("scalar LIKE timeout = %#v", likeResult)
+	}
+	if likeElapsed > 250*time.Millisecond {
+		t.Fatalf("scalar LIKE took %s with 50ms timeout; want under 250ms", likeElapsed)
+	}
+	if result := worker.query("SELECT 1"); result.err != "" {
+		t.Fatalf("session after scalar LIKE timeout = %#v", result)
+	}
+	mustQuery(t, worker, "SET statement_timeout_ms = 1000")
 
 	mustQuery(t, worker, "BEGIN")
 	mustQuery(t, worker, "UPDATE entries SET value = 30 WHERE id = 2")

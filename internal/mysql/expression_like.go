@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 )
 
-func evalLike(value, pattern exprValue, escape string, negate bool) (exprValue, error) {
+func evalLike(value, pattern exprValue, escape string, negate bool, session *session) (exprValue, error) {
 	if value.isNull() || pattern.isNull() {
 		return nullValue(), nil
 	}
@@ -23,7 +23,10 @@ func evalLike(value, pattern exprValue, escape string, negate bool) (exprValue, 
 	// CAST AS BINARY result carries no text collation, so the matcher never
 	// folds case for it.
 	fold := value.collation != collationBin && !value.binary && !pattern.binary
-	matched := likeMatch(value.render(), pattern.render(), escapeRune, fold)
+	matched, err := likeMatchRunes([]rune(value.render()), []rune(pattern.render()), escapeRune, fold, session)
+	if err != nil {
+		return exprValue{}, err
+	}
 	return boolValue(matched != negate), nil
 }
 
@@ -51,7 +54,8 @@ func likeEscapeRune(escape string) (rune, bool) {
 }
 
 func likeMatch(value, pattern string, escape rune, fold bool) bool {
-	return likeMatchRunes([]rune(value), []rune(pattern), escape, fold)
+	matched, _ := likeMatchRunes([]rune(value), []rune(pattern), escape, fold, nil)
+	return matched
 }
 
 type likeTokenKind byte
@@ -67,7 +71,9 @@ type likeToken struct {
 	literal rune
 }
 
-func likeMatchRunes(value, pattern []rune, escape rune, fold bool) bool {
+const likeCheckIntervalMask = 15
+
+func likeMatchRunes(value, pattern []rune, escape rune, fold bool, session *session) (bool, error) {
 	// Dynamic programming keeps one bounded row for each pattern token. A
 	// percent token consumes zero or more value runes, so its row recurrence is
 	// previous[i] (zero runes) or current[i-1] (one more rune). This removes the
@@ -78,12 +84,17 @@ func likeMatchRunes(value, pattern []rune, escape rune, fold bool) bool {
 	previous := make([]bool, valueLength+1)
 	current := make([]bool, valueLength+1)
 	previous[0] = true
-	for _, token := range tokens {
+	for index, token := range tokens {
+		if (index&likeCheckIntervalMask) == 0 && session != nil {
+			if err := session.checkStatementResources(); err != nil {
+				return false, err
+			}
+		}
 		clear(current)
 		applyLikeToken(token, value, valueLength, previous, current, fold)
 		previous, current = current, previous
 	}
-	return previous[valueLength]
+	return previous[valueLength], nil
 }
 
 func tokenizeLikePattern(pattern []rune, escape rune) []likeToken {
