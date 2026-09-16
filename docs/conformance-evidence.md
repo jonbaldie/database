@@ -36,6 +36,7 @@ go test ./test/blackbox -run '^TestExternalDriverCompatibilityProfile$' -count=1
 ## Exploratory feedback
 
 - [2026-09-16 operator, SQL, and account journeys](exploratory-testing/2026-09-16-operator-sql-accounts.md)
+- [2026-09-16 coverage-guided property testing](exploratory-testing/2026-09-16-cgpt.md)
 
 `make performance` runs the fixed performance acceptance harness and writes
 `dist/performance-evidence.json`. See the performance section below for the
