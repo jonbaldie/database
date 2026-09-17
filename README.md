@@ -310,6 +310,7 @@ make quality
 | [docs/operator-automation.md](docs/operator-automation.md) | Operator command inputs and results |
 | [docs/distribution.md](docs/distribution.md) | Supported systems and release artifacts |
 | [docs/performance-acceptance.md](docs/performance-acceptance.md) | Experimental performance release gate |
+| [docs/exploratory-testing/](docs/exploratory-testing/) | Exploratory testing passes and their findings |
 | [COMPATIBILITY.md](COMPATIBILITY.md) | Public compatibility policy |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes |
 
