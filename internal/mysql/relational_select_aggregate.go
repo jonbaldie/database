@@ -787,6 +787,12 @@ func projectAggregateWindow(projection relationalProjection, tail string, column
 func parseComposedAggregateProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
 	length := len(expression)
 	for index := 0; index < length; index++ {
+		if isSQLQuote(expression[index]) {
+			if end, ok := quotedSQLLiteralEnd(expression, index); ok {
+				index = end
+				continue
+			}
+		}
 		nameStart, nameEnd := aggregateNameAt(expression, index)
 		if nameStart < 0 {
 			continue
@@ -972,6 +978,12 @@ func composedWindowFunction(expression string, start int) (int, int, relationalF
 func nextComposedWindowCandidate(expression string, start int) (int, bool) {
 	length := len(expression)
 	for start < length {
+		if isSQLQuote(expression[start]) {
+			if end, ok := quotedSQLLiteralEnd(expression, start); ok {
+				start = end + 1
+				continue
+			}
+		}
 		if !isAggregateIdentifierByte(expression[start]) {
 			start++
 			continue
@@ -1817,6 +1829,13 @@ func (p *relationalSelectPlan) replaceGroupAggregates(expression string, group [
 	var result strings.Builder
 	length := len(expression)
 	for index := 0; index < length; {
+		if isSQLQuote(expression[index]) {
+			if end, ok := quotedSQLLiteralEnd(expression, index); ok {
+				result.WriteString(expression[index : end+1])
+				index = end + 1
+				continue
+			}
+		}
 		literal, end, found, err := p.groupAggregateLiteral(expression, index, group)
 		if err != nil {
 			return "", err
