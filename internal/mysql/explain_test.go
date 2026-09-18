@@ -329,3 +329,73 @@ func TestExplainMatchesExecutorAcceptance(t *testing.T) {
 		_ = explainResult
 	}
 }
+
+func TestExplainAnalyzeJSONEmitsRequiredArrays(t *testing.T) {
+	executor := explainExecutor(t)
+	for _, query := range []string{
+		"EXPLAIN ANALYZE FORMAT=JSON SELECT 1",
+		"EXPLAIN ANALYZE FORMAT=JSON SELECT id FROM orders WHERE customer_id = 7",
+	} {
+		result, err := executeStatement(executor, query)
+		if err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		var document map[string]any
+		if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+			t.Fatalf("decode analysis: %v", err)
+		}
+		assertNoNullArrays(t, document)
+	}
+}
+
+func assertNoNullArrays(t *testing.T, document map[string]any) {
+	t.Helper()
+	if document["warnings"] == nil {
+		t.Errorf("document.warnings is null, want array")
+	}
+	statement, ok := document["statement"].(map[string]any)
+	if !ok {
+		t.Fatalf("statement block missing: %#v", document)
+	}
+	if statement["parameters"] == nil {
+		t.Errorf("statement.parameters is null, want array")
+	}
+	plan, ok := document["plan"].(map[string]any)
+	if !ok {
+		t.Fatalf("plan block missing: %#v", document)
+	}
+	assertOperatorNoNullArrays(t, plan)
+}
+
+func assertOperatorNoNullArrays(t *testing.T, operator map[string]any) {
+	t.Helper()
+	if operator["warnings"] == nil {
+		t.Errorf("operator %s warnings is null, want array", operator["kind"])
+	}
+	if operator["children"] == nil {
+		t.Errorf("operator %s children is null, want array", operator["kind"])
+	}
+	if output, ok := operator["output"].(map[string]any); ok {
+		if output["columns"] == nil {
+			t.Errorf("operator %s output.columns is null, want array", operator["kind"])
+		}
+		if output["ordering"] == nil {
+			t.Errorf("operator %s output.ordering is null, want array", operator["kind"])
+		}
+		if output["unique_keys"] == nil {
+			t.Errorf("operator %s output.unique_keys is null, want array", operator["kind"])
+		}
+	}
+	if actual, ok := operator["actual"].(map[string]any); ok {
+		if actual["warnings"] == nil {
+			t.Errorf("operator %s actual.warnings is null, want array", operator["kind"])
+		}
+	}
+	if children, ok := operator["children"].([]any); ok {
+		for _, child := range children {
+			if childMap, ok := child.(map[string]any); ok {
+				assertOperatorNoNullArrays(t, childMap)
+			}
+		}
+	}
+}

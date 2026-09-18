@@ -618,9 +618,63 @@ func mutationEstimates(table Table, rows, childCost float64) Estimates {
 
 // RenderJSON returns the canonical single-document JSON encoding.
 func RenderJSON(document *Document) (string, error) {
+	normalizeDocument(document)
 	encoded, err := json.Marshal(document)
 	if err != nil {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+func normalizeDocument(document *Document) {
+	if document == nil {
+		return
+	}
+	if document.Warnings == nil {
+		document.Warnings = []Warning{}
+	}
+	if document.Statement.Parameters == nil {
+		document.Statement.Parameters = []Parameter{}
+	}
+	normalizeOperator(document.Plan)
+}
+
+func normalizeOperator(operator *Operator) {
+	if operator == nil {
+		return
+	}
+	if operator.Warnings == nil {
+		operator.Warnings = []Warning{}
+	}
+	if operator.Children == nil {
+		operator.Children = []*Operator{}
+	}
+	normalizeOutput(&operator.Output)
+	normalizeActual(operator.Actual)
+	for _, child := range operator.Children {
+		normalizeOperator(child)
+	}
+}
+
+func normalizeOutput(output *Output) {
+	if output.Columns == nil {
+		output.Columns = []string{}
+	}
+	if output.Ordering == nil {
+		output.Ordering = []OrderingTerm{}
+	}
+	if output.UniqueKeys == nil {
+		output.UniqueKeys = [][]string{}
+	}
+	for index := range output.UniqueKeys {
+		if output.UniqueKeys[index] == nil {
+			output.UniqueKeys[index] = []string{}
+		}
+	}
+}
+
+func normalizeActual(actual *Actual) {
+	if actual != nil && actual.Warnings == nil {
+		actual.Warnings = []Warning{}
+	}
 }

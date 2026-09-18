@@ -162,6 +162,27 @@ func assertPublicPlan(t *testing.T, value any, hasRuntimeEvidence bool) {
 			t.Errorf("public plan node %v lacks %q: %#v", plan["id"], field, plan)
 		}
 	}
+	if plan["warnings"] == nil {
+		t.Errorf("public plan node %v warnings is null, want array", plan["id"])
+	}
+	if output, ok := plan["output"].(map[string]any); ok {
+		if output["columns"] == nil {
+			t.Errorf("public plan node %v output.columns is null, want array", plan["id"])
+		}
+		if output["ordering"] == nil {
+			t.Errorf("public plan node %v output.ordering is null, want array", plan["id"])
+		}
+		if output["unique_keys"] == nil {
+			t.Errorf("public plan node %v output.unique_keys is null, want array", plan["id"])
+		}
+	}
+	if hasRuntimeEvidence {
+		if actual, ok := plan["actual"].(map[string]any); ok {
+			if actual["warnings"] == nil {
+				t.Errorf("public plan node %v actual.warnings is null, want array", plan["id"])
+			}
+		}
+	}
 	_, hasActual := plan["actual"]
 	if hasActual != hasRuntimeEvidence {
 		t.Errorf("public plan node %v runtime evidence: %#v", plan["id"], plan)
@@ -205,6 +226,15 @@ func TestMySQLAnalyzeAndLiveExplanationUseTheWireContract(t *testing.T) {
 	if analysis["mode"] != "analyze" || analysis["partial"] != false {
 		t.Fatalf("analyzed envelope: %#v", analysis)
 	}
+	if analysis["warnings"] == nil {
+		t.Errorf("analyzed explanation warnings is null, want array")
+	}
+	if statement, ok := analysis["statement"].(map[string]any); ok {
+		if statement["parameters"] == nil {
+			t.Errorf("analyzed explanation statement.parameters is null, want array")
+		}
+	}
+	assertPublicPlan(t, analysis["plan"], true)
 	if complete, ok := analysis["timing"].(map[string]any)["execution"].(map[string]any)["complete"].(bool); !ok || !complete {
 		t.Fatalf("analyzed timing: %#v", analysis["timing"])
 	}
