@@ -310,12 +310,13 @@ func replaceValue(arguments []exprValue) (exprValue, error) {
 // comparing windows of the same rune length by their collation key.
 func replaceCollated(text, search []rune, replacement string) string {
 	searchKey := characterComparisonKey(defaultStringType, string(search))
+	textLength, searchLength := len(text), len(search)
 	var out strings.Builder
-	for index := 0; index < len(text); {
-		if index+len(search) <= len(text) &&
-			characterComparisonKey(defaultStringType, string(text[index:index+len(search)])) == searchKey {
+	for index := 0; index < textLength; {
+		if index+searchLength <= textLength &&
+			characterComparisonKey(defaultStringType, string(text[index:index+searchLength])) == searchKey {
 			out.WriteString(replacement)
-			index += len(search)
+			index += searchLength
 			continue
 		}
 		out.WriteRune(text[index])
