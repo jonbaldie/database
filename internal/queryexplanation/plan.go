@@ -3,6 +3,7 @@ package queryexplanation
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 )
 
 // Select describes a supported read to be explained.
@@ -361,7 +362,7 @@ func distinctOperator(child *Operator) *Operator {
 func sortOperator(orders []Order, child *Operator) *Operator {
 	ordering := make([]OrderingTerm, len(orders))
 	for index, order := range orders {
-		ordering[index] = OrderingTerm{Expression: order.Expression, Direction: order.Direction}
+		ordering[index] = OrderingTerm{Expression: order.Expression, Direction: strings.ToLower(order.Direction)}
 	}
 	output := child.Output
 	output.Ordering = ordering
