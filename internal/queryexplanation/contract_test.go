@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 var operatorKinds = []string{
@@ -223,4 +224,70 @@ func repositoryRoot(t *testing.T) string {
 		t.Fatal("locate contract test")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+}
+
+func TestQueryExplanationRenderJSONEnforcesRequiredArrays(t *testing.T) {
+	table := Table{Database: "app", Name: "items", Columns: []string{"id", "val"}}
+	read := Select{Table: table, Columns: []string{"id"}}
+	plan := PlanSelect("0.1.0", "SELECT id FROM items", "app", read)
+
+	now := time.Now()
+	analyzed := Analyze(plan, 5*time.Millisecond, 1)
+	snapshot := Snapshot(plan, 42, now, 2*time.Millisecond)
+
+	for name, doc := range map[string]*Document{
+		"plan":     plan,
+		"analyze":  analyzed,
+		"snapshot": snapshot,
+	} {
+		encoded, err := RenderJSON(doc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(encoded), &parsed); err != nil {
+			t.Fatalf("%s unmarshal: %v", name, err)
+		}
+		if parsed["warnings"] == nil {
+			t.Errorf("%s document warnings is null", name)
+		}
+		statement, ok := parsed["statement"].(map[string]any)
+		if !ok || statement["parameters"] == nil {
+			t.Errorf("%s statement parameters is null", name)
+		}
+		assertOperatorRequiredArrays(t, name, parsed["plan"].(map[string]any))
+	}
+}
+
+func assertOperatorRequiredArrays(t *testing.T, docName string, operator map[string]any) {
+	t.Helper()
+	if operator["warnings"] == nil {
+		t.Errorf("%s operator %v warnings is null", docName, operator["id"])
+	}
+	if operator["children"] == nil {
+		t.Errorf("%s operator %v children is null", docName, operator["id"])
+	}
+	if output, ok := operator["output"].(map[string]any); ok {
+		if output["columns"] == nil {
+			t.Errorf("%s operator %v output.columns is null", docName, operator["id"])
+		}
+		if output["ordering"] == nil {
+			t.Errorf("%s operator %v output.ordering is null", docName, operator["id"])
+		}
+		if output["unique_keys"] == nil {
+			t.Errorf("%s operator %v output.unique_keys is null", docName, operator["id"])
+		}
+	}
+	if actual, ok := operator["actual"].(map[string]any); ok {
+		if actual["warnings"] == nil {
+			t.Errorf("%s operator %v actual.warnings is null", docName, operator["id"])
+		}
+	}
+	if children, ok := operator["children"].([]any); ok {
+		for _, child := range children {
+			if childMap, ok := child.(map[string]any); ok {
+				assertOperatorRequiredArrays(t, docName, childMap)
+			}
+		}
+	}
 }

@@ -97,6 +97,9 @@ func (m *RuntimeMetrics) RecordOperator(id, inputRows, outputRows, filteredRows,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	actual := m.operators[id]
+	if actual.Warnings == nil {
+		actual.Warnings = []Warning{}
+	}
 	actual.Invocations++
 	actual.InputRows += inputRows
 	actual.OutputRows += outputRows
@@ -123,6 +126,9 @@ func (m *RuntimeMetrics) SetRoot(outputRows, peakMemoryBytes int, elapsed, lockW
 		return
 	}
 	actual := m.operators[m.rootID]
+	if actual.Warnings == nil {
+		actual.Warnings = []Warning{}
+	}
 	if actual.Invocations == 0 {
 		actual.Invocations = 1
 	}
@@ -171,6 +177,9 @@ func (m *RuntimeMetrics) RecordSpill(id, spillCount, spillBytes, temporaryStorag
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	actual := m.operators[id]
+	if actual.Warnings == nil {
+		actual.Warnings = []Warning{}
+	}
 	actual.SpillCount += spillCount
 	actual.SpillBytes += spillBytes
 	if temporaryStorageBytes > actual.TemporaryStorageBytes {
@@ -243,6 +252,9 @@ func setRoot(operators map[int]Actual, rootID, outputRows, peakMemoryBytes int, 
 		return
 	}
 	actual := operators[rootID]
+	if actual.Warnings == nil {
+		actual.Warnings = []Warning{}
+	}
 	if actual.Invocations == 0 {
 		actual.Invocations = 1
 	}
@@ -268,6 +280,9 @@ func attachCompletedRuntime(operator *Operator, observed map[int]Actual) {
 	if !found {
 		actual = unavailableActual()
 	}
+	if actual.Warnings == nil {
+		actual.Warnings = []Warning{}
+	}
 	actual.RowsVsEstimateRatio = estimateRatio(actual.OutputRows, operator.Estimates.Rows)
 	operator.Actual = &actual
 	for _, child := range operator.Children {
@@ -281,6 +296,9 @@ func attachPartialRuntime(operator *Operator, observed map[int]Actual) {
 	}
 	if actual, found := observed[operator.ID]; found {
 		actual.RowsVsEstimateRatio = nil
+		if actual.Warnings == nil {
+			actual.Warnings = []Warning{}
+		}
 		actual.Warnings = append(actual.Warnings, Warning{
 			Code: "PARTIAL_RUNTIME_EVIDENCE", Severity: "info",
 			Summary: "Runtime counters were captured before this operator completed.",
@@ -293,10 +311,14 @@ func attachPartialRuntime(operator *Operator, observed map[int]Actual) {
 }
 
 func unavailableActual() Actual {
-	return Actual{Warnings: []Warning{{
-		Code: "RUNTIME_OPERATOR_NOT_INVOKED", Severity: "info",
-		Summary: "The operator did not run during this execution.",
-	}}}
+	return Actual{
+		Storage: StorageEvidence{},
+		Wait:    WaitEvidence{},
+		Warnings: []Warning{{
+			Code: "RUNTIME_OPERATOR_NOT_INVOKED", Severity: "info",
+			Summary: "The operator did not run during this execution.",
+		}},
+	}
 }
 
 func cloneActual(source Actual) Actual {
@@ -309,7 +331,12 @@ func cloneActual(source Actual) Actual {
 		total := *source.TotalMS
 		result.TotalMS = &total
 	}
-	result.Warnings = append([]Warning(nil), source.Warnings...)
+	if source.Warnings != nil {
+		result.Warnings = make([]Warning, len(source.Warnings))
+		copy(result.Warnings, source.Warnings)
+	} else {
+		result.Warnings = []Warning{}
+	}
 	return result
 }
 
@@ -338,7 +365,7 @@ func partialSnapshotWarning() Warning {
 func resourceWarnings(failure string) []Warning {
 	warning, found := resourceWarning(failure)
 	if !found {
-		return nil
+		return []Warning{}
 	}
 	return []Warning{warning}
 }
@@ -378,9 +405,9 @@ func cloneRuntimeDocument(source *Document) *Document {
 		return nil
 	}
 	document := *source
-	document.Statement.Parameters = append([]Parameter(nil), source.Statement.Parameters...)
+	document.Statement.Parameters = cloneParameters(source.Statement.Parameters)
 	document.Statement.PlanningSettings = cloneSettings(source.Statement.PlanningSettings)
-	document.Warnings = append([]Warning(nil), source.Warnings...)
+	document.Warnings = cloneWarnings(source.Warnings)
 	document.Plan = cloneOperator(source.Plan)
 	if source.Timing.Execution != nil {
 		execution := *source.Timing.Execution
@@ -391,6 +418,15 @@ func cloneRuntimeDocument(source *Document) *Document {
 		document.Snapshot = &snapshot
 	}
 	return &document
+}
+
+func cloneParameters(source []Parameter) []Parameter {
+	if source == nil {
+		return []Parameter{}
+	}
+	clone := make([]Parameter, len(source))
+	copy(clone, source)
+	return clone
 }
 
 func cloneSettings(settings map[string]string) map[string]string {
@@ -406,31 +442,74 @@ func cloneOperator(source *Operator) *Operator {
 		return nil
 	}
 	operator := *source
-	operator.Objects = append([]ObjectReference(nil), source.Objects...)
+	operator.Objects = cloneObjects(source.Objects)
 	operator.Predicates = clonePredicates(source.Predicates)
 	operator.Statistics = cloneStatistics(source.Statistics)
 	operator.Opportunities = cloneOpportunities(source.Opportunities)
 	operator.Output = cloneOutput(source.Output)
-	operator.Warnings = append([]Warning(nil), source.Warnings...)
-	if source.Strategy != nil {
-		strategy := *source.Strategy
-		operator.Strategy = &strategy
-	}
-	if source.Choice != nil {
-		choice := *source.Choice
-		choice.Alternatives = append([]Alternative(nil), source.Choice.Alternatives...)
-		operator.Choice = &choice
-	}
-	if source.Actual != nil {
-		actual := *source.Actual
-		actual.Warnings = append([]Warning(nil), source.Actual.Warnings...)
-		operator.Actual = &actual
-	}
-	operator.Children = make([]*Operator, len(source.Children))
-	for index, child := range source.Children {
-		operator.Children[index] = cloneOperator(child)
-	}
+	operator.Warnings = cloneWarnings(source.Warnings)
+	operator.Strategy = cloneStrategy(source.Strategy)
+	operator.Choice = cloneChoice(source.Choice)
+	operator.Actual = cloneActualPtr(source.Actual)
+	operator.Children = cloneChildren(source.Children)
 	return &operator
+}
+
+func cloneObjects(source []ObjectReference) []ObjectReference {
+	if source == nil {
+		return nil
+	}
+	clone := make([]ObjectReference, len(source))
+	copy(clone, source)
+	return clone
+}
+
+func cloneWarnings(source []Warning) []Warning {
+	if source == nil {
+		return []Warning{}
+	}
+	clone := make([]Warning, len(source))
+	copy(clone, source)
+	return clone
+}
+
+func cloneStrategy(source *Strategy) *Strategy {
+	if source == nil {
+		return nil
+	}
+	strategy := *source
+	return &strategy
+}
+
+func cloneChoice(source *Choice) *Choice {
+	if source == nil {
+		return nil
+	}
+	choice := *source
+	if source.Alternatives != nil {
+		choice.Alternatives = make([]Alternative, len(source.Alternatives))
+		copy(choice.Alternatives, source.Alternatives)
+	}
+	return &choice
+}
+
+func cloneActualPtr(source *Actual) *Actual {
+	if source == nil {
+		return nil
+	}
+	actual := cloneActual(*source)
+	return &actual
+}
+
+func cloneChildren(source []*Operator) []*Operator {
+	if source == nil {
+		return []*Operator{}
+	}
+	children := make([]*Operator, len(source))
+	for index, child := range source {
+		children[index] = cloneOperator(child)
+	}
+	return children
 }
 
 func clonePredicates(source []Predicate) []Predicate {
@@ -460,11 +539,30 @@ func cloneOpportunities(source []Opportunity) []Opportunity {
 
 func cloneOutput(source Output) Output {
 	output := source
-	output.Columns = append([]string(nil), source.Columns...)
-	output.Ordering = append([]OrderingTerm(nil), source.Ordering...)
-	output.UniqueKeys = make([][]string, len(source.UniqueKeys))
-	for index, key := range source.UniqueKeys {
-		output.UniqueKeys[index] = append([]string(nil), key...)
+	if source.Columns != nil {
+		output.Columns = make([]string, len(source.Columns))
+		copy(output.Columns, source.Columns)
+	} else {
+		output.Columns = []string{}
+	}
+	if source.Ordering != nil {
+		output.Ordering = make([]OrderingTerm, len(source.Ordering))
+		copy(output.Ordering, source.Ordering)
+	} else {
+		output.Ordering = []OrderingTerm{}
+	}
+	if source.UniqueKeys != nil {
+		output.UniqueKeys = make([][]string, len(source.UniqueKeys))
+		for index, key := range source.UniqueKeys {
+			if key != nil {
+				output.UniqueKeys[index] = make([]string, len(key))
+				copy(output.UniqueKeys[index], key)
+			} else {
+				output.UniqueKeys[index] = []string{}
+			}
+		}
+	} else {
+		output.UniqueKeys = [][]string{}
 	}
 	return output
 }
