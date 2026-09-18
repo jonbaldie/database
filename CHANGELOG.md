@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.13] - 2026-09-18
 
 ### Fixed
 
@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SELECT FROM`, or that carries a trailing dotted part, such as
   ``SELECT 1 FROM `t` .``. The identifier reader indexed the first byte of an
   empty value, so any authenticated account could stop every session.
+- Enforced statement deadlines cooperatively during scalar `LIKE` evaluation
+  so long inputs and wildcards cannot block the server or ignore cancellation.
 
 ## [0.2.12] - 2026-09-13
 
