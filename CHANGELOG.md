@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Implemented the documented catalog `SHOW` clauses: `SHOW [FULL] TABLES`,
+  `SHOW COLUMNS`, and `SHOW INDEX` now accept `FROM`/`IN` with a database name,
+  and `LIKE` or `WHERE` where MySQL does. Added `SHOW CHARACTER SET` and
+  `SHOW COLLATION`, and `DESCRIBE table column`. `SHOW INDEX FROM t FROM db` no
+  longer folds the second clause into the table name. `LIKE` filtering keeps
+  NULL flags aligned with rows.
+
 ## [0.2.13] - 2026-09-18
 
 ### Fixed

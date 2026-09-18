@@ -22,12 +22,30 @@ func describeTarget(query, lower string) (string, bool) {
 	return "", false
 }
 
-func (s *catalogExecutor) describe(query, target string) (*queryResult, error) {
-	_, table, err := s.resolveShowTable(query, target)
+func (s *catalogExecutor) describe(target string) (*queryResult, error) {
+	tableText, tail, ok := nextShowIdentifier(target)
+	if !ok {
+		return nil, sqlFailure{1064, "42000", "invalid table name"}
+	}
+	_, table, err := s.resolveShowTable(tableText)
 	if err != nil {
 		return nil, err
 	}
-	return showColumns(table, false, ""), nil
+	result := showColumns(table, false, "")
+	if strings.TrimSpace(tail) == "" {
+		return result, nil
+	}
+	// DESCRIBE tbl col_name | wild filters the reported columns.
+	pattern, rest, ok := nextShowString(tail)
+	if !ok {
+		var word string
+		word, rest = nextShowWord(tail)
+		pattern = scalar(word)
+	}
+	if strings.TrimSpace(rest) != "" {
+		return nil, showSyntaxFailure(strings.TrimSpace(rest))
+	}
+	return filterShowLike(result, pattern), nil
 }
 
 // showColumnsAndStatusStatement dispatches the column-structure and server
@@ -86,21 +104,40 @@ func hasAnyPrefix(value string, prefixes ...string) bool {
 
 func (s *catalogExecutor) showColumnsStatement(query, lower string) (*queryResult, error) {
 	remainder, full := showColumnsTarget(query, lower)
-	target := strings.TrimSpace(remainder)
-	if index := strings.Index(strings.ToLower(remainder), " like "); index >= 0 {
-		target = strings.TrimSpace(remainder[:index])
+	if strings.TrimSpace(remainder) == "" {
+		return nil, sqlFailure{1064, "42000", "invalid table name"}
 	}
-	namespaceName, table, err := s.resolveShowTable(query, target)
+	clauses, err := parseShowClauses("from " + remainder)
+	if err != nil {
+		return nil, err
+	}
+	namespaceName, table, err := s.resolveShowTable(showClauseTarget(clauses))
 	if err != nil {
 		return nil, err
 	}
 	result := showColumns(table, full, s.columnPrivileges(namespaceName))
-	return filterShowLike(result, query, lower), nil
+	return s.applyShowClauses(result, clauses)
+}
+
+// showClauseTarget reports the table named by the leading FROM/IN clause. A
+// second clause names its database, so SHOW ... FROM tbl FROM db reads as
+// db.tbl unless the table is already qualified.
+func showClauseTarget(clauses showClauses) string {
+	if len(clauses.from) == 0 {
+		return ""
+	}
+	table := clauses.from[0]
+	if len(clauses.from) == 2 {
+		if parts, ok := splitQualifiedIdentifier(table); ok && len(parts) == 1 {
+			return clauses.from[1] + "." + table
+		}
+	}
+	return table
 }
 
 // resolveShowTable resolves the table named by a catalog SHOW or DESCRIBE
 // target against the statement-scoped catalog snapshot.
-func (s *catalogExecutor) resolveShowTable(query, target string) (string, catalog.Table, error) {
+func (s *catalogExecutor) resolveShowTable(target string) (string, catalog.Table, error) {
 	parts, valid := splitQualifiedIdentifier(target)
 	if !valid || len(parts) > 2 {
 		return "", catalog.Table{}, sqlFailure{1064, "42000", "invalid table name"}
@@ -174,7 +211,17 @@ func (s *catalogExecutor) showStatus(query, lower string) (*queryResult, error) 
 	for _, counter := range counters {
 		result.rows = append(result.rows, []string{counter.name, strconv.FormatInt(counter.value, 10)})
 	}
-	return filterShowLike(result, query, lower), nil
+	clauses, err := parseShowClauses(showStatusTail(query, lower))
+	if err != nil {
+		return nil, err
+	}
+	return s.applyShowClauses(result, clauses)
+}
+
+// showStatusTail reports the LIKE or WHERE text after SHOW [scope] STATUS,
+// keeping the caller's spelling of any pattern.
+func showStatusTail(query, lower string) string {
+	return strings.TrimSpace(query)[strings.Index(lower, "status")+len("status"):]
 }
 
 // showColumns renders the per-column structure one DESCRIBE or SHOW COLUMNS

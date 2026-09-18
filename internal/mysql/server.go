@@ -1073,7 +1073,7 @@ func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryRes
 		return result, true, err
 	}
 	if target, ok := describeTarget(query, lower); ok {
-		result, err := catalogQueries.describe(query, target)
+		result, err := catalogQueries.describe(target)
 		return result, true, err
 	}
 	if strings.HasPrefix(lower, "use ") {
@@ -1088,49 +1088,91 @@ func (s *textStatementExecutor) catalogStatement(query, lower string) (*queryRes
 
 func showCatalog(s *catalogExecutor, query, lower string) (*queryResult, bool, error) {
 	switch {
-	case lower == "show databases" || strings.HasPrefix(lower, "show databases like "):
-		return filterShowLike(s.showDatabases(), query, lower), true, nil
 	case strings.HasPrefix(lower, "show create database ") || strings.HasPrefix(lower, "show create schema "):
 		result, err := s.showCreateDatabase(query)
 		return result, true, err
 	case strings.HasPrefix(lower, "show create table "):
 		result, err := s.showCreateTable(query)
 		return result, true, err
-	case showIndexTarget(query) != "":
-		result, err := s.showIndexes(query)
-		return result, true, err
-	case lower == "show tables" || strings.HasPrefix(lower, "show tables like "):
-		result, err := s.showTables()
-		return filterShowLike(result, query, lower), true, err
-	default:
-		return nil, false, nil
 	}
+	for _, form := range []struct {
+		prefixes []string
+		run      func(*catalogExecutor, showClauses) (*queryResult, error)
+	}{
+		{[]string{"show databases", "show schemas"}, (*catalogExecutor).showDatabasesStatement},
+		{[]string{"show tables"}, func(s *catalogExecutor, clauses showClauses) (*queryResult, error) {
+			return s.showTablesStatement(clauses, false)
+		}},
+		{[]string{"show full tables"}, func(s *catalogExecutor, clauses showClauses) (*queryResult, error) {
+			return s.showTablesStatement(clauses, true)
+		}},
+		{[]string{"show character set", "show charset"}, func(s *catalogExecutor, clauses showClauses) (*queryResult, error) {
+			return s.applyShowClauses(showCharacterSet(), clauses, "Maxlen")
+		}},
+		{[]string{"show collation"}, func(s *catalogExecutor, clauses showClauses) (*queryResult, error) {
+			return s.applyShowClauses(showCollation(), clauses, "Id", "Sortlen")
+		}},
+		{[]string{"show index", "show indexes", "show keys"}, (*catalogExecutor).showIndexesStatement},
+	} {
+		rest, ok := cutShowPrefix(query, lower, form.prefixes...)
+		if !ok {
+			continue
+		}
+		clauses, err := parseShowClauses(rest)
+		if err != nil {
+			return nil, true, err
+		}
+		result, err := form.run(s, clauses)
+		return result, true, err
+	}
+	return nil, false, nil
 }
 
-func filterShowLike(result *queryResult, query, lower string) *queryResult {
-	if result == nil {
-		return result
-	}
-	pattern, ok := showLikePattern(query, lower)
-	if !ok {
-		return result
-	}
-	rows := make([][]string, 0, len(result.rows))
-	for _, row := range result.rows {
-		if len(row) > 0 && mysqlLike(row[0], pattern) {
-			rows = append(rows, row)
+// cutShowPrefix reports the text after the first matching statement prefix,
+// which must end at a word boundary.
+func cutShowPrefix(query, lower string, prefixes ...string) (string, bool) {
+	value := strings.TrimSpace(query)
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(lower, prefix) && (len(lower) == len(prefix) || strings.IndexByte(" \t\r\n", lower[len(prefix)]) >= 0) {
+			return value[len(prefix):], true
 		}
 	}
-	result.rows = rows
-	return result
+	return "", false
 }
 
-func showLikePattern(query, lower string) (string, bool) {
-	index := strings.Index(lower, " like ")
-	if index < 0 {
-		return "", false
+func (s *catalogExecutor) showDatabasesStatement(clauses showClauses) (*queryResult, error) {
+	if len(clauses.from) > 0 {
+		return nil, showSyntaxFailure("FROM")
 	}
-	return scalar(strings.TrimSpace(query[index+len(" like "):])), true
+	return s.applyShowClauses(s.showDatabases(), clauses)
+}
+
+func (s *catalogExecutor) showTablesStatement(clauses showClauses, full bool) (*queryResult, error) {
+	if len(clauses.from) > 1 {
+		return nil, showSyntaxFailure(clauses.from[1])
+	}
+	database := s.database
+	if len(clauses.from) == 1 {
+		database = identifier(clauses.from[0])
+		if database == "" {
+			return nil, sqlFailure{1064, "42000", "invalid database name"}
+		}
+	}
+	result, err := s.showTablesIn(database)
+	if err != nil {
+		return nil, err
+	}
+	if full {
+		tableType := "BASE TABLE"
+		if strings.EqualFold(database, informationSchemaName) {
+			tableType = "SYSTEM VIEW"
+		}
+		result.columns = append(result.columns, "Table_type")
+		for index := range result.rows {
+			result.rows[index] = append(result.rows[index], tableType)
+		}
+	}
+	return s.applyShowClauses(result, clauses)
 }
 
 func (s *catalogExecutor) showDatabases() *queryResult {
@@ -1146,18 +1188,18 @@ func (s *catalogExecutor) showDatabases() *queryResult {
 	return &queryResult{columns: []string{"Database"}, rows: rows}
 }
 
-func (s *catalogExecutor) showTables() (*queryResult, error) {
-	if s.database == "" {
+func (s *catalogExecutor) showTablesIn(database string) (*queryResult, error) {
+	if database == "" {
 		return nil, sqlFailure{1046, "3D000", "no database selected"}
 	}
-	if strings.EqualFold(s.database, informationSchemaName) {
+	if strings.EqualFold(database, informationSchemaName) {
 		return informationSchemaTables(), nil
 	}
-	namespace, found := s.metadataDefinition().Namespaces[catalog.Key(s.database)]
+	namespace, found := s.metadataDefinition().Namespaces[catalog.Key(database)]
 	if !found {
-		return nil, metadataNamespaceFailure(s.server.config.Catalog, s.database)
+		return nil, metadataNamespaceFailure(s.server.config.Catalog, database)
 	}
-	return namespaceTables(s.database, namespace), nil
+	return namespaceTables(database, namespace), nil
 }
 
 func informationSchemaTables() *queryResult {
@@ -1657,7 +1699,7 @@ func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error)
 
 func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
-	_, table, err := s.resolveShowTable(query, target)
+	_, table, err := s.resolveShowTable(target)
 	if err != nil {
 		return nil, err
 	}
@@ -1668,23 +1710,13 @@ func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 	return &queryResult{columns: []string{"Table", "Create Table"}, rows: [][]string{{table.Name, definition}}}, nil
 }
 
-func (s *catalogExecutor) showIndexes(query string) (*queryResult, error) {
-	_, table, err := s.resolveShowTable(query, showIndexTarget(query))
+func (s *catalogExecutor) showIndexesStatement(clauses showClauses) (*queryResult, error) {
+	_, table, err := s.resolveShowTable(showClauseTarget(clauses))
 	if err != nil {
 		return nil, err
 	}
-	return showTableIndexes(table), nil
-}
-
-func showIndexTarget(query string) string {
-	value := strings.TrimSpace(query)
-	lower := strings.ToLower(value)
-	for _, prefix := range []string{"show index from ", "show index in ", "show indexes from ", "show indexes in ", "show keys from ", "show keys in "} {
-		if strings.HasPrefix(lower, prefix) {
-			return strings.TrimSpace(value[len(prefix):])
-		}
-	}
-	return ""
+	result := showTableIndexes(table)
+	return s.applyShowClauses(result, clauses, "Non_unique", "Seq_in_index", "Cardinality", "Sub_part")
 }
 
 func showTableIndexes(table catalog.Table) *queryResult {
