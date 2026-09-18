@@ -128,6 +128,42 @@ func TestExplainAnalyzeReportsCompletedRuntimeEvidence(t *testing.T) {
 	}
 }
 
+func TestExplainOrderingDirectionIsLowerCase(t *testing.T) {
+	for _, mode := range []string{"EXPLAIN FORMAT=JSON", "EXPLAIN ANALYZE FORMAT=JSON"} {
+		for direction, want := range map[string]string{"": "asc", "DESC": "desc"} {
+			t.Run(mode+"/"+direction, func(t *testing.T) {
+				executor := explainExecutor(t)
+				query := mode + " SELECT id, total FROM orders ORDER BY total " + direction
+				result, err := executeStatement(executor, query)
+				if err != nil {
+					t.Fatalf("explain: %v", err)
+				}
+				var document map[string]any
+				if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+					t.Fatalf("decode explanation: %v", err)
+				}
+				var ordering []any
+				var visit func(map[string]any)
+				visit = func(node map[string]any) {
+					if terms := node["output"].(map[string]any)["ordering"].([]any); len(terms) > 0 {
+						ordering = terms
+					}
+					for _, child := range node["children"].([]any) {
+						visit(child.(map[string]any))
+					}
+				}
+				visit(document["plan"].(map[string]any))
+				if len(ordering) != 1 {
+					t.Fatalf("ordering = %#v", ordering)
+				}
+				if got := ordering[0].(map[string]any)["direction"]; got != want {
+					t.Errorf("direction = %v, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
 func TestExplainAnalyzeReportsSpillEvidence(t *testing.T) {
 	executor := explainExecutor(t)
 	for _, values := range [][]string{{"2", "8", "20"}, {"3", "9", "30"}, {"4", "10", "40"}, {"5", "11", "60"}} {
