@@ -136,6 +136,19 @@ func run(dataSource string, statements []string, hold time.Duration) int {
 
 func execute(pool *sql.DB, statement string) outcome {
 	result := outcome{Statement: statement}
+	if !returnsRows(statement) {
+		execResult, err := pool.Exec(statement)
+		if err != nil {
+			return describeError(result, err)
+		}
+		affected, err := execResult.RowsAffected()
+		if err != nil {
+			return describeError(result, err)
+		}
+		result.RowsAffected = affected
+		result.OK = true
+		return result
+	}
 	rows, err := pool.Query(statement)
 	if err != nil {
 		return describeError(result, err)
@@ -156,6 +169,30 @@ func execute(pool *sql.DB, statement string) outcome {
 	}
 	result.OK = true
 	return result
+}
+
+// returnsRows reports whether a statement produces a result set and must go
+// through Query rather than Exec. Everything else (INSERT, UPDATE, DELETE,
+// REPLACE, DDL, ...) is dispatched through Exec so its rows_affected count
+// can be read back from the driver's sql.Result.
+func returnsRows(statement string) bool {
+	switch firstWord(statement) {
+	case "SELECT", "SHOW", "EXPLAIN", "WITH", "DESCRIBE", "DESC":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstWord(statement string) string {
+	trimmed := strings.TrimSpace(statement)
+	end := strings.IndexFunc(trimmed, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '('
+	})
+	if end == -1 {
+		end = len(trimmed)
+	}
+	return strings.ToUpper(trimmed[:end])
 }
 
 func readRows(rows *sql.Rows, width int) ([][]string, error) {
