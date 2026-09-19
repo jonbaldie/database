@@ -196,7 +196,7 @@ func validateUniqueIndexesAgainstPrevious(previous, table catalog.Table, columns
 }
 
 func uniqueIndexUnchanged(previous, table catalog.Table, index catalog.Index, columns map[string]int) bool {
-	if len(previous.Rows) != len(table.Rows) {
+	if !previousUniqueIndex(previous, index) || len(previous.Rows) != len(table.Rows) {
 		return false
 	}
 	for rowIndex := range table.Rows {
@@ -213,6 +213,27 @@ func uniqueIndexUnchanged(previous, table catalog.Table, index catalog.Index, co
 		}
 	}
 	return true
+}
+
+// previousUniqueIndex reports whether previous already enforced index with the
+// same key parts. Only then have the previous rows already been checked.
+func previousUniqueIndex(previous catalog.Table, index catalog.Index) bool {
+	for _, candidate := range previous.Indexes {
+		if !candidate.Unique || catalog.Key(candidate.Name) != catalog.Key(index.Name) || len(candidate.Parts) != len(index.Parts) {
+			continue
+		}
+		same := true
+		for part := range index.Parts {
+			if candidate.Parts[part] != index.Parts[part] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return true
+		}
+	}
+	return false
 }
 
 func validateNotNullColumnsAgainstPrevious(previous, table catalog.Table, indexes map[string]int) error {
