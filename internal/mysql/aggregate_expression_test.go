@@ -33,3 +33,34 @@ func TestAggregateArithmeticOrderAndNullResults(t *testing.T) {
 		t.Fatalf("ordered aggregate arithmetic = %#v, err = %v", result.rows, err)
 	}
 }
+
+func TestComposedAggregateStringProjectionEncodes(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE t (id INT PRIMARY KEY)",
+		"INSERT INTO t VALUES (1)",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("execute %q: %v", query, err)
+		}
+	}
+	for _, test := range []struct {
+		query string
+		want  [][]string
+	}{
+		{query: "SELECT IF(COUNT(*) > 0, 'yes', 'no') FROM t", want: [][]string{{"yes"}}},
+		{query: "SELECT CONCAT('total: ', CAST(COUNT(*) AS CHAR)) FROM t", want: [][]string{{"total: 1"}}},
+		{query: "SELECT IFNULL(MAX(id), 'none') FROM t WHERE 1=0", want: [][]string{{"none"}}},
+	} {
+		result, err := executeStatement(executor, test.query)
+		if err != nil || !equalRows(result.rows, test.want) {
+			t.Fatalf("%s rows = %#v, err = %v", test.query, result.rows, err)
+		}
+		if len(result.metadata) != 1 || result.metadata[0].typ != mysqlTypeVarString {
+			t.Fatalf("%s metadata = %#v, want VARCHAR", test.query, result.metadata)
+		}
+		if _, err := binaryRow(result.rows[0], 0, result.nulls, result.metadata); err != nil {
+			t.Fatalf("%s binary encode: %v", test.query, err)
+		}
+	}
+}

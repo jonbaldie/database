@@ -799,7 +799,7 @@ func parseComposedAggregateProjection(expression, alias string, columns []relati
 		if err != nil {
 			return nil, true, err
 		}
-		metadata, err := aggregateMetadata(aggregate, columns)
+		metadata, err := composedAggregateMetadata(expression, columns)
 		if err != nil {
 			return nil, true, err
 		}
@@ -1048,8 +1048,12 @@ func composedWindowOverAt(expression string, start int) bool {
 }
 
 func composedWindowPlaceholder(columns []relationColumn, used map[string]struct{}) string {
+	return uniqueSyntheticColumn(columns, used, "__database_window_value_")
+}
+
+func uniqueSyntheticColumn(columns []relationColumn, used map[string]struct{}, prefix string) string {
 	for index := 0; ; index++ {
-		placeholder := "__database_window_value_" + strconv.Itoa(index)
+		placeholder := prefix + strconv.Itoa(index)
 		if _, found := used[placeholder]; found {
 			continue
 		}
@@ -1057,6 +1061,62 @@ func composedWindowPlaceholder(columns []relationColumn, used map[string]struct{
 			return placeholder
 		}
 	}
+}
+
+func composedAggregateMetadata(expression string, columns []relationColumn) (columnMetadata, error) {
+	rewritten, rewrittenColumns, err := composedAggregateColumns(expression, columns)
+	if err != nil {
+		return columnMetadata{}, err
+	}
+	return relationExpressionMetadata(rewritten, rewrittenColumns)
+}
+
+func composedAggregateColumns(expression string, columns []relationColumn) (string, []relationColumn, error) {
+	var builder strings.Builder
+	rewritten := append([]relationColumn(nil), columns...)
+	used := make(map[string]struct{})
+	length, copied := len(expression), 0
+	for index := 0; index < length; {
+		next, written, extra, err := composedAggregateColumnAt(expression, index, copied, columns, rewritten, used)
+		if err != nil {
+			return "", nil, err
+		}
+		if extra.name != "" {
+			builder.WriteString(written)
+			rewritten = append(rewritten, extra)
+			copied = next
+		}
+		index = next
+	}
+	if copied == 0 {
+		return expression, columns, nil
+	}
+	builder.WriteString(expression[copied:])
+	return builder.String(), rewritten, nil
+}
+
+func composedAggregateColumnAt(expression string, index, copied int, columns, rewritten []relationColumn, used map[string]struct{}) (int, string, relationColumn, error) {
+	if isSQLQuote(expression[index]) {
+		return skipQuoted(expression, index) + 1, "", relationColumn{}, nil
+	}
+	call, end, found := aggregateCallAt(expression, index)
+	if !found {
+		return index + 1, "", relationColumn{}, nil
+	}
+	aggregate, err := parseRelationalAggregate(strings.ToUpper(call.name), call.arguments)
+	if err != nil {
+		return 0, "", relationColumn{}, err
+	}
+	metadata, err := aggregateMetadata(aggregate, columns)
+	if err != nil {
+		return 0, "", relationColumn{}, err
+	}
+	placeholder := uniqueSyntheticColumn(rewritten, used, "__database_aggregate_value_")
+	used[placeholder] = struct{}{}
+	return end, expression[copied:index] + placeholder, relationColumn{
+		name: placeholder, qualifier: placeholder, index: len(rewritten),
+		typeName: composedWindowTypeName(metadata), metadata: metadata,
+	}, nil
 }
 
 func composedWindowMetadata(expression string, windows []relationalComposedWindow, columns []relationColumn) (columnMetadata, error) {

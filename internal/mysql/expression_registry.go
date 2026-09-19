@@ -325,10 +325,14 @@ func coalesceValue(arguments []exprValue) (exprValue, error) {
 }
 
 func ifNullValue(arguments []exprValue) (exprValue, error) {
-	if arguments[0].isNull() {
-		return arguments[1], nil
+	chosen := arguments[0]
+	if chosen.isNull() {
+		chosen = arguments[1]
 	}
-	return arguments[0], nil
+	if chosen.isNull() || chosen.kind == valueString || (arguments[0].kind != valueString && arguments[1].kind != valueString) {
+		return chosen, nil
+	}
+	return stringValue(chosen.render()), nil
 }
 
 // nullIfValue returns NULL when the two arguments compare equal and the first
