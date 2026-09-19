@@ -15,8 +15,14 @@
 // Statements may also be supplied on standard input, one per line, with -stdin.
 // Each statement produces one JSON line on standard output:
 //
-//	{"statement":"SELECT 1","ok":true,"columns":["1"],"rows":[["1"]],"rows_affected":0}
+//	{"statement":"SELECT 1","ok":true,"columns":["1"],"rows":[["1"]]}
+//	{"statement":"INSERT INTO t VALUES (1),(2)","ok":true,"rows_affected":2,"last_insert_id":0}
 //	{"statement":"SELECT bad","ok":false,"error":"...","error_code":1146}
+//
+// A statement that returns a result set (SELECT, SHOW, EXPLAIN, DESCRIBE, WITH,
+// VALUES, TABLE) runs as a query and reports columns and rows. Every other
+// statement runs as an exec and reports the server's affected-row count and
+// last insert ID. The two counts are absent, not 0, when they were not measured.
 //
 // The exit code is 0 when every statement succeeded and 1 when any failed.
 package main
@@ -40,7 +46,8 @@ type outcome struct {
 	OK           bool       `json:"ok"`
 	Columns      []string   `json:"columns,omitempty"`
 	Rows         [][]string `json:"rows,omitempty"`
-	RowsAffected int64      `json:"rows_affected"`
+	RowsAffected *int64     `json:"rows_affected,omitempty"`
+	LastInsertID *int64     `json:"last_insert_id,omitempty"`
 	Error        string     `json:"error,omitempty"`
 	ErrorCode    uint16     `json:"error_code,omitempty"`
 }
@@ -135,6 +142,9 @@ func run(dataSource string, statements []string, hold time.Duration) int {
 }
 
 func execute(pool *sql.DB, statement string) outcome {
+	if !returnsRows(statement) {
+		return executeWithoutRows(pool, statement)
+	}
 	result := outcome{Statement: statement}
 	rows, err := pool.Query(statement)
 	if err != nil {
@@ -156,6 +166,64 @@ func execute(pool *sql.DB, statement string) outcome {
 	}
 	result.OK = true
 	return result
+}
+
+// executeWithoutRows runs a statement that returns no result set, so the
+// server's OK packet supplies the affected-row count and last insert ID.
+func executeWithoutRows(pool *sql.DB, statement string) outcome {
+	result := outcome{Statement: statement}
+	summary, err := pool.Exec(statement)
+	if err != nil {
+		return describeError(result, err)
+	}
+	affected, err := summary.RowsAffected()
+	if err != nil {
+		return describeError(result, err)
+	}
+	inserted, err := summary.LastInsertId()
+	if err != nil {
+		return describeError(result, err)
+	}
+	result.RowsAffected, result.LastInsertID = &affected, &inserted
+	result.OK = true
+	return result
+}
+
+// resultSetKeywords are the leading keywords of statements that return rows.
+var resultSetKeywords = map[string]bool{
+	"SELECT": true, "SHOW": true, "EXPLAIN": true, "DESCRIBE": true, "DESC": true,
+	"WITH": true, "VALUES": true, "TABLE": true,
+}
+
+// returnsRows reports whether the statement's leading keyword, after comments
+// and opening parentheses, names a statement that returns a result set.
+func returnsRows(statement string) bool {
+	rest := strings.TrimLeft(statement, " \t\r\n(")
+	for {
+		switch {
+		case strings.HasPrefix(rest, "/*"):
+			end := strings.Index(rest, "*/")
+			if end < 0 {
+				return false
+			}
+			rest = rest[end+2:]
+		case strings.HasPrefix(rest, "--"), strings.HasPrefix(rest, "#"):
+			end := strings.IndexByte(rest, '\n')
+			if end < 0 {
+				return false
+			}
+			rest = rest[end+1:]
+		default:
+			end := strings.IndexFunc(rest, func(r rune) bool {
+				return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z')
+			})
+			if end < 0 {
+				end = len(rest)
+			}
+			return resultSetKeywords[strings.ToUpper(rest[:end])]
+		}
+		rest = strings.TrimLeft(rest, " \t\r\n(")
+	}
 }
 
 func readRows(rows *sql.Rows, width int) ([][]string, error) {

@@ -66,8 +66,9 @@ Preconditions:
   alone.
 - Every value is rendered as a string in the `rows` output, and SQL `NULL`
   becomes the literal `"NULL"`. Compare against `"250"`, not `250`.
-- `rows_affected` is not populated by this helper. Prove a mutation with a
-  follow-up read, not with a row count.
+- `rows_affected` is the server's affected-row count for each statement that
+  returns no result set. It proves the count, not the stored data. Prove a
+  mutation with a follow-up read as well.
 - `INSERT` returning `"ok":true` is not durability proof. A post-restart read
   proves the write landed; the on-disk catalog stores schema and account
   metadata, not row data.
