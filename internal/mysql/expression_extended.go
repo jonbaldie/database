@@ -300,7 +300,29 @@ func replaceValue(arguments []exprValue) (exprValue, error) {
 	if search == "" {
 		return boundedStringValue(text, binary)
 	}
-	return boundedStringValue(strings.ReplaceAll(text, search, replacement), binary)
+	if binary {
+		return boundedStringValue(strings.ReplaceAll(text, search, replacement), binary)
+	}
+	return boundedStringValue(replaceCollated([]rune(text), []rune(search), replacement), binary)
+}
+
+// replaceCollated replaces every non-overlapping occurrence of search in text,
+// comparing windows of the same rune length by their collation key.
+func replaceCollated(text, search []rune, replacement string) string {
+	searchKey := characterComparisonKey(defaultStringType, string(search))
+	textLength, searchLength := len(text), len(search)
+	var out strings.Builder
+	for index := 0; index < textLength; {
+		if index+searchLength <= textLength &&
+			characterComparisonKey(defaultStringType, string(text[index:index+searchLength])) == searchKey {
+			out.WriteString(replacement)
+			index += searchLength
+			continue
+		}
+		out.WriteRune(text[index])
+		index++
+	}
+	return out.String()
 }
 
 func boundedStringValue(value string, binary bool) (exprValue, error) {
