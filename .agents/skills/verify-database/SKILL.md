@@ -101,9 +101,16 @@ Each statement prints one JSON line, and the exit code is `1` if any statement
 failed:
 
 ```json
-{"statement":"SELECT id, total FROM orders","ok":true,"columns":["id","total"],"rows":[["1","250"]],"rows_affected":0}
-{"statement":"SELECT * FROM missing","ok":false,"rows_affected":0,"error":"Error 1146 (42S02): table does not exist","error_code":1146}
+{"statement":"INSERT INTO orders VALUES (1, 250)","ok":true,"rows_affected":1,"last_insert_id":0}
+{"statement":"SELECT id, total FROM orders","ok":true,"columns":["id","total"],"rows":[["1","250"]]}
+{"statement":"SELECT * FROM missing","ok":false,"error":"Error 1146 (42S02): table does not exist","error_code":1146}
 ```
+
+A statement that returns a result set (`SELECT`, `SHOW`, `EXPLAIN`,
+`DESCRIBE`, `WITH`, `VALUES`, `TABLE`) reports `columns` and `rows`. Every
+other statement reports the server's `rows_affected` and `last_insert_id`, so
+you can assert the affected-row contract directly. A count that was not
+measured is absent, not `0`.
 
 A failure is data, not a crash: use `error_code` to assert the MySQL error
 number a contract requires.
