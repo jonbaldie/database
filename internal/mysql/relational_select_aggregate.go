@@ -787,16 +787,15 @@ func projectAggregateWindow(projection relationalProjection, tail string, column
 func parseComposedAggregateProjection(expression, alias string, columns []relationColumn) ([]relationalProjection, bool, error) {
 	length := len(expression)
 	for index := 0; index < length; index++ {
-		nameStart, nameEnd := aggregateNameAt(expression, index)
-		if nameStart < 0 {
+		if isSQLQuote(expression[index]) {
+			index = skipQuoted(expression, index)
 			continue
 		}
-		open := afterAggregateName(expression, nameEnd)
-		close, found := matchingParenthesis(expression, open)
-		if open >= len(expression) || expression[open] != '(' || !found {
+		call, _, found := aggregateCallAt(expression, index)
+		if !found {
 			continue
 		}
-		aggregate, err := parseRelationalAggregate(strings.ToUpper(expression[nameStart:nameEnd]), expression[open+1:close])
+		aggregate, err := parseRelationalAggregate(strings.ToUpper(call.name), call.arguments)
 		if err != nil {
 			return nil, true, err
 		}
@@ -972,6 +971,10 @@ func composedWindowFunction(expression string, start int) (int, int, relationalF
 func nextComposedWindowCandidate(expression string, start int) (int, bool) {
 	length := len(expression)
 	for start < length {
+		if isSQLQuote(expression[start]) {
+			start = skipQuoted(expression, start) + 1
+			continue
+		}
 		if !isAggregateIdentifierByte(expression[start]) {
 			start++
 			continue
@@ -1817,6 +1820,12 @@ func (p *relationalSelectPlan) replaceGroupAggregates(expression string, group [
 	var result strings.Builder
 	length := len(expression)
 	for index := 0; index < length; {
+		if isSQLQuote(expression[index]) {
+			end := skipQuoted(expression, index) + 1
+			result.WriteString(expression[index:end])
+			index = end
+			continue
+		}
 		literal, end, found, err := p.groupAggregateLiteral(expression, index, group)
 		if err != nil {
 			return "", err
@@ -1833,16 +1842,11 @@ func (p *relationalSelectPlan) replaceGroupAggregates(expression string, group [
 }
 
 func (p *relationalSelectPlan) groupAggregateLiteral(expression string, index int, group []relationRow) (string, int, bool, error) {
-	nameStart, nameEnd := aggregateNameAt(expression, index)
-	if nameStart < 0 {
+	call, end, found := aggregateCallAt(expression, index)
+	if !found {
 		return "", index, false, nil
 	}
-	open := afterAggregateName(expression, nameEnd)
-	close, found := matchingParenthesis(expression, open)
-	if open >= len(expression) || expression[open] != '(' || !found {
-		return "", index, false, nil
-	}
-	aggregate, err := parseRelationalAggregate(strings.ToUpper(expression[nameStart:nameEnd]), expression[open+1:close])
+	aggregate, err := parseRelationalAggregate(strings.ToUpper(call.name), call.arguments)
 	if err != nil {
 		return "", index, false, err
 	}
@@ -1850,7 +1854,22 @@ func (p *relationalSelectPlan) groupAggregateLiteral(expression string, index in
 	if err != nil {
 		return "", index, false, err
 	}
-	return groupExpressionLiteral(value), close + 1, true, nil
+	return groupExpressionLiteral(value), end, true, nil
+}
+
+// aggregateCallAt reports the aggregate call that starts at index and the
+// offset after its closing parenthesis.
+func aggregateCallAt(expression string, index int) (relationalFunctionCall, int, bool) {
+	nameStart, nameEnd := aggregateNameAt(expression, index)
+	if nameStart < 0 {
+		return relationalFunctionCall{}, index, false
+	}
+	open := afterAggregateName(expression, nameEnd)
+	close, found := matchingParenthesis(expression, open)
+	if open >= len(expression) || expression[open] != '(' || !found {
+		return relationalFunctionCall{}, index, false
+	}
+	return relationalFunctionCall{name: expression[nameStart:nameEnd], arguments: expression[open+1 : close]}, close + 1, true
 }
 
 func afterAggregateName(expression string, index int) int {
