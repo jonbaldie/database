@@ -23,7 +23,7 @@ func describeTarget(query, lower string) (string, bool) {
 }
 
 func (s *catalogExecutor) describe(query, target string) (*queryResult, error) {
-	_, table, err := s.resolveShowTable(query, target)
+	_, table, err := s.resolveShowTable(target, "")
 	if err != nil {
 		return nil, err
 	}
@@ -86,26 +86,34 @@ func hasAnyPrefix(value string, prefixes ...string) bool {
 
 func (s *catalogExecutor) showColumnsStatement(query, lower string) (*queryResult, error) {
 	remainder, full := showColumnsTarget(query, lower)
-	target := strings.TrimSpace(remainder)
-	if index := strings.Index(strings.ToLower(remainder), " like "); index >= 0 {
-		target = strings.TrimSpace(remainder[:index])
+	modifiers, err := parseShowModifiers(remainder, true)
+	if err != nil {
+		return nil, err
 	}
-	namespaceName, table, err := s.resolveShowTable(query, target)
+	namespaceName, table, err := s.resolveShowTableParts(modifiers.objectParts, modifiers.namespace)
 	if err != nil {
 		return nil, err
 	}
 	result := showColumns(table, full, s.columnPrivileges(namespaceName))
-	return filterShowLike(result, query, lower), nil
+	return applyShowFilters(s.session, result, modifiers)
 }
 
-// resolveShowTable resolves the table named by a catalog SHOW or DESCRIBE
-// target against the statement-scoped catalog snapshot.
-func (s *catalogExecutor) resolveShowTable(query, target string) (string, catalog.Table, error) {
-	parts, valid := splitQualifiedIdentifier(target)
-	if !valid || len(parts) > 2 {
+func (s *catalogExecutor) resolveShowTable(target, namespaceOverride string) (string, catalog.Table, error) {
+	parts, rest, ok := consumeQualifiedIdentifier(strings.TrimSpace(target))
+	if !ok || strings.TrimSpace(rest) != "" {
 		return "", catalog.Table{}, sqlFailure{1064, "42000", "invalid table name"}
 	}
-	namespaceName, tableName, err := s.qualifiedShowTableTarget(target, parts)
+	return s.resolveShowTableParts(parts, namespaceOverride)
+}
+
+func (s *catalogExecutor) resolveShowTableParts(parts []string, namespaceOverride string) (string, catalog.Table, error) {
+	if len(parts) == 0 || len(parts) > 2 {
+		return "", catalog.Table{}, sqlFailure{1064, "42000", "invalid table name"}
+	}
+	if namespaceOverride != "" {
+		parts = []string{namespaceOverride, parts[len(parts)-1]}
+	}
+	namespaceName, tableName, err := s.qualifiedShowTableTarget("", parts)
 	if err != nil {
 		return "", catalog.Table{}, err
 	}

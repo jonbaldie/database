@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Supported the documented catalog `SHOW` forms that previously failed with
+  1064: `SHOW [FULL] TABLES FROM|IN`, `SHOW TABLES WHERE`, `SHOW DATABASES
+  WHERE`, `SHOW CHARACTER SET`, and `SHOW COLLATION`.
+
+### Fixed
+
+- Resolved `SHOW INDEX FROM <table> FROM <db>` and `SHOW COLUMNS FROM
+  <table> FROM <db>` against the named database instead of folding the
+  second `FROM` clause into the table identifier.
+
 ## [0.2.13] - 2026-09-18
 
 ### Fixed
