@@ -318,21 +318,98 @@ func concatValue(arguments []exprValue) (exprValue, error) {
 func coalesceValue(arguments []exprValue) (exprValue, error) {
 	for _, argument := range arguments {
 		if !argument.isNull() {
-			return argument, nil
+			return mergedArgumentValue(argument, arguments)
 		}
 	}
 	return nullValue(), nil
 }
 
 func ifNullValue(arguments []exprValue) (exprValue, error) {
-	chosen := arguments[0]
-	if chosen.isNull() {
-		chosen = arguments[1]
+	if arguments[0].isNull() {
+		return mergedArgumentValue(arguments[1], arguments)
 	}
-	if chosen.isNull() || chosen.kind == valueString || (arguments[0].kind != valueString && arguments[1].kind != valueString) {
+	return mergedArgumentValue(arguments[0], arguments)
+}
+
+// mergedArgumentValue converts the chosen argument of a type-coalescing
+// function to the merged type of all non-NULL arguments. MySQL decides the
+// result type statically (STRING over REAL over DECIMAL over INTEGER, and
+// mixed signed and unsigned integers as DECIMAL), so the value matches the
+// advertised column type whichever branch a row selects.
+func mergedArgumentValue(chosen exprValue, arguments []exprValue) (exprValue, error) {
+	merged, scale := mergedArgumentKind(arguments)
+	switch {
+	case chosen.isNull():
+		return chosen, nil
+	case merged == valueString:
+		return mergedStringValue(chosen, arguments), nil
+	case chosen.kind == merged:
+		return chosen, nil
+	case merged == valueDouble:
+		value, err := castFloatInput(chosen)
+		if err != nil {
+			return exprValue{}, err
+		}
+		return doubleValue(value), nil
+	case merged == valueDecimal:
+		value := toDecimal(chosen)
+		return decimalValueOf(decimalValue{unscaled: value.rescaled(scale), scale: scale}), nil
+	default:
 		return chosen, nil
 	}
-	return stringValue(chosen.render()), nil
+}
+
+// mergedStringValue keeps the chosen character value when every argument
+// shares its temporal and binary shape, and otherwise renders it as plain
+// character text, binary when any argument is binary.
+func mergedStringValue(chosen exprValue, arguments []exprValue) exprValue {
+	if sameStringShape(chosen, arguments) {
+		return chosen
+	}
+	return exprValue{kind: valueString, s: chosen.render(), binary: anyBinaryArgument(arguments)}
+}
+
+// sameStringShape reports whether every non-NULL argument is a character
+// value of the chosen argument's temporal and binary shape, so the chosen value
+// already carries the merged wire type.
+func sameStringShape(chosen exprValue, arguments []exprValue) bool {
+	for _, argument := range arguments {
+		if argument.isNull() {
+			continue
+		}
+		if argument.kind != valueString || argument.temporal != chosen.temporal || argument.binary != chosen.binary {
+			return false
+		}
+	}
+	return true
+}
+
+func anyBinaryArgument(arguments []exprValue) bool {
+	for _, argument := range arguments {
+		if argument.kind == valueString && argument.binary {
+			return true
+		}
+	}
+	return false
+}
+
+// mergedArgumentKind returns the merged value kind of the non-NULL arguments
+// and, for a DECIMAL result, the widest argument scale.
+func mergedArgumentKind(arguments []exprValue) (valueKind, int) {
+	merged, scale := valueNull, 0
+	signed, unsigned := false, false
+	for _, argument := range arguments {
+		signed = signed || argument.kind == valueInt
+		unsigned = unsigned || argument.kind == valueUint
+		if argument.kind == valueDecimal {
+			scale = max(scale, argument.dec.scale)
+		}
+		merged = max(merged, argument.kind)
+	}
+	if signed && unsigned && merged == valueUint {
+		merged = valueDecimal
+	}
+	return merged, scale
 }
 
 // nullIfValue returns NULL when the two arguments compare equal and the first

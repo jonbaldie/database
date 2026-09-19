@@ -321,7 +321,9 @@ func relationExpressionCharacterMetadata(expression string, columns []relationCo
 			continue
 		}
 		index, err := resolveRelationColumn(token.text, columns)
-		if err != nil {
+		// A numeric or temporal column converts to a character value in the
+		// connection character set, so only character columns decide it.
+		if err != nil || !isCharacterWireType(columns[index].metadata.typ) {
 			continue
 		}
 		candidate := columns[index].metadata.characterSet
