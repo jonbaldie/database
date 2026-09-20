@@ -113,6 +113,9 @@ func TestMySQLBTreeIndexesUseThePublicWireContract(t *testing.T) {
 	if orderHint.err != "" || len(orderHint.rows) != 1 || !strings.Contains(orderHint.rows[0][0], `"selected":"idx_status_created"`) {
 		t.Fatalf("order index hint: %#v", orderHint)
 	}
+	if result := client.query("SELECT status FROM accounts USE INDEX FOR GROUP BY (idx_status) GROUP BY status ORDER BY status"); result.err != "" || len(result.rows) != 2 || strings.Join(result.rows[0], ",") != "closed" || strings.Join(result.rows[1], ",") != "open" {
+		t.Fatalf("group index hint: %#v", result)
+	}
 	ignoreHint := client.query("EXPLAIN FORMAT=JSON SELECT id FROM accounts IGNORE INDEX (idx_status_created) WHERE status = 'open'")
 	if ignoreHint.err != "" || len(ignoreHint.rows) != 1 || strings.Contains(ignoreHint.rows[0][0], `"source":"index"`) {
 		t.Fatalf("ignore index hint: %#v", ignoreHint)

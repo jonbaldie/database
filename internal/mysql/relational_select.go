@@ -1135,7 +1135,7 @@ func selectClauseAt(text, keyword string) int {
 			return -1
 		}
 		at += start
-		if keyword != "order" || !indexHintOrderKeyword(text, at) {
+		if (keyword != "order" && keyword != "group") || !indexHintForKeyword(text, at) {
 			return at
 		}
 		start = at + len(keyword)
@@ -1143,7 +1143,7 @@ func selectClauseAt(text, keyword string) int {
 	return -1
 }
 
-func indexHintOrderKeyword(text string, at int) bool {
+func indexHintForKeyword(text string, at int) bool {
 	before := strings.Fields(strings.ToLower(strings.TrimSpace(text[:at])))
 	return len(before) > 0 && before[len(before)-1] == "for"
 }
