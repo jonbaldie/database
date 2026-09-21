@@ -209,22 +209,11 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 	if strings.EqualFold(name, informationSchemaName) {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
-	key := catalog.Key(name)
 	noOp := false
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
-		if _, found := definition.Namespaces[key]; !found {
-			if ifExists {
-				noOp = true
-				return nil
-			}
-			return errors.New("unknown database")
-		}
-		if err := checkNamespaceNotReferencedByForeignKey(definition, key); err != nil {
-			return err
-		}
-		delete(definition.Namespaces, key)
-		removeNamespaceGrants(definition, name)
-		return nil
+		var err error
+		noOp, err = dropDatabaseInDefinition(definition, s.username, name, ifExists)
+		return err
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1008, "HY000", err.Error()})
 	}
@@ -233,6 +222,26 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 	}
 	recordDropDatabaseDiagnostic(s.session, name, noOp)
 	return nil
+}
+
+func dropDatabaseInDefinition(definition *catalog.Definition, username, name string, ifExists bool) (bool, error) {
+	resolution := resolveNamespace(*definition, username, name)
+	if !resolution.exists {
+		if ifExists {
+			return true, nil
+		}
+		return false, resolution.requireName()
+	}
+	if err := resolution.requireName(); err != nil {
+		return false, err
+	}
+	key := catalog.Key(name)
+	if err := checkNamespaceNotReferencedByForeignKey(definition, key); err != nil {
+		return false, err
+	}
+	delete(definition.Namespaces, key)
+	removeNamespaceGrants(definition, name)
+	return false, nil
 }
 
 func (s *ddlExecutor) dropTable(query string) error {

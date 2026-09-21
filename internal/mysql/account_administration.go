@@ -48,14 +48,22 @@ func grantsWithoutNamespace(grants []catalog.Grant, namespace string) []catalog.
 }
 
 func visibleCatalogDefinition(definition catalog.Definition, username string) catalog.Definition {
-	if username == "" || accountSeesAllNamespaces(definition.Accounts[username]) {
+	if username == "" {
 		return definition
 	}
-	account := definition.Accounts[username]
 	visible := catalog.Definition{Namespaces: map[string]catalog.Namespace{}, Accounts: definition.Accounts}
 	for key, namespace := range definition.Namespaces {
-		if accountSeesNamespace(account, namespace.Name) {
-			visible.Namespaces[key] = namespace
+		name := namespace.Name
+		if name == "" {
+			name = key
+		}
+		resolution := resolveNamespace(definition, username, name)
+		if resolution.nameVisible {
+			if resolution.definitionVisible {
+				visible.Namespaces[key] = resolution.namespace
+			} else {
+				visible.Namespaces[key] = catalog.Namespace{Name: resolution.namespace.Name}
+			}
 		}
 	}
 	return visible
@@ -72,16 +80,6 @@ func accountSeesNamespace(account catalog.Account, namespace string) bool {
 		}
 	}
 	return false
-}
-
-func metadataNamespaceFailure(store *catalog.Store, name string) error {
-	if store != nil {
-		_, exists := store.Snapshot().Namespaces[catalog.Key(name)]
-		if exists {
-			return sqlFailure{1044, "42000", "access denied"}
-		}
-	}
-	return sqlFailure{1049, "42000", "unknown database '" + name + "'"}
 }
 
 func (s *textStatementExecutor) authorizeStatement(lower string) error {
@@ -458,8 +456,11 @@ func parseGrantChange(query string, grant bool) (accountGrantChange, error) {
 }
 
 func (s *textStatementExecutor) applyGrantChange(change accountGrantChange) error {
-	if change.namespace != "" && !s.namespaceExists(change.namespace) {
-		return sqlFailure{1049, "42000", "unknown database"}
+	if change.namespace != "" {
+		resolution := resolveNamespace(s.session.currentDefinition(), s.session.username, change.namespace)
+		if err := resolution.requireName(); err != nil {
+			return err
+		}
 	}
 	account, found := s.session.server.config.Catalog.Account(change.name)
 	if !found {
@@ -584,10 +585,6 @@ func (s *textStatementExecutor) enabledAccountManagerCount() int {
 		}
 	}
 	return count
-}
-func (s *textStatementExecutor) namespaceExists(name string) bool {
-	_, found := s.session.server.config.Catalog.Snapshot().Namespaces[catalog.Key(name)]
-	return found
 }
 func validateAccountInput(name, password string) error {
 	if !validAccountName(name) || !validAccountPassword(password) {

@@ -117,10 +117,15 @@ func (s *catalogExecutor) resolveShowTableParts(parts []string, namespaceOverrid
 	if err != nil {
 		return "", catalog.Table{}, err
 	}
-	namespace, ok := s.metadataDefinition().Namespaces[catalog.Key(namespaceName)]
-	if !ok {
-		return "", catalog.Table{}, metadataNamespaceFailure(s.server.config.Catalog, namespaceName)
+	definition := emptyDefinition()
+	if s.server.config.Catalog != nil {
+		definition = s.server.config.Catalog.Snapshot()
 	}
+	resolution := resolveNamespace(definition, s.session.username, namespaceName)
+	if err := resolution.requireDefinition(); err != nil {
+		return "", catalog.Table{}, err
+	}
+	namespace := resolution.namespace
 	table, ok := namespace.Tables[catalog.Key(tableName)]
 	if !ok {
 		return "", catalog.Table{}, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}

@@ -2,8 +2,6 @@ package mysql
 
 import (
 	"strings"
-
-	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func isShowTablesStatement(lower string) bool {
@@ -54,10 +52,15 @@ func (s *catalogExecutor) showTablesIn(name string, full bool) (*queryResult, er
 		}
 		return result, nil
 	}
-	namespace, found := s.metadataDefinition().Namespaces[catalog.Key(name)]
-	if !found {
-		return nil, metadataNamespaceFailure(s.server.config.Catalog, name)
+	definition := emptyDefinition()
+	if s.server.config.Catalog != nil {
+		definition = s.server.config.Catalog.Snapshot()
 	}
+	resolution := resolveNamespace(definition, s.session.username, name)
+	if err := resolution.requireDefinition(); err != nil {
+		return nil, err
+	}
+	namespace := resolution.namespace
 	display := namespace.Name
 	if display == "" {
 		display = name
