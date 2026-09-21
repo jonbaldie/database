@@ -610,13 +610,7 @@ func catalogMutationFailure(err error, fallback sqlFailure) error {
 }
 
 func (s *session) databaseExists(name string) error {
-	if strings.EqualFold(name, informationSchemaName) {
-		return nil
-	}
-	if _, found := s.currentDefinition().Namespaces[catalog.Key(name)]; !found {
-		return sqlFailure{1049, "42000", "unknown database '" + name + "'"}
-	}
-	return nil
+	return resolveNamespace(s.currentDefinition(), s.username, name).requireDefinition()
 }
 
 func (s *transactionExecutor) commit() error {

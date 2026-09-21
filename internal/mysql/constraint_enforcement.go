@@ -637,10 +637,11 @@ func foreignKeyParent(definition catalog.Definition, namespaceName string, const
 	if parentNamespace == "" {
 		parentNamespace = namespaceName
 	}
-	namespace, found := definition.Namespaces[catalog.Key(parentNamespace)]
-	if !found {
+	resolution := resolveNamespace(definition, "", parentNamespace)
+	if err := resolution.requireName(); err != nil {
 		return catalog.Table{}, nil, errorsConstraintDefinition("foreign key '" + constraint.Name + "' references an unknown database")
 	}
+	namespace := resolution.namespace
 	parent, found := namespace.Tables[catalog.Key(constraint.ReferencedTable)]
 	if !found {
 		return catalog.Table{}, nil, errorsConstraintDefinition("foreign key '" + constraint.Name + "' references an unknown table")

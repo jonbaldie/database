@@ -593,17 +593,11 @@ type authenticator struct {
 	rsaKey    *rsa.PrivateKey
 }
 
-func (a authenticator) databaseExists(name string) error {
-	if strings.EqualFold(identifier(name), informationSchemaName) {
-		return nil
-	}
+func (a authenticator) databaseExists(username, name string) error {
 	if a.config.Catalog == nil {
 		return nil
 	}
-	if _, ok := a.config.Catalog.Snapshot().Namespaces[catalog.Key(name)]; !ok {
-		return sqlFailure{code: 1049, state: "42000", message: "unknown database '" + name + "'"}
-	}
-	return nil
+	return resolveNamespace(a.config.Catalog.Snapshot(), username, name).requireDefinition()
 }
 
 func makeNonce() []byte {
@@ -1224,10 +1218,6 @@ func (s *catalogExecutor) metadataDefinition() catalog.Definition {
 	return visibleCatalogDefinition(s.server.config.Catalog.Snapshot(), s.session.username)
 }
 
-func snapshotNamespace(s *relationExecutor, name string) (catalog.Namespace, bool) {
-	ns, ok := s.session.currentDefinition().Namespaces[catalog.Key(name)]
-	return ns, ok
-}
 func (s *catalogExecutor) createDatabase(query string) error {
 	lower := strings.ToLower(query)
 	keyword := "database "
@@ -1636,14 +1626,15 @@ func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error)
 	if name == "" || s.server.config.Catalog == nil {
 		return nil, sqlFailure{1049, "42000", "unknown database"}
 	}
-	key := catalog.Key(name)
-	namespace, ok := s.metadataDefinition().Namespaces[key]
-	if !ok {
-		return nil, metadataNamespaceFailure(s.server.config.Catalog, name)
+	definition := emptyDefinition()
+	if s.server.config.Catalog != nil {
+		definition = s.server.config.Catalog.Snapshot()
 	}
-	if namespace.Name == "" {
-		namespace.Name = key
+	resolution := resolveNamespace(definition, s.session.username, name)
+	if err := resolution.requireDefinition(); err != nil {
+		return nil, err
 	}
+	namespace := resolution.namespace
 	return &queryResult{
 		columns: []string{"Database", "Create Database"},
 		rows:    [][]string{{namespace.Name, "CREATE DATABASE " + quoteIdentifier(namespace.Name)}},
@@ -3431,11 +3422,11 @@ func limitDeleteCandidates(candidates []deleteCandidate, limit relationalLimit) 
 }
 
 func relationTable(s *relationExecutor, namespace, name string) (catalog.Table, error) {
-	ns, found := snapshotNamespace(s, namespace)
-	if !found {
-		return catalog.Table{}, sqlFailure{1049, "42000", "unknown database '" + namespace + "'"}
+	resolution := resolveNamespace(s.currentDefinition(), s.username, namespace)
+	if err := resolution.requireDefinition(); err != nil {
+		return catalog.Table{}, err
 	}
-	table, found := ns.Tables[catalog.Key(name)]
+	table, found := resolution.namespace.Tables[catalog.Key(name)]
 	if !found {
 		return catalog.Table{}, sqlFailure{1146, "42S02", "table does not exist"}
 	}

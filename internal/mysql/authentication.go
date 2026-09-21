@@ -169,7 +169,7 @@ func (a authenticator) validate(response handshakeResponse, nonce []byte) (strin
 		return "", sqlFailure{1045, "28000", "access denied"}
 	}
 	if response.database != "" {
-		if err := a.databaseExists(response.database); err != nil {
+		if err := a.databaseExists(response.accountName, response.database); err != nil {
 			return "", err
 		}
 	}
