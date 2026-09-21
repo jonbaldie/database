@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/credential"
 	"github.com/jonbaldie/database/internal/instance"
 	"github.com/jonbaldie/database/internal/queryexplanation"
 )
@@ -682,12 +683,7 @@ func validPlainPassword(password []byte, encodedHash string) bool {
 	if encodedHash == "" {
 		return len(password) == 0
 	}
-	expected, err := hex.DecodeString(encodedHash)
-	if err != nil || len(expected) != sha256.Size {
-		return false
-	}
-	actual := sha256.Sum256(password)
-	return subtle.ConstantTimeCompare(actual[:], expected) == 1
+	return credential.PasswordMatches(password, encodedHash)
 }
 
 func publicKeyPacket(key *rsa.PrivateKey) []byte {

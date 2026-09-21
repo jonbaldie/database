@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Made `database init` apply the `CREATE USER` credential policy. An initial
+  password outside 12 through 1,024 valid UTF-8 bytes, or an initial account
+  name that `CREATE USER` rejects, now fails as `invalid_input` and creates no
+  data directory. Online commands also reject a password source outside that
+  range. Existing data directories load unchanged. `CREATE USER` also now
+  rejects non-ASCII characters after the first character of an account name.
 - Resolved `SHOW INDEX FROM <table> FROM <db>` and `SHOW COLUMNS FROM
   <table> FROM <db>` against the named database instead of folding the
   second `FROM` clause into the table identifier.

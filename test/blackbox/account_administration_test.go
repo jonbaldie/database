@@ -3,6 +3,7 @@ package blackbox_test
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jonbaldie/database/test/blackbox"
@@ -121,4 +122,29 @@ func TestMySQLCrossDatabaseGrantAuthorizationViaWire(t *testing.T) {
 	if res := bob.query("TRUNCATE TABLE db_secret.confidential"); res.errCode != 1044 && res.errCode != 1142 {
 		t.Fatalf("expected 1044 or 1142 on cross-db truncate table, got %#v", res)
 	}
+}
+
+func TestMySQLAccountAdministrationAppliesTheInitCredentialPolicy(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "account-policy-secret")
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	admin := newWireClient(t, address, "admin", "account-policy-secret")
+	defer admin.close()
+	for _, statement := range []string{
+		"CREATE USER 'aš' IDENTIFIED BY 'contract-valid-password'",
+		"CREATE USER 'reader@localhost' IDENTIFIED BY 'contract-valid-password'",
+		"CREATE USER '_reader' IDENTIFIED BY 'contract-valid-password'",
+		"CREATE USER 'reader' IDENTIFIED BY 'eleven-byte'",
+		"ALTER USER 'admin' IDENTIFIED BY 'eleven-byte'",
+	} {
+		if result := admin.query(statement); !strings.Contains(result.err, "invalid account or password") {
+			t.Fatalf("%s: %#v, want invalid account or password", statement, result)
+		}
+	}
+	mustQuery(t, admin, "CREATE USER 'Reader.ops_2-x' IDENTIFIED BY 'twelve-bytes'")
+	reader := newWireClient(t, address, "Reader.ops_2-x", "twelve-bytes")
+	defer reader.close()
+	mustQuery(t, reader, "SELECT 1")
 }

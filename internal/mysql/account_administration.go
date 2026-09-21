@@ -1,14 +1,12 @@
 package mysql
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/credential"
 )
 
 const accountManagerPrivilege = "ACCOUNT_MANAGER"
@@ -306,7 +304,7 @@ func (s *textStatementExecutor) createAccount(query string) error {
 	if err := validateAccountInput(name, password); err != nil {
 		return err
 	}
-	hash := passwordHash(password)
+	hash := credential.PasswordHash(password)
 	err := s.session.server.config.Catalog.CreateAccount(catalog.Account{Name: name, PasswordHash: hash})
 	if err != nil && ifNotExists {
 		s.session.addDiagnostic("Note", 3163, "Authorization ID '"+name+"' already exists.")
@@ -394,7 +392,10 @@ func (s *textStatementExecutor) changeAccountPassword(name, suffix string) error
 	if err := validateAccountInput(name, password); err != nil {
 		return err
 	}
-	return s.session.server.config.Catalog.UpdateAccount(name, func(account *catalog.Account) error { account.PasswordHash = passwordHash(password); return nil })
+	return s.session.server.config.Catalog.UpdateAccount(name, func(account *catalog.Account) error {
+		account.PasswordHash = credential.PasswordHash(password)
+		return nil
+	})
 }
 
 func (s *textStatementExecutor) dropAccount(query string) error {
@@ -587,31 +588,10 @@ func (s *textStatementExecutor) enabledAccountManagerCount() int {
 	return count
 }
 func validateAccountInput(name, password string) error {
-	if !validAccountName(name) || !validAccountPassword(password) {
+	if credential.ValidateAccountName(name) != nil || credential.ValidatePassword(password) != nil {
 		return sqlFailure{1819, "HY000", "invalid account or password"}
 	}
 	return nil
-}
-func validAccountName(name string) bool {
-	if len(name) == 0 || len(name) > 32 || !asciiLetterOrDigit(name[0]) {
-		return false
-	}
-	for _, character := range name[1:] {
-		if !asciiLetterOrDigit(byte(character)) && character != '.' && character != '_' && character != '-' {
-			return false
-		}
-	}
-	return true
-}
-func validAccountPassword(password string) bool {
-	return utf8.ValidString(password) && len(password) >= 12 && len(password) <= 1024
-}
-func asciiLetterOrDigit(character byte) bool {
-	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
-}
-func passwordHash(password string) string {
-	sum := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(sum[:])
 }
 
 func showGrantsStatement(lower string) bool {
