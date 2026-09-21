@@ -24,7 +24,8 @@ fi
 
 files=()
 while IFS= read -r file; do
-	[[ -n "$file" ]] && files+=("$file")
+	# A deleted file has nothing left to mutate.
+	[[ -f "$file" ]] && files+=("$file")
 done < <({ git diff --name-only "$base"...HEAD; git diff --cached --name-only; git diff --name-only; } | sort -u | sed -nE '/\.go$/p' | grep -vE '(_test\.go|^$)' || true)
 if ((${#files[@]} == 0)); then
 	echo "mutation threshold: no changed production Go files"
