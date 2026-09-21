@@ -4,8 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/jonbaldie/database/internal/credential"
 )
 
 func TestInitializeAllowsExactlyOneConcurrentCreator(t *testing.T) {
@@ -18,7 +21,7 @@ func TestInitializeAllowsExactlyOneConcurrentCreator(t *testing.T) {
 		go func() {
 			defer group.Done()
 			<-start
-			metadata, err := Initialize(directory, "admin", "secret")
+			metadata, err := Initialize(directory, "admin", "contract-valid-password")
 			results <- initializationResult{metadata: metadata, err: err}
 		}()
 	}
@@ -141,4 +144,35 @@ func splitInitializationResults(results <-chan initializationResult) (Metadata, 
 		rejected = result.err
 	}
 	return created, rejected
+}
+
+func TestInitializeRejectsCredentialsOutsideTheContract(t *testing.T) {
+	cases := []struct {
+		account, password string
+		want              error
+	}{
+		{"admin", "secret", credential.ErrInvalidPassword},
+		{"admin@localhost", "contract-valid-password", credential.ErrInvalidAccountName},
+	}
+	for _, test := range cases {
+		directory := filepath.Join(t.TempDir(), "instance")
+		if _, err := Initialize(directory, test.account, test.password); !errors.Is(err, test.want) {
+			t.Fatalf("Initialize(%q) error = %v, want %v", test.account, err, test.want)
+		}
+		if _, err := os.Stat(directory); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Initialize created the data directory after rejecting credentials: %v", err)
+		}
+	}
+}
+
+func TestReadPasswordAppliesPolicyAfterLineEndingIsRemoved(t *testing.T) {
+	password, err := ReadPassword("", strings.NewReader("contract-valid-password\r\n"))
+	if err != nil || password != "contract-valid-password" {
+		t.Fatalf("ReadPassword = %q, %v", password, err)
+	}
+	for _, input := range []string{"", "\n", "eleven-byte\n", "eleven-byte\r\n", strings.Repeat("p", 1025), "valid-prefix\xff\n"} {
+		if _, err := ReadPassword("", strings.NewReader(input)); !errors.Is(err, credential.ErrInvalidPassword) {
+			t.Fatalf("ReadPassword(%d bytes) error = %v, want ErrInvalidPassword", len(input), err)
+		}
+	}
 }

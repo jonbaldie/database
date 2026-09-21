@@ -87,6 +87,11 @@ listed here or in the server configuration registry are unsupported.
 | `database data inspect` | Offline `--data-directory PATH` |
 | `database version` | No command-specific inputs |
 
+`database init` applies the same account-name and password rules as
+[`CREATE USER`](account-administration.md). An initial account name or password
+that `CREATE USER` would reject fails as `invalid_input` before the data
+directory is created or changed.
+
 Online commands (`shutdown` and `backup create`) use this exact common input
 set:
 

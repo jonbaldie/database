@@ -15,11 +15,11 @@ import (
 func TestMySQLCoordinatesConcurrentLocks(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	initializeServer(t, runner, directory, "lock-secret")
+	initializeServer(t, runner, directory, "lock-test-secret")
 	process, address := startMySQLServer(t, runner, directory, "--lock-wait-timeout-ms=500")
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 
-	admin := newWireClient(t, address, "admin", "lock-secret")
+	admin := newWireClient(t, address, "admin", "lock-test-secret")
 	defer admin.close()
 	mustQuery(t, admin, "CREATE DATABASE coordination")
 	mustQuery(t, admin, "USE coordination")
@@ -30,11 +30,11 @@ func TestMySQLCoordinatesConcurrentLocks(t *testing.T) {
 			mustQuery(t, admin, "CREATE TABLE "+table+" (id INT PRIMARY KEY, value INT)")
 			mustQuery(t, admin, "INSERT INTO "+table+" VALUES (1, 10)")
 
-			owner := newWireClient(t, address, "admin", "lock-secret")
+			owner := newWireClient(t, address, "admin", "lock-test-secret")
 			defer owner.close()
-			writer := newWireClient(t, address, "admin", "lock-secret")
+			writer := newWireClient(t, address, "admin", "lock-test-secret")
 			defer writer.close()
-			observer := newWireClient(t, address, "admin", "lock-secret")
+			observer := newWireClient(t, address, "admin", "lock-test-secret")
 			defer observer.close()
 			setIsolation(t, owner, isolation)
 			setIsolation(t, writer, isolation)
@@ -63,11 +63,11 @@ func TestMySQLCoordinatesConcurrentLocks(t *testing.T) {
 func TestMySQLLockModesTimeoutCancellationAndDeadlock(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	initializeServer(t, runner, directory, "lock-secret")
+	initializeServer(t, runner, directory, "lock-test-secret")
 	process, address := startMySQLServer(t, runner, directory, "--lock-wait-timeout-ms=500")
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 
-	admin := newWireClient(t, address, "admin", "lock-secret")
+	admin := newWireClient(t, address, "admin", "lock-test-secret")
 	defer admin.close()
 	mustQuery(t, admin, "CREATE DATABASE coordination")
 	mustQuery(t, admin, "USE coordination")
@@ -93,11 +93,11 @@ func TestMySQLLockModesTimeoutCancellationAndDeadlock(t *testing.T) {
 		t.Fatalf("locking EXPLAIN document: %#v", explained)
 	}
 
-	owner := newWireClient(t, address, "admin", "lock-secret")
+	owner := newWireClient(t, address, "admin", "lock-test-secret")
 	defer owner.close()
-	nowait := newWireClient(t, address, "admin", "lock-secret")
+	nowait := newWireClient(t, address, "admin", "lock-test-secret")
 	defer nowait.close()
-	skip := newWireClient(t, address, "admin", "lock-secret")
+	skip := newWireClient(t, address, "admin", "lock-test-secret")
 	defer skip.close()
 	for _, client := range []*wireClient{owner, nowait, skip} {
 		mustQuery(t, client, "USE coordination")
@@ -116,7 +116,7 @@ func TestMySQLLockModesTimeoutCancellationAndDeadlock(t *testing.T) {
 	}
 	mustQuery(t, skip, "ROLLBACK")
 
-	timeout := newWireClient(t, address, "admin", "lock-secret")
+	timeout := newWireClient(t, address, "admin", "lock-test-secret")
 	defer timeout.close()
 	mustQuery(t, timeout, "USE coordination")
 	mustQuery(t, timeout, "BEGIN")
@@ -126,7 +126,7 @@ func TestMySQLLockModesTimeoutCancellationAndDeadlock(t *testing.T) {
 	mustQuery(t, timeout, "SELECT value FROM work WHERE id = 1")
 	mustQuery(t, timeout, "ROLLBACK")
 
-	cancelled := newWireClient(t, address, "admin", "lock-secret")
+	cancelled := newWireClient(t, address, "admin", "lock-test-secret")
 	mustQuery(t, cancelled, "USE coordination")
 	mustQuery(t, cancelled, "BEGIN")
 	mustQuery(t, cancelled, "UPDATE work SET value = 40 WHERE id = 2")
@@ -163,11 +163,11 @@ func TestMySQLLockModesTimeoutCancellationAndDeadlock(t *testing.T) {
 	mustQuery(t, skip, "ROLLBACK")
 	mustQuery(t, owner, "ROLLBACK")
 
-	first := newWireClient(t, address, "admin", "lock-secret")
+	first := newWireClient(t, address, "admin", "lock-test-secret")
 	defer first.close()
-	second := newWireClient(t, address, "admin", "lock-secret")
+	second := newWireClient(t, address, "admin", "lock-test-secret")
 	defer second.close()
-	checker := newWireClient(t, address, "admin", "lock-secret")
+	checker := newWireClient(t, address, "admin", "lock-test-secret")
 	defer checker.close()
 	for _, client := range []*wireClient{first, second, checker} {
 		mustQuery(t, client, "USE coordination")
@@ -187,9 +187,9 @@ func TestMySQLLockModesTimeoutCancellationAndDeadlock(t *testing.T) {
 	if result := checker.query("SELECT id, value FROM work WHERE id < 3 ORDER BY id"); result.err != "" || len(result.rows) != 2 || result.rows[0][1] != "11" || result.rows[1][1] != "12" {
 		t.Fatalf("deadlock transaction state: %#v", result)
 	}
-	locker := newWireClient(t, address, "admin", "lock-secret")
+	locker := newWireClient(t, address, "admin", "lock-test-secret")
 	defer locker.close()
-	shifter := newWireClient(t, address, "admin", "lock-secret")
+	shifter := newWireClient(t, address, "admin", "lock-test-secret")
 	defer shifter.close()
 	for _, client := range []*wireClient{locker, shifter} {
 		mustQuery(t, client, "USE coordination")
@@ -239,7 +239,7 @@ func mustQueryResult(t *testing.T, result wireResult, action string) {
 
 func assertCancelledLockReleased(t *testing.T, address, id string) {
 	t.Helper()
-	client := newWireClient(t, address, "admin", "lock-secret")
+	client := newWireClient(t, address, "admin", "lock-test-secret")
 	defer client.close()
 	mustQuery(t, client, "USE coordination")
 	deadline := time.Now().Add(200 * time.Millisecond)

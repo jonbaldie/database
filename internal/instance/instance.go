@@ -3,7 +3,6 @@ package instance
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jonbaldie/database/internal/credential"
 )
 
 type Metadata struct {
@@ -88,8 +89,22 @@ func Initialize(directory, account, password string) (Metadata, error) {
 }
 
 func validateInitializationInput(directory, account, password string) error {
-	if directory == "" || account == "" || password == "" {
-		return errors.New("data directory, account, and password are required")
+	if directory == "" {
+		return errors.New("data directory is required")
+	}
+	return ValidateCredentials(account, password)
+}
+
+// ValidateCredentials applies the account-administration credential policy to
+// the initial account, so init never creates an account that CREATE USER
+// would reject. Failures wrap credential.ErrInvalidAccountName or
+// credential.ErrInvalidPassword.
+func ValidateCredentials(account, password string) error {
+	if err := credential.ValidateAccountName(account); err != nil {
+		return fmt.Errorf("initial account: %w", err)
+	}
+	if err := credential.ValidatePassword(password); err != nil {
+		return fmt.Errorf("initial password: %w", err)
 	}
 	return nil
 }
@@ -201,14 +216,13 @@ func newMetadata(account, password string) (Metadata, error) {
 	if _, err := rand.Read(idBytes[:]); err != nil {
 		return Metadata{}, fmt.Errorf("generate instance identity: %w", err)
 	}
-	hash := sha256.Sum256([]byte(password))
 	return Metadata{
 		Schema:       "database.instance/v1",
 		InstanceID:   hex.EncodeToString(idBytes[:]),
 		DataVersion:  CurrentDataVersion,
 		State:        "stopped",
 		AdminAccount: account,
-		PasswordHash: hex.EncodeToString(hash[:]),
+		PasswordHash: credential.PasswordHash(password),
 	}, nil
 }
 
@@ -315,7 +329,8 @@ func writeDurable(path string, contents []byte) error {
 	return err
 }
 
-// ReadPassword obtains a secret from a named file or standard input.
+// ReadPassword obtains a secret from a named file or standard input and
+// applies the password policy after one final LF or CRLF is removed.
 func ReadPassword(file string, stdin io.Reader) (string, error) {
 	var input []byte
 	var err error
@@ -329,8 +344,8 @@ func ReadPassword(file string, stdin io.Reader) (string, error) {
 	}
 	password := strings.TrimSuffix(string(input), "\n")
 	password = strings.TrimSuffix(password, "\r")
-	if password == "" {
-		return "", errors.New("password is empty")
+	if err := credential.ValidatePassword(password); err != nil {
+		return "", err
 	}
 	return password, nil
 }

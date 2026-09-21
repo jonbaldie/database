@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jonbaldie/database/internal/credential"
 	"github.com/jonbaldie/database/internal/instance"
 )
 
@@ -34,11 +35,12 @@ func initialize(args []string, stdout, stderr io.Writer) int {
 	}
 	password, err := request.readPassword(os.Stdin)
 	if err != nil {
-		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, "unable to read password")
+		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, passwordInputFailure(err))
 	}
 	metadata, err := instance.Initialize(request.directory, request.account, password)
 	if err != nil {
-		return writeOperatorFailure(stdout, "init", newOperationID(), "precondition", 3, err.Error())
+		class := initializationFailureClass(err)
+		return writeOperatorFailure(stdout, "init", newOperationID(), class, operatorExitCode(class), err.Error())
 	}
 	return writeInitializationSuccess(stdout, request, metadata)
 }
@@ -63,13 +65,32 @@ func initializeWithReporter(args []string, stdout, stderr io.Writer) int {
 	reporter.progress("initializing")
 	password, err := request.readPassword(os.Stdin)
 	if err != nil {
-		return reporter.failure("invalid_input", "", "unable to read password", nil)
+		return reporter.failure("invalid_input", "", passwordInputFailure(err), nil)
 	}
 	metadata, err := instance.Initialize(request.directory, request.account, password)
 	if err != nil {
-		return reporter.failure("precondition", "", err.Error(), nil)
+		return reporter.failure(initializationFailureClass(err), "", err.Error(), nil)
 	}
 	return reporter.success(map[string]any{"instance_id": metadata.InstanceID, "data_directory": request.directory, "admin_account": metadata.AdminAccount})
+}
+
+// initializationFailureClass reports credentials that violate the
+// account-administration contract as invalid input; other failures are
+// preconditions of the data directory.
+func initializationFailureClass(err error) string {
+	if errors.Is(err, credential.ErrInvalidAccountName) || errors.Is(err, credential.ErrInvalidPassword) {
+		return "invalid_input"
+	}
+	return "precondition"
+}
+
+// passwordInputFailure names a password policy violation but keeps other read
+// failures generic.
+func passwordInputFailure(err error) string {
+	if errors.Is(err, credential.ErrInvalidPassword) {
+		return err.Error()
+	}
+	return "unable to read password"
 }
 
 func parseInitializationRequest(args []string) (initializationRequest, error) {

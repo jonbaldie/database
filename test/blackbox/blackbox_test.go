@@ -758,7 +758,7 @@ func TestMySQLCRUDStatementsAreAtomicAndPreparedExecutionMatchesText(t *testing.
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
 	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("crud-secret\n"), 0o600); err != nil {
+	if err := os.WriteFile(passwordFile, []byte("crud-test-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
@@ -766,7 +766,7 @@ func TestMySQLCRUDStatementsAreAtomicAndPreparedExecutionMatchesText(t *testing.
 	}
 	process, address := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	client := newWireClient(t, address, "admin", "crud-secret")
+	client := newWireClient(t, address, "admin", "crud-test-secret")
 	defer client.close()
 
 	for _, query := range []string{
