@@ -14,8 +14,7 @@ func tryPointLookup(plan *relationalSelectPlan) ([]relationalResultRow, bool) {
 	if !ok {
 		return nil, false
 	}
-	table := plan.source.tables[0]
-	row, ok := lookupCatalogRow(plan.session.server.config.Catalog, table, column, value)
+	row, ok := lookupStatementRow(plan, column, value)
 	if !ok {
 		return nil, false
 	}
@@ -45,6 +44,39 @@ func projectPointLookup(plan *relationalSelectPlan, row []string) ([]relationalR
 		return nil, false
 	}
 	return []relationalResultRow{projected}, true
+}
+
+// lookupStatementRow reads one keyed row from the same definition that the
+// general SELECT path scans. A transaction stages its mutations in that
+// definition only, so the durable index serves sessions outside one.
+func lookupStatementRow(plan *relationalSelectPlan, column, value string) ([]string, bool) {
+	table := plan.source.tables[0]
+	if plan.session.transaction {
+		return lookupDefinitionRow(table, column, value)
+	}
+	return lookupCatalogRow(plan.session.server.config.Catalog, table, column, value)
+}
+
+func lookupDefinitionRow(table relationalTableSource, column, value string) ([]string, bool) {
+	if primaryColumn(table.table) != column && uniqueColumn(table.table) != column {
+		return nil, false
+	}
+	position := -1
+	for index, name := range table.table.Columns {
+		if name == column {
+			position = index
+			break
+		}
+	}
+	if position < 0 {
+		return nil, false
+	}
+	for _, row := range table.table.Rows {
+		if position < len(row) && row[position] == value {
+			return append([]string(nil), row...), true
+		}
+	}
+	return nil, false
 }
 
 func lookupCatalogRow(store *catalog.Store, table relationalTableSource, column, value string) ([]string, bool) {
