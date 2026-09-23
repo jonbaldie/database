@@ -5,25 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.14] - 2026-09-23
 
 ### Added
 
-- Supported the documented catalog `SHOW` forms that previously failed with
-  1064: `SHOW [FULL] TABLES FROM|IN`, `SHOW TABLES WHERE`, `SHOW DATABASES
-  WHERE`, `SHOW CHARACTER SET`, and `SHOW COLLATION`.
+- Supported catalog `SHOW` statements with `FROM`, `IN`, `FULL`, and `WHERE` clauses.
+- Supported `SHOW CHARACTER SET` and `SHOW COLLATION`.
+- Supported `FOR GROUP BY` clauses in index hints.
 
 ### Fixed
 
-- Made `database init` apply the `CREATE USER` credential policy. An initial
-  password outside 12 through 1,024 valid UTF-8 bytes, or an initial account
-  name that `CREATE USER` rejects, now fails as `invalid_input` and creates no
-  data directory. Online commands also reject a password source outside that
-  range. Existing data directories load unchanged. `CREATE USER` also now
-  rejects non-ASCII characters after the first character of an account name.
-- Resolved `SHOW INDEX FROM <table> FROM <db>` and `SHOW COLUMNS FROM
-  <table> FROM <db>` against the named database instead of folding the
-  second `FROM` clause into the table identifier.
+- Enforced the `CREATE USER` credential policy at instance initialization (`database init`).
+- Rejected passwords outside 12 through 1,024 bytes and invalid account names before modifying the data directory.
+- Rejected non-ASCII characters after the first character in account names for `CREATE USER`.
+- Resolved namespace visibility consistently across authentication, `USE`, schema metadata, grants, and DDL statements.
+- Returned MySQL error 1044 or 1049 for hidden and missing namespaces.
+- Read point lookups from the active transaction snapshot rather than only durable store indexes.
+- Preserved visibility of staged updates and deletes for primary key queries.
+- Resolved `SHOW INDEX FROM <table> FROM <db>` and `SHOW COLUMNS FROM <table> FROM <db>` against the specified database.
+- Validated existing rows when `CREATE UNIQUE INDEX` or `ALTER TABLE ... ADD UNIQUE INDEX` creates a unique index.
+- Merged argument types for `IFNULL` and `COALESCE` expressions so column metadata matches subsequent row values.
+- Computed outer expression metadata for composed aggregate projections.
+- Skipped quoted string literals when parsing aggregate and window function calls in SQL clauses.
+- Matched substrings by active collation in `REPLACE` for non-binary string arguments.
+- Formatted ordering directions as lowercase `asc` or `desc` in `EXPLAIN` output.
+
+### Removed
+
+- Removed the unused `internal/engine` package so all SQL execution uses the unified MySQL wire engine.
+
 
 ## [0.2.13] - 2026-09-18
 
@@ -314,6 +324,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.14]: https://github.com/jonbaldie/database/compare/v0.2.13...v0.2.14
+[0.2.13]: https://github.com/jonbaldie/database/compare/v0.2.12...v0.2.13
+[0.2.12]: https://github.com/jonbaldie/database/compare/v0.2.11...v0.2.12
 [0.2.11]: https://github.com/jonbaldie/database/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/jonbaldie/database/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/jonbaldie/database/compare/v0.2.8...v0.2.9
