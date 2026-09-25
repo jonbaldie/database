@@ -2,131 +2,13 @@ package mysql
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
-	"net"
 	"strconv"
 	"strings"
 )
 
 type queryRowStream func(func([]string, []bool) error) error
-
-func writeResult(connection net.Conn, sequence byte, result *queryResult, maximum int64) error {
-	writer := newResultWriter(connection, sequence, maximum)
-	if err := writer.writeColumns(result.columns, result.metadata); err != nil {
-		return err
-	}
-	if err := writer.writeTextResultRows(result); err != nil {
-		return writer.writeStreamError(err)
-	}
-	return writer.writeEOF(result.warnings)
-}
-
-func writeBinaryResult(connection net.Conn, sequence byte, result *queryResult, maximum int64) error {
-	writer := newResultWriter(connection, sequence, maximum)
-	if err := writer.writeColumns(result.columns, result.metadata); err != nil {
-		return err
-	}
-	if err := writer.writeBinaryResultRows(result); err != nil {
-		return writer.writeStreamError(err)
-	}
-	return writer.writeEOF(result.warnings)
-}
-
-func (w *resultWriter) writeTextResultRows(result *queryResult) error {
-	if result.stream == nil {
-		return w.writeTextRows(result.rows, result.nulls)
-	}
-	return result.stream(func(row []string, nulls []bool) error {
-		payload, err := textRowWithDefinitions(row, 0, [][]bool{nulls}, w.definitions)
-		if err != nil {
-			return err
-		}
-		return w.write(payload)
-	})
-}
-
-func (w *resultWriter) writeBinaryResultRows(result *queryResult) error {
-	if result.stream == nil {
-		return w.writeBinaryRows(result.rows, result.nulls)
-	}
-	return result.stream(func(row []string, nulls []bool) error {
-		payload, err := binaryRow(row, 0, [][]bool{nulls}, w.definitions)
-		if err != nil {
-			return err
-		}
-		return w.write(payload)
-	})
-}
-
-type resultWriter struct {
-	connection  net.Conn
-	sequence    byte
-	maximum     int64
-	definitions []columnMetadata
-}
-
-func newResultWriter(connection net.Conn, sequence byte, maximum int64) *resultWriter {
-	return &resultWriter{connection: connection, sequence: sequence, maximum: maximum}
-}
-
-func (w *resultWriter) writeColumns(columns []string, metadata []columnMetadata) error {
-	if err := w.write(lengthEncodedInt(len(columns))); err != nil {
-		return err
-	}
-	w.definitions = resultColumnDefinitions(columns, metadata)
-	for _, definition := range w.definitions {
-		if err := w.write(columnDefinition(definition)); err != nil {
-			return err
-		}
-	}
-	return w.writeEOF()
-}
-
-func (w *resultWriter) writeTextRows(rows [][]string, nulls [][]bool) error {
-	for rowIndex, row := range rows {
-		payload, err := textRowWithDefinitions(row, rowIndex, nulls, w.definitions)
-		if err != nil {
-			return err
-		}
-		if err := w.write(payload); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (w *resultWriter) writeBinaryRows(rows [][]string, nulls [][]bool) error {
-	for rowIndex, row := range rows {
-		payload, err := binaryRow(row, rowIndex, nulls, w.definitions)
-		if err != nil {
-			return err
-		}
-		if err := w.write(payload); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (w *resultWriter) writeEOF(warnings ...uint16) error { return w.write(eofPacket(warnings...)) }
-
-func (w *resultWriter) writeStreamError(err error) error {
-	var failure sqlFailure
-	if !errors.As(err, &failure) {
-		return err
-	}
-	return w.write(mysqlError(err))
-}
-
-func (w *resultWriter) write(payload []byte) error {
-	if err := writeBoundedPacket(w.connection, w.sequence, payload, w.maximum); err != nil {
-		return err
-	}
-	w.sequence = nextPacketSequence(w.sequence, payload)
-	return nil
-}
 
 func resultColumnDefinitions(columns []string, metadata []columnMetadata) []columnMetadata {
 	definitions := make([]columnMetadata, len(columns))
@@ -493,14 +375,6 @@ func columnDefinition(definition columnMetadata) []byte {
 	payload = append(payload, lengthEncodedString(definition.originalName)...)
 	payload = append(payload, 0x0c, byte(definition.characterSet), byte(definition.characterSet>>8), byte(definition.length), byte(definition.length>>8), byte(definition.length>>16), byte(definition.length>>24), definition.typ, byte(definition.flags), byte(definition.flags>>8), definition.decimals, 0, 0)
 	return payload
-}
-
-func eofPacket(warnings ...uint16) []byte {
-	count := uint16(0)
-	if len(warnings) > 0 {
-		count = warnings[0]
-	}
-	return []byte{0xfe, byte(count), byte(count >> 8), 2, 0}
 }
 
 func lengthEncodedInt(value int) []byte {
