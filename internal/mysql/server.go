@@ -14,7 +14,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"sort"
@@ -659,26 +658,6 @@ func acceptedClientCapabilities(tlsEnabled bool) uint32 {
 		clientDeprecateEOF | clientOptionalMetadata | clientQueryAttributes | clientMultiFactorAuth
 }
 
-func handshake(version string, nonce []byte, tlsEnabled bool, connectionID uint32) []byte {
-	capabilities := serverCapabilities(tlsEnabled)
-	p := []byte{0x0a}
-	// Drivers parse the handshake version as a MySQL semantic version. Keep
-	// the product identity as a suffix so strict clients (for example
-	// Connector/Python) accept the connection while VERSION() remains honest.
-	p = append(p, []byte("8.4.11-database-"+version)...)
-	p = append(p, 0)
-	p = append(p, byte(connectionID), byte(connectionID>>8), byte(connectionID>>16), byte(connectionID>>24))
-	p = append(p, nonce[:8]...)
-	p = append(p, 0)
-	p = append(p, byte(capabilities), byte(capabilities>>8), 33, 0x02, 0, byte(capabilities>>16), byte(capabilities>>24), byte(len(nonce)+1))
-	p = append(p, make([]byte, 10)...)
-	p = append(p, nonce[8:]...)
-	p = append(p, 0)
-	p = append(p, []byte("caching_sha2_password")...)
-	p = append(p, 0)
-	return p
-}
-
 func validPlainPassword(password []byte, encodedHash string) bool {
 	if encodedHash == "" {
 		return len(password) == 0
@@ -716,14 +695,6 @@ type sqlDiagnostic struct {
 	level   string
 	code    uint16
 	message string
-}
-
-func mysqlError(err error) []byte {
-	var failure sqlFailure
-	if errors.As(err, &failure) {
-		return errorPacket(failure.code, failure.state, failure.message)
-	}
-	return errorPacket(1064, "42000", err.Error())
 }
 
 type queryResult struct {
@@ -870,26 +841,33 @@ var informationSchemaViews = []informationSchemaView{
 }
 
 func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
+	writer := NewStreamWriter(connection, sequence, s.statements.server.config.MaxAllowedPacket)
 	statement, err := normalizeStatement(query)
 	if err != nil {
 		s.statements.session.replaceDiagnostics([]sqlDiagnostic{diagnosticForError(err)})
-		return writePacket(connection, sequence, mysqlError(err))
+		return writer.WriteError(err)
 	}
 	executor := s.statements
 	executor.streamRows = true
 	result, err := newStatementExecutionPolicy(&executor).execute(statement)
 	if err != nil {
-		return writePacket(connection, sequence, mysqlError(err))
+		return writer.WriteError(err)
 	}
 	warnings := s.statements.session.diagnosticCount()
 	if result == nil {
-		return writePacket(connection, sequence, okPacketWithWarnings(0, warnings))
+		return writer.WriteOK(0, warnings)
 	}
 	result.warnings = warnings
 	if len(result.columns) == 0 {
-		return writePacket(connection, sequence, okPacketWithWarnings(result.affected, warnings))
+		return writer.WriteOK(result.affected, warnings)
 	}
-	return writeResult(connection, sequence, result, s.statements.server.config.MaxAllowedPacket)
+	if err := writer.WriteResultSet(result, ResultModeText); err != nil {
+		if writer.PacketsWritten() == 0 {
+			return writer.WriteError(err)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *queryExecutor) useDatabase(name string) { s.statements.useDatabase(name) }
@@ -4383,69 +4361,13 @@ func (s *preparedPreparation) release(id uint32) {
 }
 
 func (s *preparedPreparation) writePreparedMetadata(connection net.Conn, sequence byte, id uint32, parameters int, metadata []columnMetadata) error {
+	writer := NewStreamWriter(connection, sequence, s.server.config.MaxAllowedPacket)
 	response := []byte{0x00, byte(id), byte(id >> 8), byte(id >> 16), byte(id >> 24), byte(len(metadata)), 0, byte(parameters), byte(parameters >> 8), 0, 0, 0}
-	maximum := s.server.config.MaxAllowedPacket
-	if !preparedMetadataFits(response, parameters, metadata, maximum) {
+	if !preparedMetadataFits(response, parameters, metadata, s.server.config.MaxAllowedPacket) {
 		s.release(id)
-		return writePacket(connection, sequence, errorPacket(1153, "08S01", "prepared statement metadata exceeds maximum packet size"))
+		return writer.WriteError(sqlFailure{1153, "08S01", "prepared statement metadata exceeds maximum packet size"})
 	}
-	return writePreparedMetadataPackets(connection, sequence, response, parameters, metadata, maximum)
-}
-
-func writePreparedMetadataPackets(connection net.Conn, sequence byte, response []byte, parameters int, metadata []columnMetadata, maximum int64) error {
-	if err := writeBoundedPacket(connection, sequence, response, maximum); err != nil {
-		return err
-	}
-	sequence = nextPacketSequence(sequence, response)
-	if parameters > 0 {
-		for i := 0; i < parameters; i++ {
-			payload := columnDefinition(preparedParameterMetadata(i))
-			if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
-				return err
-			}
-			sequence = nextPacketSequence(sequence, payload)
-		}
-		if err := writeBoundedPacket(connection, sequence, eofPacket(), maximum); err != nil {
-			return err
-		}
-		sequence = nextPacketSequence(sequence, eofPacket())
-	}
-	return writePreparedResultMetadata(connection, sequence, metadata, maximum)
-}
-
-func writePreparedResultMetadata(connection net.Conn, sequence byte, metadata []columnMetadata, maximum int64) error {
-	for _, definition := range metadata {
-		payload := columnDefinition(definition)
-		if err := writeBoundedPacket(connection, sequence, payload, maximum); err != nil {
-			return err
-		}
-		sequence = nextPacketSequence(sequence, payload)
-	}
-	if len(metadata) > 0 {
-		return writeBoundedPacket(connection, sequence, eofPacket(), maximum)
-	}
-	return nil
-}
-
-func preparedMetadataFits(response []byte, parameters int, metadata []columnMetadata, maximum int64) bool {
-	if int64(len(response)) > maximum {
-		return false
-	}
-	for index := range parameters {
-		if int64(len(columnDefinition(preparedParameterMetadata(index)))) > maximum {
-			return false
-		}
-	}
-	return everyColumnFits(metadata, maximum)
-}
-
-func everyColumnFits(metadata []columnMetadata, maximum int64) bool {
-	for _, definition := range metadata {
-		if int64(len(columnDefinition(definition))) > maximum {
-			return false
-		}
-	}
-	return true
+	return writer.WritePreparedMetadata(id, parameters, metadata)
 }
 
 func preparedParameterMetadata(index int) columnMetadata {
@@ -4671,36 +4593,43 @@ func preparedResultMetadata(result *queryResult, preserveMetadata bool) []column
 }
 
 func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, payload []byte) error {
+	writer := NewStreamWriter(connection, sequence, s.server.config.MaxAllowedPacket)
 	if len(payload) < 5 {
-		return writePacket(connection, sequence, errorPacket(1210, "HY000", "malformed prepared statement"))
+		return writer.WriteError(sqlFailure{1210, "HY000", "malformed prepared statement"})
 	}
 	id := binary.LittleEndian.Uint32(payload[1:5])
 	statement, ok := s.statements[id]
 	if !ok {
-		return writePacket(connection, sequence, errorPacket(1243, "HY000", "unknown prepared statement handler"))
+		return writer.WriteError(sqlFailure{1243, "HY000", "unknown prepared statement handler"})
 	}
 	boundStatement, err := s.boundStatement(payload, statement)
 	if err != nil {
 		err = preparedStatementError(err)
 		s.session.replaceDiagnostics([]sqlDiagnostic{diagnosticForError(err)})
-		return writePacket(connection, sequence, mysqlError(err))
+		return writer.WriteError(err)
 	}
 	finishExplanation := s.recordPreparedExplanation(statement)
 	defer finishExplanation()
 	executor := textStatementExecutor{session: s.session, streamRows: true}
 	result, err := newStatementExecutionPolicy(&executor).execute(boundStatement)
 	if err != nil {
-		return writePacket(connection, sequence, mysqlError(err))
+		return writer.WriteError(err)
 	}
 	warnings := s.session.diagnosticCount()
 	if result == nil {
-		return writePacket(connection, sequence, okPacketWithWarnings(0, warnings))
+		return writer.WriteOK(0, warnings)
 	}
 	result.warnings = warnings
 	if len(result.columns) == 0 {
-		return writePacket(connection, sequence, okPacketWithWarnings(result.affected, warnings))
+		return writer.WriteOK(result.affected, warnings)
 	}
-	return writeBinaryResult(connection, sequence, result, s.server.config.MaxAllowedPacket)
+	if err := writer.WriteResultSet(result, ResultModeBinary); err != nil {
+		if writer.PacketsWritten() == 0 {
+			return writer.WriteError(err)
+		}
+		return err
+	}
+	return nil
 }
 
 // boundStatement makes the common policy input only after the prepared values
@@ -5077,96 +5006,4 @@ func normalizeEmptyCSV(parts []string) []string {
 		return nil
 	}
 	return parts
-}
-
-const maximumPacketFrame = (1 << 24) - 1
-
-func readPacket(r io.Reader, maximum int64) (byte, []byte, error) {
-	if maximum <= 0 {
-		return 0, nil, errors.New("packet maximum must be positive")
-	}
-	var payload []byte
-	var sequence, expected byte
-	for frame := 0; ; frame++ {
-		header := make([]byte, 4)
-		if _, err := io.ReadFull(r, header); err != nil {
-			return 0, nil, err
-		}
-		if frame == 0 {
-			sequence, expected = header[3], header[3]+1
-		} else if header[3] != expected {
-			return 0, nil, errors.New("packet continuation sequence mismatch")
-		}
-		sequence = header[3]
-		expected++
-		length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
-		if int64(len(payload))+int64(length) > maximum {
-			return 0, nil, errors.New("packet exceeds configured maximum size")
-		}
-		start := len(payload)
-		payload = append(payload, make([]byte, length)...)
-		if _, err := io.ReadFull(r, payload[start:]); err != nil {
-			return 0, nil, err
-		}
-		if length < maximumPacketFrame {
-			return sequence, payload, nil
-		}
-	}
-}
-
-func writeBoundedPacket(w io.Writer, sequence byte, payload []byte, maximum int64) error {
-	if int64(len(payload)) > maximum {
-		return errors.New("packet exceeds configured maximum size")
-	}
-	return writePacket(w, sequence, payload)
-}
-
-func nextPacketSequence(sequence byte, payload []byte) byte {
-	return sequence + byte(len(payload)/maximumPacketFrame+1)
-}
-
-func writePacket(w io.Writer, sequence byte, payload []byte) error {
-	for {
-		length := len(payload)
-		if length > maximumPacketFrame {
-			length = maximumPacketFrame
-		}
-		header := []byte{byte(length), byte(length >> 8), byte(length >> 16), sequence}
-		if _, err := w.Write(header); err != nil {
-			return err
-		}
-		if _, err := w.Write(payload[:length]); err != nil {
-			return err
-		}
-		payload = payload[length:]
-		if length < maximumPacketFrame {
-			return nil
-		}
-		sequence++
-	}
-}
-
-func okPacket(affected ...uint64) []byte {
-	count := uint64(0)
-	if len(affected) > 0 {
-		count = affected[0]
-	}
-	return okPacketWithWarnings(count, 0)
-}
-
-func okPacketWithWarnings(affected uint64, warnings uint16) []byte {
-	payload := []byte{0x00}
-	payload = append(payload, lengthEncodedUint(affected)...)
-	payload = append(payload, 0x00, 0x02, 0x00, byte(warnings), byte(warnings>>8))
-	return payload
-}
-
-func errorPacket(code uint16, state, message string) []byte {
-	if len(message) > 255 {
-		message = message[:252] + "..."
-	}
-	payload := []byte{0xff, byte(code), byte(code >> 8), '#'}
-	payload = append(payload, state...)
-	payload = append(payload, message...)
-	return payload
 }
