@@ -182,6 +182,14 @@ Successful command details contain these stable operator facts:
 | `data inspect` | Identity, versions, compatibility, state, and whether recovery or upgrade is required |
 | `version` | Product, build, and platform identity plus data, backup, and named MySQL application compatibility ranges |
 
+Successful `data validate` details include `checked_at`, the UTC RFC 3339
+time at which the checks finished. If `examined` is present, it contains
+logical component names such as `instance_metadata`, `catalog`, and
+`row_store`. Structured findings use `code`, `severity`, and `summary`, and
+may use a logical `component` such as `row_store` or `catalog`. Data inspection
+and validation results do not expose storage file names, relative storage
+paths, or per-file hashes.
+
 Failed artifact-producing commands report whether cleanup is required, whether
 any output is usable, and the observable terminal state. A failed `restore`
 uses these `details` keys:

@@ -14,6 +14,7 @@ it with `SIGINT` or `SIGTERM`. One data directory belongs to exactly one live
 - `lifecycle-serve` starts the process and emits a `ready` lifecycle event.
 - `lifecycle-exclusive` refuses a second `serve` on the same data directory.
 - `lifecycle-stop` finishes current work and exits `0` on `SIGTERM`.
+- `lifecycle-inspect` reports logical data facts without exposing storage layout.
 - `lifecycle-validate` checks a data directory with `database data validate`.
 
 ## How to get to it (user POV)
@@ -24,6 +25,7 @@ it with `SIGINT` or `SIGTERM`. One data directory belongs to exactly one live
   --diagnostics-listen-address=<addr> --format=json`.
 - Press `Ctrl-C`, or send `SIGTERM`, to a running `serve`.
 - Run `bin/database data validate --data-directory <dir> --result=json`.
+- Run `bin/database data inspect --data-directory <dir> --result=json`.
 - Run `bin/database help` for the command list.
 
 ## Driving it with control.sh
@@ -60,8 +62,13 @@ Preconditions:
   `data directory is already in use`. The live instance keeps serving.
 - **Validate stored data.** Run
   `bin/database data validate --data-directory <DATA_DIR> --result=json`. The
-  result object reports `data_version` and an `examined` list of checksummed
-  files.
+  result object reports `data_version`, `valid`, structured `findings`, and
+  UTC RFC 3339 `checked_at`. Any `examined` values name logical components,
+  such as `instance_metadata`, `catalog`, and `row_store`.
+- **Inspect stored data.** Run
+  `bin/database data inspect --data-directory <DATA_DIR> --result=json`. The
+  result object reports identity, versions, compatibility, state, and recovery
+  or upgrade status. It does not report directory entries or storage file names.
 - **Stop gracefully.** Run `control.sh stop <run>`. The process exits within 15
   seconds and `control.sh doctor <run>` then fails with
   `no live serve process`.
@@ -86,4 +93,3 @@ Preconditions:
   `.running.lock` behind. Always stop with `control.sh stop` or `clean`.
 - `--data-directory` wants an absolute path. `init` takes the directory as a
   positional argument; `serve` takes it as the `--data-directory` flag.
-

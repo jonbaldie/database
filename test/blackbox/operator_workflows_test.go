@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonbaldie/database/test/blackbox"
 )
@@ -31,6 +32,145 @@ func TestOperatorDataValidateReportsHealthyStoppedInstance(t *testing.T) {
 	}
 	if valid, _ := result["valid"].(bool); !valid {
 		t.Fatalf("data validate valid = %#v", result)
+	}
+}
+
+func TestOperatorDataResultsHideStorageLayoutAndReportCheckTime(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "data-contract-secret")
+
+	t.Run("stopped", func(t *testing.T) {
+		assertOperatorDataResultsHideStorageLayout(t, runner, directory)
+	})
+
+	process, _ := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	t.Run("serving", func(t *testing.T) {
+		assertOperatorDataResultsHideStorageLayout(t, runner, directory)
+	})
+}
+
+func assertOperatorDataResultsHideStorageLayout(t *testing.T, runner blackbox.Runner, directory string) {
+	t.Helper()
+	for _, command := range []string{"inspect", "validate"} {
+		run := runner.Run(context.Background(), "data", command,
+			"--data-directory", directory, "--result=json", "--progress=none")
+		if run.ExitCode != 0 {
+			t.Fatalf("data %s: %#v", command, run)
+		}
+		fullOutput := run.Stdout + run.Stderr
+		for _, internalName := range []string{
+			".database-state", ".running.lock", "catalog.json", "instance.json",
+			"rows/", "wal.log", "checkpoint.dat", "tables.meta",
+		} {
+			if strings.Contains(fullOutput, internalName) {
+				t.Errorf("data %s exposed internal name %q: %s", command, internalName, fullOutput)
+			}
+		}
+		result := decodeOperatorResult(t, run.Stdout)
+		if command == "inspect" {
+			for _, key := range []string{"entries", "examined"} {
+				if _, exists := result[key]; exists {
+					t.Errorf("data inspect includes internal-layout field %q: %#v", key, result[key])
+				}
+			}
+			for _, key := range []string{"instance_id", "data_version", "compatibility", "state", "recovery_required", "upgrade_required"} {
+				if _, exists := result[key]; !exists {
+					t.Errorf("data inspect lacks required fact %q: %#v", key, result)
+				}
+			}
+			continue
+		}
+
+		checkedAt, ok := result["checked_at"].(string)
+		if !ok || checkedAt == "" {
+			t.Fatalf("data validate check time = %#v", result["checked_at"])
+		}
+		checkedTime, err := time.Parse(time.RFC3339Nano, checkedAt)
+		if err != nil {
+			t.Fatalf("data validate checked_at %q is not RFC 3339: %v", checkedAt, err)
+		}
+		_, offset := checkedTime.Zone()
+		if offset != 0 {
+			t.Errorf("data validate checked_at %q is not UTC", checkedAt)
+		}
+		if result["valid"] != true {
+			t.Errorf("data validate valid = %#v", result["valid"])
+		}
+		if _, ok := result["findings"].([]any); !ok {
+			t.Errorf("data validate findings are not structured: %#v", result["findings"])
+		}
+		examined, ok := result["examined"].([]any)
+		if !ok {
+			t.Errorf("data validate examined components are not structured: %#v", result["examined"])
+			continue
+		}
+		allowedComponents := map[string]bool{
+			"catalog": true, "data_directory": true, "initialization": true,
+			"instance_metadata": true, "row_store": true, "upgrade_state": true,
+		}
+		for _, value := range examined {
+			component, ok := value.(string)
+			if !ok || !allowedComponents[component] {
+				t.Errorf("data validate exposed non-logical examined component %#v", value)
+			}
+		}
+	}
+}
+
+func TestOperatorDataValidateReportsUnreadableRowStoreAsLogicalComponent(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "data-row-store-secret")
+	process, _ := startMySQLServer(t, runner, directory)
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.ExitCode != 0 {
+		t.Fatalf("stop server before row-store damage: %#v", result)
+	}
+	walPath := filepath.Join(directory, "rows", "wal.log")
+	if err := os.Chmod(walPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(walPath, 0o600) })
+
+	failed := runner.Run(context.Background(), "data", "validate",
+		"--data-directory", directory, "--result=json", "--progress=none")
+	if failed.ExitCode != 5 {
+		t.Fatalf("unreadable row-store validation exit = %d, want 5; %#v", failed.ExitCode, failed)
+	}
+	result := decodeOperatorResult(t, failed.Stdout)
+	if result["exit_class"] != "invalid_artifact" || result["valid"] != false {
+		t.Fatalf("unreadable row-store result = %#v", result)
+	}
+	findings, ok := result["findings"].([]any)
+	if !ok {
+		t.Fatalf("findings are not structured: %#v", result["findings"])
+	}
+	found := false
+	for _, raw := range findings {
+		finding, ok := raw.(map[string]any)
+		if !ok || finding["code"] != "unreadable_entry" {
+			continue
+		}
+		found = true
+		if finding["component"] != "row_store" {
+			t.Errorf("row-store finding component = %#v", finding["component"])
+		}
+		if _, exists := finding["path"]; exists {
+			t.Errorf("row-store finding exposes a path: %#v", finding)
+		}
+	}
+	if !found {
+		t.Fatalf("missing unreadable row-store finding: %#v", findings)
+	}
+	fullOutput := failed.Stdout + failed.Stderr
+	for _, internalName := range []string{"rows/", "wal.log", "catalog.json", "instance.json"} {
+		if strings.Contains(fullOutput, internalName) {
+			t.Errorf("data validate exposed internal name %q: %s", internalName, fullOutput)
+		}
 	}
 }
 
