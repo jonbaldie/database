@@ -65,7 +65,8 @@ func performShutdown(request shutdownRequest, reporter *operationReporter) (map[
 	reporter.progress("requesting")
 	details, err := requestServerShutdown(db, reporter.id)
 	if err != nil {
-		return nil, errors.New("shutdown request failed"), onlineAccessExitClass(err)
+		err, exitClass := normalizeOnlineCommandFailure(err, "shutdown request failed")
+		return nil, err, exitClass
 	}
 	reporter.progress("draining")
 	_ = db.Close()
