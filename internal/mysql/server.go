@@ -702,8 +702,11 @@ type queryResult struct {
 	rows     [][]string
 	metadata []columnMetadata
 	affected uint64
-	warnings uint16
-	stream   queryRowStream
+	// lastInsertID is the OK-packet last insert ID of a row write, following
+	// the MySQL mysql_insert_id() rules.
+	lastInsertID uint64
+	warnings     uint16
+	stream       queryRowStream
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
@@ -855,11 +858,11 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 	}
 	warnings := s.statements.session.diagnosticCount()
 	if result == nil {
-		return writer.WriteOK(0, warnings)
+		return writer.WriteOK(0, 0, warnings)
 	}
 	result.warnings = warnings
 	if len(result.columns) == 0 {
-		return writer.WriteOK(result.affected, warnings)
+		return writer.WriteOK(result.affected, result.lastInsertID, warnings)
 	}
 	if err := writer.WriteResultSet(result, ResultModeText); err != nil {
 		if writer.PacketsWritten() == 0 {
@@ -1146,11 +1149,11 @@ func (s *textStatementExecutor) relationStatement(query, lower string) (*queryRe
 	case strings.HasPrefix(lower, "create table "):
 		return nil, true, createTable(&relations, query)
 	case strings.HasPrefix(lower, "insert into "):
-		affected, err := insertRows(&relations, query)
-		return &queryResult{affected: affected}, true, err
+		written, err := insertRows(&relations, query)
+		return &queryResult{affected: written.affected, lastInsertID: written.lastInsertID}, true, err
 	case strings.HasPrefix(lower, "replace "):
-		affected, err := replaceRows(&relations, query)
-		return &queryResult{affected: affected}, true, err
+		written, err := replaceRows(&relations, query)
+		return &queryResult{affected: written.affected, lastInsertID: written.lastInsertID}, true, err
 	case strings.HasPrefix(lower, "update "):
 		affected, err := updateRows(&relations, query)
 		return &queryResult{affected: affected}, true, err
@@ -1886,37 +1889,46 @@ func mutateTableRows(definition *catalog.Definition, namespaceName, tableName st
 	return nil
 }
 
-func insertRows(s *relationExecutor, query string) (uint64, error) {
+// rowWrite is the new table image of one INSERT or REPLACE and the counts
+// that its OK packet reports.
+type rowWrite struct {
+	rows         [][]string
+	affected     uint64
+	state        autoIncrementState
+	lastInsertID uint64
+}
+
+func insertRows(s *relationExecutor, query string) (rowWrite, error) {
 	input, assignments, upsert, err := splitInsertOnDuplicate(query)
 	if err != nil {
-		return 0, err
+		return rowWrite{}, err
 	}
 	if upsert {
 		return upsertRows(s, input, assignments)
 	}
 	plan, err := makeInsertionPlan(s, input)
 	if err != nil {
-		return 0, err
+		return rowWrite{}, err
 	}
-	var affected uint64
+	var written rowWrite
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
 			currentPlan.table = *table
-			rows, count, state, err := applyInsertPlan(currentPlan)
+			write, err := applyInsertPlan(currentPlan)
 			if err != nil {
 				return err
 			}
-			table.Rows = rows
-			setAutoIncrementState(table, state)
-			affected = count
+			table.Rows = write.rows
+			setAutoIncrementState(table, write.state)
+			written = write
 			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
-		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+		return rowWrite{}, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
-	return affected, nil
+	return written, nil
 }
 
 // splitInsertOnDuplicate keeps the INSERT value input separate from the
@@ -1935,32 +1947,34 @@ func splitInsertOnDuplicate(query string) (string, string, bool, error) {
 	return input, assignments, true, nil
 }
 
-func upsertRows(s *relationExecutor, query, assignments string) (uint64, error) {
+func upsertRows(s *relationExecutor, query, assignments string) (rowWrite, error) {
 	plan, err := makeUpsertPlan(s, query, assignments)
 	if err != nil {
-		return 0, err
+		return rowWrite{}, err
 	}
-	_, affected, _, err := applyUpsertPlan(plan)
+	preview, err := applyUpsertPlan(plan)
 	if err != nil {
-		return 0, err
+		return rowWrite{}, err
 	}
+	var lastInsertID uint64
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.insert.namespace, plan.insert.name, func(table *catalog.Table) error {
 			currentPlan := plan
 			currentPlan.insert.table = *table
-			rows, _, state, err := applyUpsertPlan(currentPlan)
+			write, err := applyUpsertPlan(currentPlan)
 			if err != nil {
 				return err
 			}
-			table.Rows = rows
-			setAutoIncrementState(table, state)
+			table.Rows = write.rows
+			setAutoIncrementState(table, write.state)
+			lastInsertID = write.lastInsertID
 			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
-		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+		return rowWrite{}, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
-	return affected, nil
+	return rowWrite{affected: preview.affected, lastInsertID: lastInsertID}, nil
 }
 
 type upsertPlan struct {
@@ -2061,42 +2075,50 @@ func upsertValuesReference(raw string, indexes map[string]int) (int, bool, error
 	return index, true, nil
 }
 
-func applyUpsertPlan(plan upsertPlan) ([][]string, uint64, autoIncrementState, error) {
-	input := plan.insert
-	input.table.Rows = nil
-	candidates, _, state, err := applyInsertPlan(input)
+func applyUpsertPlan(plan upsertPlan) (rowWrite, error) {
+	candidates, generated, state, err := insertCandidates(plan.insert)
 	if err != nil {
-		return nil, 0, autoIncrementState{}, err
+		return rowWrite{}, err
 	}
 	indexes, err := tableColumnIndexes(plan.insert.table)
 	if err != nil {
-		return nil, 0, autoIncrementState{}, err
+		return rowWrite{}, err
 	}
 	rows, affected := cloneRows(plan.insert.table.Rows), uint64(0)
+	var id lastInsertID
 	for number, candidate := range candidates {
 		var changed uint64
-		rows, changed, state, err = applyUpsertCandidate(plan, indexes, rows, candidate, number+1, state)
+		var stored []string
+		rows, stored, changed, state, err = applyUpsertCandidate(plan, indexes, rows, candidate, number+1, state)
 		if err != nil {
-			return nil, 0, autoIncrementState{}, err
+			return rowWrite{}, err
+		}
+		if changed == 1 {
+			id.record(plan.insert.table, stored, generated[number])
+		} else if changed != 0 {
+			id.record(plan.insert.table, stored, false)
 		}
 		affected += changed
 	}
-	return rows, affected, state, nil
+	return rowWrite{rows: rows, affected: affected, state: state, lastInsertID: id.value()}, nil
 }
 
-func applyUpsertCandidate(plan upsertPlan, indexes map[string]int, rows [][]string, candidate []string, rowNumber int, state autoIncrementState) ([][]string, uint64, autoIncrementState, error) {
+// applyUpsertCandidate inserts one candidate or updates the row it conflicts
+// with. It returns the stored row and the affected count: 1 for an insert, 2
+// for a changed row, and 0 for an unchanged row.
+func applyUpsertCandidate(plan upsertPlan, indexes map[string]int, rows [][]string, candidate []string, rowNumber int, state autoIncrementState) ([][]string, []string, uint64, autoIncrementState, error) {
 	conflicts, err := conflictingUniqueRows(plan.insert.table, indexes, rows, candidate)
 	if err != nil {
-		return nil, 0, autoIncrementState{}, err
+		return nil, nil, 0, autoIncrementState{}, err
 	}
 	conflict := firstConflictingRow(rows, conflicts)
 	if conflict < 0 {
-		return append(rows, candidate), 1, state, nil
+		return append(rows, candidate), candidate, 1, state, nil
 	}
 	existing := rows[conflict]
 	updated, err := applyUpsertAssignments(plan, existing, candidate, rowNumber)
 	if err != nil {
-		return nil, 0, autoIncrementState{}, err
+		return nil, nil, 0, autoIncrementState{}, err
 	}
 	changed := uint64(0)
 	if !equalTableRow(updated, existing) {
@@ -2105,9 +2127,9 @@ func applyUpsertCandidate(plan upsertPlan, indexes map[string]int, rows [][]stri
 	rows[conflict] = updated
 	state, err = ratchetAutoIncrementForUpdatedRow(plan.insert.table, existing, updated, state)
 	if err != nil {
-		return nil, 0, autoIncrementState{}, err
+		return nil, nil, 0, autoIncrementState{}, err
 	}
-	return rows, changed, state, nil
+	return rows, updated, changed, state, nil
 }
 
 func firstConflictingRow(rows [][]string, conflicts map[int]bool) int {
@@ -2164,15 +2186,16 @@ func equalTableRow(left, right []string) bool {
 // row followed by an insert of the submitted row. The final image is committed
 // through mutateCatalog, so all row and cross-table constraints are checked
 // before it becomes visible.
-func replaceRows(s *relationExecutor, query string) (uint64, error) {
+func replaceRows(s *relationExecutor, query string) (rowWrite, error) {
 	plan, err := makeReplacePlan(s, query)
 	if err != nil {
-		return 0, err
+		return rowWrite{}, err
 	}
-	_, affected, _, err := applyReplacePlan(plan)
+	preview, err := applyReplacePlan(plan)
 	if err != nil {
-		return 0, err
+		return rowWrite{}, err
 	}
+	var lastInsertID uint64
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
@@ -2180,19 +2203,20 @@ func replaceRows(s *relationExecutor, query string) (uint64, error) {
 			if err := validateReplaceDeletePhases(*definition, currentPlan); err != nil {
 				return err
 			}
-			rows, _, state, err := applyReplacePlan(currentPlan)
+			write, err := applyReplacePlan(currentPlan)
 			if err != nil {
 				return err
 			}
-			table.Rows = rows
-			setAutoIncrementState(table, state)
+			table.Rows = write.rows
+			setAutoIncrementState(table, write.state)
+			lastInsertID = write.lastInsertID
 			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
-		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+		return rowWrite{}, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
-	return affected, nil
+	return rowWrite{affected: preview.affected, lastInsertID: lastInsertID}, nil
 }
 
 func makeReplacePlan(s *relationExecutor, query string) (insertPlan, error) {
@@ -2211,32 +2235,27 @@ func replaceInsertInput(query string) string {
 	return "INSERT INTO " + rest
 }
 
-func applyReplacePlan(plan insertPlan) ([][]string, uint64, autoIncrementState, error) {
-	candidates, state, err := replacementCandidates(plan)
+func applyReplacePlan(plan insertPlan) (rowWrite, error) {
+	candidates, generated, state, err := insertCandidates(plan)
 	if err != nil {
-		return nil, 0, autoIncrementState{}, err
+		return rowWrite{}, err
 	}
 	indexes, err := tableColumnIndexes(plan.table)
 	if err != nil {
-		return nil, 0, autoIncrementState{}, err
+		return rowWrite{}, err
 	}
 	rows, affected := cloneRows(plan.table.Rows), uint64(0)
-	for _, candidate := range candidates {
+	var id lastInsertID
+	for number, candidate := range candidates {
 		conflicts, err := conflictingUniqueRows(plan.table, indexes, rows, candidate)
 		if err != nil {
-			return nil, 0, autoIncrementState{}, err
+			return rowWrite{}, err
 		}
 		rows = append(rowsWithoutConflicts(rows, conflicts), candidate)
 		affected += uint64(len(conflicts) + 1)
+		id.record(plan.table, candidate, generated[number])
 	}
-	return rows, affected, state, nil
-}
-
-func replacementCandidates(plan insertPlan) ([][]string, autoIncrementState, error) {
-	input := plan
-	input.table.Rows = nil
-	candidates, _, state, err := applyInsertPlan(input)
-	return candidates, state, err
+	return rowWrite{rows: rows, affected: affected, state: state, lastInsertID: id.value()}, nil
 }
 
 func rowsWithoutConflicts(rows [][]string, conflicts map[int]bool) [][]string {
@@ -2252,7 +2271,7 @@ func rowsWithoutConflicts(rows [][]string, conflicts map[int]bool) [][]string {
 // validateReplaceDeletePhases observes the delete stage of each replacement.
 // A later insert cannot repair a foreign-key violation that the delete caused.
 func validateReplaceDeletePhases(definition catalog.Definition, plan insertPlan) error {
-	candidates, _, err := replacementCandidates(plan)
+	candidates, _, _, err := insertCandidates(plan)
 	if err != nil {
 		return err
 	}
@@ -2591,24 +2610,14 @@ func insertColumnIndexes(table catalog.Table, columns []string) ([]int, error) {
 	return result, nil
 }
 
-func applyInsertPlan(plan insertPlan) ([][]string, uint64, autoIncrementState, error) {
-	if err := validateInsertColumnDefaults(plan.table, plan.columns); err != nil {
-		return nil, 0, autoIncrementState{}, err
+func applyInsertPlan(plan insertPlan) (rowWrite, error) {
+	added, generated, state, err := insertCandidates(plan)
+	if err != nil {
+		return rowWrite{}, err
 	}
-	added := make([][]string, 0, len(plan.groups))
-	state := autoIncrementStateForTable(plan.table)
-	rowNumber := 1
-	for _, group := range plan.groups {
-		row, err := insertPlanRow(plan, group, rowNumber)
-		if err != nil {
-			return nil, 0, autoIncrementState{}, err
-		}
-		state, err = fillAutoIncrementValue(plan.table, row, state, rowNumber)
-		if err != nil {
-			return nil, 0, autoIncrementState{}, err
-		}
-		added = append(added, row)
-		rowNumber++
+	var id lastInsertID
+	for number, row := range added {
+		id.record(plan.table, row, generated[number])
 	}
 	rows := plan.table.Rows
 	if cap(rows) < len(rows)+len(added) {
@@ -2616,7 +2625,35 @@ func applyInsertPlan(plan insertPlan) ([][]string, uint64, autoIncrementState, e
 		copy(owned, rows)
 		rows = owned
 	}
-	return append(rows, added...), uint64(len(added)), state, nil
+	return rowWrite{rows: append(rows, added...), affected: uint64(len(added)), state: state, lastInsertID: id.value()}, nil
+}
+
+// insertCandidates builds the table row for each value group and assigns
+// AUTO_INCREMENT values. generated reports, per row, whether the row received
+// a generated value.
+func insertCandidates(plan insertPlan) ([][]string, []bool, autoIncrementState, error) {
+	if err := validateInsertColumnDefaults(plan.table, plan.columns); err != nil {
+		return nil, nil, autoIncrementState{}, err
+	}
+	added := make([][]string, 0, len(plan.groups))
+	generated := make([]bool, 0, len(plan.groups))
+	state := autoIncrementStateForTable(plan.table)
+	rowNumber := 1
+	for _, group := range plan.groups {
+		row, err := insertPlanRow(plan, group, rowNumber)
+		if err != nil {
+			return nil, nil, autoIncrementState{}, err
+		}
+		var assigned bool
+		state, assigned, err = fillAutoIncrementValue(plan.table, row, state, rowNumber)
+		if err != nil {
+			return nil, nil, autoIncrementState{}, err
+		}
+		added = append(added, row)
+		generated = append(generated, assigned)
+		rowNumber++
+	}
+	return added, generated, state, nil
 }
 
 func insertPlanRow(plan insertPlan, group []string, rowNumber int) ([]string, error) {
@@ -4617,11 +4654,11 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	}
 	warnings := s.session.diagnosticCount()
 	if result == nil {
-		return writer.WriteOK(0, warnings)
+		return writer.WriteOK(0, 0, warnings)
 	}
 	result.warnings = warnings
 	if len(result.columns) == 0 {
-		return writer.WriteOK(result.affected, warnings)
+		return writer.WriteOK(result.affected, result.lastInsertID, warnings)
 	}
 	if err := writer.WriteResultSet(result, ResultModeBinary); err != nil {
 		if writer.PacketsWritten() == 0 {
