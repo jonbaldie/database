@@ -155,18 +155,20 @@ func autoIncrementLimit(table catalog.Table, column int) (uint64, error) {
 	return uint64(numeric.smax), nil
 }
 
-func fillAutoIncrementValue(table catalog.Table, row []string, state autoIncrementState, rowNumber int) (autoIncrementState, error) {
+// fillAutoIncrementValue assigns the next AUTO_INCREMENT value to a row that
+// leaves the column NULL. The boolean reports whether it generated a value.
+func fillAutoIncrementValue(table catalog.Table, row []string, state autoIncrementState, rowNumber int) (autoIncrementState, bool, error) {
 	column, ok := autoIncrementColumn(table)
 	if !ok {
-		return state, nil
+		return state, false, nil
 	}
 	limit, err := autoIncrementLimit(table, column)
 	if err != nil {
-		return state, err
+		return state, false, err
 	}
 	if row[column] == storedSQLNullValue {
 		if state.exhausted || state.next == 0 || state.next > limit {
-			return state, autoIncrementOverflow(table.Columns[column], rowNumber)
+			return state, false, autoIncrementOverflow(table.Columns[column], rowNumber)
 		}
 		row[column] = strconv.FormatUint(state.next, 10)
 		if state.next == limit {
@@ -174,13 +176,44 @@ func fillAutoIncrementValue(table catalog.Table, row []string, state autoIncreme
 		} else {
 			state.next++
 		}
-		return state, nil
+		return state, true, nil
 	}
 	value, positive := autoIncrementPositiveValue(row[column])
 	if positive {
 		state = advanceAutoIncrement(state, value, limit)
 	}
-	return state, nil
+	return state, false, nil
+}
+
+// lastInsertID follows the mysql_insert_id() rules for one INSERT or REPLACE.
+// The first generated AUTO_INCREMENT value that the statement stores wins.
+// Without one, the AUTO_INCREMENT value of the last row that the statement
+// inserted or updated is reported.
+type lastInsertID struct {
+	firstGenerated uint64
+	lastStored     uint64
+}
+
+func (id *lastInsertID) record(table catalog.Table, row []string, generated bool) {
+	column, ok := autoIncrementColumn(table)
+	if !ok || column >= len(row) {
+		return
+	}
+	value, positive := autoIncrementPositiveValue(row[column])
+	if !positive {
+		return
+	}
+	if generated && id.firstGenerated == 0 {
+		id.firstGenerated = value
+	}
+	id.lastStored = value
+}
+
+func (id lastInsertID) value() uint64 {
+	if id.firstGenerated != 0 {
+		return id.firstGenerated
+	}
+	return id.lastStored
 }
 
 func advanceAutoIncrement(state autoIncrementState, value, limit uint64) autoIncrementState {

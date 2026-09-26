@@ -142,7 +142,7 @@ func TestStreamWriterWriteOK(t *testing.T) {
 	buf := &bytes.Buffer{}
 	writer := NewStreamWriter(buf, 1, 1024)
 
-	if err := writer.WriteOK(10, 2); err != nil {
+	if err := writer.WriteOK(10, 0, 2); err != nil {
 		t.Fatalf("WriteOK: %v", err)
 	}
 
@@ -166,6 +166,22 @@ func TestStreamWriterWriteOK(t *testing.T) {
 	warnings := uint16(payload[len(payload)-2]) | uint16(payload[len(payload)-1])<<8
 	if warnings != 2 {
 		t.Fatalf("warnings = %d, want 2", warnings)
+	}
+}
+
+// TestStreamWriterWriteOKEncodesLastInsertID proves that the OK packet carries
+// the last insert ID as a length-encoded integer after the affected rows.
+func TestStreamWriterWriteOKEncodesLastInsertID(t *testing.T) {
+	buf := &bytes.Buffer{}
+	writer := NewStreamWriter(buf, 1, 1024)
+
+	if err := writer.WriteOK(2, 70000, 1); err != nil {
+		t.Fatalf("WriteOK: %v", err)
+	}
+
+	want := []byte{0x00, 0x02, 0xfd, 0x70, 0x11, 0x01, 0x02, 0x00, 0x01, 0x00}
+	if payload := buf.Bytes()[4:]; !bytes.Equal(payload, want) {
+		t.Fatalf("OK payload = % x, want % x", payload, want)
 	}
 }
 

@@ -159,6 +159,17 @@ sequence to that value plus one. Deletes do not reuse values, and
 `TRUNCATE TABLE` resets the sequence to `1`. Custom increment and offset
 settings are outside v0.1.
 
+The OK packet of an `INSERT` or `REPLACE` reports the last insert ID with the
+MySQL `mysql_insert_id()` rules. It is the first generated value that the
+statement stored. If the statement stored no generated value, it is the
+`AUTO_INCREMENT` value of the last row that the statement inserted or changed.
+This includes explicit values, `INSERT ... SELECT`, and rows that
+`ON DUPLICATE KEY UPDATE` changes. Other statements, tables without an
+`AUTO_INCREMENT` column, and statements that store no row report `0`. A
+statement that fails returns an error, not an OK packet. An explicit negative
+value in a signed `AUTO_INCREMENT` column is not reported and gives `0`. The
+`LAST_INSERT_ID()` function is not supported.
+
 Each insert, update, delete, and schema change checks the complete affected
 constraint surface before it becomes durable. Foreign keys require a primary or
 unique referenced key. No foreign-key action clause is supported. A write that
