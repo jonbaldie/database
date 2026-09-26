@@ -24,7 +24,8 @@ func createOnlineBackup(request onlineConnectionRequest, output string, reporter
 	reporter.progress("capturing")
 	files, err := captureOnlineBackupFiles(db)
 	if err != nil {
-		return nil, err, onlineBackupExitClass(err)
+		err, exitClass := normalizeOnlineCommandFailure(err, "")
+		return nil, err, exitClass
 	}
 	defer files.Close()
 	return writeValidatedOnlineBackup(files, output, reporter)
@@ -221,8 +222,15 @@ func closeOnlineBackupWriters(writers map[string]*os.File) {
 	}
 }
 
-func onlineBackupExitClass(err error) string {
-	return onlineAccessExitClass(err)
+func normalizeOnlineCommandFailure(err error, fallbackSummary string) (error, string) {
+	exitClass := onlineAccessExitClass(err)
+	if exitClass == "access" {
+		return errors.New("connection failed"), exitClass
+	}
+	if fallbackSummary != "" {
+		return errors.New(fallbackSummary), exitClass
+	}
+	return err, exitClass
 }
 
 func onlineAccessExitClass(err error) string {
