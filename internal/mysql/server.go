@@ -1892,10 +1892,11 @@ func mutateTableRows(definition *catalog.Definition, namespaceName, tableName st
 // rowWrite is the new table image of one INSERT or REPLACE and the counts
 // that its OK packet reports.
 type rowWrite struct {
-	rows         [][]string
-	affected     uint64
-	state        autoIncrementState
-	lastInsertID uint64
+	rows                   [][]string
+	affected               uint64
+	state                  autoIncrementState
+	lastInsertID           uint64
+	allocatedAutoIncrement bool
 }
 
 func insertRows(s *relationExecutor, query string) (rowWrite, error) {
@@ -1926,9 +1927,33 @@ func insertRows(s *relationExecutor, query string) (rowWrite, error) {
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
+		if written.allocatedAutoIncrement {
+			if stateErr := preserveFailedInsertAutoIncrementState(s, plan, written.state); stateErr != nil {
+				return rowWrite{}, catalogMutationFailure(stateErr, sqlFailure{1105, "HY000", stateErr.Error()})
+			}
+		}
 		return rowWrite{}, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
 	return written, nil
+}
+
+func preserveFailedInsertAutoIncrementState(s *relationExecutor, plan insertPlan, allocated autoIncrementState) error {
+	return s.mutateCatalog(func(definition *catalog.Definition) error {
+		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
+			setAutoIncrementState(table, fartherAutoIncrementState(autoIncrementStateForTable(*table), allocated))
+			return nil
+		})
+	})
+}
+
+func fartherAutoIncrementState(current, allocated autoIncrementState) autoIncrementState {
+	if allocated.exhausted {
+		return allocated
+	}
+	if current.exhausted || current.next >= allocated.next {
+		return current
+	}
+	return allocated
 }
 
 // splitInsertOnDuplicate keeps the INSERT value input separate from the
@@ -2625,7 +2650,13 @@ func applyInsertPlan(plan insertPlan) (rowWrite, error) {
 		copy(owned, rows)
 		rows = owned
 	}
-	return rowWrite{rows: append(rows, added...), affected: uint64(len(added)), state: state, lastInsertID: id.value()}, nil
+	return rowWrite{
+		rows:                   append(rows, added...),
+		affected:               uint64(len(added)),
+		state:                  state,
+		lastInsertID:           id.value(),
+		allocatedAutoIncrement: id.firstGenerated != 0,
+	}, nil
 }
 
 // insertCandidates builds the table row for each value group and assigns

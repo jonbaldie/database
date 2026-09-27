@@ -166,9 +166,10 @@ statement stored. If the statement stored no generated value, it is the
 This includes explicit values, `INSERT ... SELECT`, and rows that
 `ON DUPLICATE KEY UPDATE` changes. Other statements, tables without an
 `AUTO_INCREMENT` column, and statements that store no row report `0`. A
-statement that fails returns an error, not an OK packet. An explicit negative
-value in a signed `AUTO_INCREMENT` column is not reported and gives `0`. The
-`LAST_INSERT_ID()` function is not supported.
+statement that fails returns an error, not an OK packet. Values allocated
+before a failed insert are not reused. An explicit negative value in a signed
+`AUTO_INCREMENT` column is not reported and gives `0`. The `LAST_INSERT_ID()`
+function is not supported.
 
 Each insert, update, delete, and schema change checks the complete affected
 constraint surface before it becomes durable. Foreign keys require a primary or

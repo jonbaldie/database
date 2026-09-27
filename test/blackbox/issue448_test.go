@@ -82,6 +82,23 @@ func TestIssue448InsertReportsGeneratedLastInsertID(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkIssue448Result(t, "create table", result, 0, 0)
+
+	for _, statement := range []string{
+		"CREATE TABLE trial.failed_ids (id BIGINT PRIMARY KEY AUTO_INCREMENT, label VARCHAR(20) NOT NULL UNIQUE)",
+		"INSERT INTO trial.failed_ids (label) VALUES ('seed')",
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("execute %s: %v", statement, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO trial.failed_ids (label) VALUES ('first'), ('seed')"); err == nil {
+		t.Fatal("duplicate multi-row insert succeeded")
+	}
+	result, err = db.ExecContext(ctx, "INSERT INTO trial.failed_ids (label) VALUES ('after failure')")
+	if err != nil {
+		t.Fatalf("insert after failed insert: %v", err)
+	}
+	checkIssue448Result(t, "insert after failed insert", result, 1, 4)
 }
 
 func checkIssue448Result(t *testing.T, label string, result sql.Result, wantAffected, wantID int64) {

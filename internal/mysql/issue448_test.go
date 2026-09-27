@@ -53,7 +53,7 @@ func TestIssue448LastInsertIDFollowsMySQLInsertIDRules(t *testing.T) {
 
 // TestIssue448FailedMultiRowInsertStoresNothing proves that a multi-row insert
 // that fails partway returns an error, not an OK packet, and stores no row.
-// The next insert reports the id that it stored.
+// The failed insert stores no rows. MySQL does not reuse its allocated IDs.
 func TestIssue448FailedMultiRowInsertStoresNothing(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{
@@ -78,7 +78,7 @@ func TestIssue448FailedMultiRowInsertStoresNothing(t *testing.T) {
 	if len(rows.rows) != 2 || rows.rows[1][1] != "c" {
 		t.Fatalf("rows = %#v, want the rows 'a' and 'c' only", rows.rows)
 	}
-	if got := rows.rows[1][0]; got != "2" || result.lastInsertID != 2 {
-		t.Fatalf("stored id %s, last insert ID %d; want 2, 2", got, result.lastInsertID)
+	if got := rows.rows[1][0]; got != "4" || result.lastInsertID != 4 {
+		t.Fatalf("stored id %s, last insert ID %d; want 4, 4", got, result.lastInsertID)
 	}
 }
