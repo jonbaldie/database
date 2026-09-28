@@ -1112,8 +1112,8 @@ func (s *catalogExecutor) showDatabasesStatement(query, lower string) (*queryRes
 
 func (s *catalogExecutor) showDatabases() *queryResult {
 	names := []string{informationSchemaName}
-	for _, namespace := range sortedNamespaces(s.metadataDefinition()) {
-		names = append(names, namespace.Name)
+	for _, namespace := range catalogMetadataForSession(s.session).namespaces {
+		names = append(names, namespace.name)
 	}
 	sort.Strings(names)
 	rows := make([][]string, len(names))
@@ -1131,11 +1131,10 @@ func informationSchemaTables() *queryResult {
 	return &queryResult{columns: []string{"Tables_in_" + informationSchemaName}, rows: rows}
 }
 
-func namespaceTables(name string, namespace catalog.Namespace) *queryResult {
-	tables := sortedTables(namespace)
-	rows := make([][]string, len(tables))
-	for index, table := range tables {
-		rows[index] = []string{table.Name}
+func namespaceTables(name string, namespace catalogNamespaceMetadata) *queryResult {
+	rows := make([][]string, len(namespace.tables))
+	for index, table := range namespace.tables {
+		rows[index] = []string{table.name}
 	}
 	return &queryResult{columns: []string{"Tables_in_" + name}, rows: rows}
 }
@@ -1181,15 +1180,6 @@ func (s *databaseSelector) use(name string) error {
 
 func (s *databaseSelector) databaseExists(name string) error {
 	return s.session.databaseExists(identifier(name))
-}
-
-func (s *catalogExecutor) metadataDefinition() catalog.Definition {
-	if s.server.config.Catalog == nil {
-		return emptyDefinition()
-	}
-	// Catalog metadata is statement-scoped even when ordinary data reads use
-	// a repeatable-read transaction snapshot.
-	return visibleCatalogDefinition(s.server.config.Catalog.Snapshot(), s.session.username)
 }
 
 func (s *catalogExecutor) createDatabase(query string) error {
@@ -1597,35 +1587,31 @@ func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error)
 	if strings.EqualFold(name, informationSchemaName) {
 		return nil, sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
-	if name == "" || s.server.config.Catalog == nil {
+	if name == "" {
 		return nil, sqlFailure{1049, "42000", "unknown database"}
 	}
-	definition := emptyDefinition()
-	if s.server.config.Catalog != nil {
-		definition = s.server.config.Catalog.Snapshot()
-	}
-	resolution := resolveNamespace(definition, s.session.username, name)
-	if err := resolution.requireDefinition(); err != nil {
+	namespace, err := catalogMetadataForSession(s.session).namespace(name)
+	if err != nil {
 		return nil, err
 	}
-	namespace := resolution.namespace
 	return &queryResult{
 		columns: []string{"Database", "Create Database"},
-		rows:    [][]string{{namespace.Name, "CREATE DATABASE " + quoteIdentifier(namespace.Name)}},
+		rows:    [][]string{{namespace.name, "CREATE DATABASE " + quoteIdentifier(namespace.name)}},
 	}, nil
 }
 
 func (s *catalogExecutor) showCreateTable(query string) (*queryResult, error) {
 	target := strings.TrimSpace(query[len("SHOW CREATE TABLE "):])
-	_, table, err := s.resolveShowTable(target, "")
+	projection := catalogMetadataForSession(s.session)
+	_, table, err := s.resolveShowTable(target, "", projection)
 	if err != nil {
 		return nil, err
 	}
-	definition, err := canonicalCreateTable(table)
+	definition, err := canonicalCreateTable(table.definition)
 	if err != nil {
 		return nil, sqlFailure{1105, "HY000", err.Error()}
 	}
-	return &queryResult{columns: []string{"Table", "Create Table"}, rows: [][]string{{table.Name, definition}}}, nil
+	return &queryResult{columns: []string{"Table", "Create Table"}, rows: [][]string{{table.name, definition}}}, nil
 }
 
 func (s *catalogExecutor) showIndexes(query, lower string) (*queryResult, error) {
@@ -1637,7 +1623,8 @@ func (s *catalogExecutor) showIndexes(query, lower string) (*queryResult, error)
 	if err != nil {
 		return nil, err
 	}
-	_, table, err := s.resolveShowTableParts(modifiers.objectParts, modifiers.namespace)
+	projection := catalogMetadataForSession(s.session)
+	_, table, err := s.resolveShowTableParts(modifiers.objectParts, modifiers.namespace, projection)
 	if err != nil {
 		return nil, err
 	}
@@ -1653,66 +1640,16 @@ func showIndexPrefix(lower string) string {
 	return ""
 }
 
-func showTableIndexes(table catalog.Table) *queryResult {
+func showTableIndexes(table catalogTableMetadata) *queryResult {
 	columns := []string{"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality", "Sub_part", "Packed", "Null", "Index_type", "Comment", "Index_comment", "Visible", "Expression"}
-	rows := [][]string{}
-	nulls := [][]bool{}
-	for _, index := range effectiveTableIndexes(table) {
-		for number, part := range index.Parts {
-			row, null := showIndexRow(table, index, part, number)
-			rows = append(rows, row)
-			nulls = append(nulls, null)
-		}
+	rows := make([][]string, 0, len(table.indexes))
+	nulls := make([][]bool, 0, len(table.indexes))
+	for _, index := range table.indexes {
+		row, null := index.showRow(table.name)
+		rows = append(rows, row)
+		nulls = append(nulls, null)
 	}
 	return &queryResult{columns: columns, rows: rows, nulls: nulls}
-}
-
-func showIndexRow(table catalog.Table, index catalog.Index, part catalog.IndexPart, number int) ([]string, []bool) {
-	column, expression := part.Column, part.Expression
-	nullable := false
-	if column != "" {
-		columnIndex := tableColumnIndex(table.Columns, column)
-		nullable = columnIndex >= 0 && catalog.ColumnAttributeAt(table, columnIndex).Nullable
-	}
-	null := []bool{false, false, false, false, column == "", false, false, part.PrefixLength == 0, true, !nullable, false, false, false, false, expression == ""}
-	return []string{
-		table.Name,
-		strconv.Itoa(boolToInt(!index.Unique)),
-		index.Name,
-		strconv.Itoa(number + 1),
-		column,
-		indexPartCollation(part),
-		strconv.Itoa(len(table.Rows)),
-		strconv.Itoa(part.PrefixLength),
-		"",
-		"YES",
-		"BTREE",
-		"",
-		index.Comment,
-		indexVisibility(index),
-		expression,
-	}, null
-}
-
-func boolToInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}
-
-func indexPartCollation(part catalog.IndexPart) string {
-	if part.Descending {
-		return "D"
-	}
-	return "A"
-}
-
-func indexVisibility(index catalog.Index) string {
-	if index.Invisible {
-		return "NO"
-	}
-	return "YES"
 }
 
 func (s *catalogExecutor) qualifiedShowTableTarget(target string, parts []string) (string, string, error) {
@@ -4063,12 +4000,21 @@ func (s *informationSchemaExecutor) selectInformationSchema(query string) (*quer
 	if err != nil {
 		return nil, err
 	}
-	rows := informationSchemaRows(view.name, s.session)
-	return projectInformationSchemaRows(view, projection, rows), nil
+	metadata := catalogMetadataForSession(s.session)
+	rows, err := informationSchemaRows(view, s.session, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return projectInformationSchemaRows(view, projection, rows)
 }
 
-func informationSchemaQueryResult(s *session, view informationSchemaView) *queryResult {
-	return projectInformationSchemaRows(view, everyInformationSchemaColumn(view), informationSchemaRows(view.name, s))
+func informationSchemaQueryResult(s *session, view informationSchemaView) (*queryResult, error) {
+	metadata := catalogMetadataForSession(s)
+	rows, err := informationSchemaRows(view, s, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return projectInformationSchemaRows(view, everyInformationSchemaColumn(view), rows)
 }
 
 func parseInformationSchemaQuery(query string) (informationSchemaView, []int, error) {
@@ -4147,12 +4093,17 @@ func informationSchemaColumnIndex(view informationSchemaView, item string) (int,
 	return 0, sqlFailure{1054, "42S22", "unknown information_schema column '" + name + "'"}
 }
 
-func projectInformationSchemaRows(view informationSchemaView, projection []int, rows [][]metadataValue) *queryResult {
+func projectInformationSchemaRows(view informationSchemaView, projection []int, rows [][]metadataValue) (*queryResult, error) {
 	columns := make([]string, len(projection))
 	resultRows := make([][]string, len(rows))
 	resultNulls := make([][]bool, len(rows))
 	for resultIndex, sourceIndex := range projection {
 		columns[resultIndex] = view.columns[sourceIndex].name
+	}
+	for _, row := range rows {
+		if len(row) != len(view.columns) {
+			return nil, sqlFailure{1105, "HY000", "information_schema row width does not match view definition"}
+		}
 	}
 	for rowIndex, row := range rows {
 		resultRows[rowIndex] = make([]string, len(projection))
@@ -4162,7 +4113,7 @@ func projectInformationSchemaRows(view informationSchemaView, projection []int, 
 			resultNulls[rowIndex][resultIndex] = row[sourceIndex].null
 		}
 	}
-	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls}
+	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls}, nil
 }
 
 type metadataValue struct {
@@ -4179,33 +4130,28 @@ func findInformationSchemaView(name string) (informationSchemaView, bool) {
 	return informationSchemaView{}, false
 }
 
-func informationSchemaRows(viewName string, s *session) [][]metadataValue {
-	builder, ok := informationSchemaRowBuilders[strings.ToLower(viewName)]
+func informationSchemaRows(view informationSchemaView, s *session, projection catalogMetadataProjection) ([][]metadataValue, error) {
+	builder, ok := informationSchemaRowBuilders[strings.ToLower(view.name)]
 	if !ok {
-		return nil
+		return nil, sqlFailure{1105, "HY000", "information_schema view has no row builder"}
 	}
-	return builder(s, informationSchemaDefinition(s))
+	return builder(s, projection), nil
 }
 
-func informationSchemaDefinition(s *session) catalog.Definition {
-	if s == nil || s.server == nil || s.server.config.Catalog == nil {
-		return emptyDefinition()
-	}
-	return visibleCatalogDefinition(s.server.config.Catalog.Snapshot(), s.username)
-}
-
-func informationSchemaSchemataRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaSchemataRows(_ *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := [][]metadataValue{{{value: informationSchemaName}}}
-	for _, namespace := range sortedNamespaces(definition) {
-		rows = append(rows, []metadataValue{{value: namespace.Name}})
+	for _, namespace := range projection.namespaces {
+		rows = append(rows, []metadataValue{{value: namespace.name}})
 	}
 	return rows
 }
 
-func informationSchemaTableRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaTableRows(_ *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := informationSchemaVirtualTableRows()
-	for _, namespace := range sortedNamespaces(definition) {
-		rows = append(rows, informationSchemaNamespaceTableRows(namespace)...)
+	for _, namespace := range projection.namespaces {
+		for _, table := range namespace.tables {
+			rows = append(rows, []metadataValue{{value: namespace.name}, {value: table.name}, {value: "BASE TABLE"}, table.autoIncrement})
+		}
 	}
 	return rows
 }
@@ -4218,19 +4164,14 @@ func informationSchemaVirtualTableRows() [][]metadataValue {
 	return rows
 }
 
-func informationSchemaNamespaceTableRows(namespace catalog.Namespace) [][]metadataValue {
-	tables := sortedTables(namespace)
-	rows := make([][]metadataValue, len(tables))
-	for index, table := range tables {
-		rows[index] = []metadataValue{{value: namespace.Name}, {value: table.Name}, {value: "BASE TABLE"}, informationSchemaAutoIncrement(table)}
-	}
-	return rows
-}
-
-func informationSchemaColumnRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaColumnRows(_ *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := informationSchemaVirtualColumnRows()
-	for _, namespace := range sortedNamespaces(definition) {
-		rows = append(rows, informationSchemaNamespaceColumnRows(namespace)...)
+	for _, namespace := range projection.namespaces {
+		for _, table := range namespace.tables {
+			for _, column := range table.columns {
+				rows = append(rows, informationSchemaColumnRow(namespace.name, table.name, column.name, column.ordinalPosition, column.dataType, column.columnType, metadataValue{value: column.extra}))
+			}
+		}
 	}
 	return rows
 }
@@ -4239,26 +4180,15 @@ func informationSchemaVirtualColumnRows() [][]metadataValue {
 	rows := make([][]metadataValue, 0)
 	for _, view := range informationSchemaViews {
 		for index, column := range view.columns {
-			rows = append(rows, informationSchemaColumnRow(informationSchemaName, view.name, column.name, index, metadataValue{value: baseType(column.typeName)}, metadataValue{value: column.typeName}, metadataValue{value: ""}))
+			rows = append(rows, informationSchemaColumnRow(informationSchemaName, view.name, column.name, index+1, metadataValue{value: baseType(column.typeName)}, metadataValue{value: column.typeName}, metadataValue{value: ""}))
 		}
 	}
 	return rows
 }
 
-func informationSchemaNamespaceColumnRows(namespace catalog.Namespace) [][]metadataValue {
-	rows := make([][]metadataValue, 0)
-	for _, table := range sortedTables(namespace) {
-		for index, column := range table.Columns {
-			dataType, columnType := informationSchemaType(table, index)
-			rows = append(rows, informationSchemaColumnRow(namespace.Name, table.Name, column, index, dataType, columnType, informationSchemaColumnExtra(table, index)))
-		}
-	}
-	return rows
-}
-
-func informationSchemaColumnRow(namespace, table, column string, index int, dataType, columnType, extra metadataValue) []metadataValue {
+func informationSchemaColumnRow(namespace, table, column string, ordinalPosition int, dataType, columnType, extra metadataValue) []metadataValue {
 	return []metadataValue{
-		{value: namespace}, {value: table}, {value: column}, {value: strconv.Itoa(index + 1)}, dataType, columnType, extra,
+		{value: namespace}, {value: table}, {value: column}, {value: strconv.Itoa(ordinalPosition)}, dataType, columnType, extra,
 	}
 }
 
@@ -4271,21 +4201,6 @@ func informationSchemaAutoIncrement(table catalog.Table) metadataValue {
 		return metadataValue{null: true}
 	}
 	return metadataValue{value: strconv.FormatUint(state.next, 10)}
-}
-
-func informationSchemaColumnExtra(table catalog.Table, index int) metadataValue {
-	if catalog.ColumnAttributeAt(table, index).AutoIncrement {
-		return metadataValue{value: "auto_increment"}
-	}
-	return metadataValue{value: ""}
-}
-
-func informationSchemaType(table catalog.Table, index int) (metadataValue, metadataValue) {
-	typeName, known := table.ColumnType(index)
-	if !known {
-		return metadataValue{null: true}, metadataValue{null: true}
-	}
-	return metadataValue{value: baseType(typeName)}, metadataValue{value: typeName}
 }
 
 func baseType(typeName string) string {
