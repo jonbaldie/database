@@ -170,6 +170,37 @@ func TestShowFullColumnsProjectsAccountGrants(t *testing.T) {
 	}
 }
 
+func TestShowFullColumnsUsesGrantSnapshot(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	if err := executor.server.config.Catalog.CreateAccount(catalog.Account{
+		Name:         "reader",
+		PasswordHash: "hash",
+		Grants:       []catalog.Grant{{Privilege: "DATA_READ", Namespace: "app"}},
+	}); err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	if _, err := executeStatement(executor, "CREATE TABLE devices (id INT)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	executor.session.username = "reader"
+	projection := catalogMetadataForSession(executor.session)
+
+	if err := executor.server.config.Catalog.UpdateAccount("reader", func(account *catalog.Account) error {
+		account.Grants = []catalog.Grant{{Privilege: "DATA_WRITE", Namespace: "app"}}
+		return nil
+	}); err != nil {
+		t.Fatalf("update account grants: %v", err)
+	}
+	table, err := projection.table("app", "devices")
+	if err != nil {
+		t.Fatalf("resolve table from snapshot: %v", err)
+	}
+	result := showColumns(table, true, projection.columnPrivileges("app"))
+	if len(result.rows) != 1 || result.rows[0][7] != "select" {
+		t.Fatalf("snapshot privileges = %#v, want select", result.rows)
+	}
+}
+
 func TestShowStatusPrefixesStayExact(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, query := range []string{"SHOW SESSION STATUSX", "SHOW GLOBAL STATUSX", "SHOW STATUSX"} {

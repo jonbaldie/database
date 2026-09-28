@@ -96,7 +96,7 @@ func (s *catalogExecutor) showColumnsStatement(query, lower string) (*queryResul
 	if err != nil {
 		return nil, err
 	}
-	result := showColumns(table, full, s.columnPrivileges(namespaceName))
+	result := showColumns(table, full, projection.columnPrivileges(namespaceName))
 	return applyShowFilters(s.session, result, modifiers)
 }
 
@@ -124,26 +124,6 @@ func (s *catalogExecutor) resolveShowTableParts(parts []string, namespaceOverrid
 		return "", catalogTableMetadata{}, err
 	}
 	return namespaceName, table, nil
-}
-
-// columnPrivileges follows the information_schema.COLUMNS.PRIVILEGES contract:
-// it projects the current account's namespace grants into column capabilities.
-func (s *catalogExecutor) columnPrivileges(namespaceName string) string {
-	privileges := []string{}
-	for _, grant := range []struct {
-		privilege string
-		spellings []string
-	}{
-		{privilege: "DATA_READ", spellings: []string{"select"}},
-		{privilege: "DATA_WRITE", spellings: []string{"insert", "update"}},
-		{privilege: "SCHEMA_MANAGEMENT", spellings: []string{"references"}},
-	} {
-		if s.requireGrant(grant.privilege, namespaceName) != nil {
-			continue
-		}
-		privileges = append(privileges, grant.spellings...)
-	}
-	return strings.Join(privileges, ",")
 }
 
 // isShowStatusStatement reports whether the statement is a SHOW STATUS form.

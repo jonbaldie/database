@@ -10,10 +10,11 @@ import (
 // catalogMetadataProjection holds the catalog facts shared by SHOW and
 // information_schema for one statement snapshot.
 type catalogMetadataProjection struct {
-	source     catalog.Definition
-	definition catalog.Definition
-	username   string
-	namespaces []catalogNamespaceMetadata
+	source                   catalog.Definition
+	definition               catalog.Definition
+	username                 string
+	allowUnconfiguredAccount bool
+	namespaces               []catalogNamespaceMetadata
 }
 
 type catalogNamespaceMetadata struct {
@@ -57,22 +58,25 @@ type catalogConstraintMetadata struct {
 func catalogMetadataForSession(s *session) catalogMetadataProjection {
 	source := emptyDefinition()
 	username := ""
+	allowUnconfiguredAccount := false
 	if s != nil {
 		username = s.username
+		allowUnconfiguredAccount = s.unconfiguredAccountPermitted()
 		if s.server != nil && s.server.config.Catalog != nil {
 			source = s.server.config.Catalog.Snapshot()
 		}
 	}
-	return projectCatalogMetadata(source, username)
+	return projectCatalogMetadata(source, username, allowUnconfiguredAccount)
 }
 
-func projectCatalogMetadata(source catalog.Definition, username string) catalogMetadataProjection {
+func projectCatalogMetadata(source catalog.Definition, username string, allowUnconfiguredAccount bool) catalogMetadataProjection {
 	definition := visibleCatalogDefinition(source, username)
 	projection := catalogMetadataProjection{
-		source:     source,
-		definition: definition,
-		username:   username,
-		namespaces: make([]catalogNamespaceMetadata, 0, len(definition.Namespaces)),
+		source:                   source,
+		definition:               definition,
+		username:                 username,
+		allowUnconfiguredAccount: allowUnconfiguredAccount,
+		namespaces:               make([]catalogNamespaceMetadata, 0, len(definition.Namespaces)),
 	}
 	for _, namespace := range sortedNamespaces(definition) {
 		namespaceMetadata := catalogNamespaceMetadata{
@@ -168,6 +172,38 @@ func (projection catalogMetadataProjection) table(namespaceName, tableName strin
 	return catalogTableMetadata{}, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
 }
 
+// columnPrivileges projects the account grants captured with this catalog
+// snapshot into the privileges shown for each column.
+func (projection catalogMetadataProjection) columnPrivileges(namespace string) string {
+	var account catalog.Account
+	allPrivileges := projection.username == ""
+	if projection.username != "" {
+		var found bool
+		account, found = projection.source.Accounts[projection.username]
+		if !found {
+			allPrivileges = projection.allowUnconfiguredAccount
+		} else if account.Locked {
+			return ""
+		}
+	}
+
+	privileges := []string{}
+	for _, grant := range []struct {
+		privilege string
+		spellings []string
+	}{
+		{privilege: "DATA_READ", spellings: []string{"select"}},
+		{privilege: "DATA_WRITE", spellings: []string{"insert", "update"}},
+		{privilege: "SCHEMA_MANAGEMENT", spellings: []string{"references"}},
+	} {
+		if !allPrivileges && accountGrantIndex(account, grant.privilege, namespace) < 0 {
+			continue
+		}
+		privileges = append(privileges, grant.spellings...)
+	}
+	return strings.Join(privileges, ",")
+}
+
 func (index catalogIndexPartMetadata) collation() string {
 	if index.part.Descending {
 		return "D"
@@ -204,10 +240,6 @@ func (index catalogIndexPartMetadata) prefixLength() metadataValue {
 }
 
 func (index catalogIndexPartMetadata) informationSchemaRow(namespace, table string) []metadataValue {
-	nullable := ""
-	if index.nullable {
-		nullable = "YES"
-	}
 	return []metadataValue{
 		{value: namespace},
 		{value: table},
@@ -217,7 +249,7 @@ func (index catalogIndexPartMetadata) informationSchemaRow(namespace, table stri
 		{value: index.part.Column},
 		{value: index.collation()},
 		index.prefixLength(),
-		{value: nullable},
+		{value: index.showNullability()},
 		{value: "BTREE"},
 		{value: ""},
 		{value: index.index.Comment},
