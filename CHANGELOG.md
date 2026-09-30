@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.16] - 2026-09-30
+
+### Fixed
+
+- Normalized access failures from online backup and shutdown operations to a single `connection failed` diagnostic.
+- Replaced physical file names, paths, and hashes in data inspection and validation results with logical component names, and added `checked_at` to validation results.
+
 ## [0.2.15] - 2026-09-27
 
 ### Changed
