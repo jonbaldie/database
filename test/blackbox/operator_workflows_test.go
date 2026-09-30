@@ -69,23 +69,30 @@ func assertOperatorDataResultsHideStorageLayout(t *testing.T, runner blackbox.Ru
 			}
 		}
 		result := decodeOperatorResult(t, run.Stdout)
+		details, ok := result["details"].(map[string]any)
+		if !ok {
+			t.Fatalf("data %s details are not structured: %#v", command, result["details"])
+		}
 		if command == "inspect" {
 			for _, key := range []string{"entries", "examined"} {
-				if _, exists := result[key]; exists {
-					t.Errorf("data inspect includes internal-layout field %q: %#v", key, result[key])
+				if _, exists := details[key]; exists {
+					t.Errorf("data inspect includes internal-layout field %q: %#v", key, details[key])
 				}
 			}
 			for _, key := range []string{"instance_id", "data_version", "compatibility", "state", "recovery_required", "upgrade_required"} {
-				if _, exists := result[key]; !exists {
-					t.Errorf("data inspect lacks required fact %q: %#v", key, result)
+				if _, exists := details[key]; !exists {
+					t.Errorf("data inspect lacks required fact %q: %#v", key, details)
 				}
 			}
 			continue
 		}
 
-		checkedAt, ok := result["checked_at"].(string)
+		if details["instance_id"] == "" || details["data_directory"] != directory {
+			t.Errorf("data validate identity or directory facts = %#v", details)
+		}
+		checkedAt, ok := details["checked_at"].(string)
 		if !ok || checkedAt == "" {
-			t.Fatalf("data validate check time = %#v", result["checked_at"])
+			t.Fatalf("data validate check time = %#v", details["checked_at"])
 		}
 		checkedTime, err := time.Parse(time.RFC3339Nano, checkedAt)
 		if err != nil {
@@ -95,15 +102,15 @@ func assertOperatorDataResultsHideStorageLayout(t *testing.T, runner blackbox.Ru
 		if offset != 0 {
 			t.Errorf("data validate checked_at %q is not UTC", checkedAt)
 		}
-		if result["valid"] != true {
-			t.Errorf("data validate valid = %#v", result["valid"])
+		if details["valid"] != true {
+			t.Errorf("data validate valid = %#v", details["valid"])
 		}
-		if _, ok := result["findings"].([]any); !ok {
-			t.Errorf("data validate findings are not structured: %#v", result["findings"])
+		if _, ok := details["findings"].([]any); !ok {
+			t.Errorf("data validate findings are not structured: %#v", details["findings"])
 		}
-		examined, ok := result["examined"].([]any)
+		examined, ok := details["examined"].([]any)
 		if !ok {
-			t.Errorf("data validate examined components are not structured: %#v", result["examined"])
+			t.Errorf("data validate examined components are not structured: %#v", details["examined"])
 			continue
 		}
 		allowedComponents := map[string]bool{
