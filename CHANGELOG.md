@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Registered `SIGINT` and `SIGTERM` handlers before reporting the server ready, so an immediate stop still completes a clean shutdown.
 - Normalized access failures from online backup and shutdown operations to a single `connection failed` diagnostic.
 - Replaced physical file names, paths, and hashes in data inspection and validation results with logical component names, and added `checked_at` to validation results.
 
