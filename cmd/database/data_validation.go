@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jonbaldie/database/internal/buildinfo"
 	"github.com/jonbaldie/database/internal/catalog"
@@ -23,10 +22,10 @@ type dataRequest struct {
 }
 
 type dataFinding struct {
-	Code     string `json:"code"`
-	Severity string `json:"severity"`
-	Path     string `json:"path,omitempty"`
-	Summary  string `json:"summary"`
+	Code      string `json:"code"`
+	Severity  string `json:"severity"`
+	Component string `json:"component,omitempty"`
+	Summary   string `json:"summary"`
 }
 
 type dataValidationReport struct {
@@ -34,6 +33,7 @@ type dataValidationReport struct {
 	Findings  []dataFinding
 	Examined  []string
 	Directory string
+	CheckedAt time.Time
 }
 
 func dataCommand(args []string, stdout, stderr io.Writer) int {
@@ -129,39 +129,71 @@ func validateDataDirectory(directory string) (dataValidationReport, error) {
 	collectDataEntries(directory, &report)
 	validateDataMetadata(directory, &report)
 	validateDataCatalog(directory, &report)
+	report.CheckedAt = time.Now().UTC()
 	sort.Strings(report.Examined)
+	report.Examined = compactStrings(report.Examined)
 	return report, nil
 }
 
 func collectDataEntries(directory string, report *dataValidationReport) {
 	_ = filepath.Walk(directory, func(path string, info os.FileInfo, walkErr error) error {
+		relative := relativeDataPath(directory, path)
+		component := dataComponent(relative)
 		if walkErr != nil {
-			report.Findings = append(report.Findings, dataFinding{Code: "unreadable_entry", Severity: "error", Path: relativeDataPath(directory, path), Summary: "durable entry cannot be read"})
+			report.Examined = append(report.Examined, component)
+			report.Findings = append(report.Findings, dataFinding{Code: "unreadable_entry", Severity: "error", Component: component, Summary: "durable entry cannot be read"})
 			return nil
 		}
 		if path == directory {
 			return nil
 		}
-		relative := relativeDataPath(directory, path)
 		if runtimeDataPath(relative) {
 			return nil
 		}
 		if info.IsDir() {
 			return nil
 		}
+		report.Examined = append(report.Examined, component)
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			report.Findings = append(report.Findings, dataFinding{Code: "unsupported_entry", Severity: "error", Path: relative, Summary: "durable entry is not a regular file"})
+			report.Findings = append(report.Findings, dataFinding{Code: "unsupported_entry", Severity: "error", Component: component, Summary: "durable entry is not a regular file"})
 			return nil
 		}
-		contents, err := os.ReadFile(path)
-		if err != nil {
-			report.Findings = append(report.Findings, dataFinding{Code: "unreadable_entry", Severity: "error", Path: relative, Summary: "durable entry cannot be read"})
+		if _, err := os.ReadFile(path); err != nil {
+			report.Findings = append(report.Findings, dataFinding{Code: "unreadable_entry", Severity: "error", Component: component, Summary: "durable entry cannot be read"})
 			return nil
 		}
-		digest := sha256.Sum256(contents)
-		report.Examined = append(report.Examined, relative+"#"+hex.EncodeToString(digest[:]))
 		return nil
 	})
+}
+
+func dataComponent(path string) string {
+	switch {
+	case path == "instance.json":
+		return "instance_metadata"
+	case path == "catalog.json" || strings.HasPrefix(path, ".catalog-"):
+		return "catalog"
+	case path == instance.UpgradeIncompleteMarker:
+		return "upgrade_state"
+	case path == instanceInitializationMarker:
+		return "initialization"
+	case path == "rows" || strings.HasPrefix(path, "rows/"):
+		return "row_store"
+	default:
+		return "data_directory"
+	}
+}
+
+func compactStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	unique := values[:1]
+	for _, value := range values[1:] {
+		if value != unique[len(unique)-1] {
+			unique = append(unique, value)
+		}
+	}
+	return unique
 }
 
 func relativeDataPath(directory, path string) string {
@@ -181,35 +213,38 @@ func runtimeDataPath(path string) bool {
 }
 
 func validateDataMetadata(directory string, report *dataValidationReport) {
+	report.Examined = append(report.Examined, "instance_metadata")
 	metadata, err := instance.Load(directory)
 	if err != nil {
-		report.Findings = append(report.Findings, dataFinding{Code: "instance_metadata_invalid", Severity: "error", Path: "instance.json", Summary: "instance metadata is missing or invalid"})
+		report.Findings = append(report.Findings, dataFinding{Code: "instance_metadata_invalid", Severity: "error", Component: "instance_metadata", Summary: "instance metadata is missing or invalid"})
 		return
 	}
 	report.Metadata = metadata
 	if metadata.State != "stopped" {
-		report.Findings = append(report.Findings, dataFinding{Code: "instance_state_invalid", Severity: "error", Path: "instance.json", Summary: "instance is not in a stopped state"})
+		report.Findings = append(report.Findings, dataFinding{Code: "instance_state_invalid", Severity: "error", Component: "instance_metadata", Summary: "instance is not in a stopped state"})
 	}
 	if _, err := os.Stat(filepath.Join(directory, instance.UpgradeIncompleteMarker)); err == nil {
-		report.Findings = append(report.Findings, dataFinding{Code: "upgrade_incomplete", Severity: "error", Path: instance.UpgradeIncompleteMarker, Summary: "upgrade is incomplete and requires an explicit resume"})
+		report.Examined = append(report.Examined, "upgrade_state")
+		report.Findings = append(report.Findings, dataFinding{Code: "upgrade_incomplete", Severity: "error", Component: "upgrade_state", Summary: "upgrade is incomplete and requires an explicit resume"})
 	}
 }
 
 func validateDataCatalog(directory string, report *dataValidationReport) {
+	report.Examined = append(report.Examined, "catalog", "initialization")
 	path := filepath.Join(directory, "catalog.json")
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		report.Findings = append(report.Findings, dataFinding{Code: "catalog_missing", Severity: "error", Path: "catalog.json", Summary: "catalog is missing or not a regular file"})
+		report.Findings = append(report.Findings, dataFinding{Code: "catalog_missing", Severity: "error", Component: "catalog", Summary: "catalog is missing or not a regular file"})
 		return
 	}
 	if _, err := catalog.Open(directory); err != nil {
-		report.Findings = append(report.Findings, dataFinding{Code: "catalog_invalid", Severity: "error", Path: "catalog.json", Summary: "catalog cannot be validated"})
+		report.Findings = append(report.Findings, dataFinding{Code: "catalog_invalid", Severity: "error", Component: "catalog", Summary: "catalog cannot be validated"})
 	}
 	if incompleteCatalogCommit(directory) {
-		report.Findings = append(report.Findings, dataFinding{Code: "catalog_recovery_artifact", Severity: "error", Path: ".catalog-*.tmp", Summary: "an incomplete catalog commit is present"})
+		report.Findings = append(report.Findings, dataFinding{Code: "catalog_recovery_artifact", Severity: "error", Component: "catalog", Summary: "an incomplete catalog commit is present"})
 	}
 	if incompleteInitialization(directory) {
-		report.Findings = append(report.Findings, dataFinding{Code: "initialization_incomplete", Severity: "error", Path: instanceInitializationMarker, Summary: "initialization is incomplete"})
+		report.Findings = append(report.Findings, dataFinding{Code: "initialization_incomplete", Severity: "error", Component: "initialization", Summary: "initialization is incomplete"})
 	}
 }
 
@@ -234,7 +269,13 @@ func incompleteInitialization(directory string) bool {
 }
 
 func dataValidationDetails(report dataValidationReport) map[string]any {
-	details := map[string]any{"data_directory": report.Directory, "valid": len(report.Findings) == 0, "findings": report.Findings, "examined": report.Examined}
+	details := map[string]any{
+		"data_directory": report.Directory,
+		"valid":          len(report.Findings) == 0,
+		"checked_at":     report.CheckedAt.Format(time.RFC3339Nano),
+		"findings":       report.Findings,
+		"examined":       report.Examined,
+	}
 	if report.Metadata.InstanceID != "" {
 		details["instance_id"] = report.Metadata.InstanceID
 		details["data_version"] = effectiveDataVersion(report.Metadata)
@@ -243,16 +284,13 @@ func dataValidationDetails(report dataValidationReport) map[string]any {
 }
 
 func inspectDataDirectory(directory string) (map[string]any, error) {
-	paths, err := inspectDirectoryEntries(directory)
-	if err != nil {
+	if err := checkInspectionDirectory(directory); err != nil {
 		return nil, err
 	}
 	metadata, metadataErr := instance.Load(directory)
 	details := map[string]any{
 		"data_directory":    directory,
 		"validated":         false,
-		"examined":          []string{"directory", "instance.json", "catalog.json"},
-		"entries":           paths,
 		"recovery_required": incompleteCatalogCommit(directory) || incompleteInitialization(directory),
 		"integrity":         "not-validated",
 		"compatibility":     buildinfo.Current().DataCompatibility,
@@ -270,24 +308,18 @@ func inspectDataDirectory(directory string) (map[string]any, error) {
 	return details, nil
 }
 
-func inspectDirectoryEntries(directory string) ([]string, error) {
+func checkInspectionDirectory(directory string) error {
 	info, err := os.Stat(directory)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, errors.New("data directory does not exist")
+		return errors.New("data directory does not exist")
 	}
 	if err != nil || !info.IsDir() {
-		return nil, errors.New("data directory is not a directory")
+		return errors.New("data directory is not a directory")
 	}
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return nil, fmt.Errorf("inspect data directory: %w", err)
+	if _, err := os.ReadDir(directory); err != nil {
+		return fmt.Errorf("inspect data directory: %w", err)
 	}
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		paths = append(paths, entry.Name())
-	}
-	sort.Strings(paths)
-	return paths, nil
+	return nil
 }
 
 func inspectedInstanceState(directory string, metadata instance.Metadata, err error) string {

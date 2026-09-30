@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,7 +57,9 @@ func TestDataInspectIsLimitedAndDoesNotRepairRecoveryArtifacts(t *testing.T) {
 	if _, err := os.Stat(artifact); err != nil {
 		t.Fatalf("inspection changed recovery artifact: %v", err)
 	}
-	if _, err := json.Marshal(result["entries"]); err != nil {
-		t.Fatalf("inspection entries are not structured: %v", err)
+	for _, key := range []string{"entries", "examined"} {
+		if _, exists := result[key]; exists {
+			t.Fatalf("inspection exposed internal-layout field %q: %#v", key, result[key])
+		}
 	}
 }
