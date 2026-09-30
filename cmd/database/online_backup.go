@@ -24,8 +24,8 @@ func createOnlineBackup(request onlineConnectionRequest, output string, reporter
 	reporter.progress("capturing")
 	files, err := captureOnlineBackupFiles(db)
 	if err != nil {
-		err, exitClass := normalizeOnlineCommandFailure(err, "")
-		return nil, err, exitClass
+		failure, exitClass := onlineOperationFailure(err, err)
+		return nil, failure, exitClass
 	}
 	defer files.Close()
 	return writeValidatedOnlineBackup(files, output, reporter)
@@ -44,6 +44,10 @@ func connectOnlineBackup(request onlineConnectionRequest, reporter *operationRep
 	return connectOnlineCommand(request, reporter)
 }
 
+// errOnlineConnectionFailed is the only diagnostic for an online access
+// failure, so a result never shows whether the password was valid.
+var errOnlineConnectionFailed = errors.New("connection failed")
+
 func connectOnlineCommand(request onlineConnectionRequest, reporter *operationReporter) (*sql.DB, error, string) {
 	reporter.progress("connecting")
 	password, err := readOnlinePassword(request, os.Stdin)
@@ -52,11 +56,11 @@ func connectOnlineCommand(request onlineConnectionRequest, reporter *operationRe
 	}
 	db, err := openOnlineDatabase(request, password)
 	if err != nil {
-		return nil, errors.New("connection failed"), "access"
+		return nil, errOnlineConnectionFailed, "access"
 	}
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		return nil, errors.New("connection failed"), "access"
+		return nil, errOnlineConnectionFailed, "access"
 	}
 	warnOnlineNonTLS(request, reporter)
 	return db, nil, "success"
@@ -222,15 +226,13 @@ func closeOnlineBackupWriters(writers map[string]*os.File) {
 	}
 }
 
-func normalizeOnlineCommandFailure(err error, fallbackSummary string) (error, string) {
-	exitClass := onlineAccessExitClass(err)
-	if exitClass == "access" {
-		return errors.New("connection failed"), exitClass
+// onlineOperationFailure reports a post-connect access failure the same way
+// as a failed connection. Other failures keep operationErr.
+func onlineOperationFailure(err, operationErr error) (error, string) {
+	if onlineAccessExitClass(err) == "access" {
+		return errOnlineConnectionFailed, "access"
 	}
-	if fallbackSummary != "" {
-		return errors.New(fallbackSummary), exitClass
-	}
-	return err, exitClass
+	return operationErr, "operation_failed"
 }
 
 func onlineAccessExitClass(err error) string {
