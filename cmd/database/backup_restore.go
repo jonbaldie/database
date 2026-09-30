@@ -58,6 +58,48 @@ type sourceBackupFile struct {
 	source string
 }
 
+type backupArtifactError struct {
+	err error
+}
+
+func (e *backupArtifactError) Error() string { return e.err.Error() }
+
+func (e *backupArtifactError) Unwrap() error { return e.err }
+
+type restoreDestinationError struct {
+	message string
+}
+
+func (e *restoreDestinationError) Error() string { return e.message }
+
+type restoreCleanupError struct {
+	err error
+}
+
+func (e *restoreCleanupError) Error() string { return e.err.Error() }
+
+func (e *restoreCleanupError) Unwrap() error { return e.err }
+
+func backupReadError(err error) error {
+	if err == nil || isFilesystemError(err) {
+		return err
+	}
+	var artifact *backupArtifactError
+	if errors.As(err, &artifact) {
+		return err
+	}
+	return &backupArtifactError{err: err}
+}
+
+func isFilesystemError(err error) bool {
+	var pathErr *os.PathError
+	return errors.As(err, &pathErr)
+}
+
+func destinationNotEmpty() error {
+	return &restoreDestinationError{message: "restore destination must be new or empty"}
+}
+
 func backupRestoreCommand(args []string, stdout, stderr io.Writer) int {
 	operation := operatorName(args)
 	output, filtered, err := parseCommandOutput(args, true)
@@ -73,12 +115,19 @@ func backupRestoreCommand(args []string, stdout, stderr io.Writer) int {
 	reporter := newOperationReporter(operation, output, stdout, stderr)
 	details, err, exitClass := executeBackupRestore(filtered, reporter)
 	if err != nil {
-		if reporter.output.legacy && strings.HasPrefix(operation, "backup inspect") && exitClass == "invalid_artifact" {
+		if legacyInvalidArtifact(reporter, operation, exitClass) {
 			exitClass = "operation_failed"
 		}
-		return reporter.failure(exitClass, "", err.Error(), nil)
+		return reporter.failure(exitClass, "", err.Error(), details)
 	}
 	return reporter.success(details)
+}
+
+func legacyInvalidArtifact(reporter *operationReporter, operation, exitClass string) bool {
+	if !reporter.output.legacy || exitClass != "invalid_artifact" {
+		return false
+	}
+	return operation == "restore" || strings.HasPrefix(operation, "backup inspect")
 }
 
 func executeBackupRestore(args []string, reporter *operationReporter) (map[string]any, error, string) {
@@ -166,15 +215,43 @@ func restoreCommand(args []string) (map[string]any, error, string) {
 	if err := normalizeRestoreOptions(options); err != nil {
 		return nil, err, "invalid_input"
 	}
-	details, err := restoreBackup(options["--input"], options["--data-dir"])
+	directory := options["--data-dir"]
+	details, err := restoreBackup(options["--input"], directory)
 	if err != nil {
-		exitClass := "operation_failed"
-		if strings.Contains(err.Error(), "must be new or empty") {
-			exitClass = "precondition"
-		}
-		return nil, err, exitClass
+		return restoreFailureDetails(directory, err), err, restoreExitClass(err)
 	}
 	return details, nil, "success"
+}
+
+func restoreExitClass(err error) string {
+	var destination *restoreDestinationError
+	if errors.As(err, &destination) {
+		return "precondition"
+	}
+	var artifact *backupArtifactError
+	if errors.As(err, &artifact) {
+		return "invalid_artifact"
+	}
+	return "operation_failed"
+}
+
+func restoreFailureDetails(directory string, err error) map[string]any {
+	var cleanup *restoreCleanupError
+	return map[string]any{
+		"cleanup_required": errors.As(err, &cleanup),
+		"output_usable":    false,
+		"target_state":     restoreTargetState(directory),
+	}
+}
+
+func restoreTargetState(directory string) string {
+	if directory == "" {
+		return "not_created"
+	}
+	if _, err := os.Stat(directory); errors.Is(err, os.ErrNotExist) {
+		return "not_created"
+	}
+	return "left_unchanged"
 }
 
 func normalizeRestoreOptions(options map[string]string) error {
@@ -549,7 +626,7 @@ func loadBackupArchive(input string) (backupArchive, error) {
 	}
 	if err := validateBackupArchive(manifest, files); err != nil {
 		_ = os.RemoveAll(directory)
-		return backupArchive{}, err
+		return backupArchive{}, backupReadError(err)
 	}
 	return backupArchive{manifest: manifest, files: files, directory: directory}, nil
 }
@@ -573,10 +650,10 @@ func readBackupEntries(archive *tar.Reader, directory string) (backupManifest, m
 			return reader.result()
 		}
 		if err != nil {
-			return backupManifest{}, nil, errors.New("invalid backup archive")
+			return backupManifest{}, nil, backupReadError(errors.New("invalid backup archive"))
 		}
 		if err := reader.read(header); err != nil {
-			return backupManifest{}, nil, err
+			return backupManifest{}, nil, backupReadError(err)
 		}
 	}
 }
@@ -593,7 +670,7 @@ type backupEntryReader struct {
 
 func (reader *backupEntryReader) result() (backupManifest, map[string]storedBackupFile, error) {
 	if !reader.manifestFound {
-		return backupManifest{}, nil, errors.New("backup manifest is missing")
+		return backupManifest{}, nil, backupReadError(errors.New("backup manifest is missing"))
 	}
 	return reader.manifest, reader.files, nil
 }
@@ -916,12 +993,10 @@ func applyRestoreStaging(directory string, files map[string]storedBackupFile, me
 		return err
 	}
 	if err := populateAndValidateRestore(staging, files, metadataBytes); err != nil {
-		_ = os.RemoveAll(staging)
-		return err
+		return discardRestoreStaging(staging, err)
 	}
 	if err := installRestoreStaging(staging, directory, existed); err != nil {
-		_ = os.RemoveAll(staging)
-		return err
+		return discardRestoreStaging(staging, err)
 	}
 	return nil
 }
@@ -958,13 +1033,23 @@ func validateRestoreDestination(directory string) error {
 		return err
 	}
 	if !info.IsDir() {
-		return errors.New("restore destination must be new or empty")
+		return destinationNotEmpty()
 	}
 	entries, err := os.ReadDir(directory)
-	if err != nil || len(entries) != 0 {
-		return errors.New("restore destination must be new or empty")
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		return destinationNotEmpty()
 	}
 	return nil
+}
+
+func discardRestoreStaging(staging string, cause error) error {
+	if err := os.RemoveAll(staging); err != nil {
+		return &restoreCleanupError{err: cause}
+	}
+	return cause
 }
 
 func createRestoreStaging(directory string) (string, bool, error) {

@@ -125,6 +125,96 @@ func TestBackupRestoreWorkflowCreatesAndRestoresCompleteArtifactWithTerminalConf
 	}
 }
 
+func TestRestoreClassifiesUnusableBackupAsInvalidArtifact(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatalf("create offline fixture backup: %v", err)
+	}
+	good, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		content []byte
+	}{
+		{name: "truncated", content: good[:100]},
+		{name: "empty", content: nil},
+		{name: "garbage", content: []byte("not-a-tar")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backup := filepath.Join(t.TempDir(), tc.name+".tar")
+			if err := os.WriteFile(backup, tc.content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "restored")
+			args := []string{"restore", "--backup", backup, "--data-directory", destination, "--result=json"}
+			result, code := operatorResultForTest(t, args)
+			if code != 5 || result["exit_class"] != "invalid_artifact" {
+				t.Fatalf("restore = %#v code=%d, want invalid_artifact/5", result, code)
+			}
+			inspect, inspectCode := operatorResultForTest(t, []string{"backup", "inspect", "--backup", backup, "--result=json"})
+			if inspectCode != 5 || diagnosticCode(t, result) != diagnosticCode(t, inspect) {
+				t.Fatalf("restore diagnostic %q, inspect %#v code=%d", diagnosticCode(t, result), inspect, inspectCode)
+			}
+			assertRestoreFailureFacts(t, result, false, false, "not_created")
+			if _, err := os.Stat(destination); !os.IsNotExist(err) {
+				t.Fatalf("target after unusable restore: %v", err)
+			}
+		})
+	}
+}
+
+func TestRestorePreconditionReportsFailureFacts(t *testing.T) {
+	source := t.TempDir()
+	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")
+	writeInstanceFixture(t, source)
+	archive := filepath.Join(t.TempDir(), "instance.tar")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatalf("create offline fixture backup: %v", err)
+	}
+	destination := t.TempDir()
+	writeBackupFixture(t, filepath.Join(destination, "existing.txt"), "existing")
+	result, code := operatorResultForTest(t, []string{"restore", "--backup", archive, "--data-directory", destination, "--result=json"})
+	if code != 3 || result["exit_class"] != "precondition" {
+		t.Fatalf("precondition restore = %#v code=%d", result, code)
+	}
+	assertRestoreFailureFacts(t, result, false, false, "left_unchanged")
+	contents, err := os.ReadFile(filepath.Join(destination, "existing.txt"))
+	if err != nil || string(contents) != "existing" {
+		t.Fatalf("precondition target changed: %q %v", contents, err)
+	}
+}
+
+func assertRestoreFailureFacts(t *testing.T, result map[string]any, cleanupRequired, outputUsable bool, targetState string) {
+	t.Helper()
+	details, ok := result["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("details = %#v", result["details"])
+	}
+	if details["cleanup_required"] != cleanupRequired || details["output_usable"] != outputUsable || details["target_state"] != targetState {
+		t.Fatalf("failure facts = %#v", details)
+	}
+}
+
+func diagnosticCode(t *testing.T, result map[string]any) string {
+	t.Helper()
+	diagnostics, ok := result["diagnostics"].([]any)
+	if !ok || len(diagnostics) == 0 {
+		t.Fatalf("diagnostics = %#v", result["diagnostics"])
+	}
+	record, ok := diagnostics[0].(map[string]any)
+	if !ok {
+		t.Fatalf("diagnostic = %#v", diagnostics[0])
+	}
+	code, _ := record["code"].(string)
+	return code
+}
+
 func TestRestoreRejectsNonEmptyDestination(t *testing.T) {
 	source := t.TempDir()
 	writeBackupFixture(t, filepath.Join(source, "record.txt"), "preserved")

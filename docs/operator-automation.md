@@ -183,7 +183,19 @@ Successful command details contain these stable operator facts:
 | `version` | Product, build, and platform identity plus data, backup, and named MySQL application compatibility ranges |
 
 Failed artifact-producing commands report whether cleanup is required, whether
-any output is usable, and the observable terminal state. An interrupted
+any output is usable, and the observable terminal state. A failed `restore`
+uses these `details` keys:
+
+| Key | Meaning |
+| --- | --- |
+| `cleanup_required` | `true` when the command left a partial target that the operator must remove. `false` when no cleanup is required. |
+| `output_usable` | `false` when the target is not a usable restored database. |
+| `target_state` | `not_created` when the target path does not exist. `left_unchanged` when the target path existed and the command did not change it. |
+
+A restore that cannot read or validate the backup (not a tar archive, truncated,
+missing manifest, or an integrity or compatibility failure found while reading
+it) is `invalid_artifact`. A non-empty target remains `precondition`. A failure
+while writing the target remains `operation_failed`. An interrupted
 `upgrade` reports `upgrade-incomplete` and requires a rerun of the same target
 version. Diagnostics and details never expose backup content, account data,
 application values, internal file layout, passwords, credentials, or key
