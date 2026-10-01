@@ -2897,13 +2897,14 @@ func updateRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	locks, err := matchingRowLocks(plan.namespace, plan.name, plan.table.Rows, plan.matcher)
+	identity := catalog.NewTableRef(plan.namespace, plan.name)
+	locks, err := matchingRowLocks(identity, plan.table.Rows, plan.matcher)
 	if err != nil {
 		return 0, err
 	}
 	if plan.primaryKey != "" {
 		if row, ok := pointUpdateRow(plan); ok {
-			locks = []rowLockResource{{namespace: plan.namespace, table: plan.name, key: rowLockKey(row)}}
+			locks = []rowLockResource{{table: identity, key: rowLockKey(row)}}
 		}
 	}
 	if err := s.acquireWriteLocks(locks); err != nil {
@@ -3212,9 +3213,10 @@ func deleteRows(s *relationExecutor, query string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	identity := catalog.NewTableRef(plan.namespace, plan.name)
 	locks := make([]rowLockResource, 0, len(selected))
 	for _, candidate := range selected {
-		locks = append(locks, rowLockResource{namespace: plan.namespace, table: plan.name, key: rowLockKey(candidate.result.source.values)})
+		locks = append(locks, rowLockResource{table: identity, key: rowLockKey(candidate.result.source.values)})
 	}
 	if err := s.acquireWriteLocks(locks); err != nil {
 		return 0, err

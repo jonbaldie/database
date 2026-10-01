@@ -216,7 +216,47 @@ func dedupeKeyLists(values [][]string) [][]string {
 	return out
 }
 
-// Rows exposes the durable row engine for point lookups.
+// Rows exposes the durable row engine.
 func (s *Store) Rows() rowEngine {
 	return s.rows
+}
+
+// LookupPrimary returns the durable row with one primary-key value in the
+// table that ref identifies.
+func (s *Store) LookupPrimary(ref TableRef, key string) ([]string, bool) {
+	namespace, name, ok := s.rowTableNames(ref)
+	if !ok {
+		return nil, false
+	}
+	return s.rows.LookupPrimary(namespace, name, key)
+}
+
+// LookupUnique returns the durable row with one single-column unique-key value
+// in the table that ref identifies. column is the declared column name.
+func (s *Store) LookupUnique(ref TableRef, column, key string) ([]string, bool) {
+	namespace, name, ok := s.rowTableNames(ref)
+	if !ok {
+		return nil, false
+	}
+	return s.rows.LookupUnique(namespace, name, column, key)
+}
+
+// rowTableNames maps a canonical table identity to the declared spellings
+// that key the table in the row engine.
+func (s *Store) rowTableNames(ref TableRef) (string, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rows == nil {
+		return "", "", false
+	}
+	namespace, ok := s.definition.Namespaces[ref.namespace]
+	if !ok {
+		return "", "", false
+	}
+	table, ok := namespace.Tables[ref.table]
+	if !ok {
+		return "", "", false
+	}
+	namespaceName, tableName := resolvedTableNames(ref.namespace, namespace, ref.table, table)
+	return namespaceName, tableName, true
 }

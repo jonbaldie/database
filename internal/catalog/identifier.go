@@ -6,6 +6,7 @@
 package catalog
 
 import (
+	"strings"
 	"unicode/utf8"
 
 	"golang.org/x/text/cases"
@@ -33,4 +34,26 @@ func Key(name string) string {
 // spelling, the unit the length ceiling is measured in.
 func IdentifierLength(name string) int {
 	return utf8.RuneCountInString(name)
+}
+
+// TableRef is the canonical identity of one table: the identifier keys of its
+// namespace and name. Every equivalent SQL spelling of a table yields an equal
+// TableRef, so it is safe to use as a map key or to compare with ==. Its fields
+// are unexported so a caller cannot build one from raw spellings.
+type TableRef struct {
+	namespace string
+	table     string
+}
+
+// NewTableRef resolves a namespace and table spelling to its canonical identity.
+func NewTableRef(namespace, table string) TableRef {
+	return TableRef{namespace: Key(namespace), table: Key(table)}
+}
+
+// Compare orders table identities by namespace key and then by table key.
+func (r TableRef) Compare(other TableRef) int {
+	if order := strings.Compare(r.namespace, other.namespace); order != 0 {
+		return order
+	}
+	return strings.Compare(r.table, other.table)
 }

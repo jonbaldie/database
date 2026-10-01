@@ -80,15 +80,12 @@ func lookupDefinitionRow(table relationalTableSource, column, value string) ([]s
 }
 
 func lookupCatalogRow(store *catalog.Store, table relationalTableSource, column, value string) ([]string, bool) {
-	rows := store.Rows()
-	if rows == nil {
-		return nil, false
-	}
+	identity := catalog.NewTableRef(table.namespace, table.name)
 	if primaryColumn(table.table) == column {
-		return rows.LookupPrimary(table.namespace, table.name, value)
+		return store.LookupPrimary(identity, value)
 	}
 	if uniqueColumn(table.table) == column {
-		return rows.LookupUnique(table.namespace, table.name, column, value)
+		return store.LookupUnique(identity, column, value)
 	}
 	return nil, false
 }
