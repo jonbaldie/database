@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func BenchmarkLockManagerUncontendedRows(b *testing.B) {
@@ -13,8 +15,9 @@ func BenchmarkLockManagerUncontendedRows(b *testing.B) {
 			for range b.N {
 				manager := newLockManager(time.Second)
 				owner := &session{}
+				table := catalog.NewTableRef("app", "items")
 				for row := range rows {
-					resource := rowLockResource{namespace: "app", table: "items", key: strconv.Itoa(row)}
+					resource := rowLockResource{table: table, key: strconv.Itoa(row)}
 					if acquired, err := manager.acquire(owner, []rowLockResource{resource}, lockExclusive, lockNoWait); err != nil || !acquired {
 						b.Fatalf("lock row %d: acquired=%v err=%v", row, acquired, err)
 					}

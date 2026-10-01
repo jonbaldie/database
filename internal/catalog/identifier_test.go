@@ -69,3 +69,21 @@ func TestIdentifierLimitBoundary(t *testing.T) {
 		t.Fatalf("over-limit identifier not detected")
 	}
 }
+
+func TestTableRefIdentifiesEquivalentSpellings(t *testing.T) {
+	want := NewTableRef("App", "Café")
+	for _, spelling := range [][2]string{
+		{"app", "café"},
+		{"APP", "CAFÉ"},
+		{"app", "café"},
+	} {
+		if got := NewTableRef(spelling[0], spelling[1]); got != want || got.Compare(want) != 0 {
+			t.Fatalf("NewTableRef(%q, %q) = %#v, want %#v", spelling[0], spelling[1], got, want)
+		}
+	}
+	for _, other := range [][2]string{{"other", "café"}, {"app", "cafe"}, {"app", "ｃafé"}} {
+		if got := NewTableRef(other[0], other[1]); got == want || got.Compare(want) == 0 {
+			t.Fatalf("NewTableRef(%q, %q) matched a distinct table", other[0], other[1])
+		}
+	}
+}

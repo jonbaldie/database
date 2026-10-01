@@ -1,6 +1,10 @@
 package mysql
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/jonbaldie/database/internal/catalog"
+)
 
 // lockingRead records the row lock requested by a SELECT statement. The
 // current grammar applies the requested mode to each direct table row that
@@ -64,7 +68,7 @@ func (l lockingRead) resources(plan *relationalSelectPlan, row relationRow) ([]r
 		if table.namespace == "" || table.name == "" || index >= len(row.lockKeys) || row.lockKeys[index] == "" {
 			continue
 		}
-		resources = append(resources, rowLockResource{namespace: table.namespace, table: table.name, key: row.lockKeys[index]})
+		resources = append(resources, rowLockResource{table: catalog.NewTableRef(table.namespace, table.name), key: row.lockKeys[index]})
 	}
 	if len(resources) == 0 {
 		return nil, sqlFailure{1235, "42000", "locking reads require direct table rows"}

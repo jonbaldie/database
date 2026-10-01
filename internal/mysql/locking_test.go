@@ -3,13 +3,15 @@ package mysql
 import (
 	"testing"
 	"time"
+
+	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func TestLockManagerUpgradeWaitsForOtherSharedOwner(t *testing.T) {
 	manager := newLockManager(time.Second)
 	first := &session{}
 	second := &session{}
-	resource := rowLockResource{namespace: "app", table: "items", key: "1"}
+	resource := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "1"}
 	for _, owner := range []*session{first, second} {
 		acquired, err := manager.acquire(owner, []rowLockResource{resource}, lockShared, lockNoWait)
 		if err != nil || !acquired {

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jonbaldie/database/internal/catalog"
 )
 
 type lockMode uint8
@@ -24,10 +26,11 @@ const (
 )
 
 // rowLockResource identifies one stable row value image in a table snapshot.
+// The table is a canonical identity, so every equivalent SQL spelling of one
+// table names the same resource.
 type rowLockResource struct {
-	namespace string
-	table     string
-	key       string
+	table catalog.TableRef
+	key   string
 }
 
 type lockSnapshot map[rowLockResource]lockMode
@@ -313,11 +316,8 @@ func uniqueLockResources(resources []rowLockResource) []rowLockResource {
 	}
 	unique := append([]rowLockResource(nil), resources...)
 	sort.Slice(unique, func(left, right int) bool {
-		if unique[left].namespace != unique[right].namespace {
-			return unique[left].namespace < unique[right].namespace
-		}
-		if unique[left].table != unique[right].table {
-			return unique[left].table < unique[right].table
+		if order := unique[left].table.Compare(unique[right].table); order != 0 {
+			return order < 0
 		}
 		return unique[left].key < unique[right].key
 	})
@@ -351,7 +351,7 @@ func (s *relationExecutor) acquireWriteLocks(resources []rowLockResource) error 
 	return err
 }
 
-func matchingRowLocks(namespace, table string, rows [][]string, matcher dmlPredicateMatcher) ([]rowLockResource, error) {
+func matchingRowLocks(table catalog.TableRef, rows [][]string, matcher dmlPredicateMatcher) ([]rowLockResource, error) {
 	resources := make([]rowLockResource, 0)
 	for _, row := range rows {
 		matched, err := matcher(row)
@@ -359,7 +359,7 @@ func matchingRowLocks(namespace, table string, rows [][]string, matcher dmlPredi
 			return nil, err
 		}
 		if matched {
-			resources = append(resources, rowLockResource{namespace: namespace, table: table, key: rowLockKey(row)})
+			resources = append(resources, rowLockResource{table: table, key: rowLockKey(row)})
 		}
 	}
 	return resources, nil
