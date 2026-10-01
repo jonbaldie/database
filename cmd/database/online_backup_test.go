@@ -42,7 +42,7 @@ func runOnlineStreamingBackupHelper(t *testing.T, root string) {
 	t.Helper()
 	metadata := instance.Metadata{
 		Schema: "database.instance/v1", InstanceID: "online-stream", State: "stopped",
-		AdminAccount: "admin", PasswordHash: "hash", DataVersion: instance.CurrentDataVersion,
+		AdminAccount: "admin", DataVersion: instance.CurrentDataVersion,
 	}
 	metadataBytes, err := json.Marshal(metadata)
 	if err != nil {

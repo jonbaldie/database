@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/instance"
 )
 
@@ -120,8 +121,16 @@ func TestBackupRestoreWorkflowCreatesAndRestoresCompleteArtifactWithTerminalConf
 	if err != nil {
 		t.Fatalf("load restored metadata: %v", err)
 	}
-	if restoredMetadata.InstanceID == sourceMetadata.InstanceID || restoredMetadata.SourceInstanceID != sourceMetadata.InstanceID || restoredMetadata.State != "stopped" {
+	if restoredMetadata.InstanceID == sourceMetadata.InstanceID || restoredMetadata.SourceInstanceID != sourceMetadata.InstanceID || restoredMetadata.State != "stopped" || restoredMetadata.LegacyPasswordHash != "" {
 		t.Fatalf("restored identity = %#v, source = %#v", restoredMetadata, sourceMetadata)
+	}
+	store, err := catalog.Open(destination)
+	if err != nil {
+		t.Fatalf("open restored catalog: %v", err)
+	}
+	admin, found := store.Account("admin")
+	if !found || admin.PasswordHash != "password-hash" {
+		t.Fatalf("restored legacy administrator = %#v, found=%t", admin, found)
 	}
 }
 

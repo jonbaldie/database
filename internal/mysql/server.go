@@ -95,9 +95,7 @@ const (
 )
 
 type Config struct {
-	Catalog      *catalog.Store
-	Username     string
-	PasswordHash string
+	Catalog *catalog.Store
 	// Instance is the durable instance identity copied into online backups.
 	Instance             instance.Metadata
 	Version              string
@@ -201,11 +199,6 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 	}
 	resources := newResourceManager(config)
 	if config.Catalog != nil {
-		grants := []catalog.Grant{{Privilege: "ACCOUNT_MANAGER"}, {Privilege: "NAMESPACE_MANAGER"}, {Privilege: "OPERATIONAL_OBSERVATION"}, {Privilege: "OPERATIONAL_CONTROL"}}
-		if err := config.Catalog.EnsureAccount(config.Username, config.PasswordHash, grants); err != nil {
-			_ = listener.Close()
-			return nil, err
-		}
 		config.Catalog.SetPublishValidator(validateConstraintDefinition)
 	}
 	return &Server{

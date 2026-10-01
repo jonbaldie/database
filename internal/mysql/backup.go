@@ -54,11 +54,8 @@ func (s *textStatementExecutor) requireOperationalControl() error {
 
 func (s *textStatementExecutor) captureInstanceMetadata() ([]byte, error) {
 	metadata := s.session.server.config.Instance
-	if metadata.Schema == "" {
-		metadata = instance.Metadata{
-			Schema: "database.instance/v1", InstanceID: "unknown", State: "stopped",
-			AdminAccount: s.session.server.config.Username, PasswordHash: s.session.server.config.PasswordHash,
-		}
+	if metadata.Schema != "database.instance/v1" || metadata.InstanceID == "" || metadata.AdminAccount == "" {
+		return nil, sqlFailure{1684, "HY000", "backup capture failed"}
 	}
 	if metadata.DataVersion == "" {
 		metadata.DataVersion = instance.CurrentDataVersion

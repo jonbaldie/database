@@ -10,12 +10,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/credential"
 	"github.com/jonbaldie/database/internal/instance"
 	"github.com/jonbaldie/database/internal/mysql"
 )
@@ -66,6 +69,58 @@ func freeLocalAddress(t *testing.T) string {
 	address := listener.Addr().String()
 	_ = listener.Close()
 	return address
+}
+
+func TestOpenServerDataMigratesLegacyAdministratorIntoEmptyCatalog(t *testing.T) {
+	directory := initializedDirectory(t)
+	if err := os.WriteFile(filepath.Join(directory, "catalog.json"), []byte(`{"namespaces":{},"accounts":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadataPath := filepath.Join(directory, "instance.json")
+	metadataContents, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedMetadata map[string]json.RawMessage
+	if err := json.Unmarshal(metadataContents, &storedMetadata); err != nil {
+		t.Fatal(err)
+	}
+	storedMetadata["password_hash"], err = json.Marshal(credential.PasswordHash("test-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataContents, err = json.Marshal(storedMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadataPath, metadataContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	metadata, store, err := openServerData(directory)
+	if err != nil {
+		t.Fatalf("open legacy server data: %v", err)
+	}
+	admin, found := store.Account("admin")
+	wantGrants := []catalog.Grant{
+		{Privilege: "ACCOUNT_MANAGER"},
+		{Privilege: "NAMESPACE_MANAGER"},
+		{Privilege: "OPERATIONAL_OBSERVATION"},
+		{Privilege: "OPERATIONAL_CONTROL"},
+	}
+	if !found || admin.PasswordHash != credential.PasswordHash("test-password") || !reflect.DeepEqual(admin.Grants, wantGrants) {
+		t.Fatalf("migrated administrator = %#v, found=%t", admin, found)
+	}
+	if metadata.LegacyPasswordHash != "" {
+		t.Fatalf("returned metadata retains a legacy credential: %#v", metadata)
+	}
+	metadataContents, err = os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metadataContents), `"password_hash"`) {
+		t.Fatalf("migrated metadata retains a legacy credential: %s", metadataContents)
+	}
 }
 
 func TestServeRejectsDamagedInitializedDirectory(t *testing.T) {
