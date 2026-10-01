@@ -1,10 +1,6 @@
 package mysql
 
-import (
-	"strings"
-
-	"github.com/jonbaldie/database/internal/catalog"
-)
+import "github.com/jonbaldie/database/internal/catalog"
 
 // namespaceResolution is the result shared by namespace existence, metadata,
 // and access checks. Name visibility is enough for namespace administration;
@@ -19,7 +15,7 @@ type namespaceResolution struct {
 
 func resolveNamespace(definition catalog.Definition, username, name string) namespaceResolution {
 	resolution := namespaceResolution{name: name}
-	if strings.EqualFold(name, informationSchemaName) {
+	if catalog.IsInformationSchema(name) {
 		resolution.namespace = catalog.Namespace{Name: informationSchemaName}
 		resolution.exists = true
 		resolution.nameVisible = true
