@@ -26,18 +26,18 @@ func newActiveExplanationRegistry() *activeExplanationRegistry {
 	return &activeExplanationRegistry{active: make(map[uint32]*activeExplanation)}
 }
 
-func (r *activeExplanationRegistry) begin(connectionID uint32, plan *queryexplanation.Document, session *session) func() {
+// begin publishes plan as the live explanation for connectionID. It returns
+// the recorder that the statement execution must receive, so the live
+// snapshot reports the operator counters of the running statement.
+func (r *activeExplanationRegistry) begin(connectionID uint32, plan *queryexplanation.Document, session *session) (*queryexplanation.RuntimeMetrics, func()) {
 	if r == nil || connectionID == 0 || plan == nil {
-		return func() {}
+		return nil, func() {}
 	}
 	entry := &activeExplanation{plan: plan, started: time.Now(), session: session, metrics: queryexplanation.NewRuntimeMetrics(plan)}
 	r.mu.Lock()
 	r.active[connectionID] = entry
 	r.mu.Unlock()
-	// Do not attach entry.metrics to session.runtimeMetrics. That flag is reserved
-	// for EXPLAIN ANALYZE, which must walk full operators; prepared-statement live
-	// explanation must keep the point-lookup fast path.
-	return func() {
+	return entry.metrics, func() {
 		r.mu.Lock()
 		if r.active[connectionID] == entry {
 			delete(r.active, connectionID)

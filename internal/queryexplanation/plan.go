@@ -510,6 +510,9 @@ func constraintChecks(write Write, child *Operator) *Operator {
 }
 
 func tableScan(table Table) *Operator {
+	if table.Lookup != nil {
+		return pointLookup(table)
+	}
 	if table.Access != nil {
 		return btreeIndexScan(table)
 	}
@@ -560,6 +563,24 @@ func btreeIndexScan(table Table) *Operator {
 			Evidence: []string{"The selected path returns rows from the table after the index traversal."},
 		}},
 		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 2, PeakMemoryBytes: 0},
+		Output:    columnOutput(table, table.Columns),
+		Warnings:  []Warning{},
+		Children:  []*Operator{},
+	}
+}
+
+func pointLookup(table Table) *Operator {
+	lookup := table.Lookup
+	return &Operator{
+		Kind:      "lookup",
+		Summary:   "Read the row with the requested " + lookup.Column + " value through the unique key.",
+		Operation: lookupOperation{LookupType: "point", Unique: true},
+		Strategy: &Strategy{
+			Name:    "unique_key_point_lookup",
+			Summary: "Probe the unique key for the literal value. When the probe finds no row, compare the stored rows, because equal values can have a different stored form.",
+		},
+		Objects:   []ObjectReference{tableObject(table), {Type: "index", Database: table.Database, Table: table.Name, Name: lookup.Name}},
+		Estimates: Estimates{Rows: 1, RowWidthBytes: rowWidth(len(table.Columns)), Cost: 1, PeakMemoryBytes: 0},
 		Output:    columnOutput(table, table.Columns),
 		Warnings:  []Warning{},
 		Children:  []*Operator{},

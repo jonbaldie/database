@@ -468,7 +468,6 @@ type session struct {
 	prepared        preparedCounters
 	statementCancel <-chan struct{}
 	resources       *statementResources
-	runtimeMetrics  *queryexplanation.RuntimeMetrics
 	diagnostics     []sqlDiagnostic
 	transactionState
 }
@@ -550,6 +549,9 @@ type queryExecutor struct{ statements textStatementExecutor }
 type textStatementExecutor struct {
 	*session
 	streamRows bool
+	// recorder receives operator counters for a Query explanation. A nil
+	// recorder records nothing and never changes how the statement runs.
+	recorder *queryexplanation.RuntimeMetrics
 }
 
 type transactionExecutor struct{ *session }
@@ -562,6 +564,7 @@ type relationExecutor struct {
 	*session
 	streamRows bool
 	composed   *composedQueryContext
+	recorder   *queryexplanation.RuntimeMetrics
 }
 
 type informationSchemaExecutor struct{ *session }
@@ -840,7 +843,7 @@ var informationSchemaViews = []informationSchemaView{
 	}},
 }
 
-func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string) error {
+func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, query string, recorder *queryexplanation.RuntimeMetrics) error {
 	writer := NewStreamWriter(connection, sequence, s.statements.server.config.MaxAllowedPacket)
 	statement, err := normalizeStatement(query)
 	if err != nil {
@@ -849,6 +852,7 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 	}
 	executor := s.statements
 	executor.streamRows = true
+	executor.recorder = recorder
 	result, err := newStatementExecutionPolicy(&executor).execute(statement)
 	if err != nil {
 		return writer.WriteError(err)
@@ -1141,7 +1145,7 @@ func namespaceTables(name string, namespace catalog.Namespace) *queryResult {
 }
 
 func (s *textStatementExecutor) relationStatement(query, lower string) (*queryResult, bool, error) {
-	relations := relationExecutor{session: s.session, streamRows: s.streamRows}
+	relations := relationExecutor{session: s.session, streamRows: s.streamRows, recorder: s.recorder}
 	switch {
 	case strings.HasPrefix(lower, "create table "):
 		return nil, true, createTable(&relations, query)
@@ -4610,9 +4614,9 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 		s.session.replaceDiagnostics([]sqlDiagnostic{diagnosticForError(err)})
 		return writer.WriteError(err)
 	}
-	finishExplanation := s.recordPreparedExplanation(statement)
+	recorder, finishExplanation := s.recordPreparedExplanation(statement)
 	defer finishExplanation()
-	executor := textStatementExecutor{session: s.session, streamRows: true}
+	executor := textStatementExecutor{session: s.session, streamRows: true, recorder: recorder}
 	result, err := newStatementExecutionPolicy(&executor).execute(boundStatement)
 	if err != nil {
 		return writer.WriteError(err)
@@ -4659,9 +4663,9 @@ func preparedStatementError(err error) error {
 // recordPreparedExplanation plans a value-free copy of the prepared SQL once
 // per statement. The executable query can contain bound values, but the public
 // document must not.
-func (s *preparedExecution) recordPreparedExplanation(statement *preparedStatement) func() {
+func (s *preparedExecution) recordPreparedExplanation(statement *preparedStatement) (*queryexplanation.RuntimeMetrics, func()) {
 	if statement == nil || s.session == nil {
-		return func() {}
+		return nil, func() {}
 	}
 	if statement.explanation == nil {
 		maskedValues := make([]string, statement.parameters)
@@ -4670,13 +4674,13 @@ func (s *preparedExecution) recordPreparedExplanation(statement *preparedStateme
 		}
 		maskedQuery, err := bindPreparedQuery(statement.query, maskedValues)
 		if err != nil {
-			return func() {}
+			return nil, func() {}
 		}
 		started := time.Now()
 		planner := textStatementExecutor{session: s.session}
 		plan, err := planner.planExplanation(maskedQuery)
 		if err != nil {
-			return func() {}
+			return nil, func() {}
 		}
 		plan.Timing.PlanningMS = float64(time.Since(started)) / float64(time.Millisecond)
 		plan.Statement.SQL = statement.query
