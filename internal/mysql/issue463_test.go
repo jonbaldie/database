@@ -1,6 +1,9 @@
 package mysql
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestDateComparesWithMidnightDatetimeAcrossSubqueryBoundaries(t *testing.T) {
 	executor := ddlExecutorForTest(t)
@@ -117,5 +120,24 @@ func TestBinaryCollationSurvivesSetOperationBoundaries(t *testing.T) {
 	}
 	if len(result.rows) != 3 || result.rows[0][0] != "A" || result.rows[1][0] != "B" || result.rows[2][0] != "a" {
 		t.Fatalf("utf8mb4_bin UNION ORDER BY = %v, want [[A] [B] [a]]", result.rows)
+	}
+}
+
+func TestMixedImplicitCollationsAcrossSubqueryBoundaryFail(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{
+		"CREATE TABLE b (id INT PRIMARY KEY, v VARCHAR(10) COLLATE utf8mb4_bin)",
+		"CREATE TABLE u (id INT PRIMARY KEY, v VARCHAR(10))",
+		"INSERT INTO b VALUES (1, 'a')",
+		"INSERT INTO u VALUES (1, 'A')",
+	} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	_, err := executeStatement(executor, "SELECT id FROM u WHERE v = (SELECT v FROM b)")
+	var failure sqlFailure
+	if !errors.As(err, &failure) || failure.code != 1267 {
+		t.Fatalf("utf8mb4_0900_ai_ci column = utf8mb4_bin subquery error = %v, want 1267", err)
 	}
 }

@@ -244,10 +244,25 @@ func compareRelationOperands(leftOperand, rightOperand relationOperand, left, ri
 			return 0, err
 		}
 		if found {
+			if err := checkDecodedCollation(typ, left, right); err != nil {
+				return 0, err
+			}
 			return strings.Compare(characterComparisonKey(typ, left.s), characterComparisonKey(typ, right.s)), nil
 		}
 	}
 	return compareOperands(left, right)
+}
+
+// checkDecodedCollation rejects a utf8mb4_bin value, such as a scalar subquery
+// result, against a text column with another collation, as for two columns.
+func checkDecodedCollation(typ characterType, left, right exprValue) error {
+	if typ.kind != characterText || typ.collation == collationBin {
+		return nil
+	}
+	if left.collation == collationBin || right.collation == collationBin {
+		return illegalMixOfCollations(typ, characterType{kind: characterText, collation: collationBin})
+	}
+	return nil
 }
 
 func relationCharacterComparisonType(left, right relationOperand) (characterType, bool, error) {
