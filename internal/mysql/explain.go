@@ -128,8 +128,7 @@ func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*query
 	runner := *s
 	runner.streamRows = false
 	metrics := queryexplanation.NewRuntimeMetrics(document)
-	runner.session.runtimeMetrics = metrics
-	defer func() { runner.session.runtimeMetrics = nil }()
+	runner.recorder = metrics
 	statement, err := normalizeStatement(inner)
 	if err != nil {
 		return nil, err

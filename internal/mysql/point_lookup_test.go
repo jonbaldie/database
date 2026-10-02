@@ -39,11 +39,9 @@ func TestLiveExplanationDoesNotDisablePointLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	finish := server.explanations.begin(executor.session.connectionID, &queryexplanation.Document{}, executor.session)
+	recorder, finish := server.explanations.begin(executor.session.connectionID, &queryexplanation.Document{}, executor.session)
 	defer finish()
-	if executor.session.runtimeMetrics != nil {
-		t.Fatal("live explanation must not attach runtime metrics that disable point lookup")
-	}
+	plan.runtime = newSelectRuntimeBinding(recorder, plan)
 	result, ok := tryRelationalPointLookup(plan)
 	if !ok {
 		t.Fatal("expected point lookup during live explanation")
@@ -136,8 +134,8 @@ func TestRuntimeMetricsDoNotChangePointLookupRows(t *testing.T) {
 			t.Fatalf("%q: %v", query, err)
 		}
 	}
-	relations := &relationExecutor{session: executor.session}
-	lookup := func() string {
+	lookup := func(recorder *queryexplanation.RuntimeMetrics) string {
+		relations := &relationExecutor{session: executor.session, recorder: recorder}
 		plan, err := parseRelationalSelect(relations, "SELECT id, label FROM items WHERE id = 7")
 		if err != nil {
 			t.Fatalf("plan: %v", err)
@@ -148,10 +146,8 @@ func TestRuntimeMetricsDoNotChangePointLookupRows(t *testing.T) {
 		}
 		return fmt.Sprint(result.rows)
 	}
-	without := lookup()
-	executor.session.runtimeMetrics = &queryexplanation.RuntimeMetrics{}
-	with := lookup()
-	executor.session.runtimeMetrics = nil
+	without := lookup(nil)
+	with := lookup(&queryexplanation.RuntimeMetrics{})
 	if without != with || without != "[]" {
 		t.Fatalf("rows without metrics = %s, with metrics = %s, want []", without, with)
 	}

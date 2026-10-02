@@ -222,6 +222,12 @@ type scanOperation struct {
 	Direction string `json:"direction"`
 }
 
+// lookupOperation records a keyed probe and whether the key is unique.
+type lookupOperation struct {
+	LookupType string `json:"lookup_type"`
+	Unique     bool   `json:"unique"`
+}
+
 // filterOperation records which clause a filter enforces.
 type filterOperation struct {
 	Role string `json:"role"`
@@ -296,6 +302,13 @@ type Table struct {
 	Columns  []string
 	RowCount int
 	Access   *IndexAccess
+	Lookup   *PointLookup
+}
+
+// PointLookup describes a probe of one unique key for one literal value.
+type PointLookup struct {
+	Name   string
+	Column string
 }
 
 // IndexAccess describes the selected B-tree path for a relation.
