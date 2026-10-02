@@ -3,97 +3,41 @@ package mysql
 import (
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/jonbaldie/database/internal/catalog"
 )
 
-type informationSchemaRowBuilder func(*session, catalog.Definition) [][]metadataValue
+type informationSchemaRowBuilder func(*session, catalogMetadataProjection) [][]metadataValue
 
 var informationSchemaRowBuilders = map[string]informationSchemaRowBuilder{
-	"schemata": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaSchemataRows(definition)
+	"schemata":                informationSchemaSchemataRows,
+	"tables":                  informationSchemaTableRows,
+	"columns":                 informationSchemaColumnRows,
+	"statistics":              informationSchemaStatisticsRows,
+	"table_constraints":       informationSchemaTableConstraintRows,
+	"key_column_usage":        informationSchemaKeyColumnUsageRows,
+	"referential_constraints": informationSchemaReferentialRows,
+	"check_constraints":       informationSchemaCheckRows,
+	"character_sets": func(*session, catalogMetadataProjection) [][]metadataValue {
+		return informationSchemaCharacterSetRows()
 	},
-	"tables": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaTableRows(definition)
+	"collations": func(*session, catalogMetadataProjection) [][]metadataValue {
+		return informationSchemaCollationRows()
 	},
-	"columns": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaColumnRows(definition)
-	},
-	"statistics": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaStatisticsRows(definition)
-	},
-	"table_constraints": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaTableConstraintRows(definition)
-	},
-	"key_column_usage": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaKeyColumnUsageRows(definition)
-	},
-	"referential_constraints": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaReferentialRows(definition)
-	},
-	"check_constraints": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaCheckRows(definition)
-	},
-	"character_sets": func(*session, catalog.Definition) [][]metadataValue { return informationSchemaCharacterSetRows() },
-	"collations":     func(*session, catalog.Definition) [][]metadataValue { return informationSchemaCollationRows() },
 	"accounts":       informationSchemaAccountRows,
 	"account_grants": informationSchemaAccountGrantRows,
-	"processlist":    func(s *session, _ catalog.Definition) [][]metadataValue { return informationSchemaProcessListRows(s) },
+	"processlist": func(s *session, _ catalogMetadataProjection) [][]metadataValue {
+		return informationSchemaProcessListRows(s)
+	},
 }
 
-func informationSchemaStatisticsRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaStatisticsRows(_ *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := make([][]metadataValue, 0)
-	for _, namespace := range sortedNamespaces(definition) {
-		for _, table := range sortedTables(namespace) {
-			rows = append(rows, informationSchemaTableStatistics(namespace.Name, table)...)
-		}
-	}
-	return rows
-}
-
-func informationSchemaTableStatistics(namespace string, table catalog.Table) [][]metadataValue {
-	rows := make([][]metadataValue, 0)
-	for _, index := range effectiveTableIndexes(table) {
-		nonUnique := "1"
-		if index.Unique {
-			nonUnique = "0"
-		}
-		visible := "YES"
-		if index.Invisible {
-			visible = "NO"
-		}
-		for number, part := range index.Parts {
-			column := part.Column
-			expression := part.Expression
-			collation := "A"
-			if part.Descending {
-				collation = "D"
+	for _, namespace := range projection.namespaces {
+		for _, table := range namespace.tables {
+			for _, index := range table.indexes {
+				rows = append(rows, index.informationSchemaRow(namespace.name, table.name))
 			}
-			subPart := metadataValue{null: true}
-			if part.PrefixLength > 0 {
-				subPart = metadataValue{value: strconv.Itoa(part.PrefixLength)}
-			}
-			nullable := ""
-			if columnNullable(table, column) {
-				nullable = "YES"
-			}
-			rows = append(rows, []metadataValue{
-				{value: namespace},
-				{value: table.Name},
-				{value: nonUnique},
-				{value: index.Name},
-				{value: strconv.Itoa(number + 1)},
-				{value: column},
-				{value: collation},
-				subPart,
-				{value: nullable},
-				{value: "BTREE"},
-				{value: ""},
-				{value: index.Comment},
-				{value: visible},
-				{value: expression},
-			})
 		}
 	}
 	return rows
@@ -115,17 +59,17 @@ func columnNullable(table catalog.Table, name string) bool {
 	return true
 }
 
-func informationSchemaTableConstraintRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaTableConstraintRows(_ *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := make([][]metadataValue, 0)
-	for _, namespace := range sortedNamespaces(definition) {
-		for _, table := range sortedTables(namespace) {
-			for _, constraint := range table.Constraints {
+	for _, namespace := range projection.namespaces {
+		for _, table := range namespace.tables {
+			for _, constraint := range table.constraints {
 				rows = append(rows, []metadataValue{
-					{value: namespace.Name},
-					{value: constraint.Name},
-					{value: namespace.Name},
-					{value: table.Name},
-					{value: constraintTypeLabel(constraint.Type)},
+					{value: namespace.name},
+					{value: constraint.definition.Name},
+					{value: namespace.name},
+					{value: table.name},
+					{value: constraint.typeLabel()},
 				})
 			}
 		}
@@ -133,27 +77,12 @@ func informationSchemaTableConstraintRows(definition catalog.Definition) [][]met
 	return rows
 }
 
-func constraintTypeLabel(kind string) string {
-	switch kind {
-	case catalog.ConstraintTypePrimary:
-		return "PRIMARY KEY"
-	case catalog.ConstraintTypeUnique:
-		return "UNIQUE"
-	case catalog.ConstraintTypeForeignKey:
-		return "FOREIGN KEY"
-	case catalog.ConstraintTypeCheck:
-		return "CHECK"
-	default:
-		return strings.ToUpper(kind)
-	}
-}
-
-func informationSchemaKeyColumnUsageRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaKeyColumnUsageRows(_ *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := make([][]metadataValue, 0)
-	for _, namespace := range sortedNamespaces(definition) {
-		for _, table := range sortedTables(namespace) {
-			for _, constraint := range table.Constraints {
-				rows = append(rows, keyColumnUsageRows(namespace.Name, table.Name, constraint)...)
+	for _, namespace := range projection.namespaces {
+		for _, table := range namespace.tables {
+			for _, constraint := range table.constraints {
+				rows = append(rows, keyColumnUsageRows(namespace.name, table.name, constraint.definition)...)
 			}
 		}
 	}
@@ -192,19 +121,19 @@ func keyColumnUsageRows(namespace, table string, constraint catalog.Constraint) 
 	return rows
 }
 
-func informationSchemaReferentialRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaReferentialRows(_ *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := make([][]metadataValue, 0)
-	for _, namespace := range sortedNamespaces(definition) {
-		for _, table := range sortedTables(namespace) {
-			for _, constraint := range table.Constraints {
-				if constraint.Type != catalog.ConstraintTypeForeignKey {
+	for _, namespace := range projection.namespaces {
+		for _, table := range namespace.tables {
+			for _, constraint := range table.constraints {
+				if constraint.definition.Type != catalog.ConstraintTypeForeignKey {
 					continue
 				}
 				rows = append(rows, []metadataValue{
-					{value: namespace.Name},
-					{value: constraint.Name},
-					{value: table.Name},
-					{value: constraint.ReferencedTable},
+					{value: namespace.name},
+					{value: constraint.definition.Name},
+					{value: table.name},
+					{value: constraint.definition.ReferencedTable},
 				})
 			}
 		}
@@ -212,18 +141,18 @@ func informationSchemaReferentialRows(definition catalog.Definition) [][]metadat
 	return rows
 }
 
-func informationSchemaCheckRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaCheckRows(_ *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := make([][]metadataValue, 0)
-	for _, namespace := range sortedNamespaces(definition) {
-		for _, table := range sortedTables(namespace) {
-			for _, constraint := range table.Constraints {
-				if constraint.Type != catalog.ConstraintTypeCheck {
+	for _, namespace := range projection.namespaces {
+		for _, table := range namespace.tables {
+			for _, constraint := range table.constraints {
+				if constraint.definition.Type != catalog.ConstraintTypeCheck {
 					continue
 				}
 				rows = append(rows, []metadataValue{
-					{value: namespace.Name},
-					{value: constraint.Name},
-					{value: constraint.Check},
+					{value: namespace.name},
+					{value: constraint.definition.Name},
+					{value: constraint.definition.Check},
 				})
 			}
 		}
@@ -242,9 +171,9 @@ func informationSchemaCollationRows() [][]metadataValue {
 	}
 }
 
-func informationSchemaAccountRows(s *session, definition catalog.Definition) [][]metadataValue {
+func informationSchemaAccountRows(s *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := make([][]metadataValue, 0)
-	for _, account := range visibleAccounts(s, definition) {
+	for _, account := range visibleAccounts(s, projection.definition) {
 		locked := "0"
 		if account.Locked {
 			locked = "1"
@@ -254,9 +183,9 @@ func informationSchemaAccountRows(s *session, definition catalog.Definition) [][
 	return rows
 }
 
-func informationSchemaAccountGrantRows(s *session, definition catalog.Definition) [][]metadataValue {
+func informationSchemaAccountGrantRows(s *session, projection catalogMetadataProjection) [][]metadataValue {
 	rows := make([][]metadataValue, 0)
-	for _, account := range visibleAccounts(s, definition) {
+	for _, account := range visibleAccounts(s, projection.definition) {
 		for _, grant := range sortedAccountGrants(account.Grants) {
 			rows = append(rows, []metadataValue{{value: account.Name}, {value: grant.Privilege}, {value: grant.Namespace}})
 		}

@@ -52,20 +52,11 @@ func (s *catalogExecutor) showTablesIn(name string, full bool) (*queryResult, er
 		}
 		return result, nil
 	}
-	definition := emptyDefinition()
-	if s.server.config.Catalog != nil {
-		definition = s.server.config.Catalog.Snapshot()
-	}
-	resolution := resolveNamespace(definition, s.session.username, name)
-	if err := resolution.requireDefinition(); err != nil {
+	namespace, err := catalogMetadataForSession(s.session).namespace(name)
+	if err != nil {
 		return nil, err
 	}
-	namespace := resolution.namespace
-	display := namespace.Name
-	if display == "" {
-		display = name
-	}
-	result := namespaceTables(display, namespace)
+	result := namespaceTables(namespace.name, namespace)
 	if full {
 		return withShowTableType(result, "BASE TABLE"), nil
 	}

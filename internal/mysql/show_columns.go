@@ -23,7 +23,8 @@ func describeTarget(query, lower string) (string, bool) {
 }
 
 func (s *catalogExecutor) describe(query, target string) (*queryResult, error) {
-	_, table, err := s.resolveShowTable(target, "")
+	projection := catalogMetadataForSession(s.session)
+	_, table, err := s.resolveShowTable(target, "", projection)
 	if err != nil {
 		return nil, err
 	}
@@ -90,70 +91,39 @@ func (s *catalogExecutor) showColumnsStatement(query, lower string) (*queryResul
 	if err != nil {
 		return nil, err
 	}
-	namespaceName, table, err := s.resolveShowTableParts(modifiers.objectParts, modifiers.namespace)
+	projection := catalogMetadataForSession(s.session)
+	namespaceName, table, err := s.resolveShowTableParts(modifiers.objectParts, modifiers.namespace, projection)
 	if err != nil {
 		return nil, err
 	}
-	result := showColumns(table, full, s.columnPrivileges(namespaceName))
+	result := showColumns(table, full, projection.columnPrivileges(namespaceName))
 	return applyShowFilters(s.session, result, modifiers)
 }
 
-func (s *catalogExecutor) resolveShowTable(target, namespaceOverride string) (string, catalog.Table, error) {
+func (s *catalogExecutor) resolveShowTable(target, namespaceOverride string, projection catalogMetadataProjection) (string, catalogTableMetadata, error) {
 	parts, rest, ok := consumeQualifiedIdentifier(strings.TrimSpace(target))
 	if !ok || strings.TrimSpace(rest) != "" {
-		return "", catalog.Table{}, sqlFailure{1064, "42000", "invalid table name"}
+		return "", catalogTableMetadata{}, sqlFailure{1064, "42000", "invalid table name"}
 	}
-	return s.resolveShowTableParts(parts, namespaceOverride)
+	return s.resolveShowTableParts(parts, namespaceOverride, projection)
 }
 
-func (s *catalogExecutor) resolveShowTableParts(parts []string, namespaceOverride string) (string, catalog.Table, error) {
+func (s *catalogExecutor) resolveShowTableParts(parts []string, namespaceOverride string, projection catalogMetadataProjection) (string, catalogTableMetadata, error) {
 	if len(parts) == 0 || len(parts) > 2 {
-		return "", catalog.Table{}, sqlFailure{1064, "42000", "invalid table name"}
+		return "", catalogTableMetadata{}, sqlFailure{1064, "42000", "invalid table name"}
 	}
 	if namespaceOverride != "" {
 		parts = []string{namespaceOverride, parts[len(parts)-1]}
 	}
 	namespaceName, tableName, err := s.qualifiedShowTableTarget("", parts)
 	if err != nil {
-		return "", catalog.Table{}, err
+		return "", catalogTableMetadata{}, err
 	}
-	definition := emptyDefinition()
-	if s.server.config.Catalog != nil {
-		definition = s.server.config.Catalog.Snapshot()
-	}
-	resolution := resolveNamespace(definition, s.session.username, namespaceName)
-	if err := resolution.requireDefinition(); err != nil {
-		return "", catalog.Table{}, err
-	}
-	namespace := resolution.namespace
-	table, ok := namespace.Tables[catalog.Key(tableName)]
-	if !ok {
-		return "", catalog.Table{}, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
-	}
-	if table.Name == "" {
-		table.Name = strings.ToLower(tableName)
+	table, err := projection.table(namespaceName, tableName)
+	if err != nil {
+		return "", catalogTableMetadata{}, err
 	}
 	return namespaceName, table, nil
-}
-
-// columnPrivileges follows the information_schema.COLUMNS.PRIVILEGES contract:
-// it projects the current account's namespace grants into column capabilities.
-func (s *catalogExecutor) columnPrivileges(namespaceName string) string {
-	privileges := []string{}
-	for _, grant := range []struct {
-		privilege string
-		spellings []string
-	}{
-		{privilege: "DATA_READ", spellings: []string{"select"}},
-		{privilege: "DATA_WRITE", spellings: []string{"insert", "update"}},
-		{privilege: "SCHEMA_MANAGEMENT", spellings: []string{"references"}},
-	} {
-		if s.requireGrant(grant.privilege, namespaceName) != nil {
-			continue
-		}
-		privileges = append(privileges, grant.spellings...)
-	}
-	return strings.Join(privileges, ",")
 }
 
 // isShowStatusStatement reports whether the statement is a SHOW STATUS form.
@@ -194,54 +164,37 @@ func (s *catalogExecutor) showStatus(query, lower string) (*queryResult, error) 
 // statement reports. The full shape adds the collation, privilege, and comment
 // columns this catalog does not track; collation and comment stay honestly
 // NULL or empty, and privileges project the account's namespace grants.
-func showColumns(table catalog.Table, full bool, privileges string) *queryResult {
+func showColumns(table catalogTableMetadata, full bool, privileges string) *queryResult {
 	columns := []string{"Field", "Type", "Null", "Key", "Default", "Extra"}
 	if full {
 		columns = []string{"Field", "Type", "Collation", "Null", "Key", "Default", "Extra", "Privileges", "Comment"}
 	}
-	rows := make([][]string, 0, len(table.Columns))
-	nulls := make([][]bool, 0, len(table.Columns))
-	for index, column := range table.Columns {
-		attribute := catalog.ColumnAttributeAt(table, index)
-		columnType, _ := table.ColumnType(index)
-		defaultCell, defaultNull := "", true
-		if attribute.HasDefault && attribute.Default != storedSQLNullValue {
-			defaultCell, defaultNull = attribute.Default, false
-		}
-		shared := []string{
-			column,
-			columnType,
-			nullLabel(attribute),
-			showColumnKey(table, index),
-			defaultCell,
-			showColumnExtra(attribute),
-		}
-		sharedNull := []bool{false, false, false, false, defaultNull, false}
-		row, null := shared, sharedNull
-		if full {
-			row = append([]string{column, columnType, ""}, shared[2:]...)
-			row = append(row, privileges, "")
-			null = append([]bool{false, false, true}, sharedNull[2:]...)
-			null = append(null, false, false)
-		}
+	rows := make([][]string, 0, len(table.columns))
+	nulls := make([][]bool, 0, len(table.columns))
+	for _, column := range table.columns {
+		row, null := column.showRow(full, privileges)
 		rows = append(rows, row)
 		nulls = append(nulls, null)
 	}
 	return &queryResult{columns: columns, rows: rows, nulls: nulls}
 }
 
-func nullLabel(attribute catalog.ColumnAttribute) string {
-	if attribute.Nullable {
-		return "YES"
+func (column catalogColumnMetadata) showRow(full bool, privileges string) ([]string, []bool) {
+	typeName := ""
+	if !column.columnType.null {
+		typeName = column.columnType.value
 	}
-	return "NO"
-}
-
-func showColumnExtra(attribute catalog.ColumnAttribute) string {
-	if attribute.AutoIncrement {
-		return "auto_increment"
+	nullability := "NO"
+	if column.attribute.Nullable {
+		nullability = "YES"
 	}
-	return ""
+	row := []string{column.name, typeName, nullability, column.key, column.defaultValue.value, column.extra}
+	nulls := []bool{false, false, false, false, column.defaultValue.null, false}
+	if !full {
+		return row, nulls
+	}
+	return []string{column.name, typeName, "", nullability, column.key, column.defaultValue.value, column.extra, privileges, ""},
+		[]bool{false, false, true, false, false, column.defaultValue.null, false, false, false}
 }
 
 // showColumnKey follows the MySQL rule: PRI for any primary key column, UNI

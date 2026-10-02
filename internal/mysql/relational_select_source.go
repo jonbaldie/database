@@ -128,7 +128,10 @@ func parseInformationSchemaTableSource(s *relationExecutor, parts []string, rema
 	if !found {
 		return relationalTableSource{}, "", true, sqlFailure{1105, "HY000", "unsupported information_schema view '" + name + "'"}
 	}
-	result := informationSchemaQueryResult(s.session, view)
+	result, err := informationSchemaQueryResult(s.session, view)
+	if err != nil {
+		return relationalTableSource{}, "", true, err
+	}
 	table, err := queryResultTable(view.name, result)
 	if err != nil {
 		return relationalTableSource{}, "", true, err
