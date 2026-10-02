@@ -434,9 +434,9 @@ func ifValue(arguments []exprValue) (exprValue, error) {
 		return exprValue{}, err
 	}
 	if known && truth {
-		return arguments[1], nil
+		return mergedArgumentValue(arguments[1], arguments[1:])
 	}
-	return arguments[2], nil
+	return mergedArgumentValue(arguments[2], arguments[1:])
 }
 
 func greatestValue(arguments []exprValue) (exprValue, error) {
