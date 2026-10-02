@@ -593,7 +593,7 @@ func scalarSubqueryValue(result *queryResult) (exprValue, columnMetadata, error)
 		definition.flags &^= mysqlNotNullFlag
 		return nullValue(), definition, nil
 	}
-	value, err := expressionValueFromMetadata(result.rows[0][0], definition)
+	value, err := decodeResultValue(result.rows[0][0], definition)
 	return value, definition, err
 }
 
@@ -619,7 +619,7 @@ func scalarStreamValue(result *queryResult, definition columnMetadata) (exprValu
 		definition.flags &^= mysqlNotNullFlag
 		return nullValue(), definition, nil
 	}
-	value, err := expressionValueFromMetadata(rows[0][0], definition)
+	value, err := decodeResultValue(rows[0][0], definition)
 	return value, definition, err
 }
 
@@ -944,7 +944,7 @@ func compareInRow(left exprValue, result *queryResult, metadata columnMetadata, 
 	if resultValueIsNull(index, 0, result.nulls) {
 		return false, true, nil
 	}
-	right, err := expressionValueFromMetadata(result.rows[index][0], metadata)
+	right, err := decodeResultValue(result.rows[index][0], metadata)
 	if err != nil {
 		return false, false, err
 	}
@@ -971,7 +971,7 @@ func useGenericInComparison(left, right exprValue) bool {
 	if left.kind != valueString || right.kind != valueString {
 		return true
 	}
-	return left.binary || right.binary
+	return left.binary || right.binary || left.temporal != temporalNone || right.temporal != temporalNone
 }
 
 func inComparisonCharacterType(metadata columnMetadata, operand relationOperand) characterType {
@@ -1000,14 +1000,42 @@ func outerRelationValue(name string, outer *outerRelationScope) (exprValue, erro
 	return relationColumnValue(outer.columns, index, outer.row)
 }
 
-func expressionValueFromMetadata(raw string, metadata columnMetadata) (exprValue, error) {
+// decodeResultValue rebuilds a typed value from one non-NULL result cell. The
+// wire type restores the numeric or temporal domain, and the character set
+// restores the binary flag or text collation, so a value that crosses a
+// subquery or set-operation boundary compares as its source column does.
+func decodeResultValue(raw string, metadata columnMetadata) (exprValue, error) {
 	if isNumericWireType(metadata.typ) {
 		return evaluateScalar(raw)
 	}
-	if metadata.characterSet == mysqlCharsetBinary {
-		return exprValue{kind: valueString, s: raw, binary: true}, nil
+	if temporal := temporalKindFromWireType(metadata.typ); temporal != temporalNone {
+		return exprValue{kind: valueString, s: raw, temporal: temporal}, nil
 	}
-	return stringValue(raw), nil
+	switch metadata.characterSet {
+	case mysqlCharsetBinary:
+		return binaryStringValue(raw), nil
+	case mysqlCharsetUTF8MB4Bin:
+		return exprValue{kind: valueString, s: raw, collation: collationBin}, nil
+	default:
+		return stringValue(raw), nil
+	}
+}
+
+func temporalKindFromWireType(typ byte) temporalKind {
+	switch typ {
+	case mysqlTypeDate:
+		return temporalDate
+	case mysqlTypeTime:
+		return temporalTime
+	case mysqlTypeDatetime:
+		return temporalDatetime
+	case mysqlTypeTimestamp:
+		return temporalTimestamp
+	case mysqlTypeYear:
+		return temporalYear
+	default:
+		return temporalNone
+	}
 }
 
 func isNumericWireType(typ byte) bool {
@@ -1867,8 +1895,8 @@ func compareSetValues(result *queryResult, left, right, column int) int {
 
 func compareNonNullSetValues(result *queryResult, left, right, column int) int {
 	metadata := resultColumnDefinition(result.columns[column], column, result.metadata)
-	leftValue, leftErr := expressionValueFromMetadata(result.rows[left][column], metadata)
-	rightValue, rightErr := expressionValueFromMetadata(result.rows[right][column], metadata)
+	leftValue, leftErr := decodeResultValue(result.rows[left][column], metadata)
+	rightValue, rightErr := decodeResultValue(result.rows[right][column], metadata)
 	if leftErr == nil && rightErr == nil {
 		if leftValue.kind == valueString && rightValue.kind == valueString {
 			return strings.Compare(setComparisonKey(leftValue.s, metadata), setComparisonKey(rightValue.s, metadata))
