@@ -1,11 +1,15 @@
 package blackbox_test
 
 import (
+	"database/sql"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/jonbaldie/database/test/blackbox"
 )
 
@@ -48,6 +52,153 @@ func TestMySQLAccountAdministrationPersistsAcrossRestart(t *testing.T) {
 	defer reader.close()
 	if result := reader.query("SELECT 1"); result.err != "" {
 		t.Fatalf("durable account login query: %#v", result)
+	}
+}
+
+func TestDroppedInitialAdministratorStaysDroppedAcrossRestart(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "account-admin-secret")
+
+	process, address := startMySQLServer(t, runner, directory)
+	admin := newWireClient(t, address, "admin", "account-admin-secret")
+	mustQuery(t, admin, "CREATE USER 'ops' IDENTIFIED BY 'ops-account-secret'")
+	mustQuery(t, admin, "GRANT ACCOUNT_MANAGER ON *.* TO 'ops'")
+	mustQuery(t, admin, "DROP USER 'admin'")
+	_ = admin.close()
+	ops := newWireClient(t, address, "ops", "ops-account-secret")
+	accounts := ops.query("SELECT * FROM information_schema.ACCOUNTS")
+	if accounts.err != "" {
+		t.Fatalf("read account catalog before restart: %#v", accounts)
+	}
+	for _, account := range accounts.rows {
+		if account[0] == "admin" {
+			t.Fatalf("DROP USER did not remove the initial administrator: %#v", accounts.rows)
+		}
+	}
+	_ = ops.close()
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.ExitCode != 0 {
+		t.Fatalf("first shutdown: %#v", result)
+	}
+	addLegacyPasswordHash(t, directory)
+
+	process, address = startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	ops = newWireClient(t, address, "ops", "ops-account-secret")
+	defer ops.close()
+	accounts = ops.query("SELECT * FROM information_schema.ACCOUNTS")
+	if accounts.err != "" {
+		t.Fatalf("read account catalog after restart: %#v", accounts)
+	}
+	for _, account := range accounts.rows {
+		if account[0] == "admin" {
+			t.Fatalf("dropped initial administrator returned after restart: %#v", accounts.rows)
+		}
+	}
+	metadata, err := os.ReadFile(filepath.Join(directory, "instance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metadata), `"password_hash"`) {
+		t.Fatalf("legacy administrator verifier remains in instance metadata: %s", metadata)
+	}
+}
+
+func addLegacyPasswordHash(t *testing.T, directory string) {
+	t.Helper()
+	path := filepath.Join(directory, "instance.json")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	metadata["password_hash"], err = json.Marshal("legacy-bootstrap-hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err = json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(contents, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInitialAdministratorPasswordChangeSurvivesRestartAndBackup(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "account-admin-secret")
+
+	process, address := startMySQLServer(t, runner, directory)
+	admin := newWireClient(t, address, "admin", "account-admin-secret")
+	mustQuery(t, admin, "ALTER USER 'admin' IDENTIFIED BY 'updated-admin-secret'")
+	backup := admin.query("BACKUP INSTANCE")
+	if backup.err != "" {
+		t.Fatalf("backup instance: %#v", backup)
+	}
+	files := make(map[string]string, len(backup.rows))
+	for _, row := range backup.rows {
+		files[row[0]] = row[1]
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(files["instance.json"]), &metadata); err != nil {
+		t.Fatalf("decode backup instance metadata: %v", err)
+	}
+	if _, found := metadata["password_hash"]; found {
+		t.Fatalf("backup instance metadata contains a second password verifier: %s", files["instance.json"])
+	}
+	var backupCatalog struct {
+		Accounts map[string]struct {
+			PasswordHash string `json:"password_hash"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal([]byte(files["catalog.json"]), &backupCatalog); err != nil {
+		t.Fatalf("decode backup catalog: %v", err)
+	}
+	currentCatalog, err := os.ReadFile(filepath.Join(directory, "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var currentAccounts struct {
+		Accounts map[string]struct {
+			PasswordHash string `json:"password_hash"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(currentCatalog, &currentAccounts); err != nil {
+		t.Fatalf("decode current catalog: %v", err)
+	}
+	backupAdmin, backupFound := backupCatalog.Accounts["admin"]
+	currentAdmin, currentFound := currentAccounts.Accounts["admin"]
+	if !backupFound || !currentFound || backupAdmin.PasswordHash == "" || backupAdmin.PasswordHash != currentAdmin.PasswordHash {
+		t.Fatalf("backup administrator does not match catalog state: backup=%#v current=%#v", backupAdmin, currentAdmin)
+	}
+	_ = admin.close()
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.ExitCode != 0 {
+		t.Fatalf("first shutdown: %#v", result)
+	}
+
+	process, address = startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	admin = newWireClient(t, address, "admin", "updated-admin-secret")
+	defer admin.close()
+	mustQuery(t, admin, "SELECT 1")
+	oldCredentials, err := sql.Open("mysql", "admin:account-admin-secret@tcp("+address+")/")
+	if err != nil {
+		t.Fatalf("open old credentials: %v", err)
+	}
+	defer oldCredentials.Close()
+	if err := oldCredentials.Ping(); err == nil {
+		t.Fatal("old administrator password still works after restart")
 	}
 }
 
