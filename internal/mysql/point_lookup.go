@@ -51,7 +51,7 @@ func projectPointLookup(plan *relationalSelectPlan, row []string) ([]relationalR
 // definition only, so the durable index serves sessions outside one.
 func lookupStatementRow(plan *relationalSelectPlan, column, value string) ([]string, bool) {
 	table := plan.source.tables[0]
-	if plan.session.transaction {
+	if plan.session.inTransaction() {
 		return lookupDefinitionRow(table, column, value)
 	}
 	return lookupCatalogRow(plan.session.server.config.Catalog, table, column, value)

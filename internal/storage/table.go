@@ -33,7 +33,7 @@ func (t *table) newPrimaryKey(row []string) (string, error) {
 	}
 	key := t.primaryKey(row)
 	if _, exists := t.primaryIdx[key]; exists {
-		return "", errDuplicateKey
+		return "", ErrDuplicateKey
 	}
 	return key, nil
 }
@@ -46,7 +46,7 @@ func (t *table) validateUniqueKeys(row []string) error {
 		}
 		indexKey := strings.Join(unique, "\x00")
 		if _, exists := t.uniqueIdx[indexKey][rowKey(row, indexes)]; exists {
-			return errDuplicateKey
+			return ErrDuplicateKey
 		}
 	}
 	return nil
@@ -152,7 +152,7 @@ func (t *table) validatePrimaryReplacement(previous, row []string, position int)
 		return nil
 	}
 	if existing, exists := t.primaryIdx[nextKey]; exists && existing != position {
-		return errDuplicateKey
+		return ErrDuplicateKey
 	}
 	return nil
 }
@@ -178,7 +178,7 @@ func (t *table) validateUniqueIndexReplacement(previous, row []string, position 
 	}
 	indexKey := strings.Join(unique, "\x00")
 	if existing, exists := t.uniqueIdx[indexKey][nextKey]; exists && existing != position {
-		return errDuplicateKey
+		return ErrDuplicateKey
 	}
 	return nil
 }
