@@ -267,7 +267,7 @@ func accountAdministrationStatement(lower string) bool {
 }
 
 func (s *textStatementExecutor) commitAccountBoundary() error {
-	if s.session.transaction {
+	if s.session.inTransaction() {
 		return (&transactionExecutor{s.session}).commit()
 	}
 	return nil

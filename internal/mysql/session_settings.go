@@ -290,7 +290,7 @@ func applyAutocommitValue(s *textStatementExecutor, value string) error {
 	if !found {
 		return sqlFailure{1231, "42000", "autocommit has an invalid value"}
 	}
-	if !off && s.session.transaction {
+	if !off && s.session.inTransaction() {
 		if err := (&transactionExecutor{s.session}).commit(); err != nil {
 			return err
 		}
@@ -324,7 +324,7 @@ func applyReadOnlyValue(s *textStatementExecutor, value string) error {
 }
 
 func sessionCharacteristicChangeAllowed(s *session) error {
-	if s.transaction {
+	if s.inTransaction() {
 		return sqlFailure{1568, "25001", "transaction characteristics cannot change in an active transaction"}
 	}
 	return nil

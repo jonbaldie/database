@@ -82,14 +82,14 @@ func (overlay *tableOverlay) rejectDuplicatePrimary(key string) error {
 	}
 	if !overlay.clear {
 		if _, exists := overlay.base.primaryIdx[key]; exists && !overlay.deletes[key] {
-			return errDuplicateKey
+			return ErrDuplicateKey
 		}
 	}
 	if _, exists := overlay.insertKeys[key]; exists {
-		return errDuplicateKey
+		return ErrDuplicateKey
 	}
 	if _, exists := overlay.updates[key]; exists {
-		return errDuplicateKey
+		return ErrDuplicateKey
 	}
 	return nil
 }
@@ -114,13 +114,13 @@ func (overlay *tableOverlay) rejectDuplicateUnique(row, unique []string) error {
 		if position, exists := overlay.base.uniqueIdx[indexKey][uniqueKey]; exists {
 			existing := overlay.base.primaryKey(overlay.base.rows[position])
 			if !overlay.deletes[existing] {
-				return errDuplicateKey
+				return ErrDuplicateKey
 			}
 		}
 	}
 	indexKey := strings.Join(unique, "\x00")
 	if _, exists := overlay.uniqueKeys[indexKey][uniqueKey]; exists {
-		return errDuplicateKey
+		return ErrDuplicateKey
 	}
 	return nil
 }
@@ -491,7 +491,7 @@ func (state *overlayConstraintState) add(row []string) error {
 	if len(state.table.primary) > 0 {
 		key := state.table.primaryKey(row)
 		if state.primaryExists(key) {
-			return errDuplicateKey
+			return ErrDuplicateKey
 		}
 		state.addedPrimary[key] = true
 	}
@@ -503,7 +503,7 @@ func (state *overlayConstraintState) add(row []string) error {
 		indexKey := strings.Join(unique, "\x00")
 		key := rowKey(row, indexes)
 		if state.uniqueExists(indexKey, key) {
-			return errDuplicateKey
+			return ErrDuplicateKey
 		}
 		state.addedUnique[indexKey][key] = true
 	}
