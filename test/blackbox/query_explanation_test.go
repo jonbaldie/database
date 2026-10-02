@@ -52,10 +52,10 @@ func TestMySQLPlannedExplanationUsesTheWireContract(t *testing.T) {
 	if filter["kind"] != "filter" {
 		t.Fatalf("JSON planned explanation filter: %#v", filter)
 	}
-	scan := filter["children"].([]any)[0].(map[string]any)
-	strategy, ok := scan["strategy"].(map[string]any)
-	if scan["kind"] != "scan" || !ok || strategy["name"] != "btree_covering_index_scan" {
-		t.Fatalf("JSON planned explanation scan: %#v", scan)
+	lookup := filter["children"].([]any)[0].(map[string]any)
+	strategy, ok := lookup["strategy"].(map[string]any)
+	if lookup["kind"] != "lookup" || !ok || strategy["name"] != "unique_key_point_lookup" {
+		t.Fatalf("JSON planned explanation lookup: %#v", lookup)
 	}
 
 	tabular := admin.query("EXPLAIN SELECT id FROM orders WHERE id = 1")
