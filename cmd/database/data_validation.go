@@ -49,7 +49,6 @@ func dataCommand(args []string, stdout, stderr io.Writer) int {
 		output.legacy = true
 	}
 	reporter := newOperationReporter(operation, output, stdout, stderr)
-	reporter.progress("reading")
 	request, err := parseDataRequest(filtered)
 	if err != nil {
 		return reporter.failure("invalid_input", "", err.Error(), nil)
@@ -80,10 +79,12 @@ func parseDataRequest(args []string) (dataRequest, error) {
 }
 
 func runDataValidation(request dataRequest, reporter *operationReporter) int {
-	report, err := validateDataDirectory(request.directory)
-	if err != nil {
+	reporter.progress("preflight")
+	if err := checkDataDirectory(request.directory); err != nil {
 		return reporter.failure("precondition", "", err.Error(), nil)
 	}
+	reporter.progress("validating")
+	report := validateDataDirectory(request.directory)
 	details := dataValidationDetails(report)
 	if len(report.Findings) != 0 {
 		return reporter.failure("invalid_artifact", "", "durable data validation found damage", details)
@@ -92,6 +93,7 @@ func runDataValidation(request dataRequest, reporter *operationReporter) int {
 }
 
 func runDataInspection(request dataRequest, reporter *operationReporter) int {
+	reporter.progress("reading")
 	details, err := inspectDataDirectory(request.directory)
 	if err != nil {
 		return reporter.failure("precondition", "", err.Error(), nil)
@@ -99,17 +101,21 @@ func runDataInspection(request dataRequest, reporter *operationReporter) int {
 	return reporter.success(details)
 }
 
-func validateDataDirectory(directory string) (dataValidationReport, error) {
+func checkDataDirectory(directory string) error {
 	info, err := os.Stat(directory)
 	if errors.Is(err, os.ErrNotExist) {
-		return dataValidationReport{}, errors.New("data directory does not exist")
+		return errors.New("data directory does not exist")
 	}
 	if err != nil {
-		return dataValidationReport{}, fmt.Errorf("inspect data directory: %w", err)
+		return fmt.Errorf("inspect data directory: %w", err)
 	}
 	if !info.IsDir() {
-		return dataValidationReport{}, errors.New("data directory is not a directory")
+		return errors.New("data directory is not a directory")
 	}
+	return nil
+}
+
+func validateDataDirectory(directory string) dataValidationReport {
 	report := dataValidationReport{Directory: directory, Findings: []dataFinding{}, Examined: []string{}}
 	collectDataEntries(directory, &report)
 	validateDataMetadata(directory, &report)
@@ -117,7 +123,7 @@ func validateDataDirectory(directory string) (dataValidationReport, error) {
 	report.CheckedAt = time.Now().UTC()
 	sort.Strings(report.Examined)
 	report.Examined = compactStrings(report.Examined)
-	return report, nil
+	return report
 }
 
 func collectDataEntries(directory string, report *dataValidationReport) {

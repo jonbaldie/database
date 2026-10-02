@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +64,38 @@ func TestDataInspectIsLimitedAndDoesNotRepairRecoveryArtifacts(t *testing.T) {
 		if _, exists := result[key]; exists {
 			t.Fatalf("inspection exposed internal-layout field %q: %#v", key, result[key])
 		}
+	}
+}
+
+func TestDataCommandsEmitContractPhases(t *testing.T) {
+	for _, tc := range []struct {
+		operation string
+		want      []string
+	}{
+		{operation: "validate", want: []string{"preflight", "validating"}},
+		{operation: "inspect", want: []string{"reading"}},
+	} {
+		t.Run(tc.operation, func(t *testing.T) {
+			directory := t.TempDir()
+			writeInstanceFixture(t, directory)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"data", tc.operation, "--data-directory", directory, "--result=json", "--progress=json"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("data %s exit = %d stdout = %q stderr = %q", tc.operation, code, stdout.String(), stderr.String())
+			}
+			var phases []string
+			for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+				var record struct {
+					Phase string `json:"phase"`
+				}
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatalf("decode data %s progress %q: %v", tc.operation, line, err)
+				}
+				phases = append(phases, record.Phase)
+			}
+			if !slices.Equal(phases, tc.want) {
+				t.Fatalf("data %s phases = %v, want %v", tc.operation, phases, tc.want)
+			}
+		})
 	}
 }
