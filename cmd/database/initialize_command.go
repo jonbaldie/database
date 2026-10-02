@@ -76,7 +76,8 @@ func initializeValidatedRequest(request initializationRequest, reporter *operati
 	if err != nil {
 		return initializationFailure(reporter, initializationFailureClass(err), err.Error())
 	}
-	details := map[string]any{"instance_id": metadata.InstanceID, "data_directory": request.directory, "admin_account": metadata.AdminAccount}
+	reporter.progress("validating")
+	details := map[string]any{"instance_id": metadata.InstanceID, "data_directory": request.directory, "admin_account": metadata.AdminAccount, "state": metadata.State}
 	if reporter.output.legacy && reporter.output.result == "human" {
 		fmt.Fprintf(stdout, "initialized database instance %s\n", metadata.InstanceID)
 		return 0

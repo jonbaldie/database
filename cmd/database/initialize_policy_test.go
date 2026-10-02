@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -82,5 +84,40 @@ func TestInitializeKeepsTextFormatUnsupported(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(directory, "instance.json")); !os.IsNotExist(err) {
 		t.Fatalf("init created metadata for unsupported output format: %v", err)
+	}
+}
+
+func TestInitializeReportsStoppedStateAndContractPhases(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("valid-password-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", directory, "--password-file", passwordFile, "--result=json", "--progress=json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("init exit = %d stdout = %q stderr = %q", code, stdout.String(), stderr.String())
+	}
+	var result struct {
+		Details map[string]any `json:"details"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode init result %q: %v", stdout.String(), err)
+	}
+	if result.Details["state"] != "stopped" {
+		t.Fatalf("init details = %v, want state stopped", result.Details)
+	}
+	var phases []string
+	for _, line := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		var record struct {
+			Phase string `json:"phase"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode init progress %q: %v", line, err)
+		}
+		phases = append(phases, record.Phase)
+	}
+	if want := []string{"preflight", "initializing", "validating"}; !slices.Equal(phases, want) {
+		t.Fatalf("init phases = %v, want %v", phases, want)
 	}
 }
