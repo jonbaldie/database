@@ -738,7 +738,7 @@ func invalidConfiguration(message string) error {
 	return &configurationError{class: "invalid_input", message: message}
 }
 
-func configurationResult(config configuration, operationID string) map[string]any {
+func configurationSettings(config configuration) map[string]any {
 	settings := make(map[string]any, len(config.values))
 	for name, setting := range config.values {
 		value := setting.value
@@ -747,7 +747,7 @@ func configurationResult(config configuration, operationID string) map[string]an
 		}
 		settings[name] = map[string]string{"value": value, "source": setting.source}
 	}
-	return map[string]any{"schema": "database.configuration/v1", "operation_id": operationID, "settings": settings}
+	return settings
 }
 
 func configurationClass(err error) string {

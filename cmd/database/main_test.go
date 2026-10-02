@@ -136,14 +136,18 @@ func TestConfigValidateJSONOutputIncludesOperationIdentity(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("result is not JSON: %v; output=%q", err, stdout.String())
 	}
-	if result["schema"] != "database.configuration/v1" || result["operation"] != "config validate" || result["success"] != true || result["exit_class"] != "success" {
+	if result["schema"] != "database.operator.result/v1" || result["record_type"] != "result" || result["command"] != "config validate" || result["status"] != "success" || result["success"] != true || result["exit_class"] != "success" {
 		t.Fatalf("result = %#v", result)
 	}
 	if operationID, ok := result["operation_id"].(string); !ok || operationID == "" {
 		t.Fatalf("operation_id = %#v", result["operation_id"])
 	}
-	if _, ok := result["settings"].(map[string]any); !ok {
-		t.Fatalf("settings = %#v", result["settings"])
+	details, ok := result["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("details = %#v", result["details"])
+	}
+	if _, ok := details["settings"].(map[string]any); !ok {
+		t.Fatalf("settings = %#v", details["settings"])
 	}
 }
 
@@ -164,23 +168,23 @@ func TestConfigValidateJSONFailureIncludesStableExitClass(t *testing.T) {
 	}
 }
 
-func TestConfigOutputFormatPreservesConfigurationArguments(t *testing.T) {
-	format, arguments, err := configOutputFormat([]string{"validate", "--format", "json", "--data-directory=/tmp/database"})
+func TestConfigCommandOutputUsesSharedParser(t *testing.T) {
+	output, arguments, err := parseCommandOutput([]string{"validate", "--format", "json", "--data-directory=/tmp/database"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if format != "json" {
-		t.Fatalf("format = %q", format)
+	if output.result != "json" || !output.legacy {
+		t.Fatalf("command output = %#v", output)
 	}
 	if got, want := strings.Join(arguments, " "), "validate --data-directory=/tmp/database"; got != want {
 		t.Fatalf("arguments = %q, want %q", got, want)
 	}
 }
 
-func TestConfigOutputFormatRejectsRepeatedAndMissingValues(t *testing.T) {
+func TestConfigCommandOutputRejectsRepeatedAndMissingValues(t *testing.T) {
 	for _, arguments := range [][]string{{"--format=json", "--format=text"}, {"--format"}} {
-		if _, _, err := configOutputFormat(arguments); err == nil {
-			t.Fatalf("configOutputFormat(%q) accepted invalid output format", arguments)
+		if _, _, err := parseCommandOutput(arguments); err == nil {
+			t.Fatalf("parseCommandOutput(%q) accepted invalid output format", arguments)
 		}
 	}
 }

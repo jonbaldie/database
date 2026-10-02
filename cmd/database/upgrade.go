@@ -46,11 +46,11 @@ type dataVersion struct {
 var upgradeAvailableSpace = availableUpgradeSpace
 
 func upgradeCommand(args []string, stdout, stderr io.Writer) int {
-	output, filtered, err := parseCommandOutput(args, true)
+	output, filtered, err := parseCommandOutput(args)
 	if err != nil {
 		return newOperationReporter("upgrade", commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", err.Error(), nil)
 	}
-	if !containsOutputControl(args) {
+	if !output.resultSet && !output.formatSet && !output.progressSet {
 		output.result = "json"
 		output.legacy = true
 	}

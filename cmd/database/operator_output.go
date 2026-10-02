@@ -14,26 +14,21 @@ import (
 // commandOutput describes the two public operator streams. The terminal
 // result is written to stdout. Progress and human diagnostics use stderr.
 type commandOutput struct {
-	result   string
-	progress string
-	legacy   bool
+	result      string
+	progress    string
+	legacy      bool
+	resultSet   bool
+	formatSet   bool
+	formatText  bool
+	progressSet bool
 }
 
 func defaultCommandOutput() commandOutput { return commandOutput{result: "human", progress: "auto"} }
 
-func containsOutputControl(args []string) bool {
-	for _, arg := range args {
-		if arg == "--json" || strings.HasPrefix(arg, "--result") || strings.HasPrefix(arg, "--progress") || strings.HasPrefix(arg, "--format") {
-			return true
-		}
-	}
-	return false
-}
-
 // parseCommandOutput removes output controls from args. --format is retained
 // as a compatibility alias for clients of the first command-line contract.
-func parseCommandOutput(args []string, acceptFormatAlias bool) (commandOutput, []string, error) {
-	parser := commandOutputParser{output: defaultCommandOutput(), filtered: make([]string, 0, len(args)), acceptFormatAlias: acceptFormatAlias}
+func parseCommandOutput(args []string) (commandOutput, []string, error) {
+	parser := commandOutputParser{output: defaultCommandOutput(), filtered: make([]string, 0, len(args))}
 	for index, argumentCount := 0, len(args); index < argumentCount; index++ {
 		next, err := parser.consume(args, index)
 		if err != nil {
@@ -45,11 +40,10 @@ func parseCommandOutput(args []string, acceptFormatAlias bool) (commandOutput, [
 }
 
 type commandOutputParser struct {
-	output            commandOutput
-	filtered          []string
-	acceptFormatAlias bool
-	resultSeen        bool
-	progressSeen      bool
+	output       commandOutput
+	filtered     []string
+	resultSeen   bool
+	progressSeen bool
 }
 
 func (parser *commandOutputParser) consume(args []string, index int) (int, error) {
@@ -65,23 +59,48 @@ func (parser *commandOutputParser) consume(args []string, index int) (int, error
 }
 
 func (parser *commandOutputParser) isResult(name string) bool {
-	return name == "--result" || name == "--json" || parser.acceptFormatAlias && name == "--format"
+	return name == "--result" || name == "--json" || name == "--format"
 }
 
 func (parser *commandOutputParser) consumeResult(args []string, index int) (int, error) {
+	name, value, hasValue := strings.Cut(args[index], "=")
+	if name == "--format" {
+		parser.output.legacy = true
+		parser.output.formatSet = true
+		parser.output.formatText = isTextFormatValue(args, index, value, hasValue)
+	}
 	if parser.resultSeen {
 		return index, fmt.Errorf("repeated result format")
 	}
 	parser.resultSeen = true
-	name, value, hasValue := strings.Cut(args[index], "=")
+	if name != "--format" {
+		parser.output.resultSet = true
+	}
+	value, index, err := resultFormatValue(args, index, name, value, hasValue)
+	if err != nil {
+		return index, err
+	}
+	parser.output.result = value
+	return index, nil
+}
+
+func isTextFormatValue(args []string, index int, value string, hasValue bool) bool {
+	if hasValue {
+		return value == "text"
+	}
+	return index+1 < len(args) && args[index+1] == "text"
+}
+
+func resultFormatValue(args []string, index int, name, value string, hasValue bool) (string, int, error) {
 	if name == "--json" {
 		if hasValue {
-			return index, fmt.Errorf("--json does not take a value")
+			return "", index, fmt.Errorf("--json does not take a value")
 		}
-		value = "json"
-	} else if !hasValue {
+		return "json", index, nil
+	}
+	if !hasValue {
 		if index+1 >= len(args) {
-			return index, fmt.Errorf("%s requires a value", name)
+			return "", index, fmt.Errorf("%s requires a value", name)
 		}
 		index++
 		value = args[index]
@@ -90,10 +109,9 @@ func (parser *commandOutputParser) consumeResult(args []string, index int) (int,
 		value = "human"
 	}
 	if value != "human" && value != "json" {
-		return index, fmt.Errorf("result must be human or json")
+		return "", index, fmt.Errorf("result must be human or json")
 	}
-	parser.output.result = value
-	return index, nil
+	return value, index, nil
 }
 
 func (parser *commandOutputParser) consumeProgress(args []string, index int) (int, error) {
@@ -101,6 +119,7 @@ func (parser *commandOutputParser) consumeProgress(args []string, index int) (in
 		return index, fmt.Errorf("repeated progress mode")
 	}
 	parser.progressSeen = true
+	parser.output.progressSet = true
 	_, value, hasValue := strings.Cut(args[index], "=")
 	if !hasValue {
 		if index+1 >= len(args) {
@@ -265,37 +284,4 @@ func operatorExitCode(class string) int {
 	default:
 		return 6
 	}
-}
-
-// These helpers preserve the old internal API while producing the complete
-// terminal envelope when a workflow has not yet migrated to a reporter.
-func writeOperatorResult(stdout io.Writer, operation, operationID string, success bool, exitClass, diagnostic string) int {
-	reporter := &operationReporter{command: operation, id: operationID, started: time.Now().UTC(), output: commandOutput{result: "json", progress: "none"}, stdout: stdout}
-	if success {
-		return reporter.success(nil)
-	}
-	return reporter.failure(exitClass, diagnosticCodeForClass(exitClass), diagnostic, nil)
-}
-
-func writeOperatorFailure(stdout io.Writer, operation, operationID, class string, code int, message string) int {
-	reporter := &operationReporter{command: operation, id: operationID, started: time.Now().UTC(), output: commandOutput{result: "json", progress: "none", legacy: true}, stdout: stdout}
-	resultCode := reporter.failure(class, diagnosticCodeForClass(class), message, nil)
-	if code != 0 && resultCode != code {
-		return code
-	}
-	return resultCode
-}
-
-func operatorResult(operation, operationID string, success bool, exitClass, diagnostic string) map[string]any {
-	result := map[string]any{
-		"schema": "database.operator.result/v1", "record_type": "result", "operation": operation, "command": operation, "operation_id": operationID,
-		"status": map[bool]string{true: "success", false: "failure"}[success], "success": success, "exit_class": exitClass, "exit_code": operatorExitCode(exitClass),
-	}
-	if diagnostic != "" {
-		result["diagnostic"] = diagnostic
-		result["diagnostics"] = []map[string]any{{"code": diagnosticCodeForClass(exitClass), "severity": "error", "summary": diagnostic}}
-	} else {
-		result["diagnostics"] = []map[string]any{}
-	}
-	return result
 }

@@ -63,5 +63,24 @@ func TestInitializeAcceptsContractBoundaryCredentials(t *testing.T) {
 		if code := run([]string{"init", directory, "--initial-account", account, "--password-file", passwordFile}, &stdout, &stderr); code != 0 {
 			t.Fatalf("init exit = %d stdout = %q stderr = %q", code, stdout.String(), stderr.String())
 		}
+		if !strings.HasPrefix(stdout.String(), "initialized database instance ") || stderr.Len() != 0 {
+			t.Fatalf("init human output changed: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestInitializeKeepsTextFormatUnsupported(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("valid-password-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", directory, "--password-file", passwordFile, "--format=text"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stdout.String(), `"exit_class":"invalid_input"`) {
+		t.Fatalf("init --format=text exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(directory, "instance.json")); !os.IsNotExist(err) {
+		t.Fatalf("init created metadata for unsupported output format: %v", err)
 	}
 }

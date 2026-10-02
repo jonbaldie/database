@@ -96,6 +96,15 @@ func operatorOptions(args []string, allowed ...string) (map[string]string, error
 	return values, nil
 }
 
+func hasResultControl(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" || strings.HasPrefix(arg, "--result") || strings.HasPrefix(arg, "--progress") {
+			return true
+		}
+	}
+	return false
+}
+
 func version(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Fprintln(stdout, "Usage: database version [--format=human|json]")
@@ -124,10 +133,10 @@ func version(args []string, stdout, stderr io.Writer) int {
 }
 
 func versionResultCommand(args []string, stdout, stderr io.Writer) int {
-	output, filtered, err := parseCommandOutput(args, true)
+	output, filtered, err := parseCommandOutput(args)
 	reporter := newOperationReporter("version", output, stdout, stderr)
 	if err != nil {
-		if containsOutputControl(args) {
+		if output.resultSet || output.formatSet || output.progressSet {
 			reporter.output.result = "json"
 		}
 		return reporter.failure("invalid_input", "", err.Error(), nil)

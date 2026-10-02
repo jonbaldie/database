@@ -102,13 +102,13 @@ func destinationNotEmpty() error {
 
 func backupRestoreCommand(args []string, stdout, stderr io.Writer) int {
 	operation := operatorName(args)
-	output, filtered, err := parseCommandOutput(args, true)
+	output, filtered, err := parseCommandOutput(args)
 	if err != nil {
 		return newOperationReporter(operation, commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", err.Error(), nil)
 	}
 	// Keep the original machine-readable output for callers that did not opt
 	// into the v1 human default. Explicit --result always wins.
-	if !containsOutputControl(args) {
+	if !output.resultSet && !output.formatSet && !output.progressSet {
 		output.result = "json"
 		output.legacy = true
 	}
