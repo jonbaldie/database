@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -334,11 +335,11 @@ func TestOperatorConfigValidateAcceptsDefaultsAndRejectsUnknown(t *testing.T) {
 	if err := json.Unmarshal([]byte(accepted.Stdout), &acceptedResult); err != nil {
 		t.Fatalf("decode config validate: %v", err)
 	}
-	if acceptedResult["schema"] != "database.configuration/v1" || acceptedResult["exit_class"] != "success" || acceptedResult["operation_id"] == "" {
+	if acceptedResult["schema"] != "database.operator.result/v1" || acceptedResult["record_type"] != "result" || acceptedResult["command"] != "config validate" || acceptedResult["exit_class"] != "success" || acceptedResult["status"] != "success" || acceptedResult["operation_id"] == "" {
 		t.Fatalf("config validate result = %#v", acceptedResult)
 	}
-	if _, ok := acceptedResult["settings"].(map[string]any); !ok {
-		t.Fatalf("config validate settings missing: %#v", acceptedResult)
+	if details, ok := acceptedResult["details"].(map[string]any); !ok || details["settings"] == nil {
+		t.Fatalf("config validate details missing settings: %#v", acceptedResult["details"])
 	}
 
 	rejected := runner.Run(context.Background(),
@@ -511,4 +512,258 @@ func decodeOperatorResult(t *testing.T, stdout string) map[string]any {
 		t.Fatalf("operator result missing identity: %#v", result)
 	}
 	return result
+}
+
+func TestOperatorResultFormatsShareOneEnvelope(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	options := []struct {
+		name string
+		flag string
+	}{
+		{name: "result", flag: "--result=json"},
+		{name: "format", flag: "--format=json"},
+	}
+
+	t.Run("initialization", func(t *testing.T) {
+		password := "operator-result-init-secret"
+		passwordFile := filepath.Join(t.TempDir(), "password")
+		if err := os.WriteFile(passwordFile, []byte(password+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		results := make([]map[string]any, 0, len(options))
+		for _, option := range options {
+			directory := filepath.Join(t.TempDir(), "instance")
+			run := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, option.flag)
+			if run.ExitCode != 0 {
+				t.Fatalf("init %s: %#v", option.name, run)
+			}
+			result := decodeOperatorResult(t, run.Stdout)
+			assertOperatorResultEnvelope(t, result, "init", "success")
+			results = append(results, result)
+		}
+		assertSameOperatorResultShape(t, results[0], results[1])
+	})
+
+	t.Run("configuration failure", func(t *testing.T) {
+		results := make([]map[string]any, 0, len(options))
+		for _, option := range options {
+			run := runner.Run(context.Background(), "config", "validate", "--unknown-setting=value", option.flag)
+			if run.ExitCode != 2 {
+				t.Fatalf("config validate %s exit = %d, want 2; %#v", option.name, run.ExitCode, run)
+			}
+			result := decodeOperatorResult(t, run.Stdout)
+			assertOperatorResultEnvelope(t, result, "config validate", "failure")
+			results = append(results, result)
+		}
+		assertSameOperatorResultShape(t, results[0], results[1])
+	})
+
+	t.Run("serve", func(t *testing.T) {
+		password := "operator-result-serve-secret"
+		passwordFile := filepath.Join(t.TempDir(), "password")
+		if err := os.WriteFile(passwordFile, []byte(password+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		results := make([]map[string]any, 0, len(options))
+		for _, option := range options {
+			directory := filepath.Join(t.TempDir(), "instance")
+			initializeServer(t, runner, directory, password)
+			mysqlAddress := freeAddress(t)
+			diagnosticsAddress := freeAddress(t)
+			process, err := runner.Start(context.Background(), "serve",
+				"--data-directory", directory,
+				"--mysql-listen-address", mysqlAddress,
+				"--diagnostics-listen-address", diagnosticsAddress,
+				option.flag,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			processFinished := false
+			t.Cleanup(func() {
+				if !processFinished {
+					_ = process.Stop()
+					_ = process.Wait()
+				}
+			})
+			waitForDiagnosticsReady(t, diagnosticsAddress)
+			stopped := runner.Run(context.Background(), "shutdown", "--yes", "--address="+mysqlAddress,
+				"--account=admin", "--password-file", passwordFile, "--result=json")
+			if stopped.ExitCode != 0 {
+				_ = process.Stop()
+				t.Fatalf("shutdown after serve %s: %#v", option.name, stopped)
+			}
+			served := process.Wait()
+			processFinished = true
+			if served.ExitCode != 0 {
+				t.Fatalf("serve %s exit = %d; stdout=%s stderr=%s", option.name, served.ExitCode, served.Stdout, served.Stderr)
+			}
+			result := decodeLastOperatorResult(t, served.Stdout)
+			assertOperatorResultEnvelope(t, result, "serve", "success")
+			results = append(results, result)
+		}
+		assertSameOperatorResultShape(t, results[0], results[1])
+	})
+
+	t.Run("data validation", func(t *testing.T) {
+		directory := filepath.Join(t.TempDir(), "instance")
+		initializeServer(t, runner, directory, "operator-result-data-secret")
+		results := make([]map[string]any, 0, len(options))
+		for _, option := range options {
+			run := runner.Run(context.Background(), "data", "validate", "--data-directory", directory, option.flag)
+			if run.ExitCode != 0 {
+				t.Fatalf("data validate %s: %#v", option.name, run)
+			}
+			result := decodeOperatorResult(t, run.Stdout)
+			assertOperatorResultEnvelope(t, result, "data validate", "success")
+			results = append(results, result)
+		}
+		assertSameOperatorResultShape(t, results[0], results[1])
+	})
+
+	t.Run("data inspection", func(t *testing.T) {
+		directory := filepath.Join(t.TempDir(), "instance")
+		initializeServer(t, runner, directory, "operator-result-inspect-secret")
+		results := make([]map[string]any, 0, len(options))
+		for _, option := range options {
+			run := runner.Run(context.Background(), "data", "inspect", "--data-directory", directory, option.flag)
+			if run.ExitCode != 0 {
+				t.Fatalf("data inspect %s: %#v", option.name, run)
+			}
+			result := decodeOperatorResult(t, run.Stdout)
+			assertOperatorResultEnvelope(t, result, "data inspect", "success")
+			results = append(results, result)
+		}
+		assertSameOperatorResultShape(t, results[0], results[1])
+	})
+}
+
+func TestOperatorServeKeepsDefaultHumanOutput(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	password := "operator-human-serve-secret"
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, password)
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte(password+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mysqlAddress := freeAddress(t)
+	diagnosticsAddress := freeAddress(t)
+	process, err := runner.Start(context.Background(), "serve",
+		"--data-directory", directory,
+		"--mysql-listen-address", mysqlAddress,
+		"--diagnostics-listen-address", diagnosticsAddress,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processFinished := false
+	t.Cleanup(func() {
+		if !processFinished {
+			_ = process.Stop()
+			_ = process.Wait()
+		}
+	})
+	waitForDiagnosticsReady(t, diagnosticsAddress)
+	stopped := runner.Run(context.Background(), "shutdown", "--yes", "--address="+mysqlAddress,
+		"--account=admin", "--password-file", passwordFile, "--result=json")
+	if stopped.ExitCode != 0 {
+		t.Fatalf("shutdown after human serve: %#v", stopped)
+	}
+	served := process.Wait()
+	processFinished = true
+	if served.ExitCode != 0 {
+		t.Fatalf("human serve exit = %d; stdout=%s stderr=%s", served.ExitCode, served.Stdout, served.Stderr)
+	}
+	if !strings.Contains(served.Stdout, "database: ready (diagnostics=") || !strings.Contains(served.Stdout, "database serve: success (operation_id=op-") || served.Stderr != "" {
+		t.Fatalf("human serve output changed: stdout=%q stderr=%q", served.Stdout, served.Stderr)
+	}
+}
+
+func assertOperatorResultEnvelope(t *testing.T, result map[string]any, command, status string) {
+	t.Helper()
+	for _, field := range []string{
+		"schema", "record_type", "operation_id", "command", "status", "exit_class", "exit_code",
+		"started_at", "finished_at", "duration_ms", "details", "diagnostics",
+	} {
+		if _, ok := result[field]; !ok {
+			t.Errorf("%s result lacks required field %q: %#v", command, field, result)
+		}
+	}
+	if result["command"] != command {
+		t.Errorf("result command = %#v, want %q", result["command"], command)
+	}
+	if result["status"] != status {
+		t.Errorf("result status = %#v, want %q", result["status"], status)
+	}
+}
+
+func assertSameOperatorResultShape(t *testing.T, first, second map[string]any) {
+	t.Helper()
+	if !reflect.DeepEqual(operatorResultShape(first), operatorResultShape(second)) {
+		t.Errorf("result shapes differ:\n first: %#v\nsecond: %#v", operatorResultShape(first), operatorResultShape(second))
+	}
+}
+
+func operatorResultShape(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		shape := make(map[string]any, len(value))
+		for key, child := range value {
+			shape[key] = operatorResultShape(child)
+		}
+		return shape
+	case []any:
+		elementShapes := make([]any, 0, len(value))
+		for _, child := range value {
+			childShape := operatorResultShape(child)
+			seen := false
+			for _, existing := range elementShapes {
+				if reflect.DeepEqual(existing, childShape) {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				elementShapes = append(elementShapes, childShape)
+			}
+		}
+		return map[string]any{"array_elements": elementShapes}
+	case nil:
+		return nil
+	default:
+		return reflect.TypeOf(value).String()
+	}
+}
+
+func decodeLastOperatorResult(t *testing.T, stdout string) map[string]any {
+	t.Helper()
+	var result map[string]any
+	for _, line := range strings.Split(stdout, "\n") {
+		var candidate map[string]any
+		if err := json.Unmarshal([]byte(line), &candidate); err == nil && candidate["schema"] == "database.operator.result/v1" && candidate["record_type"] == "result" {
+			result = candidate
+		}
+	}
+	if result == nil {
+		t.Fatalf("operator result not found in stdout %q", stdout)
+	}
+	return result
+}
+
+func waitForDiagnosticsReady(t *testing.T, address string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		var response map[string]any
+		status, err := blackbox.HTTPJSON(ctx, address, "/ready", &response)
+		if err == nil && status == 200 {
+			return
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("diagnostics listener %s did not become ready", address)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

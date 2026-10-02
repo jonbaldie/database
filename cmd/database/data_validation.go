@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,11 +40,11 @@ func dataCommand(args []string, stdout, stderr io.Writer) int {
 		return newOperationReporter("data", commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", "data requires validate or inspect", nil)
 	}
 	operation := "data " + args[0]
-	output, filtered, err := parseCommandOutput(args[1:], true)
+	output, filtered, err := parseCommandOutput(args[1:])
 	if err != nil {
 		return newOperationReporter(operation, commandOutput{result: "json", progress: "none"}, stdout, stderr).failure("invalid_input", "", err.Error(), nil)
 	}
-	if !containsOutputControl(args) {
+	if !output.resultSet && !output.formatSet && !output.progressSet {
 		output.result = "json"
 		output.legacy = true
 	}
@@ -98,20 +97,6 @@ func runDataInspection(request dataRequest, reporter *operationReporter) int {
 		return reporter.failure("precondition", "", err.Error(), nil)
 	}
 	return reporter.success(details)
-}
-
-func writeDataResult(stdout io.Writer, operation string, success bool, exitClass, diagnostic string, details map[string]any) int {
-	result := operatorResult(operation, newOperationID(), success, exitClass, diagnostic)
-	for key, value := range details {
-		result[key] = value
-	}
-	if err := json.NewEncoder(stdout).Encode(result); err != nil {
-		return 1
-	}
-	if success {
-		return 0
-	}
-	return operatorExitCode(exitClass)
 }
 
 func validateDataDirectory(directory string) (dataValidationReport, error) {

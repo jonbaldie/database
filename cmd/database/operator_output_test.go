@@ -8,15 +8,33 @@ import (
 )
 
 func TestParseCommandOutputRemovesControlsAndRejectsRepeats(t *testing.T) {
-	output, args, err := parseCommandOutput([]string{"validate", "--result=json", "--progress", "json", "--data-directory", "/tmp/db"}, true)
+	output, args, err := parseCommandOutput([]string{"validate", "--result=json", "--progress", "json", "--data-directory", "/tmp/db"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if output.result != "json" || output.progress != "json" || strings.Join(args, " ") != "validate --data-directory /tmp/db" {
 		t.Fatalf("output=%#v args=%q", output, args)
 	}
-	if _, _, err := parseCommandOutput([]string{"--result=json", "--result=human"}, true); err == nil {
+	if _, _, err := parseCommandOutput([]string{"--result=json", "--result=human"}); err == nil {
 		t.Fatal("repeated result format was accepted")
+	}
+}
+
+func TestParseCommandOutputRoutesFormatAliasThroughLegacyReporterMode(t *testing.T) {
+	output, args, err := parseCommandOutput([]string{"--format=json", "--data-directory", "/tmp/db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.result != "json" || !output.legacy || !output.formatSet || output.resultSet || strings.Join(args, " ") != "--data-directory /tmp/db" {
+		t.Fatalf("format output=%#v args=%q", output, args)
+	}
+
+	resultOutput, _, err := parseCommandOutput([]string{"--result=json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resultOutput.legacy || !resultOutput.resultSet || resultOutput.formatSet {
+		t.Fatalf("--result=json output mode = %#v", resultOutput)
 	}
 }
 

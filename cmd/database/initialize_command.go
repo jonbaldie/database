@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,66 +11,84 @@ import (
 	"github.com/jonbaldie/database/internal/instance"
 )
 
+const initializationUsage = "usage: database init DIRECTORY (--password-file FILE | --password-stdin) [--format=human|json]"
+
 type initializationRequest struct {
 	directory       string
 	account         string
 	accountProvided bool
 	passwordFile    string
 	passwordStdin   bool
-	format          string
-	formatProvided  bool
 }
 
 func initialize(args []string, stdout, stderr io.Writer) int {
-	if hasResultControl(args) {
-		return initializeWithReporter(args, stdout, stderr)
-	}
-	request, err := parseInitializationRequest(args)
-	if err != nil {
-		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, err.Error())
-	}
-	if err := instance.ValidateInitializationTarget(request.directory); err != nil {
-		return writeOperatorFailure(stdout, "init", newOperationID(), "precondition", 3, err.Error())
-	}
-	password, err := request.readPassword(os.Stdin)
-	if err != nil {
-		return writeOperatorFailure(stdout, "init", newOperationID(), "invalid_input", 2, passwordInputFailure(err))
-	}
-	metadata, err := instance.Initialize(request.directory, request.account, password)
-	if err != nil {
-		class := initializationFailureClass(err)
-		return writeOperatorFailure(stdout, "init", newOperationID(), class, operatorExitCode(class), err.Error())
-	}
-	return writeInitializationSuccess(stdout, request, metadata)
+	return initializeWithReporter(args, stdout, stderr)
 }
 
 func initializeWithReporter(args []string, stdout, stderr io.Writer) int {
-	output, filtered, err := parseCommandOutput(args, true)
-	reporter := newOperationReporter("init", output, stdout, stderr)
+	reporter, filtered, err := newInitializationReporter(args, stdout, stderr)
 	if err != nil {
-		if containsOutputControl(args) {
-			reporter.output.result = "json"
-		}
-		return reporter.failure("invalid_input", "", err.Error(), nil)
+		return initializationOutputFailure(reporter, err)
 	}
 	request, err := parseInitializationRequest(filtered)
 	if err != nil {
-		return reporter.failure("invalid_input", "", err.Error(), nil)
+		return initializationFailure(reporter, "invalid_input", err.Error())
 	}
+	return initializeRequest(request, reporter, stdout)
+}
+
+func newInitializationReporter(args []string, stdout, stderr io.Writer) (*operationReporter, []string, error) {
+	output, filtered, err := parseCommandOutput(args)
+	if err == nil && output.formatText {
+		err = errors.New(initializationUsage)
+	}
+	if !output.resultSet && !output.formatSet && !output.progressSet {
+		output.legacy = true
+	}
+	if output.legacy && !output.progressSet {
+		output.progress = "none"
+	}
+	return newOperationReporter("init", output, stdout, stderr), filtered, err
+}
+
+func initializationOutputFailure(reporter *operationReporter, err error) int {
+	if reporter.output.resultSet || reporter.output.formatSet || reporter.output.progressSet {
+		reporter.output.result = "json"
+	}
+	return reporter.failure("invalid_input", "", err.Error(), nil)
+}
+
+func initializeRequest(request initializationRequest, reporter *operationReporter, stdout io.Writer) int {
 	reporter.progress("preflight")
 	if err := instance.ValidateInitializationTarget(request.directory); err != nil {
-		return reporter.failure("precondition", "", err.Error(), nil)
+		return initializationFailure(reporter, "precondition", err.Error())
 	}
+	return initializeValidatedRequest(request, reporter, stdout)
+}
+
+func initializeValidatedRequest(request initializationRequest, reporter *operationReporter, stdout io.Writer) int {
 	reporter.progress("initializing")
 	password, err := request.readPassword(os.Stdin)
 	if err != nil {
-		return reporter.failure("invalid_input", "", passwordInputFailure(err), nil)
+		return initializationFailure(reporter, "invalid_input", passwordInputFailure(err))
 	}
 	metadata, err := instance.Initialize(request.directory, request.account, password)
 	if err != nil {
-		return reporter.failure(initializationFailureClass(err), "", err.Error(), nil)
+		return initializationFailure(reporter, initializationFailureClass(err), err.Error())
 	}
-	return reporter.success(map[string]any{"instance_id": metadata.InstanceID, "data_directory": request.directory, "admin_account": metadata.AdminAccount})
+	details := map[string]any{"instance_id": metadata.InstanceID, "data_directory": request.directory, "admin_account": metadata.AdminAccount}
+	if reporter.output.legacy && reporter.output.result == "human" {
+		fmt.Fprintf(stdout, "initialized database instance %s\n", metadata.InstanceID)
+		return 0
+	}
+	return reporter.success(details)
+}
+
+func initializationFailure(reporter *operationReporter, class, summary string) int {
+	if reporter.output.legacy && reporter.output.result == "human" {
+		reporter.output.result = "json"
+	}
+	return reporter.failure(class, "", summary, nil)
 }
 
 // initializationFailureClass reports credentials that violate the
@@ -94,7 +111,7 @@ func passwordInputFailure(err error) string {
 }
 
 func parseInitializationRequest(args []string) (initializationRequest, error) {
-	request := initializationRequest{format: "human", account: "admin"}
+	request := initializationRequest{account: "admin"}
 	argumentCount := len(args)
 	for index := 0; index < argumentCount; index++ {
 		nextIndex, err := request.consume(args, index)
@@ -127,8 +144,6 @@ func (request *initializationRequest) consume(args []string, index int) (int, er
 		return request.setPasswordFile(args, index, value, hasValue)
 	case "--password-stdin", "--initial-password-stdin":
 		return index, request.setPasswordStdin(hasValue)
-	case "--format":
-		return request.setFormat(args, index, value, hasValue)
 	default:
 		return index, fmt.Errorf("unknown flag %q", name)
 	}
@@ -186,19 +201,6 @@ func (request *initializationRequest) setPasswordStdin(hasValue bool) error {
 	return nil
 }
 
-func (request *initializationRequest) setFormat(args []string, index int, value string, hasValue bool) (int, error) {
-	if request.formatProvided {
-		return index, errors.New("--format may be specified once")
-	}
-	value, nextIndex, err := requiredInitializationValue(args, index, "--format", value, hasValue)
-	if err != nil {
-		return index, err
-	}
-	request.formatProvided = true
-	request.format = value
-	return nextIndex, nil
-}
-
 func requiredInitializationValue(args []string, index int, name, value string, hasValue bool) (string, int, error) {
 	if hasValue && value != "" {
 		return value, index, nil
@@ -215,10 +217,7 @@ func requiredInitializationValue(args []string, index int, name, value string, h
 
 func (request initializationRequest) validate() error {
 	if request.directory == "" || request.passwordFile == "" && !request.passwordStdin {
-		return errors.New("usage: database init DIRECTORY (--password-file FILE | --password-stdin) [--format=human|json]")
-	}
-	if request.format != "human" && request.format != "json" {
-		return errors.New("usage: database init DIRECTORY (--password-file FILE | --password-stdin) [--format=human|json]")
+		return errors.New(initializationUsage)
 	}
 	return nil
 }
@@ -228,21 +227,4 @@ func (request initializationRequest) readPassword(stdin io.Reader) (string, erro
 		return instance.ReadPassword("", stdin)
 	}
 	return instance.ReadPassword(request.passwordFile, stdin)
-}
-
-func writeInitializationSuccess(stdout io.Writer, request initializationRequest, metadata instance.Metadata) int {
-	if request.format == "json" {
-		_ = json.NewEncoder(stdout).Encode(initializationResult(request.directory, metadata))
-		return 0
-	}
-	fmt.Fprintf(stdout, "initialized database instance %s\n", metadata.InstanceID)
-	return 0
-}
-
-func initializationResult(directory string, metadata instance.Metadata) map[string]any {
-	result := operatorResult("init", newOperationID(), true, "success", "")
-	result["instance_id"] = metadata.InstanceID
-	result["data_directory"] = directory
-	result["admin_account"] = metadata.AdminAccount
-	return result
 }

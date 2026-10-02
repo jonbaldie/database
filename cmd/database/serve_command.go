@@ -27,34 +27,55 @@ func isCommandHelp(args []string) bool {
 }
 
 func runServe(args []string, stdout, stderr io.Writer) int {
-	if hasResultControl(args) {
-		return runServeWithReporter(args, stdout, stderr)
-	}
-	format, configurationArgs, err := configOutputFormat(args)
-	if err != nil {
-		return serveInputFailure(stderr, err)
-	}
-	opts, err := parseServeFlags(configurationArgs)
-	if err != nil {
-		return serveConfigurationFailure(stderr, err)
-	}
-	return serveLifecycle(format, opts, stdout, stderr)
+	return runServeWithReporter(args, stdout, stderr)
 }
 
 func runServeWithReporter(args []string, stdout, stderr io.Writer) int {
-	output, configurationArgs, err := parseCommandOutput(args, false)
-	reporter := newOperationReporter("serve", output, stdout, stderr)
+	reporter, configurationArgs, err := newServeReporter(args, stdout, stderr)
 	if err != nil {
-		if containsOutputControl(args) {
-			reporter.output.result = "json"
-		}
-		return reporter.failure("invalid_input", "", err.Error(), nil)
+		return reportServeOutputFailure(reporter, err, stderr)
 	}
 	opts, err := parseServeFlags(configurationArgs)
 	if err != nil {
-		return reporter.failure(configurationClass(err), "", err.Error(), nil)
+		return reportServeConfigurationFailure(reporter, err, stderr)
 	}
 	return serveLifecycleWithReporter(opts, reporter)
+}
+
+func newServeReporter(args []string, stdout, stderr io.Writer) (*operationReporter, []string, error) {
+	output, filtered, err := parseCommandOutput(args)
+	if !output.resultSet && !output.formatSet && !output.progressSet {
+		output.legacy = true
+	}
+	if output.legacy && !output.progressSet {
+		output.progress = "none"
+	}
+	return newOperationReporter("serve", output, stdout, stderr), filtered, err
+}
+
+func usesLegacyServeOutput(output commandOutput) bool {
+	return output.legacy && !output.resultSet && !output.progressSet
+}
+
+func usesLegacyHumanServeOutput(output commandOutput) bool {
+	return usesLegacyServeOutput(output) && output.result == "human"
+}
+
+func reportServeOutputFailure(reporter *operationReporter, err error, stderr io.Writer) int {
+	if usesLegacyHumanServeOutput(reporter.output) {
+		return serveInputFailure(stderr, err)
+	}
+	if reporter.output.resultSet || reporter.output.formatSet || reporter.output.progressSet {
+		reporter.output.result = "json"
+	}
+	return reporter.failure("invalid_input", "", err.Error(), nil)
+}
+
+func reportServeConfigurationFailure(reporter *operationReporter, err error, stderr io.Writer) int {
+	if usesLegacyHumanServeOutput(reporter.output) {
+		return serveConfigurationFailure(stderr, err)
+	}
+	return reporter.failure(configurationClass(err), "", err.Error(), nil)
 }
 
 func serveLifecycleWithReporter(opts lifecycle.Options, reporter *operationReporter) int {
@@ -68,25 +89,59 @@ func serveLifecycleWithReporter(opts lifecycle.Options, reporter *operationRepor
 	err := lifecycle.Serve(ctx, opts, func(event lifecycle.Event) {
 		state = event.State
 		recovered = recovered || event.Recovered
-		reporter.progress(event.State)
-		if event.State == "ready" {
-			details["state"] = "ready"
-			if event.DiagnosticsAddress != "" {
-				details["diagnostics_address"] = event.DiagnosticsAddress
-			}
-			if len(event.Warnings) != 0 {
-				details["warnings"] = event.Warnings
-			}
-		}
+		recordServeEvent(reporter, event, details)
 	})
 	if err != nil {
-		return reporter.failure(serveExitClass(err), "", err.Error(), details)
+		return reportServeLifecycleFailure(reporter, err, details)
 	}
 	if state == "stopped" || state == "" {
 		details["state"] = "stopped"
 	}
 	details["data_directory"] = opts.DataDirectory
 	details["recovered"] = recovered
+	return reportServeLifecycleSuccess(reporter, details)
+}
+
+func recordServeEvent(reporter *operationReporter, event lifecycle.Event, details map[string]any) {
+	if usesLegacyServeOutput(reporter.output) {
+		event.OperationID = reporter.id
+		if reporter.output.result == "json" {
+			_ = json.NewEncoder(reporter.stdout).Encode(event)
+		} else {
+			writeHumanServeEvent(reporter.stdout, event)
+		}
+	} else {
+		reporter.progress(event.State)
+	}
+	if event.State == "ready" {
+		details["state"] = "ready"
+		if event.DiagnosticsAddress != "" {
+			details["diagnostics_address"] = event.DiagnosticsAddress
+		}
+		if len(event.Warnings) != 0 {
+			details["warnings"] = event.Warnings
+		}
+	}
+}
+
+func reportServeLifecycleFailure(reporter *operationReporter, err error, details map[string]any) int {
+	if usesLegacyHumanServeOutput(reporter.output) {
+		class := serveExitClass(err)
+		code := operatorExitCode(class)
+		if class == "operation_failed" {
+			code = 1
+		}
+		fmt.Fprintf(reporter.stderr, "database serve: %v\n", err)
+		return code
+	}
+	return reporter.failure(serveExitClass(err), "", err.Error(), details)
+}
+
+func reportServeLifecycleSuccess(reporter *operationReporter, details map[string]any) int {
+	if usesLegacyHumanServeOutput(reporter.output) {
+		fmt.Fprintf(reporter.stdout, "database serve: success (operation_id=%s)\n", reporter.id)
+		return 0
+	}
 	return reporter.success(details)
 }
 
@@ -107,28 +162,6 @@ func serveConfigurationFailure(stderr io.Writer, err error) int {
 	return 2
 }
 
-func serveLifecycle(format string, opts lifecycle.Options, stdout, stderr io.Writer) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	operationID := newOperationID()
-	opts.OperationID = operationID
-	if err := lifecycle.Serve(ctx, opts, serveEventWriter(format, operationID, stdout)); err != nil {
-		return serveFailure(format, operationID, stdout, stderr, err)
-	}
-	return serveSuccess(format, operationID, stdout)
-}
-
-func serveEventWriter(format, operationID string, stdout io.Writer) func(lifecycle.Event) {
-	return func(event lifecycle.Event) {
-		event.OperationID = operationID
-		if format == "json" {
-			_ = json.NewEncoder(stdout).Encode(event)
-			return
-		}
-		writeHumanServeEvent(stdout, event)
-	}
-}
-
 func writeHumanServeEvent(stdout io.Writer, event lifecycle.Event) {
 	for _, warning := range event.Warnings {
 		fmt.Fprintf(stdout, "database: WARNING [%s] %s\n", warning.Code, warning.Summary)
@@ -142,25 +175,4 @@ func writeHumanServeEvent(stdout io.Writer, event lifecycle.Event) {
 		return
 	}
 	fmt.Fprintf(stdout, "database: ready (diagnostics=%s)\n", event.DiagnosticsAddress)
-}
-
-func serveFailure(format, operationID string, stdout, stderr io.Writer, err error) int {
-	class := serveExitClass(err)
-	code := operatorExitCode(class)
-	if class == "operation_failed" {
-		code = 1
-	}
-	if format == "json" {
-		return writeOperatorFailure(stdout, "serve", operationID, class, code, err.Error())
-	}
-	fmt.Fprintf(stderr, "database serve: %v\n", err)
-	return code
-}
-
-func serveSuccess(format, operationID string, stdout io.Writer) int {
-	if format == "json" {
-		return writeOperatorResult(stdout, "serve", operationID, true, "success", "")
-	}
-	fmt.Fprintf(stdout, "database serve: success (operation_id=%s)\n", operationID)
-	return 0
 }
