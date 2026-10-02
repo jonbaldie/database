@@ -133,6 +133,19 @@ func TestTxnReadCommittedReplaysStagedMutationsOnTheLatestCommit(t *testing.T) {
 	requireItems(t, "store", store.Snapshot(), "1", "3", "2")
 }
 
+func TestTxnRepeatableReadReplaysStagedMutationsUntilItsFirstRead(t *testing.T) {
+	store := openTxnStore(t)
+	txn := BeginTxn(store, RepeatableRead)
+	if err := txn.Stage(insertItem("2"), nil); err != nil {
+		t.Fatal(err)
+	}
+	publishItem(t, store, "3")
+
+	requireItems(t, "first read", readView(t, txn), "1", "3", "2")
+	publishItem(t, store, "4")
+	requireItems(t, "pinned read", readView(t, txn), "1", "3", "2")
+}
+
 func TestTxnCommitReportsRevisionConflict(t *testing.T) {
 	store := openTxnStore(t)
 	first := BeginTxn(store, RepeatableRead)
@@ -362,6 +375,19 @@ func TestTxnWithoutStoreReadsAnEmptyCatalog(t *testing.T) {
 	}
 	if current := txn.Current(); current.Namespaces == nil || len(current.Namespaces) != 0 {
 		t.Fatalf("current = %#v, want an empty catalog", current)
+	}
+	addNamespace := func(definition *Definition) error {
+		definition.Namespaces["scratch"] = Namespace{Name: "scratch", Tables: map[string]Table{}}
+		return nil
+	}
+	if err := txn.Stage(addNamespace, nil); err != nil {
+		t.Fatalf("stage without store: %v", err)
+	}
+	if _, ok := txn.Current().Namespaces["scratch"]; !ok {
+		t.Fatal("staged namespace is not visible to the transaction")
+	}
+	if !txn.Dirty() {
+		t.Fatal("stage without store did not mark the transaction dirty")
 	}
 	if err := txn.Commit(); err != nil {
 		t.Fatal(err)

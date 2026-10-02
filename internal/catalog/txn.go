@@ -1,14 +1,6 @@
 package catalog
 
-import (
-	"errors"
-
-	"github.com/jonbaldie/database/internal/storage"
-)
-
-// ErrDuplicateKey reports that a published row would repeat a primary or
-// unique key in the durable row image.
-var ErrDuplicateKey = storage.ErrDuplicateKey
+import "errors"
 
 // ErrSavepointNotFound reports a savepoint name the transaction does not hold.
 var ErrSavepointNotFound = errors.New("savepoint does not exist")
@@ -132,10 +124,7 @@ func (t *Txn) RollbackTo(name string) error {
 	if index < 0 {
 		return ErrSavepointNotFound
 	}
-	restored := t.savepoints[index].state
-	restored.loaded = true
-	restored.mutations = append([]func(*Definition) error(nil), restored.mutations...)
-	t.working = restored
+	t.working = t.savepoints[index].state
 	t.savepoints = t.savepoints[:index+1]
 	return nil
 }

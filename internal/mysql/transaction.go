@@ -590,9 +590,6 @@ func (s *session) finishTransaction() {
 	if s.server != nil && s.server.locks != nil {
 		s.server.locks.release(s)
 	}
-	if s.catalogTxn != nil {
-		s.catalogTxn.Abort()
-	}
 	s.catalogTxn = nil
 	s.transactionReadOnly = false
 }

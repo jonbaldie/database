@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/jonbaldie/database/internal/storage"
 )
 
 type Definition struct {
@@ -97,6 +99,10 @@ type Constraint struct {
 // ErrRevisionConflict reports that a concurrent catalog commit superseded the
 // snapshot a caller tried to publish.
 var ErrRevisionConflict = errors.New("catalog changed concurrently")
+
+// ErrDuplicateKey reports that a published row would repeat a primary or
+// unique key in the durable row image.
+var ErrDuplicateKey = storage.ErrDuplicateKey
 
 // ColumnType reports the recorded logical type without inventing a fallback
 // for catalog entries written before column types were persisted.
