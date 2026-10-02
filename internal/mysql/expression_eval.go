@@ -172,8 +172,8 @@ func applyComparison(operator string, order int) bool {
 }
 
 // compareOperands returns the sign of a minus b within a common domain. Binary
-// strings compare byte by byte; other strings compare through the default
-// collation key. A string against a number requires an explicit cast; otherwise
+// strings and strings with a utf8mb4_bin side compare byte by byte; other
+// strings compare through the default collation key. A string against a number requires an explicit cast; otherwise
 // the operands promote to a common numeric domain, using approximate comparison
 // only when an approximate operand is present.
 func compareOperands(a, b exprValue) (int, error) {
@@ -193,7 +193,7 @@ func compareStringOperands(a, b exprValue) (int, error) {
 	if a.kind != valueString || b.kind != valueString {
 		return 0, strictConversionError()
 	}
-	if a.binary || b.binary {
+	if a.binary || b.binary || a.collation == collationBin || b.collation == collationBin {
 		return strings.Compare(a.s, b.s), nil
 	}
 	return compareStrings(a.s, b.s), nil
