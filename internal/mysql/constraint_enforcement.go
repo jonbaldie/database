@@ -628,6 +628,14 @@ func validateForeignKeyConstraint(previous, definition catalog.Definition, names
 	if err != nil {
 		return err
 	}
+	for index, column := range constraint.Columns {
+		childIndex := childIndexes[catalog.Key(column)]
+		parentColumn := constraint.ReferencedColumns[index]
+		parentIndex := parentIndexes[catalog.Key(parentColumn)]
+		if !foreignKeyColumnTypesCompatible(child, parent, childIndex, parentIndex) {
+			return sqlFailure{3780, "HY000", fmt.Sprintf("Referencing column '%s' and referenced column '%s' in foreign key constraint '%s' are incompatible.", column, parentColumn, constraint.Name)}
+		}
+	}
 	childColumns, parentColumns := constraintIndexes(constraint.Columns, childIndexes), constraintIndexes(constraint.ReferencedColumns, parentIndexes)
 	return validateForeignKeyRows(previous, namespaceName, child, parent, constraint, childColumns, parentColumns)
 }
