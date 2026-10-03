@@ -87,8 +87,11 @@ func parseTableIndexParts(value string) ([]catalog.IndexPart, string, error) {
 		return nil, "", sqlFailure{1064, "42000", "index requires key parts"}
 	}
 	parts := splitCSV(body)
-	if len(parts) == 0 || len(parts) > maxIndexParts {
-		return nil, "", sqlFailure{1069, "42000", "too many key parts"}
+	if len(parts) == 0 {
+		return nil, "", sqlFailure{1064, "42000", "index requires key parts"}
+	}
+	if len(parts) > maxIndexParts {
+		return nil, "", tooManyKeyParts()
 	}
 	result := make([]catalog.IndexPart, len(parts))
 	for number, part := range parts {
@@ -351,6 +354,10 @@ func effectiveTableIndexes(table catalog.Table) []catalog.Index {
 	return append(append(primary, unique...), other...)
 }
 
+func tooManyKeyParts() error {
+	return sqlFailure{1070, "42000", "Too many key parts specified; max " + strconv.Itoa(maxIndexParts) + " parts allowed"}
+}
+
 func validateTableIndexes(table catalog.Table) error {
 	indexes := effectiveTableIndexes(table)
 	if len(indexes) > maxTableIndexes {
@@ -374,8 +381,11 @@ func validateTableIndex(table catalog.Table, index catalog.Index, seen map[strin
 		return sqlFailure{1061, "42000", "duplicate key name '" + index.Name + "'"}
 	}
 	seen[key] = true
-	if len(index.Parts) == 0 || len(index.Parts) > maxIndexParts {
-		return sqlFailure{1069, "42000", "invalid key part count"}
+	if len(index.Parts) == 0 {
+		return sqlFailure{1064, "42000", "index requires key parts"}
+	}
+	if len(index.Parts) > maxIndexParts {
+		return tooManyKeyParts()
 	}
 	return validateTableIndexParts(table, index)
 }

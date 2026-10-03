@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -274,7 +275,7 @@ func validateConstraintDeclaration(seen map[string]bool, previous, definition ca
 		return errorsConstraintDefinition("constraint requires a name and type")
 	}
 	if seen[catalog.Key(constraint.Name)] {
-		return errorsConstraintDefinition("duplicate constraint name '" + constraint.Name + "'")
+		return duplicateConstraintName(constraint)
 	}
 	seen[catalog.Key(constraint.Name)] = true
 	if err := validateConstraintColumns(constraint, indexes); err != nil {
@@ -602,7 +603,7 @@ func constraintColumnKey(table catalog.Table, column int, value string) string {
 func validateCheckConstraint(namespaceName, tableName string, table catalog.Table, constraint catalog.Constraint) error {
 	columns := relationalTableColumns(namespaceName, tableName, tableName, table)
 	if _, err := evaluateRelationExpression(constraint.Check, columns, sampleRelationRow(columns)); err != nil {
-		return err
+		return checkConstraintDefinitionFailure(constraint, err)
 	}
 	for _, row := range table.Rows {
 		value, err := evaluateRelationExpression(constraint.Check, columns, relationRow{values: row})
@@ -618,6 +619,20 @@ func validateCheckConstraint(namespaceName, tableName string, table catalog.Tabl
 		}
 	}
 	return nil
+}
+
+// checkConstraintDefinitionFailure reports an unknown column in a CHECK
+// expression as a CHECK definition failure, as MySQL does.
+func checkConstraintDefinitionFailure(constraint catalog.Constraint, err error) error {
+	var failure sqlFailure
+	if !errors.As(err, &failure) || failure.code != 1054 {
+		return err
+	}
+	column := failure.message
+	if _, quoted, found := strings.Cut(column, "'"); found {
+		column, _, _ = strings.Cut(quoted, "'")
+	}
+	return sqlFailure{3820, "HY000", "Check constraint '" + constraint.Name + "' refers to non-existing column '" + column + "'."}
 }
 
 func validateForeignKeyConstraint(previous, definition catalog.Definition, namespaceName string, child catalog.Table, constraint catalog.Constraint, childIndexes map[string]int) error {
@@ -644,7 +659,7 @@ func foreignKeyParent(definition catalog.Definition, namespaceName string, const
 	namespace := resolution.namespace
 	parent, found := namespace.Tables[catalog.Key(constraint.ReferencedTable)]
 	if !found {
-		return catalog.Table{}, nil, errorsConstraintDefinition("foreign key '" + constraint.Name + "' references an unknown table")
+		return catalog.Table{}, nil, sqlFailure{1824, "HY000", "Failed to open the referenced table '" + constraint.ReferencedTable + "'"}
 	}
 	parentIndexes, err := tableColumnIndexes(parent)
 	if err != nil {
@@ -652,11 +667,11 @@ func foreignKeyParent(definition catalog.Definition, namespaceName string, const
 	}
 	for _, column := range constraint.ReferencedColumns {
 		if _, found := parentIndexes[catalog.Key(column)]; !found {
-			return catalog.Table{}, nil, errorsConstraintDefinition("foreign key '" + constraint.Name + "' references an unknown column")
+			return catalog.Table{}, nil, sqlFailure{3734, "HY000", "Failed to add the foreign key constraint. Missing column '" + column + "' for constraint '" + constraint.Name + "' in the referenced table '" + constraint.ReferencedTable + "'"}
 		}
 	}
 	if !tableHasReferencedKey(parent, constraint.ReferencedColumns) {
-		return catalog.Table{}, nil, errorsConstraintDefinition("foreign key '" + constraint.Name + "' requires a unique referenced key")
+		return catalog.Table{}, nil, sqlFailure{6125, "HY000", "Failed to add the foreign key constraint. Missing unique key for constraint '" + constraint.Name + "' in the referenced table '" + constraint.ReferencedTable + "'"}
 	}
 	return parent, parentIndexes, nil
 }

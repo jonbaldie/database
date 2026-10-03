@@ -86,7 +86,7 @@ func TestMySQLBTreeIndexesUseThePublicWireContract(t *testing.T) {
 			t.Fatalf("show create missing %q: %#v", required, create)
 		}
 	}
-	if result := client.query("SELECT id FROM accounts USE INDEX (idx_email_prefix) WHERE email = 'ada@example.test'"); result.errCode != 3522 {
+	if result := client.query("SELECT id FROM accounts USE INDEX (idx_email_prefix) WHERE email = 'ada@example.test'"); result.errCode != 1176 {
 		t.Fatalf("invisible index hint was accepted: %#v", result)
 	}
 
