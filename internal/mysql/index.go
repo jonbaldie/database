@@ -321,8 +321,11 @@ func availableIndexName(base string, taken map[string]bool) string {
 	}
 }
 
+// effectiveTableIndexes returns the table keys in MySQL key order: PRIMARY,
+// then unique keys, then the other keys. Inside each group, definition order
+// stays, and constraint-backed keys come before CREATE INDEX keys.
 func effectiveTableIndexes(table catalog.Table) []catalog.Index {
-	indexes := catalog.CloneIndexes(table.Indexes)
+	primary, unique, other := []catalog.Index{}, []catalog.Index{}, []catalog.Index{}
 	for _, constraint := range table.Constraints {
 		if constraint.Type != catalog.ConstraintTypePrimary && constraint.Type != catalog.ConstraintTypeUnique {
 			continue
@@ -331,9 +334,21 @@ func effectiveTableIndexes(table catalog.Table) []catalog.Index {
 		for number, column := range constraint.Columns {
 			parts[number].Column = column
 		}
-		indexes = append(indexes, catalog.Index{Name: constraint.Name, Unique: true, Parts: parts})
+		index := catalog.Index{Name: constraint.Name, Unique: true, Parts: parts}
+		if constraint.Type == catalog.ConstraintTypePrimary {
+			primary = append(primary, index)
+		} else {
+			unique = append(unique, index)
+		}
 	}
-	return indexes
+	for _, index := range catalog.CloneIndexes(table.Indexes) {
+		if index.Unique {
+			unique = append(unique, index)
+		} else {
+			other = append(other, index)
+		}
+	}
+	return append(append(primary, unique...), other...)
 }
 
 func validateTableIndexes(table catalog.Table) error {
