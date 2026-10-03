@@ -353,15 +353,15 @@ func consumeParenthesized(value string) (string, string, bool) {
 	return "", "", false
 }
 
-func namedTableConstraints(table string, constraints []catalog.Constraint) ([]catalog.Constraint, error) {
+func namedTableConstraints(table string, constraints []catalog.Constraint, indexes []catalog.Index) ([]catalog.Constraint, error) {
 	seen := map[string]bool{}
-	checkNumber, foreignNumber := 0, 0
+	namer := constraintNamer{table: table, taken: explicitKeyNames(constraints, indexes)}
 	for index := range constraints {
 		constraint := &constraints[index]
 		if len(constraint.Columns) == 0 && constraint.Type != catalog.ConstraintTypeCheck {
 			return nil, sqlFailure{1064, "42000", "constraint requires columns"}
 		}
-		checkNumber, foreignNumber = assignConstraintName(table, constraint, checkNumber, foreignNumber)
+		namer.assign(constraint)
 		key := catalog.Key(constraint.Name)
 		if seen[key] {
 			return nil, sqlFailure{1061, "42000", "duplicate constraint name '" + constraint.Name + "'"}
@@ -380,20 +380,44 @@ func namedTableConstraints(table string, constraints []catalog.Constraint) ([]ca
 	return constraints, nil
 }
 
-func assignConstraintName(table string, constraint *catalog.Constraint, checkNumber, foreignNumber int) (int, int) {
+// explicitKeyNames reserves PRIMARY and every name that the definition
+// supplies, so that generated unique key names cannot take them.
+func explicitKeyNames(constraints []catalog.Constraint, indexes []catalog.Index) map[string]bool {
+	taken := map[string]bool{catalog.Key("PRIMARY"): true}
+	for _, constraint := range constraints {
+		if constraint.Name != "" {
+			taken[catalog.Key(constraint.Name)] = true
+		}
+	}
+	for _, index := range indexes {
+		if index.Name != "" {
+			taken[catalog.Key(index.Name)] = true
+		}
+	}
+	return taken
+}
+
+type constraintNamer struct {
+	table         string
+	taken         map[string]bool
+	checkNumber   int
+	foreignNumber int
+}
+
+func (namer *constraintNamer) assign(constraint *catalog.Constraint) {
 	if constraint.Type == catalog.ConstraintTypePrimary {
 		constraint.Name = "PRIMARY"
 	}
 	if constraint.Type == catalog.ConstraintTypeUnique && constraint.Name == "" {
-		constraint.Name = table + "_" + constraint.Columns[0] + "_unique"
+		constraint.Name = availableIndexName(constraint.Columns[0], namer.taken)
+		namer.taken[catalog.Key(constraint.Name)] = true
 	}
 	if constraint.Type == catalog.ConstraintTypeCheck && constraint.Name == "" {
-		checkNumber++
-		constraint.Name = fmt.Sprintf("%s_chk_%d", table, checkNumber)
+		namer.checkNumber++
+		constraint.Name = fmt.Sprintf("%s_chk_%d", namer.table, namer.checkNumber)
 	}
 	if constraint.Type == catalog.ConstraintTypeForeignKey && constraint.Name == "" {
-		foreignNumber++
-		constraint.Name = fmt.Sprintf("%s_ibfk_%d", table, foreignNumber)
+		namer.foreignNumber++
+		constraint.Name = fmt.Sprintf("%s_ibfk_%d", namer.table, namer.foreignNumber)
 	}
-	return checkNumber, foreignNumber
 }
