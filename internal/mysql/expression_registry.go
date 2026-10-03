@@ -464,7 +464,7 @@ func extremeValue(arguments []exprValue, direction int) (exprValue, error) {
 			best = argument
 		}
 	}
-	return best, nil
+	return mergedArgumentValue(best, arguments)
 }
 
 func unknownFunctionError(name string) error {
