@@ -708,6 +708,9 @@ type queryResult struct {
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
 	nulls [][]bool
+	// filterTypes mirrors columns with the SQL types that SHOW ... WHERE
+	// compares. An empty entry, or a missing slice, compares as VARCHAR.
+	filterTypes []string
 }
 
 // columnMetadata is the complete ColumnDefinition41 contract for one result
@@ -1655,6 +1658,7 @@ func showIndexPrefix(lower string) string {
 
 func showTableIndexes(table catalog.Table) *queryResult {
 	columns := []string{"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality", "Sub_part", "Packed", "Null", "Index_type", "Comment", "Index_comment", "Visible", "Expression"}
+	types := []string{"", "INT", "", "INT UNSIGNED", "", "", "BIGINT", "BIGINT", "", "", "", "", "", "", ""}
 	rows := [][]string{}
 	nulls := [][]bool{}
 	for _, index := range effectiveTableIndexes(table) {
@@ -1664,17 +1668,16 @@ func showTableIndexes(table catalog.Table) *queryResult {
 			nulls = append(nulls, null)
 		}
 	}
-	return &queryResult{columns: columns, rows: rows, nulls: nulls}
+	return &queryResult{columns: columns, rows: rows, nulls: nulls, filterTypes: types}
 }
 
 func showIndexRow(table catalog.Table, index catalog.Index, part catalog.IndexPart, number int) ([]string, []bool) {
 	column, expression := part.Column, part.Expression
-	nullable := false
-	if column != "" {
-		columnIndex := tableColumnIndex(table.Columns, column)
-		nullable = columnIndex >= 0 && catalog.ColumnAttributeAt(table, columnIndex).Nullable
+	nullable := ""
+	if columnNullable(table, column) {
+		nullable = "YES"
 	}
-	null := []bool{false, false, false, false, column == "", false, false, part.PrefixLength == 0, true, !nullable, false, false, false, false, expression == ""}
+	null := []bool{false, false, false, false, column == "", false, false, part.PrefixLength == 0, true, false, false, false, false, false, expression == ""}
 	return []string{
 		table.Name,
 		strconv.Itoa(boolToInt(!index.Unique)),
@@ -1685,7 +1688,7 @@ func showIndexRow(table catalog.Table, index catalog.Index, part catalog.IndexPa
 		strconv.Itoa(len(table.Rows)),
 		strconv.Itoa(part.PrefixLength),
 		"",
-		"YES",
+		nullable,
 		"BTREE",
 		"",
 		index.Comment,
