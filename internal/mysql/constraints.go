@@ -353,6 +353,19 @@ func consumeParenthesized(value string) (string, string, bool) {
 	return "", "", false
 }
 
+// duplicateConstraintName reports a repeated constraint name with the MySQL
+// error for the kind of the repeated constraint.
+func duplicateConstraintName(constraint catalog.Constraint) error {
+	switch constraint.Type {
+	case catalog.ConstraintTypeCheck:
+		return sqlFailure{3822, "HY000", "Duplicate check constraint name '" + constraint.Name + "'."}
+	case catalog.ConstraintTypeForeignKey:
+		return sqlFailure{1826, "HY000", "Duplicate foreign key constraint name '" + constraint.Name + "'"}
+	default:
+		return sqlFailure{1061, "42000", "Duplicate key name '" + constraint.Name + "'"}
+	}
+}
+
 func namedTableConstraints(table string, constraints []catalog.Constraint) ([]catalog.Constraint, error) {
 	seen := map[string]bool{}
 	checkNumber, foreignNumber := 0, 0
@@ -364,7 +377,7 @@ func namedTableConstraints(table string, constraints []catalog.Constraint) ([]ca
 		checkNumber, foreignNumber = assignConstraintName(table, constraint, checkNumber, foreignNumber)
 		key := catalog.Key(constraint.Name)
 		if seen[key] {
-			return nil, sqlFailure{1061, "42000", "duplicate constraint name '" + constraint.Name + "'"}
+			return nil, duplicateConstraintName(*constraint)
 		}
 		seen[key] = true
 	}
