@@ -164,3 +164,33 @@ func showIndexContains(result wireResult, index, column, collation, visible stri
 	}
 	return false
 }
+
+// TestUnnamedUniqueKeysUseMySQLNamesThroughTheWire verifies that unnamed
+// unique keys take the first column name with numeric suffixes for collisions.
+func TestUnnamedUniqueKeysUseMySQLNamesThroughTheWire(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer client.close()
+
+	for _, query := range []string{
+		"CREATE DATABASE app",
+		"USE app",
+		"CREATE TABLE n8 (id INT PRIMARY KEY, a INT, b INT, UNIQUE (a), UNIQUE (a, b))",
+		"CREATE TABLE p (id INT PRIMARY KEY, code INT, UNIQUE (code))",
+	} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("query %q: %#v", query, result)
+		}
+	}
+	n8 := client.query("SHOW INDEX FROM n8")
+	if n8.err != "" || !showIndexContains(n8, "a", "a", "A", "YES") || !showIndexContains(n8, "a_2", "a", "A", "YES") || !showIndexContains(n8, "a_2", "b", "A", "YES") {
+		t.Fatalf("n8 unique key names: %#v", n8)
+	}
+	p := client.query("SHOW INDEX FROM p")
+	if p.err != "" || len(p.rows) != 2 || !showIndexContains(p, "code", "code", "A", "YES") {
+		t.Fatalf("p unique key name: %#v", p)
+	}
+}
