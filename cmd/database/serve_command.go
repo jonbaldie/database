@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 
 	"github.com/jonbaldie/database/internal/lifecycle"
 )
@@ -146,7 +146,7 @@ func reportServeLifecycleSuccess(reporter *operationReporter, details map[string
 }
 
 func serveExitClass(err error) string {
-	if strings.Contains(err.Error(), "already in use") {
+	if errors.Is(err, lifecycle.ErrPrecondition) {
 		return "precondition"
 	}
 	return "operation_failed"
