@@ -355,3 +355,25 @@ func TestPreparedTemporalRejectsMalformedLength(t *testing.T) {
 		}
 	}
 }
+
+// The documented time_zone range is -13:59 to +14:00. A rejected offset must
+// fail with 1298 and leave the session time zone unchanged.
+func TestSetTimeZoneRejectsOffsetOutsideDocumentedRange(t *testing.T) {
+	executor := currentTimeExecutor(t, "UTC", time.Date(2021, 1, 2, 3, 4, 5, 0, time.UTC))
+	for _, accepted := range []string{"-13:59", "+14:00"} {
+		if _, err := executeStatement(executor, "SET time_zone = '"+accepted+"'"); err != nil {
+			t.Fatalf("SET time_zone = %q: %v", accepted, err)
+		}
+		if result, err := executeStatement(executor, "SELECT @@time_zone"); err != nil || result.rows[0][0] != accepted {
+			t.Fatalf("@@time_zone after %q = %#v err %v", accepted, result, err)
+		}
+	}
+	for _, rejected := range []string{"-14:00", "-14:01", "+14:01"} {
+		if _, err := executeStatement(executor, "SET time_zone = '"+rejected+"'"); !isFailureCode(err, 1298) {
+			t.Fatalf("SET time_zone = %q error = %v, want 1298", rejected, err)
+		}
+		if result, err := executeStatement(executor, "SELECT @@time_zone"); err != nil || result.rows[0][0] != "+14:00" {
+			t.Fatalf("@@time_zone after rejected %q = %#v err %v", rejected, result, err)
+		}
+	}
+}
