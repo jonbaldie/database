@@ -73,9 +73,9 @@ command prompts for confirmation.
 The following table is the complete command-specific input surface. Options not
 listed here or in the server configuration registry are unsupported.
 
-| Command | Required product inputs |
+| Command | Product inputs |
 | --- | --- |
-| `database init` | `--data-directory PATH`; `--initial-account NAME`; exactly one of `--initial-password-file PATH` or `--initial-password-stdin` |
+| `database init` | `--data-directory PATH`; optional `--initial-account NAME` (default: `admin`); exactly one of `--initial-password-file PATH` or `--initial-password-stdin` |
 | `database serve` | Effective closed server configuration, optionally selected by `--config PATH` and overridden by the registry's exact flags |
 | `database shutdown` | Online connection inputs below, plus `--yes` for non-interactive confirmation |
 | `database backup create` | Online connection inputs below and new `--output PATH` |
