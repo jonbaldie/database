@@ -85,6 +85,10 @@ type Event struct {
 	DiagnosticsAddress string    `json:"diagnostics_address,omitempty"`
 	Recovered          bool      `json:"recovered,omitempty"`
 	Warnings           []Warning `json:"warnings,omitempty"`
+	// These fields support the operator result and do not appear in lifecycle JSON.
+	InstanceID     string `json:"-"`
+	RecordedAt     string `json:"-"`
+	ShutdownReason string `json:"-"`
 }
 
 // Warning is a stable, code-identified lifecycle warning. Context contains
@@ -144,6 +148,9 @@ func validateOptions(opts *Options) error {
 }
 
 func (s *server) serve(ctx context.Context) error {
+	stopSignals := make(chan os.Signal, 1)
+	signal.Notify(stopSignals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(stopSignals)
 	state, err := claimState(s.options.StateFile, s.options.DataDirectory)
 	if err != nil {
 		return err
@@ -164,11 +171,8 @@ func (s *server) serve(ctx context.Context) error {
 		s.emit(s.lifecycleEvent("failed", startFailureCode(err), "critical", "database startup failed"))
 		return err
 	}
-	stopSignals := make(chan os.Signal, 1)
-	signal.Notify(stopSignals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(stopSignals)
-	s.reportReady(state.recovered, runtime.diagnosticsAddress)
-	s.awaitStop(ctx, runtime.mysql, stopSignals)
+	s.reportReady(state.recovered, runtime.diagnosticsAddress, runtime.instanceID)
+	s.awaitStop(ctx, runtime.mysql, stopSignals, runtime.instanceID)
 	if err := runtime.closeGracefully(); err != nil {
 		s.emit(s.lifecycleEvent("failed", "server.stop_failed", "error", "database shutdown failed"))
 		return fmt.Errorf("graceful shutdown: %w", err)
@@ -178,11 +182,12 @@ func (s *server) serve(ctx context.Context) error {
 	return nil
 }
 
-func (s *server) reportReady(recovered bool, diagnosticsAddress string) {
+func (s *server) reportReady(recovered bool, diagnosticsAddress, instanceID string) {
 	s.health.set("ready")
 	event := s.lifecycleEvent("ready", "server.ready", "info", "database ready")
 	event.DiagnosticsAddress = diagnosticsAddress
 	event.Recovered = recovered
+	event.InstanceID = instanceID
 	if warning, found := unsafeListenerWarning(s.options); found {
 		event.Warnings = []Warning{warning}
 	}
@@ -190,7 +195,11 @@ func (s *server) reportReady(recovered bool, diagnosticsAddress string) {
 }
 
 func (s *server) lifecycleEvent(state, code, severity, message string) Event {
-	return Event{Schema: "database.lifecycle/v1", State: state, EventCode: code, Severity: severity, Message: message, OperationID: s.options.OperationID}
+	return Event{
+		Schema: "database.lifecycle/v1", State: state, EventCode: code, Severity: severity,
+		Message: message, OperationID: s.options.OperationID,
+		RecordedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
 }
 
 func startFailureReason(err error) string {
@@ -231,15 +240,19 @@ func listenerIsLoopback(address string) bool {
 	return ip != nil && (ip.IsLoopback() || ip.To4() != nil && ip.To4().IsLoopback())
 }
 
-func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server, signals <-chan os.Signal) {
+func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server, signals <-chan os.Signal, instanceID string) {
 	var requested <-chan struct{}
 	if mysqlServer != nil {
 		requested = mysqlServer.ShutdownRequested()
 	}
+	shutdownReason := ""
 	select {
 	case <-ctx.Done():
-	case <-signals:
+		shutdownReason = "context_cancelled"
+	case receivedSignal := <-signals:
+		shutdownReason = shutdownSignalReason(receivedSignal)
 	case <-requested:
+		shutdownReason = "shutdown_command"
 		if mysqlServer != nil {
 			if operationID := mysqlServer.ShutdownOperationID(); operationID != "" {
 				s.options.OperationID = operationID
@@ -247,10 +260,25 @@ func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server, signa
 		}
 	}
 	s.health.set("shutting_down")
-	s.emit(s.lifecycleEvent("stopping", "server.stopping", "info", "database shutdown started"))
+	event := s.lifecycleEvent("stopping", "server.stopping", "info", "database shutdown started")
+	event.InstanceID = instanceID
+	event.ShutdownReason = shutdownReason
+	s.emit(event)
+}
+
+func shutdownSignalReason(receivedSignal os.Signal) string {
+	switch receivedSignal {
+	case syscall.SIGINT:
+		return "SIGINT"
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	default:
+		return receivedSignal.String()
+	}
 }
 
 type runtime struct {
+	instanceID         string
 	diagnostics        diagnosticsServer
 	diagnosticsAddress string
 	mysql              *mysql.Server
@@ -270,7 +298,7 @@ func startRuntime(opts Options, health *health) (runtime, error) {
 		_ = closeMySQL(mysqlServer)
 		return runtime{}, err
 	}
-	return runtime{diagnostics: diagnostics, diagnosticsAddress: diagnosticsAddress, mysql: mysqlServer}, nil
+	return runtime{instanceID: metadata.InstanceID, diagnostics: diagnostics, diagnosticsAddress: diagnosticsAddress, mysql: mysqlServer}, nil
 }
 
 func openServerData(directory string) (instance.Metadata, *catalog.Store, error) {
