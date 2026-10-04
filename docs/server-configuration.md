@@ -74,7 +74,12 @@ exposed by the **session settings registry**, which is distinct from this
 server configuration registry. Sessions may tighten them but cannot exceed or
 disable them. Idle timeouts, connection count, packet size, aggregate budgets,
 and prepared-statement count are read-only to sessions. The server applies
-`lock_wait_timeout_ms` to conflicting row-lock waits. The remaining runtime
+`lock_wait_timeout_ms` to conflicting row-lock waits. It applies
+`idle_in_transaction_timeout_ms` while a session waits for its next command
+with an open transaction: expiry rolls back the transaction, sends error
+`4031`, and closes the session. It applies `idle_session_timeout_ms` to a
+session without an open transaction: expiry sends error `4031` and closes the
+session. The remaining runtime
 and session enforcement is defined by the SQL and session-settings contracts.
 
 ## Network, TLS, logging, and secrets

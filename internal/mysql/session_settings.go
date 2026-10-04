@@ -74,8 +74,8 @@ var sessionVariableReaders = map[string]sessionVariableReader{
 	"net_write_timeout": fixedSessionVariable("60"), "performance_schema": fixedSessionVariable("0"),
 	"wait_timeout":       fixedSessionVariable("28800"),
 	"max_allowed_packet": sessionMaxAllowedPacket, "max_connections": sessionMaxConnections,
-	"max_prepared_stmt_count": sessionMaxPreparedStatements, "idle_session_timeout_ms": fixedSessionVariable("0"),
-	"idle_in_transaction_timeout_ms": fixedSessionVariable("0"), "aggregate_execution_memory_limit_bytes": sessionAggregateMemory,
+	"max_prepared_stmt_count": sessionMaxPreparedStatements, "idle_session_timeout_ms": sessionIdleSessionTimeout,
+	"idle_in_transaction_timeout_ms": sessionIdleInTransactionTimeout, "aggregate_execution_memory_limit_bytes": sessionAggregateMemory,
 	"aggregate_temporary_storage_limit_bytes": sessionAggregateTemporary, "version": sessionVersion,
 	"version_comment": fixedSessionVariable("database"), "license": fixedSessionVariable("database license"),
 	"protocol_version": fixedSessionVariable("10"),
@@ -128,6 +128,12 @@ func sessionStatementTimeout(s *session) (string, error) {
 }
 func sessionLockWaitTimeout(s *session) (string, error) {
 	return strconv.FormatInt(s.settings.lockWaitTimeout.Milliseconds(), 10), nil
+}
+func sessionIdleSessionTimeout(s *session) (string, error) {
+	return strconv.FormatInt(s.server.config.IdleTimeouts.Session.Milliseconds(), 10), nil
+}
+func sessionIdleInTransactionTimeout(s *session) (string, error) {
+	return strconv.FormatInt(s.server.config.IdleTimeouts.InTransaction.Milliseconds(), 10), nil
 }
 func sessionMemoryLimit(s *session) (string, error) {
 	return strconv.FormatInt(s.settings.executionMemoryLimit, 10), nil
