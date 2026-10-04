@@ -3,6 +3,7 @@ package mysql
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/jonbaldie/database/internal/catalog"
@@ -433,5 +434,55 @@ func assertOperatorNoNullArrays(t *testing.T, operator map[string]any) {
 				assertOperatorNoNullArrays(t, childMap)
 			}
 		}
+	}
+}
+
+func TestExplainAnalyzeStreamsRowsLikeTheSelectItAnalyzes(t *testing.T) {
+	executor := explainExecutor(t)
+	for id := 2; id <= 300; id++ {
+		value := strconv.Itoa(id)
+		if err := executor.server.config.Catalog.Insert("app", "orders", []string{value, value, "50"}); err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+	}
+	config := Config{ResourceLimits: ResourceLimits{
+		ExecutionMemoryLimitBytes: 20000, AggregateExecutionMemoryLimitBytes: 20000,
+		TemporaryStorageLimitBytes: 1024, AggregateTemporaryStorageLimitBytes: 1024,
+	}}
+	resources := newStatementResources(newResourceManager(config), config, nil)
+	executor.session.resources = resources
+	defer func() {
+		closeStatementResources(resources)
+		executor.session.resources = nil
+	}()
+	executor.streamRows = true
+
+	query := "SELECT a.id, b.id FROM orders a CROSS JOIN orders b WHERE a.id < 50"
+	selected, err := executeStatement(executor, query)
+	if err != nil {
+		t.Fatalf("streamed select: %v", err)
+	}
+	streamed, _, err := discardResultRows(selected)
+	if err != nil {
+		t.Fatalf("consume streamed select: %v", err)
+	}
+	if streamed != 49*300 {
+		t.Fatalf("streamed rows = %d, want %d", streamed, 49*300)
+	}
+
+	result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON "+query)
+	if err != nil {
+		t.Fatalf("analyze streamed select: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode analysis: %v", err)
+	}
+	actual := document["plan"].(map[string]any)["actual"].(map[string]any)
+	if actual["output_rows"] != float64(streamed) {
+		t.Fatalf("analyzed rows = %#v, want %d", actual["output_rows"], streamed)
+	}
+	if peak, _ := actual["peak_memory_bytes"].(float64); peak <= 0 || peak > 20000 {
+		t.Fatalf("analyzed peak memory = %#v, want a streamed peak within the 20000-byte limit", actual["peak_memory_bytes"])
 	}
 }
