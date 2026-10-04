@@ -645,3 +645,31 @@ func TestStreamWriterPreparedMetadata(t *testing.T) {
 		t.Fatalf("writer sequence = %d, want 7", writer.Sequence())
 	}
 }
+
+func TestReadPacketDiscardsOversizedPacketAcrossFrames(t *testing.T) {
+	stream := &bytes.Buffer{}
+	if err := NewStreamWriter(stream, 3, 0).WritePacket(bytes.Repeat([]byte{'x'}, maximumPacketFrame+7)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePacket(stream, 0, []byte{comPing}); err != nil {
+		t.Fatal(err)
+	}
+
+	seq, payload, err := readPacket(stream, 1024)
+	if !errors.Is(err, errPacketTooLarge) || seq != 3 || payload != nil {
+		t.Fatalf("oversized packet: seq=%d payload=%d bytes err=%v, want sequence 3 and error 1153", seq, len(payload), err)
+	}
+	seq, payload, err = readPacket(stream, 1024)
+	if err != nil || seq != 0 || !bytes.Equal(payload, []byte{comPing}) {
+		t.Fatalf("next packet after discard: seq=%d payload=%x err=%v", seq, payload, err)
+	}
+}
+
+func TestStreamWriterRejectsOversizedPacketWithPacketTooLarge(t *testing.T) {
+	buf := &bytes.Buffer{}
+	err := NewStreamWriter(buf, 0, 4).WritePacket([]byte("12345"))
+	var failure sqlFailure
+	if !errors.As(err, &failure) || failure.code != 1153 || failure.state != "08S01" || buf.Len() != 0 {
+		t.Fatalf("oversized write err=%v wrote=%d bytes, want error 1153 (08S01) and no bytes", err, buf.Len())
+	}
+}
