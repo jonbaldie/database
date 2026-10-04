@@ -4366,7 +4366,7 @@ func (s *preparedPreparation) allocate(query string) (uint32, int, []columnMetad
 		return 0, 0, nil, sqlFailure{1390, "HY000", "prepared statement contains too many placeholders"}
 	}
 	if !s.server.connections.reservePreparedStatement() {
-		return 0, 0, nil, sqlFailure{1461, "HY000", "can't create more than max_prepared_stmt_count statements"}
+		return 0, 0, nil, sqlFailure{1461, "42000", "can't create more than max_prepared_stmt_count statements"}
 	}
 	id := s.prepared.nextStmtID
 	s.prepared.nextStmtID++
