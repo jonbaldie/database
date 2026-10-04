@@ -60,7 +60,7 @@ fi
 match="$(IFS='|'; echo "${patterns[*]}")"
 output="$(mktemp)"
 trap 'rm -f "$output"' EXIT
-go-mutesting --match="$match" --exec='go test ./...' "${packages[@]}" 2>&1 | tee "$output"
+go-mutesting --match="$match" "${packages[@]}" 2>&1 | tee "$output"
 
 score="$(sed -nE 's/.*mutation score is ([0-9.]+).*/\1/p' "$output" | tail -1)"
 if [[ -z "$score" ]]; then

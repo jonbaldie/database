@@ -1,22 +1,23 @@
-# Software factory pilot
+# Software factory pilot and follow-up
 
-This repository uses [software-factory v1.8.5](https://github.com/jonbaldie/software-factory/releases/tag/v1.8.5)
-for one trial issue: [#498](https://github.com/jonbaldie/database/issues/498).
+The initial pilot with [software-factory v1.8.5](https://github.com/jonbaldie/software-factory/releases/tag/v1.8.5)
+for [issue #498](https://github.com/jonbaldie/database/issues/498) is complete.
+The current one-issue follow-up is [issue #515](https://github.com/jonbaldie/database/issues/515).
 The factory triages the issue, writes a fix, runs `make quality`, opens a PR,
 and asks a second agent to review it. A failed review can start up to two fix
 rounds. All branch rules still apply to the merge.
 
 ## Scope and ownership
 
-`FACTORY_PILOT_ISSUE` is `498`. Both issue workflows compare the event or manual
-input with this value. Other issues are skipped. Clear this variable to stop
-new issue work. A run already in progress must be cancelled separately.
-The scheduled scout is not installed for this trial.
+`FACTORY_PILOT_ISSUE` is `515` for the current follow-up. Both issue workflows
+compare the event or manual input with this value. Other issues are skipped.
+Clear this variable to stop new issue work. A run already in progress must be
+cancelled separately. The scheduled scout is not installed for this follow-up.
 
-The `factory:pilot` label reserves the issue. The local fleet queue adapter at
-`.fleet/ready-bugs` excludes this label from both its REST and GraphQL queries.
-This exclusion must be kept on each host that runs the fleet. It stops the
-fleet from taking the issue when the factory adds `ready-for-agent`.
+The `factory:pilot` label reserves the selected issue. The local fleet queue
+adapter at `.fleet/ready-bugs` excludes this label from both its REST and
+GraphQL queries. This exclusion must be kept on each host that runs the fleet.
+It stops the fleet from taking the issue when the factory adds `ready-for-agent`.
 
 ## Setup
 
@@ -37,7 +38,7 @@ Repository settings:
 
 | Setting | Value or purpose |
 | --- | --- |
-| `FACTORY_PILOT_ISSUE` | `498` |
+| `FACTORY_PILOT_ISSUE` | `515` |
 | `FACTORY_SETUP_COMMAND` | `go mod download` |
 | `FACTORY_TEST_COMMAND` | `make quality` |
 | `FACTORY_MERGE` | `true` after the installation checks pass |
@@ -58,9 +59,9 @@ The `quality` job runs `make quality` and the changed-code mutation threshold.
 The factory records the reviewed commit and passes it to `--match-head-commit`
 when it merges. New commits require a new review.
 
-## Run the pilot
+## Run the follow-up
 
-After the App access and secrets are set, add `needs-triage` to issue #498.
+After the App access and secrets are set, add `needs-triage` to issue #515.
 Follow the factory runs in GitHub Actions. Keep the issue unassigned: an
 assignee tells the factory to stop and leave the work to that person.
 The installation PR records setup checks and links to the trial runs.
