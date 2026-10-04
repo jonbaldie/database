@@ -87,6 +87,9 @@ func parseColumnModifier(column, value string, attribute catalog.ColumnAttribute
 			if constraint.Type == catalog.ConstraintTypePrimary || constraint.Type == catalog.ConstraintTypeUnique {
 				constraint.Columns = []string{column}
 			}
+			if err == nil && constraint.Type == catalog.ConstraintTypeCheck && columnCheckReferencesOtherColumn(column, constraint.Check) {
+				return "", nil, catalog.Constraint{}, true, false, errorsConstraintDefinition("Column check constraint references other column.")
+			}
 			return next, update, constraint, matched, parser.statesNullability, err
 		}
 	}
@@ -191,6 +194,21 @@ func checkModifier(value string, attribute catalog.ColumnAttribute) (string, *ca
 		return "", nil, catalog.Constraint{}, true, sqlFailure{1064, "42000", "invalid CHECK constraint"}
 	}
 	return remainder, nil, catalog.Constraint{Type: catalog.ConstraintTypeCheck, Check: expression}, true, nil
+}
+
+// columnCheckReferencesOtherColumn reports whether a column-level CHECK names
+// any column other than the one it is declared on. MySQL accepts only the owning
+// column there; a check across columns must be a table-level constraint.
+func columnCheckReferencesOtherColumn(column, expression string) bool {
+	other := false
+	_, _ = evaluateScalarResolved(expression, func(name string) (exprValue, error) {
+		parts, valid := splitQualifiedIdentifier(strings.TrimSpace(name))
+		if !valid || len(parts) == 0 || !identifiersEqual(parts[len(parts)-1], column) {
+			other = true
+		}
+		return nullValue(), nil
+	}, nil)
+	return other
 }
 
 func consumeConstraintValue(value string) (string, string, bool) {

@@ -151,6 +151,9 @@ promise row-order stability.
 with `CONSTRAINT name`. `ALTER TABLE ... ADD CONSTRAINT` supports the same table
 constraints. A new constraint checks all existing rows before the schema
 changes. If a check fails, the previous schema definition remains in use.
+A column-level `CHECK` can name only its own column; a reference to another
+column fails with error `3813` and no schema change. Use a table-level `CHECK`
+for a check across columns.
 
 `AUTO_INCREMENT` is supported on one indexed integer column per table. An
 omitted value, `NULL`, or `DEFAULT` uses the next value, starting at `1`.

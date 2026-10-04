@@ -214,3 +214,29 @@ func TestCompositeForeignKeyValidationThroughMySQL(t *testing.T) {
 		t.Fatalf("matching and nullable composite keys: %#v", result)
 	}
 }
+
+// TestColumnCheckReferencingAnotherColumnThroughMySQL verifies that a
+// column-level CHECK naming a different column fails as MySQL does.
+func TestColumnCheckReferencingAnotherColumnThroughMySQL(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, address := startMySQLServer(t, runner, directory)
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	client := newWireClient(t, address, "admin", "lifecycle-secret")
+	defer client.close()
+
+	for _, query := range []string{"CREATE DATABASE app", "USE app"} {
+		if result := client.query(query); result.err != "" {
+			t.Fatalf("query %q: %#v", query, result)
+		}
+	}
+	if result := client.query("CREATE TABLE c7 (id INT, x INT CHECK (id > 0))"); result.errCode != 3813 || !strings.HasPrefix(result.err, "HY000") {
+		t.Fatalf("column check referencing another column: %#v", result)
+	}
+	if result := client.query("SHOW TABLES"); result.err != "" || len(result.rows) != 0 {
+		t.Fatalf("rejected table was created: %#v", result)
+	}
+	if result := client.query("CREATE TABLE c8 (id INT, x INT, CHECK (id > 0 AND x > 0))"); result.err != "" {
+		t.Fatalf("table-level check across columns: %#v", result)
+	}
+}
