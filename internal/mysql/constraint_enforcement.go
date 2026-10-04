@@ -9,8 +9,9 @@ import (
 )
 
 // validateConstraintDefinition validates both the schema and every durable row
-// image. mutateCatalog calls it before a transaction snapshot or catalog file
-// becomes visible, so a failed write or DDL change is atomic.
+// image. The server installs it as the catalog publish validator, which runs
+// when a transaction stages a change and again before durable publication, so
+// a failed write or DDL change is atomic.
 func validateConstraintDefinition(previous, definition catalog.Definition) error {
 	changed := changedPublishedTables(previous, definition)
 	return validateChangedTableConstraints(previous, definition, changed)

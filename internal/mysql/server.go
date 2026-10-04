@@ -478,7 +478,6 @@ type session struct {
 type transactionState struct {
 	transactionSettings
 	transactionWork
-	savepointState
 	statementState
 }
 
@@ -502,28 +501,8 @@ type transactionSettings struct {
 }
 
 type transactionWork struct {
-	transaction          bool
-	transactionSnapshot  catalog.Definition
-	transactionRevision  uint64
-	transactionStateSet  bool
-	transactionReadSet   bool
-	transactionDirty     bool
-	transactionIsolation isolationLevel
-	transactionReadOnly  bool
-	transactionMutations []func(*catalog.Definition) error
-}
-
-type savepointState struct {
-	savepoints []savepoint
-}
-
-type savepoint struct {
-	name          string
-	snapshot      catalog.Definition
-	revision      uint64
-	dirty         bool
-	mutationCount int
-	read          bool
+	catalogTxn          *catalog.Txn
+	transactionReadOnly bool
 }
 
 type statementState struct {

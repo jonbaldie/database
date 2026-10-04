@@ -12,10 +12,23 @@ func validatePublishedDefinition(store *Store, previous, next Definition) error 
 	} else if err := validateChangedRows(previous, next); err != nil {
 		return err
 	}
-	if store.publishValidator == nil {
+	return store.validateConstraints(previous, next)
+}
+
+// validateConstraints runs the installed SQL publish validator. It is the one
+// authority for SQL constraints: transactions call it when they stage a
+// mutation, and durable publication calls it again on the merged result.
+func (s *Store) validateConstraints(previous, next Definition) error {
+	if s == nil {
 		return nil
 	}
-	return store.publishValidator(previous, next)
+	s.mu.Lock()
+	validator := s.publishValidator
+	s.mu.Unlock()
+	if validator == nil {
+		return nil
+	}
+	return validator(previous, next)
 }
 
 func validateChangedRows(previous, next Definition) error {

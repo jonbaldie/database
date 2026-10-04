@@ -35,9 +35,11 @@ type table struct {
 	uniqueIdx  map[string]map[string]int
 }
 
+// ErrDuplicateKey reports that a row would repeat a primary or unique key.
+var ErrDuplicateKey = errString("duplicate key")
+
 var (
 	errClosed       = errString("storage engine is closed")
-	errDuplicateKey = errString("duplicate key")
 	errMissingTable = errString("table does not exist")
 	errMissingRow   = errString("row does not exist")
 	errInvalidRow   = errString("row has invalid column count")
