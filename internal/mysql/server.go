@@ -113,7 +113,7 @@ type Config struct {
 	ResourceLimits  ResourceLimits
 	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
 	// current-time functions render through. It defaults to UTC and accepts UTC
-	// or a ±HH:MM offset within ±14:00.
+	// or a ±HH:MM offset from -13:59 to +14:00.
 	TimeZone string
 	// Clock supplies the current instant for current-time functions. It defaults
 	// to time.Now and is injectable so rendering is reproducible under test.
