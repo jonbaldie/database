@@ -131,7 +131,7 @@ func (s *catalogExecutor) resolveShowTableParts(parts []string, namespaceOverrid
 		return "", catalog.Table{}, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
 	}
 	if table.Name == "" {
-		table.Name = strings.ToLower(tableName)
+		table.Name = tableName
 	}
 	return namespaceName, table, nil
 }

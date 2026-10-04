@@ -7,7 +7,7 @@ import (
 )
 
 func identifiersEqual(left, right string) bool {
-	return catalog.Key(left) == catalog.Key(right)
+	return catalog.SameIdentifier(left, right)
 }
 
 func identifier(value string) string {
