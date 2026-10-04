@@ -45,6 +45,7 @@ goreportcard:
 	GOREPORTCARD_GOCYCLO="$$tool_directory/gocyclo" GOREPORTCARD_INEFFASSIGN="$$tool_directory/ineffassign" python3 scripts/goreportcard.py
 
 mutation:
+	./scripts/test-mutation-threshold.sh
 	./scripts/mutation-threshold.sh
 
 performance:
