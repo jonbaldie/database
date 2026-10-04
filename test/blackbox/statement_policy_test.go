@@ -363,7 +363,7 @@ func TestMySQLLocksResourcesCancellationAndExplanationKeepWireContract(t *testin
 	blockedSQL := "/* application update */ UPDATE entries SET value = 30 WHERE id = 1"
 	blocked := queryAsync(worker, blockedSQL)
 	waitForProcessListQuery(t, observer, worker.connectionID)
-	snapshot := liveQueryExplanation(t, observer, worker.connectionID)
+	snapshot := waitForPositiveLiveLockWait(t, observer, worker.connectionID)
 	statement := snapshot["statement"].(map[string]any)
 	actual := snapshot["plan"].(map[string]any)["actual"].(map[string]any)
 	if statement["sql"] != "UPDATE entries SET value = 30 WHERE id = 1" || statement["kind"] != "update" || actual["wait"].(map[string]any)["lock_ms"].(float64) <= 0 {
@@ -383,6 +383,24 @@ func TestMySQLLocksResourcesCancellationAndExplanationKeepWireContract(t *testin
 		t.Fatalf("transaction after cancellation = %#v", result)
 	}
 	mustQuery(t, owner, "COMMIT")
+}
+
+// Process-list visibility can precede lockManager.waitingSince. Wait for the
+// observable lock-wait value, not for elapsed wall time alone.
+func waitForPositiveLiveLockWait(t *testing.T, client *wireClient, connectionID uint32) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		snapshot := liveQueryExplanation(t, client, connectionID)
+		actual := snapshot["plan"].(map[string]any)["actual"].(map[string]any)
+		if actual["wait"].(map[string]any)["lock_ms"].(float64) > 0 {
+			return snapshot
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("live lock wait stayed at zero: %#v", snapshot)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func stringPreparedParameter(value string) preparedParameter {

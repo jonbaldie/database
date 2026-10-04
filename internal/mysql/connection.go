@@ -192,12 +192,14 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	if !c.server.connections.beginStatement() {
 		return false
 	}
-	c.control.running.Store(true)
-	defer c.control.running.Store(false)
-	c.control.activeQuery.Store(query)
-	defer c.control.activeQuery.Store("")
+	// Register the explanation before process-list publication, so observers
+	// do not race registration for supported text queries.
 	finishExplanation := c.recordActiveExplanation(query)
 	defer finishExplanation()
+	c.control.activeQuery.Store(query)
+	defer c.control.activeQuery.Store("")
+	c.control.running.Store(true)
+	defer c.control.running.Store(false)
 	watch := c.watchStatement()
 	c.control.setWatch(watch)
 	c.session.statementCancel = watch.cancelled
