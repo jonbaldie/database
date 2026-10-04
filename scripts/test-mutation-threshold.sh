@@ -14,7 +14,8 @@ temporary_directory="$(mktemp -d)"
 trap 'rm -rf "$temporary_directory"' EXIT
 workspace="$temporary_directory/project"
 mkdir -p "$workspace"
-cp "$fixture_dir/go.mod" "$fixture_dir/positive.go" "$workspace/"
+cp "$fixture_dir/go.mod" "$workspace/"
+cp "$fixture_dir/positive.go.fixture" "$workspace/positive.go"
 
 cd "$workspace"
 git init -q
