@@ -25,22 +25,37 @@ func TestInitializeRejectsCredentialsThatCreateUserRejects(t *testing.T) {
 		{name: "account with leading punctuation", account: "_admin", password: "contract-valid-password"},
 		{name: "long account", account: strings.Repeat("a", 33), password: "contract-valid-password"},
 	}
+	outputs := []struct {
+		name     string
+		flag     string
+		wantJSON bool
+	}{
+		{name: "default human"},
+		{name: "format alias json", flag: "--format=json", wantJSON: true},
+	}
 	for _, test := range cases {
-		for _, format := range []string{"", "--format=json"} {
-			t.Run(test.name+format, func(t *testing.T) {
+		for _, output := range outputs {
+			t.Run(test.name+"/"+output.name, func(t *testing.T) {
 				directory := filepath.Join(t.TempDir(), "instance")
 				passwordFile := filepath.Join(t.TempDir(), "password")
 				if err := os.WriteFile(passwordFile, []byte(test.password), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				args := []string{"init", directory, "--initial-account", test.account, "--password-file", passwordFile}
-				if format != "" {
-					args = append(args, format)
+				if output.flag != "" {
+					args = append(args, output.flag)
 				}
 				var stdout, stderr bytes.Buffer
 				code := run(args, &stdout, &stderr)
-				if code != 2 || !strings.Contains(stdout.String(), `"exit_class":"invalid_input"`) {
+				if code != 2 {
 					t.Fatalf("init exit = %d stdout = %q stderr = %q, want invalid_input exit 2", code, stdout.String(), stderr.String())
+				}
+				if output.wantJSON {
+					if !strings.Contains(stdout.String(), `"schema":"database.operator.result/v1"`) {
+						t.Fatalf("init JSON output = %q, want result envelope", stdout.String())
+					}
+				} else if strings.Contains(stdout.String(), `"schema":"database.operator.result/v1"`) || !strings.HasPrefix(stdout.String(), "init: invalid_input ") {
+					t.Fatalf("init default output is not human: stdout = %q stderr = %q", stdout.String(), stderr.String())
 				}
 				if strings.Contains(stdout.String()+stderr.String(), test.password) && utf8.ValidString(test.password) {
 					t.Fatalf("init output reveals the password")
@@ -50,6 +65,60 @@ func TestInitializeRejectsCredentialsThatCreateUserRejects(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestInitializeMissingPasswordUsesRequestedResultFormat(t *testing.T) {
+	const wantUsage = "usage: database init --data-directory PATH [--initial-account NAME] (--initial-password-file PATH | --initial-password-stdin) [--result=human|json]"
+	for _, output := range []struct {
+		name     string
+		flag     string
+		wantJSON bool
+	}{
+		{name: "default human"},
+		{name: "explicit json", flag: "--result=json", wantJSON: true},
+	} {
+		t.Run(output.name, func(t *testing.T) {
+			directory := filepath.Join(t.TempDir(), "instance")
+			args := []string{"init", "--data-directory=" + directory, "--initial-account", "admin"}
+			if output.flag != "" {
+				args = append(args, output.flag)
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(args, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("init exit = %d stdout = %q stderr = %q, want invalid_input exit 2", code, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(directory); !os.IsNotExist(err) {
+				t.Fatalf("init created or changed target data directory: %v", err)
+			}
+			if output.wantJSON {
+				var result struct {
+					Schema     string `json:"schema"`
+					RecordType string `json:"record_type"`
+					Command    string `json:"command"`
+					ExitClass  string `json:"exit_class"`
+					ExitCode   int    `json:"exit_code"`
+					Diagnostic string `json:"diagnostic"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+					t.Fatalf("decode init result %q: %v", stdout.String(), err)
+				}
+				if result.Schema != "database.operator.result/v1" || result.RecordType != "result" || result.Command != "init" || result.ExitClass != "invalid_input" || result.ExitCode != 2 || result.Diagnostic != wantUsage {
+					t.Fatalf("init result = %#v, want invalid_input result envelope with usage %q", result, wantUsage)
+				}
+				if stderr.Len() != 0 {
+					t.Fatalf("init JSON mode wrote to stderr: %q", stderr.String())
+				}
+				return
+			}
+			if strings.Contains(stdout.String(), `"schema":"database.operator.result/v1"`) || !strings.HasPrefix(stdout.String(), "init: invalid_input (operation_id=") {
+				t.Fatalf("init default output is not human: stdout = %q stderr = %q", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "init [invalid_input]: "+wantUsage) {
+				t.Fatalf("init human diagnostic = %q, want usage %q", stderr.String(), wantUsage)
+			}
+		})
 	}
 }
 
