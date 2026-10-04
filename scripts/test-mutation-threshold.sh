@@ -31,7 +31,7 @@ expected_source="$temporary_directory/positive.go.expected"
 cp positive.go "$expected_source"
 no_tests_output="$temporary_directory/no-tests.log"
 set +e
-GITHUB_BASE_SHA="$base" GOMAXPROCS=2 GOFLAGS='-p=2' "$gate_script" >"$no_tests_output" 2>&1
+MUTATION_THRESHOLD=0.80 GITHUB_BASE_SHA="$base" GOMAXPROCS=2 GOFLAGS='-p=2' "$gate_script" >"$no_tests_output" 2>&1
 no_tests_status=$?
 set -e
 cat "$no_tests_output"
@@ -76,7 +76,7 @@ EOF
 
 tests_output="$temporary_directory/tests.log"
 set +e
-GITHUB_BASE_SHA="$base" GOMAXPROCS=2 GOFLAGS='-p=2' "$gate_script" >"$tests_output" 2>&1
+MUTATION_THRESHOLD=0.80 GITHUB_BASE_SHA="$base" GOMAXPROCS=2 GOFLAGS='-p=2' "$gate_script" >"$tests_output" 2>&1
 tests_status=$?
 set -e
 cat "$tests_output"
