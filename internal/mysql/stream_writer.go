@@ -9,6 +9,9 @@ import (
 
 const maximumPacketFrame = (1 << 24) - 1
 
+// errPacketTooLarge reports a packet above max_allowed_packet in either direction.
+var errPacketTooLarge = sqlFailure{1153, "08S01", "Got a packet bigger than 'max_allowed_packet' bytes"}
+
 // ResultMode specifies whether a query result is encoded in MySQL text or binary protocol.
 type ResultMode int
 
@@ -49,7 +52,7 @@ func (w *StreamWriter) PacketsWritten() int {
 // WritePacket encodes a payload with 4-byte MySQL packet headers, splitting across maximumPacketFrame boundaries.
 func (w *StreamWriter) WritePacket(payload []byte) error {
 	if w.maxPacket > 0 && int64(len(payload)) > w.maxPacket {
-		return errors.New("packet exceeds configured maximum size")
+		return errPacketTooLarge
 	}
 	return w.writeRawPacket(payload)
 }
@@ -359,7 +362,7 @@ func readPacket(r io.Reader, maximum int64) (byte, []byte, error) {
 		expected++
 		length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
 		if int64(len(payload))+int64(length) > maximum {
-			return 0, nil, errors.New("packet exceeds configured maximum size")
+			return sequence, nil, discardPacket(r, length)
 		}
 		start := len(payload)
 		payload = append(payload, make([]byte, length)...)
@@ -369,6 +372,24 @@ func readPacket(r io.Reader, maximum int64) (byte, []byte, error) {
 		if length < maximumPacketFrame {
 			return sequence, payload, nil
 		}
+	}
+}
+
+// discardPacket reads the rest of an oversized packet so the client can read
+// the error before the connection closes; unread input makes the close a reset.
+func discardPacket(r io.Reader, length int) error {
+	for {
+		if _, err := io.CopyN(io.Discard, r, int64(length)); err != nil {
+			return err
+		}
+		if length < maximumPacketFrame {
+			return errPacketTooLarge
+		}
+		header := make([]byte, 4)
+		if _, err := io.ReadFull(r, header); err != nil {
+			return err
+		}
+		length = int(header[0]) | int(header[1])<<8 | int(header[2])<<16
 	}
 }
 

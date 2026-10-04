@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,7 @@ type conversationControl struct {
 type pendingCommand struct {
 	sequence byte
 	payload  []byte
+	failure  error
 }
 
 type statementWatch struct {
@@ -136,6 +138,10 @@ func (c *conversation) acceptCommand() bool {
 	}
 	pending := c.server.config.IdleTimeouts.await(c.session, c.connection, watch)
 	if pending == nil || (idleRead && !c.server.connections.acceptingWork()) {
+		return false
+	}
+	if pending.failure != nil {
+		_ = c.write(pending.sequence, mysqlError(pending.failure))
 		return false
 	}
 	return c.dispatch(pending.sequence, pending.payload)
@@ -265,16 +271,21 @@ func (c *conversation) watchStatement() *statementWatch {
 		cancelled: make(chan struct{}),
 	}
 	go func() {
-		sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
-		if err == nil && len(payload) > 0 {
-			watch.cancelOnce.Do(func() { close(watch.cancelled) })
-			watch.finished <- &pendingCommand{sequence: sequence + 1, payload: payload}
-			return
-		}
+		pending := readCommand(c.connection, c.server.config.MaxAllowedPacket)
 		watch.cancelOnce.Do(func() { close(watch.cancelled) })
-		watch.finished <- nil
+		watch.finished <- pending
 	}()
 	return watch
+}
+
+// readCommand returns the next client command, an oversized command that the
+// conversation must reject, or nil when the connection cannot continue.
+func readCommand(connection net.Conn, maximum int64) *pendingCommand {
+	sequence, payload, err := readPacket(connection, maximum)
+	if err == nil && len(payload) > 0 || errors.Is(err, errPacketTooLarge) {
+		return &pendingCommand{sequence: sequence + 1, payload: payload, failure: err}
+	}
+	return nil
 }
 
 func (c *conversation) closePrepared(sequence byte, payload []byte) bool {
