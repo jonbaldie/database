@@ -315,6 +315,10 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 		MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount,
 		MaxAllowedPacket: opts.MaxAllowedPacket,
 		LockWaitTimeout:  millisecondsDuration(opts.LockWaitTimeoutMilliseconds),
+		IdleTimeouts: mysql.IdleTimeouts{
+			InTransaction: millisecondsDuration(opts.IdleInTransactionTimeoutMilliseconds),
+			Session:       millisecondsDuration(opts.IdleSessionTimeoutMilliseconds),
+		},
 		ResourceLimits: mysql.ResourceLimits{
 			StatementTimeout:                    millisecondsDuration(opts.StatementTimeoutMilliseconds),
 			ExecutionMemoryLimitBytes:           opts.ExecutionMemoryLimitBytes,

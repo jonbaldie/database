@@ -109,6 +109,7 @@ type Config struct {
 	// LockWaitTimeout bounds the time a statement waits for a conflicting row
 	// lock. It defaults to five seconds.
 	LockWaitTimeout time.Duration
+	IdleTimeouts    IdleTimeouts
 	ResourceLimits  ResourceLimits
 	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
 	// current-time functions render through. It defaults to UTC and accepts UTC
@@ -231,6 +232,7 @@ func normalizedConfig(config Config) Config {
 	if config.LockWaitTimeout <= 0 {
 		config.LockWaitTimeout = 5 * time.Second
 	}
+	config.IdleTimeouts = normalizedIdleTimeouts(config.IdleTimeouts)
 	config.ResourceLimits = normalizedResourceLimits(config.ResourceLimits)
 	if config.TimeZone == "" {
 		config.TimeZone = "UTC"

@@ -129,18 +129,16 @@ func (c *conversation) acceptCommand() bool {
 	if c.control.revoked.Load() {
 		return false
 	}
-	if watch := c.control.takeWatch(); watch != nil {
-		pending := <-watch.finished
-		if pending == nil {
-			return false
-		}
-		return c.dispatch(pending.sequence, pending.payload)
+	watch := c.control.takeWatch()
+	idleRead := watch == nil
+	if idleRead {
+		watch = c.watchStatement()
 	}
-	sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
-	if err != nil || len(payload) == 0 || !c.server.connections.acceptingWork() {
+	pending := c.server.config.IdleTimeouts.await(c.session, c.connection, watch)
+	if pending == nil || (idleRead && !c.server.connections.acceptingWork()) {
 		return false
 	}
-	return c.dispatch(sequence+1, payload)
+	return c.dispatch(pending.sequence, pending.payload)
 }
 
 func (c *conversation) dispatch(sequence byte, payload []byte) bool {
