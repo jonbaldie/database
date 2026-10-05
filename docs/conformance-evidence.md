@@ -59,7 +59,7 @@ release judgment rule.
 | 1–7: driver access, protocol rejection, authentication, prepared parity, metadata, error identity, and unsupported SQL rejection | [MySQL SQL behaviour](mysql-sql-behaviour.md), [driver profile](compatibility-evidence.md) | `TestGoDriverCompatibilityProfile`, `TestExternalDriverCompatibilityProfile`, `TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures`, `TestMySQLCRUDStatementsAreAtomicAndPreparedExecutionMatchesText`, `TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely`, `TestMySQLTextErrorsKeepWireConnectionReady` |
 | 8–10: namespaces, DDL, and atomic schema change | [MySQL SQL behaviour](mysql-sql-behaviour.md), [catalog metadata](catalog-metadata.md) | `TestMySQLNamespacesAndBasicTablesSurviveRestartAndSupportQualifiedAccess`, `TestMySQLTableLifecycleSupportsRenameTruncateAndDrop`, `TestMySQLCatalogReturnsCanonicalCreateDefinitions`, `TestConstraintSurfaceThroughMySQL` |
 | 11–13: relational constraints, B-tree indexes, and index hints | [MySQL SQL behaviour](mysql-sql-behaviour.md), [query explanation](query-explanation/README.md) | `TestConstraintSurfaceThroughMySQL`, `TestMySQLBTreeIndexesUseThePublicWireContract` |
-| 14–15: strict values, collation, and SQL identifiers | [MySQL SQL behaviour](mysql-sql-behaviour.md), [domain vocabulary](../CONTEXT.md) | `TestMySQLStrictNumericAndBitSemantics`, `TestMySQLEnforcesCharacterCollationAndIdentifierSemantics` |
+| 14–15: strict values, collation, and SQL identifiers | [MySQL SQL behaviour](mysql-sql-behaviour.md), [domain vocabulary](../GLOSSARY.md) | `TestMySQLStrictNumericAndBitSemantics`, `TestMySQLEnforcesCharacterCollationAndIdentifierSemantics` |
 | 16: insert, replace, update, delete, upsert, and insert-select | [MySQL SQL behaviour](mysql-sql-behaviour.md) | `TestMySQLReplaceUsesDeleteThenInsertAffectedRows`, `TestMySQLReplaceChecksForeignKeyDeletes`, `TestMySQLInsertOnDuplicateKeyUpdatesAtomically`, `TestMySQLInsertSelectSnapshotsTheSourceRows`, `TestMySQLInsertAndReplaceSetForms`, `TestMySQLExtendedMutationsRespectTransactionVisibility` |
 | 17–20: relational shaping, functions, three-valued logic, and row order | [MySQL SQL behaviour](mysql-sql-behaviour.md) | `TestMySQLRelationalShapingMatchesTextAndPreparedWirePaths`, `TestMySQLAggregatesAndWindowsUseThePublicWireContract`, `TestMySQLComposedQueriesMatchTextAndPreparedWirePaths`, `TestMySQLStrictNumericAndBitSemantics` |
 | 21–27: isolation, atomicity, savepoints, locks, deadlocks, timeouts, cancellation, and read-only transactions | [MySQL SQL behaviour](mysql-sql-behaviour.md) | `TestMySQLTransactionsProvideIsolationAndReadYourOwnWrites`, `TestMySQLTransactionsEnforceAutocommitReadOnlyAndAtomicErrors`, `TestSavepointsThroughMySQL`, `TestMySQLCoordinatesConcurrentLocks`, `TestMySQLLockModesTimeoutCancellationAndDeadlock` |
@@ -109,7 +109,7 @@ release judgment rule.
 | Driver compatibility | [compatibility-evidence.md](compatibility-evidence.md) | Go always-on profile; opt-in external drivers |
 | Distribution | [distribution.md](distribution.md) | Release build and verify scripts |
 | Performance acceptance | [performance-acceptance.md](performance-acceptance.md) | Harness, scenario versions, evidence JSON schema |
-| Domain vocabulary and experimental bounds | [CONTEXT.md](../CONTEXT.md) | Docs use database account, database namespace, operator command family, and related glossary terms; v0.1 remains experimental and does not claim production readiness or complete MySQL compatibility |
+| Domain vocabulary and experimental bounds | [GLOSSARY.md](../GLOSSARY.md) | Docs use database account, database namespace, operator command family, and related glossary terms; v0.1 remains experimental and does not claim production readiness or complete MySQL compatibility |
 
 ## Explicit rejections covered by public evidence
 
@@ -140,7 +140,7 @@ Findings:
 2. The previously recorded implementation gaps for online backup `--address` and `database shutdown` are closed on `main` and covered by black-box tests; this audit maps them.
 3. Offline upgrade now accepts a matching online backup against a durable row-engine directory by comparing catalog schema without live `rows/` engine files. That matcher change is required so story 62 has public executable evidence.
 4. Documentation uses the canonical domain vocabulary and states that v0.1 is experimental, with finite compatibility and support bounds in the linked contracts.
-5. Performance story 68 follows the maintainer judgment recorded on issue #72: a full Mac15,5 internal-SSD acceptance run is not required for this release audit; the harness and scenario remain the normative evidence path. This does not widen the published reference environment in `CONTEXT.md`.
+5. Performance story 68 follows the maintainer judgment recorded on issue #72: a full Mac15,5 internal-SSD acceptance run is not required for this release audit; the harness and scenario remain the normative evidence path. This does not widen the published reference environment in `GLOSSARY.md`.
 6. No unresolved conflict with recorded product decisions was found. Missing ADRs remain intentional: the final Issue #1 audit recorded none.
 
 Release judgment: **no unmapped Issue #1 story or normative contract area remains, and no unresolved product-decision conflict remains for v0.1 conformance evidence.**
