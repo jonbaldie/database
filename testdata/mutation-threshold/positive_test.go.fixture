@@ -1,0 +1,21 @@
+package mutationprobe
+
+import "testing"
+
+func TestIsPositiveBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input int
+		want  bool
+	}{
+		{name: "negative", input: -1, want: false},
+		{name: "zero", input: 0, want: false},
+		{name: "positive", input: 1, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsPositive(test.input); got != test.want {
+				t.Errorf("IsPositive(%d) = %t, want %t", test.input, got, test.want)
+			}
+		})
+	}
+}

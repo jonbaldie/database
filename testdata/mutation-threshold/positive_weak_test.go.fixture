@@ -1,0 +1,9 @@
+package mutationprobe
+
+import "testing"
+
+func TestIsPositivePositiveOnly(t *testing.T) {
+	if !IsPositive(1) {
+		t.Fatal("IsPositive(1) = false, want true")
+	}
+}

@@ -60,6 +60,61 @@ func TestMessgoGateIsPinnedAndRunsWithQuality(t *testing.T) {
 	}
 }
 
+func TestMutationGateUsesPinnedMutagoCoveredMSI(t *testing.T) {
+	root := repositoryRoot(t)
+	makefile := readFile(t, filepath.Join(root, "Makefile"))
+	workflow := readFile(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	gate := readFile(t, filepath.Join(root, "scripts", "mutation-threshold.sh"))
+	runner := readFile(t, filepath.Join(root, "scripts", "run-mutago.sh"))
+	config := readFile(t, filepath.Join(root, "config", "mutago.yml"))
+
+	for _, want := range []string{
+		"MUTAGO_VERSION := v2.10.20",
+		"MUTAGO_MODULE := github.com/quality-gates/mutago/v2/cmd/mutago",
+		"export GO MUTAGO_VERSION MUTAGO_MODULE",
+		"GOMAXPROCS=2 GOFLAGS='-p=2' ./scripts/test-mutation-threshold.sh",
+		"GOMAXPROCS=2 GOFLAGS='-p=2' ./scripts/mutation-threshold.sh",
+	} {
+		if !strings.Contains(makefile, want) {
+			t.Errorf("Makefile does not contain %q", want)
+		}
+	}
+	for _, want := range []string{
+		"GOBIN=\"$RUNNER_TEMP/mutago-bin\" go install github.com/quality-gates/mutago/v2/cmd/mutago@v2.10.20",
+		"run: make mutation",
+		"MUTAGO_BIN: ${{ runner.temp }}/mutago-bin/mutago",
+		"GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+	} {
+		if !strings.Contains(workflow, want) {
+			t.Errorf("CI workflow does not contain %q", want)
+		}
+	}
+	for _, want := range []string{
+		"--coverage \\",
+		"--min-covered-msi=80 \\",
+		"--git-diff-lines \\",
+		"--git-diff-base=\"$base\" \\",
+		"--workers=2 \\",
+		"(^|/)[^/]*_test\\.go$",
+	} {
+		if !strings.Contains(gate, want) {
+			t.Errorf("mutation gate does not contain %q", want)
+		}
+	}
+	for _, want := range []string{
+		"module=\"${MUTAGO_MODULE:-github.com/quality-gates/mutago/v2/cmd/mutago}\"",
+		"version=\"${MUTAGO_VERSION:-v2.10.20}\"",
+		"exec \"$go_command\" run \"${module}@${version}\" \"$@\"",
+	} {
+		if !strings.Contains(runner, want) {
+			t.Errorf("local mutation runner does not contain %q", want)
+		}
+	}
+	if !strings.Contains(config, "skip_without_test: false") {
+		t.Error("mutago config skips changed production files without tests")
+	}
+}
+
 func TestGovulncheckIsPinnedAndRunsOnPullRequests(t *testing.T) {
 	root := repositoryRoot(t)
 	makefile := readFile(t, filepath.Join(root, "Makefile"))

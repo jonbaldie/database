@@ -24,6 +24,11 @@ GOMAXPROCS=2 GOFLAGS='-p=2' make quality
 GOMAXPROCS=2 GOFLAGS='-p=2' make mutation
 ```
 
+`make mutation` runs pinned mutago v2.10.20. It requires covered-MSI of at
+least 80% on changed production Go code. It skips test files and deleted files.
+A changed production file without test coverage fails the gate. Tests that miss
+too many mutations also fail it.
+
 Run only one fuzz campaign at a time. A campaign needs one package, one fuzz
 target, and a time limit. Use 30 seconds. For example:
 
