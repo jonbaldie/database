@@ -59,3 +59,34 @@ func TestCompileRelationPredicateHandlesLargeLogicalExpressions(t *testing.T) {
 		})
 	}
 }
+
+func TestParseStoredNumericValueEquivalence(t *testing.T) {
+	cases := []string{
+		"0",
+		"1",
+		"-1",
+		"42",
+		"-999999",
+		"9223372036854775807",
+		"-9223372036854775808",
+		"18446744073709551615",
+		"12.34",
+		"-45.678",
+		"1e5",
+		"-2.5e-3",
+		"  100  ",
+		"  -200  ",
+	}
+	for _, tc := range cases {
+		got, err := parseStoredNumericValue(tc)
+		want, wantErr := evaluateScalar(tc)
+		if (err != nil) != (wantErr != nil) {
+			t.Fatalf("parseStoredNumericValue(%q) err=%v, wantErr=%v", tc, err, wantErr)
+		}
+		if err == nil {
+			if got.kind != want.kind || got.render() != want.render() {
+				t.Fatalf("parseStoredNumericValue(%q) = (%v, %q), want (%v, %q)", tc, got.kind, got.render(), want.kind, want.render())
+			}
+		}
+	}
+}
