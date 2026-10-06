@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -460,7 +461,7 @@ func relationStoredValue(column relationColumn, raw string) (exprValue, error) {
 			return exprValue{}, err
 		}
 		if typ.kind != numericNone {
-			return evaluateScalar(raw)
+			return parseStoredNumericValue(raw)
 		}
 		temporal, temporalErr := parseTemporalType(column.typeName)
 		if temporalErr != nil {
@@ -478,6 +479,17 @@ func relationStoredValue(column relationColumn, raw string) (exprValue, error) {
 		}
 	}
 	return stringValue(raw), nil
+}
+
+func parseStoredNumericValue(raw string) (exprValue, error) {
+	trimmed := strings.TrimSpace(raw)
+	if value, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return intValue(value), nil
+	}
+	if value, err := numberLiteral(trimmed); err == nil {
+		return value, nil
+	}
+	return evaluateScalar(raw)
 }
 
 func quotedRelationLiteral(raw string) bool {
