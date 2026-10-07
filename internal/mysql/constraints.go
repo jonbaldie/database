@@ -276,10 +276,14 @@ func parseUniqueConstraint(constraint catalog.Constraint, value string) (catalog
 		value = remainder
 	}
 	columns, remainder, ok := parseConstraintColumns(value)
-	if !ok || strings.TrimSpace(remainder) != "" {
+	if !ok {
 		return catalog.Constraint{}, sqlFailure{1064, "42000", "invalid UNIQUE constraint"}
 	}
-	constraint.Type, constraint.Columns = catalog.ConstraintTypeUnique, columns
+	remainder, _, invisible, err := parseIndexVisibility(remainder)
+	if err != nil || strings.TrimSpace(remainder) != "" {
+		return catalog.Constraint{}, sqlFailure{1064, "42000", "invalid UNIQUE constraint"}
+	}
+	constraint.Type, constraint.Columns, constraint.Invisible = catalog.ConstraintTypeUnique, columns, invisible
 	return constraint, nil
 }
 func parseForeignConstraint(constraint catalog.Constraint, value string) (catalog.Constraint, error) {
