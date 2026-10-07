@@ -162,6 +162,23 @@ sequence to that value plus one. Deletes do not reuse values, and
 `TRUNCATE TABLE` resets the sequence to `1`. Custom increment and offset
 settings are outside v0.1.
 
+The OK packet of an `INSERT` or `REPLACE` reports the last insert ID with the
+MySQL 8.4.11 `mysql_insert_id()` rules. If the statement stores a generated
+value, the packet carries the first generated value. If it stores no generated
+value, the packet carries the `AUTO_INCREMENT` value of the last row that the
+statement inserted or changed. This includes an explicit value,
+`INSERT ... SELECT`, `REPLACE`, and a changed `ON DUPLICATE KEY UPDATE` row.
+An unchanged duplicate-key update reports `0`. `UPDATE`, `DELETE`, DDL, and a
+table with no `AUTO_INCREMENT` column report `0`. A failed statement returns
+an error packet and stores no row. Values allocated before that failure are
+not reused by a later statement. A type error that allocates no value does not
+advance the counter. An explicit negative value is reported as that value.
+
+Two differences from MySQL 8.4.11 are deliberate. An explicit `0` is stored as
+`0` and reported as `0`; MySQL generates a value for `0`. `ROLLBACK` restores
+the counter with the transaction snapshot; MySQL does not reuse allocated
+values after `ROLLBACK`. The `LAST_INSERT_ID()` function is not supported.
+
 Each insert, update, delete, and schema change checks the complete affected
 constraint surface before it becomes durable. Foreign keys require a primary or
 unique referenced key. No foreign-key action clause is supported. A write that

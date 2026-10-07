@@ -155,18 +155,20 @@ func autoIncrementLimit(table catalog.Table, column int) (uint64, error) {
 	return uint64(numeric.smax), nil
 }
 
-func fillAutoIncrementValue(table catalog.Table, row []string, state autoIncrementState, rowNumber int) (autoIncrementState, error) {
+// fillAutoIncrementValue assigns the next AUTO_INCREMENT value when the
+// column is NULL. The boolean is true only when this call generated a value.
+func fillAutoIncrementValue(table catalog.Table, row []string, state autoIncrementState, rowNumber int) (autoIncrementState, bool, error) {
 	column, ok := autoIncrementColumn(table)
 	if !ok {
-		return state, nil
+		return state, false, nil
 	}
 	limit, err := autoIncrementLimit(table, column)
 	if err != nil {
-		return state, err
+		return state, false, err
 	}
 	if row[column] == storedSQLNullValue {
 		if state.exhausted || state.next == 0 || state.next > limit {
-			return state, autoIncrementOverflow(table.Columns[column], rowNumber)
+			return state, false, autoIncrementOverflow(table.Columns[column], rowNumber)
 		}
 		row[column] = strconv.FormatUint(state.next, 10)
 		if state.next == limit {
@@ -174,13 +176,82 @@ func fillAutoIncrementValue(table catalog.Table, row []string, state autoIncreme
 		} else {
 			state.next++
 		}
-		return state, nil
+		return state, true, nil
 	}
 	value, positive := autoIncrementPositiveValue(row[column])
 	if positive {
 		state = advanceAutoIncrement(state, value, limit)
 	}
-	return state, nil
+	return state, false, nil
+}
+
+// statementInsertID is the OK-packet last insert ID for one INSERT or REPLACE.
+// A generated value that the statement stores wins. Otherwise the packet
+// carries the AUTO_INCREMENT value of the last row that the statement stored
+// or changed.
+type statementInsertID struct {
+	firstGenerated uint64
+	hasGenerated   bool
+	lastStored     uint64
+	hasStored      bool
+}
+
+func (id *statementInsertID) record(table catalog.Table, row []string, generated bool) {
+	column, ok := autoIncrementColumn(table)
+	if !ok || column >= len(row) {
+		return
+	}
+	value, ok := autoIncrementProtocolID(row[column])
+	if !ok {
+		return
+	}
+	if generated && !id.hasGenerated {
+		id.firstGenerated = value
+		id.hasGenerated = true
+	}
+	id.lastStored = value
+	id.hasStored = true
+}
+
+func (id statementInsertID) value() uint64 {
+	if id.hasGenerated {
+		return id.firstGenerated
+	}
+	if id.hasStored {
+		return id.lastStored
+	}
+	return 0
+}
+
+func autoIncrementProtocolID(value string) (uint64, bool) {
+	if value == "" || value == storedSQLNullValue {
+		return 0, false
+	}
+	if parsed, err := strconv.ParseUint(value, 10, 64); err == nil {
+		return parsed, true
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return uint64(parsed), true
+}
+
+func autoIncrementAdvanced(before, after autoIncrementState) bool {
+	if after.exhausted && !before.exhausted {
+		return true
+	}
+	return after.next > before.next
+}
+
+func fartherAutoIncrementState(current, allocated autoIncrementState) autoIncrementState {
+	if allocated.exhausted && !current.exhausted {
+		return allocated
+	}
+	if current.exhausted || current.next >= allocated.next {
+		return current
+	}
+	return allocated
 }
 
 func advanceAutoIncrement(state autoIncrementState, value, limit uint64) autoIncrementState {
