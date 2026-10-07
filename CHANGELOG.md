@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.18] - 2026-10-07
+
+### Changed
+
+- Sped up predicate evaluation on stored numeric row values.
+
+### Fixed
+
+- Returned MySQL error 1153 (`ER_NET_PACKET_TOO_LARGE`, SQLSTATE `08S01`) for an inbound command larger than `max_allowed_packet` before closing the session, instead of resetting the connection.
+
 ## [0.2.17] - 2026-10-04
 
 ### Added
