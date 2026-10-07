@@ -186,7 +186,7 @@ func TestStreamWriterWriteOK(t *testing.T) {
 	buf := &bytes.Buffer{}
 	writer := NewStreamWriter(buf, 1, 1024)
 
-	if err := writer.WriteOK(10, 2); err != nil {
+	if err := writer.WriteOK(10, 0, 2); err != nil {
 		t.Fatalf("WriteOK: %v", err)
 	}
 
