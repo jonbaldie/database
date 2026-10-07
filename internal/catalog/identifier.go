@@ -30,6 +30,22 @@ func Key(name string) string {
 	return norm.NFD.String(folded)
 }
 
+// SameIdentifier reports whether two SQL identifier spellings name the same
+// object under the canonical caseless matching rule of Key.
+func SameIdentifier(left, right string) bool {
+	return Key(left) == Key(right)
+}
+
+// InformationSchemaName is the declared spelling of the read-only metadata
+// namespace that every account can see.
+const InformationSchemaName = "information_schema"
+
+// IsInformationSchema reports whether a namespace spelling names the read-only
+// metadata namespace.
+func IsInformationSchema(name string) bool {
+	return SameIdentifier(name, InformationSchemaName)
+}
+
 // IdentifierLength counts the Unicode scalar values in a declared identifier
 // spelling, the unit the length ceiling is measured in.
 func IdentifierLength(name string) int {

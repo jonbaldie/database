@@ -2221,7 +2221,7 @@ func relationalStringKey(expression, value string, columns []relationColumn) str
 func (p *relationalSelectPlan) evaluateComposedWindowExpression(row relationRow, projection relationalProjection, windowValues map[string]exprValue) (exprValue, error) {
 	return evaluateScalarWithResolver(projection.windowExpr, func(name string) (exprValue, error) {
 		for placeholder, value := range windowValues {
-			if identifiersEqual(name, placeholder) {
+			if catalog.SameIdentifier(name, placeholder) {
 				return value, nil
 			}
 		}
