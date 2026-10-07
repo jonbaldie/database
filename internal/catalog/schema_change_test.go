@@ -88,7 +88,7 @@ func TestOpenAfterSchemaChangeReplaysDurableRows(t *testing.T) {
 	}
 }
 
-func TestApplyDurablePersistsTypeOnlyAndAttributeOnlyChanges(t *testing.T) {
+func TestApplyDurablePersistsShapePreservingSchemaChanges(t *testing.T) {
 	cases := []struct {
 		name   string
 		seed   func(Table) Table
@@ -130,6 +130,46 @@ func TestApplyDurablePersistsTypeOnlyAndAttributeOnlyChanges(t *testing.T) {
 				t.Helper()
 				if len(table.ColumnAttributes) != 2 || table.ColumnAttributes[1].Nullable {
 					t.Fatalf("column attributes after reopen = %#v, want val NOT NULL", table.ColumnAttributes)
+				}
+			},
+		},
+		{
+			name: "index_visibility_only",
+			seed: func(table Table) Table {
+				table.Indexes = []Index{{Name: "v_val", Parts: []IndexPart{{Column: "val"}}}}
+				return table
+			},
+			mutate: func(definition Definition) (Definition, error) {
+				table := definition.Namespaces["app"].Tables["v"]
+				table.Indexes = CloneIndexes(table.Indexes)
+				table.Indexes[0].Invisible = true
+				definition.Namespaces["app"].Tables["v"] = table
+				return definition, nil
+			},
+			check: func(t *testing.T, table Table) {
+				t.Helper()
+				if len(table.Indexes) != 1 || !table.Indexes[0].Invisible {
+					t.Fatalf("indexes after reopen = %#v, want v_val invisible", table.Indexes)
+				}
+			},
+		},
+		{
+			name: "unique_constraint_visibility_only",
+			seed: func(table Table) Table {
+				table.Constraints = []Constraint{{Name: "uq_val", Type: ConstraintTypeUnique, Columns: []string{"val"}}}
+				return table
+			},
+			mutate: func(definition Definition) (Definition, error) {
+				table := definition.Namespaces["app"].Tables["v"]
+				table.Constraints = CloneConstraints(table.Constraints)
+				table.Constraints[0].Invisible = true
+				definition.Namespaces["app"].Tables["v"] = table
+				return definition, nil
+			},
+			check: func(t *testing.T, table Table) {
+				t.Helper()
+				if len(table.Constraints) != 1 || !table.Constraints[0].Invisible {
+					t.Fatalf("constraints after reopen = %#v, want uq_val invisible", table.Constraints)
 				}
 			},
 		},

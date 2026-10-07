@@ -938,12 +938,23 @@ func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]c
 	return constraints, false
 }
 
+// alterTableIndexVisibility sets the visibility of the named index. Like
+// dropTableIndex, it also finds a UNIQUE key from a table definition, because
+// SHOW INDEX lists that unique constraint as an index.
 func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool) error {
 	for number := range table.Indexes {
 		if catalog.Key(table.Indexes[number].Name) != catalog.Key(name) {
 			continue
 		}
 		table.Indexes[number].Invisible = invisible
+		return nil
+	}
+	for number := range table.Constraints {
+		constraint := &table.Constraints[number]
+		if constraint.Type != catalog.ConstraintTypeUnique || catalog.Key(constraint.Name) != catalog.Key(name) {
+			continue
+		}
+		constraint.Invisible = invisible
 		return nil
 	}
 	if catalog.Key(name) == catalog.Key("PRIMARY") {

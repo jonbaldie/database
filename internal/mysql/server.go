@@ -1862,6 +1862,9 @@ func canonicalConstraintDefinition(constraint catalog.Constraint) string {
 	case catalog.ConstraintTypePrimary:
 		return "PRIMARY KEY " + columns
 	case catalog.ConstraintTypeUnique:
+		if constraint.Invisible {
+			columns += " INVISIBLE"
+		}
 		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " UNIQUE " + columns
 	case catalog.ConstraintTypeForeignKey:
 		target := quoteIdentifier(constraint.ReferencedTable)
