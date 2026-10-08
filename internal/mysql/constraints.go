@@ -380,10 +380,8 @@ func namedTableConstraints(table string, constraints []catalog.Constraint, reser
 		if len(constraint.Columns) == 0 && constraint.Type != catalog.ConstraintTypeCheck {
 			return nil, sqlFailure{1064, "42000", "constraint requires columns"}
 		}
-		autoUnique := constraint.Type == catalog.ConstraintTypeUnique && constraint.Name == ""
 		checkNumber, foreignNumber = assignConstraintName(table, constraint, keys, checkNumber, foreignNumber)
-		if autoUnique {
-			keys[catalog.Key(constraint.Name)] = true
+		if generatedUniqueName(constraint, keys) {
 			continue
 		}
 		key := catalog.Key(constraint.Name)
@@ -395,6 +393,13 @@ func namedTableConstraints(table string, constraints []catalog.Constraint, reser
 			keys[key] = true
 		}
 	}
+	if err := rejectMultiplePrimaryKeys(constraints); err != nil {
+		return nil, err
+	}
+	return constraints, nil
+}
+
+func rejectMultiplePrimaryKeys(constraints []catalog.Constraint) error {
 	primary := 0
 	for _, constraint := range constraints {
 		if constraint.Type == catalog.ConstraintTypePrimary {
@@ -402,17 +407,23 @@ func namedTableConstraints(table string, constraints []catalog.Constraint, reser
 		}
 	}
 	if primary > 1 {
-		return nil, sqlFailure{1068, "42000", "multiple primary keys"}
+		return sqlFailure{1068, "42000", "multiple primary keys"}
 	}
-	return constraints, nil
+	return nil
+}
+
+func generatedUniqueName(constraint *catalog.Constraint, keys map[string]bool) bool {
+	if constraint.Type != catalog.ConstraintTypeUnique || constraint.Name != "" {
+		return false
+	}
+	constraint.Name = availableIndexName(constraint.Columns[0], keys)
+	keys[catalog.Key(constraint.Name)] = true
+	return true
 }
 
 func assignConstraintName(table string, constraint *catalog.Constraint, keys map[string]bool, checkNumber, foreignNumber int) (int, int) {
 	if constraint.Type == catalog.ConstraintTypePrimary {
 		constraint.Name = "PRIMARY"
-	}
-	if constraint.Type == catalog.ConstraintTypeUnique && constraint.Name == "" {
-		constraint.Name = availableIndexName(constraint.Columns[0], keys)
 	}
 	if constraint.Type == catalog.ConstraintTypeCheck && constraint.Name == "" {
 		checkNumber++

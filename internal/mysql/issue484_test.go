@@ -68,6 +68,7 @@ func TestIssue484DuplicateExplicitNamesFail(t *testing.T) {
 	for _, query := range []string{
 		"CREATE TABLE same_unique (a INT, b INT, CONSTRAINT a UNIQUE (a), CONSTRAINT a UNIQUE (b))",
 		"CREATE TABLE same_check (a INT, CHECK (a > 0), CONSTRAINT same_check_chk_1 CHECK (a < 10))",
+		"CREATE TABLE two_primary (a INT, b INT, PRIMARY KEY (a), PRIMARY KEY (b))",
 	} {
 		if _, err := executeStatement(executor, query); err == nil {
 			t.Fatalf("%s succeeded", query)
