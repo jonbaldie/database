@@ -26,6 +26,9 @@ func TestKeyFoldsCaseAndCanonicalEquivalents(t *testing.T) {
 			if got != c.same {
 				t.Fatalf("Key(%q)==Key(%q) = %v, want %v (%q vs %q)", c.left, c.right, got, c.same, Key(c.left), Key(c.right))
 			}
+			if SameIdentifier(c.left, c.right) != c.same {
+				t.Fatalf("SameIdentifier(%q, %q) = %v, want %v", c.left, c.right, !c.same, c.same)
+			}
 		})
 	}
 }
@@ -34,6 +37,19 @@ func TestKeyPreservesNothingButComparisonKey(t *testing.T) {
 	// The stored spelling is the caller's; Key only returns a comparison key.
 	if Key("Users") == "Users" {
 		t.Fatalf("Key should fold case, got %q", Key("Users"))
+	}
+}
+
+func TestIsInformationSchemaMatchesEquivalentSpellings(t *testing.T) {
+	for _, name := range []string{"information_schema", "INFORMATION_SCHEMA", "Information_Schema", "information_\u017fchema"} {
+		if !IsInformationSchema(name) {
+			t.Fatalf("IsInformationSchema(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"", "information", "information_schema2", "ｉnformation_schema"} {
+		if IsInformationSchema(name) {
+			t.Fatalf("IsInformationSchema(%q) = true, want false", name)
+		}
 	}
 }
 

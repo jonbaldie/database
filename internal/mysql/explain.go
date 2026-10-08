@@ -392,7 +392,7 @@ func foreignKeyTargets(constraint catalog.Constraint, ownerNamespace, namespaceN
 	if targetNamespace == "" {
 		targetNamespace = ownerNamespace
 	}
-	return catalog.Key(targetNamespace) == catalog.Key(namespaceName) && catalog.Key(constraint.ReferencedTable) == catalog.Key(tableName)
+	return catalog.SameIdentifier(targetNamespace, namespaceName) && catalog.SameIdentifier(constraint.ReferencedTable, tableName)
 }
 
 func explainTable(relations *relationExecutor, parts []string) (string, string, catalog.Table, error) {

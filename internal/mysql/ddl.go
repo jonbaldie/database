@@ -187,7 +187,7 @@ func dropIndexFromDefinition(definition *catalog.Definition, namespaceName, tabl
 
 func withoutTableIndex(indexes []catalog.Index, name string) ([]catalog.Index, bool) {
 	for number, index := range indexes {
-		if catalog.Key(index.Name) != catalog.Key(name) {
+		if !catalog.SameIdentifier(index.Name, name) {
 			continue
 		}
 		return append(indexes[:number:number], indexes[number+1:]...), true
@@ -204,7 +204,7 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 	if !ok {
 		return sqlFailure{1064, "42000", "malformed DROP DATABASE"}
 	}
-	if strings.EqualFold(name, informationSchemaName) {
+	if catalog.IsInformationSchema(name) {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
 	noOp := false
@@ -215,7 +215,7 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1008, "HY000", err.Error()})
 	}
-	if strings.EqualFold(s.database, name) {
+	if catalog.SameIdentifier(s.database, name) {
 		s.database = ""
 	}
 	recordDropDatabaseDiagnostic(s.session, name, noOp)
@@ -444,7 +444,7 @@ func (s *ddlExecutor) renameTable(query string) error {
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(fromNamespace, toNamespace) {
+	if !catalog.SameIdentifier(fromNamespace, toNamespace) {
 		return sqlFailure{1146, "42S02", "cross-database table rename is unsupported"}
 	}
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
@@ -521,7 +521,7 @@ func columnRenames(actions []ddlAction) [][2]string {
 		if action.kind != ddlRenameColumn && action.kind != ddlModifyColumn {
 			continue
 		}
-		if action.newName == "" || catalog.Key(action.newName) == catalog.Key(action.name) {
+		if action.newName == "" || catalog.SameIdentifier(action.newName, action.name) {
 			continue
 		}
 		renames = append(renames, [2]string{action.name, action.newName})
@@ -930,7 +930,7 @@ func dropTableIndex(table *catalog.Table, name string) error {
 
 func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]catalog.Constraint, bool) {
 	for number, constraint := range constraints {
-		if constraint.Type != catalog.ConstraintTypeUnique || catalog.Key(constraint.Name) != catalog.Key(name) {
+		if constraint.Type != catalog.ConstraintTypeUnique || !catalog.SameIdentifier(constraint.Name, name) {
 			continue
 		}
 		return append(constraints[:number:number], constraints[number+1:]...), true
@@ -940,13 +940,13 @@ func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]c
 
 func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool) error {
 	for number := range table.Indexes {
-		if catalog.Key(table.Indexes[number].Name) != catalog.Key(name) {
+		if !catalog.SameIdentifier(table.Indexes[number].Name, name) {
 			continue
 		}
 		table.Indexes[number].Invisible = invisible
 		return nil
 	}
-	if catalog.Key(name) == catalog.Key("PRIMARY") {
+	if catalog.SameIdentifier(name, "PRIMARY") {
 		if invisible {
 			return sqlFailure{3522, "HY000", "a primary key index cannot be invisible"}
 		}
@@ -963,7 +963,7 @@ func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) err
 	}
 	constraint = named[len(named)-1]
 	for _, existing := range table.Constraints {
-		if catalog.Key(existing.Name) == catalog.Key(constraint.Name) {
+		if catalog.SameIdentifier(existing.Name, constraint.Name) {
 			return errors.New("constraint already exists")
 		}
 	}
@@ -1083,7 +1083,7 @@ func renameTableConstraintColumns(table *catalog.Table, oldName, newName string)
 
 func renameColumnList(columns []string, oldName, newName string) {
 	for index := range columns {
-		if catalog.Key(columns[index]) == catalog.Key(oldName) {
+		if catalog.SameIdentifier(columns[index], oldName) {
 			columns[index] = newName
 		}
 	}
@@ -1092,7 +1092,7 @@ func renameColumnList(columns []string, oldName, newName string) {
 func renameTableIndexColumns(table *catalog.Table, oldName, newName string) {
 	for index := range table.Indexes {
 		for part := range table.Indexes[index].Parts {
-			if catalog.Key(table.Indexes[index].Parts[part].Column) == catalog.Key(oldName) {
+			if catalog.SameIdentifier(table.Indexes[index].Parts[part].Column, oldName) {
 				table.Indexes[index].Parts[part].Column = newName
 			}
 		}

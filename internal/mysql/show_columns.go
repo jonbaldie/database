@@ -131,7 +131,7 @@ func (s *catalogExecutor) resolveShowTableParts(parts []string, namespaceOverrid
 		return "", catalog.Table{}, sqlFailure{1146, "42S02", "table '" + namespaceName + "." + tableName + "' doesn't exist"}
 	}
 	if table.Name == "" {
-		table.Name = strings.ToLower(tableName)
+		table.Name = catalog.Key(tableName)
 	}
 	return namespaceName, table, nil
 }
@@ -270,7 +270,7 @@ func showColumnPrimaryKey(table catalog.Table, column string) bool {
 func showColumnSecondaryKey(table catalog.Table, column string, columnIndex int) string {
 	attribute := catalog.ColumnAttributeAt(table, columnIndex)
 	for _, index := range effectiveTableIndexes(table) {
-		if len(index.Parts) == 0 || index.Parts[0].Column == "" || !identifiersEqual(index.Parts[0].Column, column) {
+		if len(index.Parts) == 0 || index.Parts[0].Column == "" || !catalog.SameIdentifier(index.Parts[0].Column, column) {
 			continue
 		}
 		if index.Unique && !attribute.Nullable {
@@ -283,7 +283,7 @@ func showColumnSecondaryKey(table catalog.Table, column string, columnIndex int)
 
 func constraintContainsColumn(constraint catalog.Constraint, column string) bool {
 	for _, name := range constraint.Columns {
-		if identifiersEqual(name, column) {
+		if catalog.SameIdentifier(name, column) {
 			return true
 		}
 	}

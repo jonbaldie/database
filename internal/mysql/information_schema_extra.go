@@ -115,7 +115,7 @@ func columnNullable(table catalog.Table, name string) bool {
 		return true
 	}
 	for index, column := range table.Columns {
-		if !identifiersEqual(column, name) {
+		if !catalog.SameIdentifier(column, name) {
 			continue
 		}
 		if index < len(table.ColumnAttributes) {
@@ -246,11 +246,11 @@ func informationSchemaReferentialRows(definition catalog.Definition) [][]metadat
 // is not visible or no such key exists.
 func referencedUniqueConstraintName(definition catalog.Definition, namespaceName string, constraint catalog.Constraint) metadataValue {
 	for _, namespace := range definition.Namespaces {
-		if !identifiersEqual(namespace.Name, namespaceName) {
+		if !catalog.SameIdentifier(namespace.Name, namespaceName) {
 			continue
 		}
 		for _, table := range namespace.Tables {
-			if !identifiersEqual(table.Name, constraint.ReferencedTable) {
+			if !catalog.SameIdentifier(table.Name, constraint.ReferencedTable) {
 				continue
 			}
 			for _, index := range effectiveTableIndexes(table) {
@@ -268,7 +268,7 @@ func indexCoversColumns(index catalog.Index, columns []string) bool {
 		return false
 	}
 	for number, part := range index.Parts {
-		if part.Column == "" || part.PrefixLength > 0 || !identifiersEqual(part.Column, columns[number]) {
+		if part.Column == "" || part.PrefixLength > 0 || !catalog.SameIdentifier(part.Column, columns[number]) {
 			return false
 		}
 	}
