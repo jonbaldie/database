@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -140,13 +141,37 @@ func TestInitializeCreatesStoppedInspectableInstance(t *testing.T) {
 		InstanceID   string `json:"instance_id"`
 		State        string `json:"state"`
 		AdminAccount string `json:"admin_account"`
-		PasswordHash string `json:"password_hash"`
 	}
 	if err := json.Unmarshal(metadata, &instance); err != nil {
 		t.Fatalf("decode instance metadata %q: %v", metadata, err)
 	}
-	if instance.Schema != "database.instance/v1" || instance.InstanceID != output.InstanceID || instance.State != "stopped" || instance.AdminAccount != "admin" || instance.PasswordHash == "" {
-		t.Fatalf("instance metadata = %#v", instance)
+	if instance.Schema != "database.instance/v1" || instance.InstanceID != output.InstanceID || instance.State != "stopped" || instance.AdminAccount != "admin" || strings.Contains(string(metadata), `"password_hash"`) {
+		t.Fatalf("instance metadata = %#v; contents = %s", instance, metadata)
+	}
+	catalogContents, err := os.ReadFile(filepath.Join(directory, "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog struct {
+		Accounts map[string]struct {
+			Name         string `json:"name"`
+			PasswordHash string `json:"password_hash"`
+			Grants       []struct {
+				Privilege string `json:"privilege"`
+			} `json:"grants"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(catalogContents, &catalog); err != nil {
+		t.Fatalf("decode catalog %q: %v", catalogContents, err)
+	}
+	admin, found := catalog.Accounts["admin"]
+	wantGrants := []string{"ACCOUNT_MANAGER", "NAMESPACE_MANAGER", "OPERATIONAL_OBSERVATION", "OPERATIONAL_CONTROL"}
+	var grants []string
+	for _, grant := range admin.Grants {
+		grants = append(grants, grant.Privilege)
+	}
+	if !found || admin.Name != "admin" || admin.PasswordHash == "" || !reflect.DeepEqual(grants, wantGrants) {
+		t.Fatalf("initial administrator in catalog = %#v", admin)
 	}
 
 	second := runner.Run(context.Background(), "init", directory, "--password-stdin", "--format=json")

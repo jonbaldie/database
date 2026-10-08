@@ -227,19 +227,12 @@ func (s *session) sessionAccount() (catalog.Account, bool) {
 	return s.server.config.Catalog.Account(s.username)
 }
 
-func (s *session) unconfiguredAccountPermitted() bool {
-	return s.server != nil && s.server.config.Username == s.username && s.server.config.PasswordHash != ""
-}
-
 func (s *session) requireGrant(privilege, namespace string) error {
 	if s == nil || s.username == "" {
 		return nil
 	}
 	account, found := s.sessionAccount()
 	if !found {
-		if s.unconfiguredAccountPermitted() {
-			return nil
-		}
 		return grantFailure(namespace)
 	}
 	if account.Locked || accountGrantIndex(account, privilege, namespace) < 0 {

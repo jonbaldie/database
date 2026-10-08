@@ -288,7 +288,28 @@ func openServerData(directory string) (instance.Metadata, *catalog.Store, error)
 	if err != nil {
 		return instance.Metadata{}, nil, fmt.Errorf("open catalog: %w", err)
 	}
+	if err := prepareServerAccounts(directory, &metadata, store); err != nil {
+		return instance.Metadata{}, nil, err
+	}
 	return metadata, store, nil
+}
+
+func prepareServerAccounts(directory string, metadata *instance.Metadata, store *catalog.Store) error {
+	if len(store.Snapshot().Accounts) == 0 {
+		if metadata.LegacyPasswordHash == "" {
+			return errors.New("catalog has no accounts and no legacy administrator credential")
+		}
+		if _, err := store.MigrateInitialAdministrator(metadata.AdminAccount, metadata.LegacyPasswordHash); err != nil {
+			return fmt.Errorf("migrate initial administrator: %w", err)
+		}
+	}
+	if len(store.Snapshot().Accounts) == 0 {
+		return errors.New("catalog has no accounts")
+	}
+	if err := instance.ClearLegacyPasswordHash(directory, metadata); err != nil {
+		return fmt.Errorf("remove legacy administrator credential: %w", err)
+	}
+	return nil
 }
 
 type diagnosticsServer struct {
@@ -320,8 +341,7 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 		return nil, nil
 	}
 	config := mysql.Config{
-		Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash,
-		Instance: metadata, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile,
+		Catalog: store, Instance: metadata, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile,
 		MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount,
 		MaxAllowedPacket: opts.MaxAllowedPacket,
 		LockWaitTimeout:  millisecondsDuration(opts.LockWaitTimeoutMilliseconds),

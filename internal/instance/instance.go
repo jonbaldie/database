@@ -2,6 +2,7 @@
 package instance
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,17 +13,35 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/credential"
 )
 
 type Metadata struct {
-	Schema           string `json:"schema"`
-	InstanceID       string `json:"instance_id"`
-	SourceInstanceID string `json:"source_instance_id,omitempty"`
-	DataVersion      string `json:"data_version,omitempty"`
-	State            string `json:"state"`
-	AdminAccount     string `json:"admin_account"`
-	PasswordHash     string `json:"password_hash"`
+	Schema             string `json:"schema"`
+	InstanceID         string `json:"instance_id"`
+	SourceInstanceID   string `json:"source_instance_id,omitempty"`
+	DataVersion        string `json:"data_version,omitempty"`
+	State              string `json:"state"`
+	AdminAccount       string `json:"admin_account"`
+	LegacyPasswordHash string `json:"-"`
+}
+
+func (metadata *Metadata) UnmarshalJSON(contents []byte) error {
+	type metadataFields Metadata
+	var stored metadataFields
+	if err := json.Unmarshal(contents, &stored); err != nil {
+		return err
+	}
+	var legacy struct {
+		PasswordHash string `json:"password_hash"`
+	}
+	if err := json.Unmarshal(contents, &legacy); err != nil {
+		return err
+	}
+	*metadata = Metadata(stored)
+	metadata.LegacyPasswordHash = legacy.PasswordHash
+	return nil
 }
 
 const (
@@ -39,17 +58,78 @@ func Load(directory string) (Metadata, error) {
 	if err := json.Unmarshal(contents, &metadata); err != nil {
 		return Metadata{}, fmt.Errorf("decode instance metadata: %w", err)
 	}
-	if metadata.Schema != "database.instance/v1" || metadata.InstanceID == "" || metadata.AdminAccount == "" || metadata.PasswordHash == "" {
+	if metadata.Schema != "database.instance/v1" || metadata.InstanceID == "" || metadata.AdminAccount == "" {
 		return Metadata{}, errors.New("invalid instance metadata")
 	}
 	return metadata, nil
 }
 
-// NewRestoredMetadata gives a restored instance a new identity while keeping
-// the source identity as durable provenance. Credentials and the administrator
-// account remain unchanged, and a restored instance is always stopped.
+// ClearLegacyPasswordHash removes the old init credential from instance.json
+// after the catalog has imported it or has shown that it is no longer needed.
+func ClearLegacyPasswordHash(directory string, metadata *Metadata) error {
+	if metadata.LegacyPasswordHash == "" {
+		return nil
+	}
+	contents, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode instance metadata: %w", err)
+	}
+	contents = append(contents, '\n')
+	if err := replaceInstanceMetadata(directory, contents); err != nil {
+		return err
+	}
+	metadata.LegacyPasswordHash = ""
+	return nil
+}
+
+func replaceInstanceMetadata(directory string, contents []byte) error {
+	file, err := os.CreateTemp(directory, ".instance-*.tmp")
+	if err != nil {
+		return fmt.Errorf("stage instance metadata: %w", err)
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if err := writeSyncedFile(file, contents); err != nil {
+		return fmt.Errorf("write instance metadata: %w", err)
+	}
+	if err := os.Rename(temporary, filepath.Join(directory, "instance.json")); err != nil {
+		return fmt.Errorf("install instance metadata: %w", err)
+	}
+	return syncInstanceDirectory(directory)
+}
+
+func writeSyncedFile(file *os.File, contents []byte) error {
+	if _, err := file.Write(contents); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func syncInstanceDirectory(directory string) error {
+	file, err := os.Open(directory)
+	if err != nil {
+		return fmt.Errorf("open data directory: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync data directory: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close data directory: %w", err)
+	}
+	return nil
+}
+
+// NewRestoredMetadata gives a restored instance a new identity and keeps the
+// source identity and administrator name as provenance. It leaves accounts in
+// the catalog and sets the restored instance state to stopped.
 func NewRestoredMetadata(source Metadata) (Metadata, error) {
-	if source.Schema != "database.instance/v1" || source.InstanceID == "" || source.AdminAccount == "" || source.PasswordHash == "" {
+	if source.Schema != "database.instance/v1" || source.InstanceID == "" || source.AdminAccount == "" {
 		return Metadata{}, errors.New("invalid source instance metadata")
 	}
 	var idBytes [16]byte
@@ -75,11 +155,12 @@ func Initialize(directory, account, password string) (Metadata, error) {
 	if err != nil {
 		return Metadata{}, err
 	}
-	metadata, err := newMetadata(account, password)
+	metadata, err := newMetadata(account)
 	if err != nil {
 		return Metadata{}, joinInitializationErrors(err, claim.discard())
 	}
-	if err := persistInitializedInstance(claim, metadata); err != nil {
+	initialAccount := catalog.InitialAdministrator(account, credential.PasswordHash(password))
+	if err := persistInitializedInstance(claim, metadata, initialAccount); err != nil {
 		return Metadata{}, joinInitializationErrors(err, claim.discard())
 	}
 	if err := claim.release(); err != nil {
@@ -211,7 +292,7 @@ func removeDirectory(path string) error {
 	return nil
 }
 
-func newMetadata(account, password string) (Metadata, error) {
+func newMetadata(account string) (Metadata, error) {
 	var idBytes [16]byte
 	if _, err := rand.Read(idBytes[:]); err != nil {
 		return Metadata{}, fmt.Errorf("generate instance identity: %w", err)
@@ -222,18 +303,25 @@ func newMetadata(account, password string) (Metadata, error) {
 		DataVersion:  CurrentDataVersion,
 		State:        "stopped",
 		AdminAccount: account,
-		PasswordHash: credential.PasswordHash(password),
 	}, nil
 }
 
-func persistInitializedInstance(claim initializationClaim, metadata Metadata) error {
+func persistInitializedInstance(claim initializationClaim, metadata Metadata, initialAccount catalog.Account) error {
 	metadataContents, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode instance metadata: %w", err)
 	}
 	metadataContents = append(metadataContents, '\n')
+	var catalogContents bytes.Buffer
+	definition := catalog.Definition{
+		Namespaces: map[string]catalog.Namespace{},
+		Accounts:   map[string]catalog.Account{initialAccount.Name: initialAccount},
+	}
+	if err := catalog.Write(&catalogContents, definition); err != nil {
+		return fmt.Errorf("encode catalog: %w", err)
+	}
 	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
-	if err := paths.writeStaged(metadataContents); err != nil {
+	if err := paths.writeStaged(catalogContents.Bytes(), metadataContents); err != nil {
 		return err
 	}
 	return paths.commit()
@@ -244,8 +332,8 @@ type initializationPaths struct {
 	staging   string
 }
 
-func (paths initializationPaths) writeStaged(metadata []byte) error {
-	if err := writeDurable(paths.catalogTemporary(), []byte("{\n  \"namespaces\": {}\n}\n")); err != nil {
+func (paths initializationPaths) writeStaged(catalog, metadata []byte) error {
+	if err := writeDurable(paths.catalogTemporary(), catalog); err != nil {
 		return fmt.Errorf("write catalog: %w", err)
 	}
 	if err := writeDurable(paths.metadataTemporary(), metadata); err != nil {
