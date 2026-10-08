@@ -277,29 +277,33 @@ func namedTableIndexes(tableName string, indexes []catalog.Index, constraints []
 	result := catalog.CloneIndexes(indexes)
 	taken := tableConstraintIndexNames(constraints)
 	for number := range result {
-		if err := assignIndexName(tableName, &result[number], taken); err != nil {
-			return nil, err
+		index := &result[number]
+		if index.Name == "" {
+			index.Name = availableIndexName(indexNameBase(tableName, *index), taken)
 		}
+		key := catalog.Key(index.Name)
+		if taken[key] {
+			return nil, sqlFailure{1061, "42000", "duplicate key name '" + index.Name + "'"}
+		}
+		taken[key] = true
 	}
 	return result, nil
-}
-
-func assignIndexName(tableName string, index *catalog.Index, taken map[string]bool) error {
-	if index.Name == "" {
-		index.Name = availableIndexName(indexNameBase(tableName, *index), taken)
-	}
-	key := catalog.Key(index.Name)
-	if taken[key] {
-		return sqlFailure{1061, "42000", "duplicate key name '" + index.Name + "'"}
-	}
-	taken[key] = true
-	return nil
 }
 
 func indexKeyNames(indexes []catalog.Index) map[string]bool {
 	taken := make(map[string]bool, len(indexes))
 	for _, index := range indexes {
 		taken[catalog.Key(index.Name)] = true
+	}
+	return taken
+}
+
+func explicitIndexNames(indexes []catalog.Index) map[string]bool {
+	taken := map[string]bool{}
+	for _, index := range indexes {
+		if index.Name != "" {
+			taken[catalog.Key(index.Name)] = true
+		}
 	}
 	return taken
 }

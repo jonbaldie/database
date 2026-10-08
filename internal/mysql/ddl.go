@@ -963,7 +963,7 @@ func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) err
 	}
 	constraint = named[len(named)-1]
 	for _, existing := range table.Constraints {
-		if constraintSymbolKey(existing) == constraintSymbolKey(constraint) {
+		if existing.Type == constraint.Type && catalog.Key(existing.Name) == catalog.Key(constraint.Name) {
 			return errors.New("constraint already exists")
 		}
 	}

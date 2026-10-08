@@ -371,81 +371,48 @@ func consumeParenthesized(value string) (string, string, bool) {
 	return "", "", false
 }
 
-type tableKeyRef struct {
-	isIndex bool
-	offset  int
-}
-
 func namedTableConstraints(table string, constraints []catalog.Constraint, reservedKeys map[string]bool) ([]catalog.Constraint, error) {
-	if err := prepareConstraintSymbols(table, constraints); err != nil {
-		return nil, err
-	}
-	taken := copyKeyNames(reservedKeys)
-	for index := range constraints {
-		constraint := &constraints[index]
-		if !isIndexedConstraint(*constraint) {
-			continue
-		}
-		if err := assignIndexedConstraintName(constraint, taken); err != nil {
-			return nil, err
-		}
-	}
-	if err := rejectMultiplePrimaryKeys(constraints); err != nil {
-		return nil, err
-	}
-	return constraints, nil
-}
-
-func nameCreateTableKeys(table string, constraints []catalog.Constraint, indexes []catalog.Index, order []tableKeyRef) ([]catalog.Constraint, []catalog.Index, error) {
-	if err := prepareConstraintSymbols(table, constraints); err != nil {
-		return nil, nil, err
-	}
-	namedIndexes := catalog.CloneIndexes(indexes)
-	taken := map[string]bool{}
-	for _, ref := range order {
-		if err := assignCreateTableKey(table, constraints, namedIndexes, ref, taken); err != nil {
-			return nil, nil, err
-		}
-	}
-	if err := rejectMultiplePrimaryKeys(constraints); err != nil {
-		return nil, nil, err
-	}
-	return constraints, namedIndexes, nil
-}
-
-func assignCreateTableKey(table string, constraints []catalog.Constraint, indexes []catalog.Index, ref tableKeyRef, taken map[string]bool) error {
-	if ref.isIndex {
-		return assignIndexName(table, &indexes[ref.offset], taken)
-	}
-	return assignIndexedConstraintName(&constraints[ref.offset], taken)
-}
-
-func prepareConstraintSymbols(table string, constraints []catalog.Constraint) error {
 	seen := map[string]bool{}
+	keys := copyKeyNames(reservedKeys)
 	checkNumber, foreignNumber := 0, 0
 	for index := range constraints {
 		constraint := &constraints[index]
 		if len(constraint.Columns) == 0 && constraint.Type != catalog.ConstraintTypeCheck {
-			return sqlFailure{1064, "42000", "constraint requires columns"}
+			return nil, sqlFailure{1064, "42000", "constraint requires columns"}
 		}
-		if unnamedUnique(*constraint) {
+		autoUnique := constraint.Type == catalog.ConstraintTypeUnique && constraint.Name == ""
+		checkNumber, foreignNumber = assignConstraintName(table, constraint, keys, checkNumber, foreignNumber)
+		if autoUnique {
+			keys[catalog.Key(constraint.Name)] = true
 			continue
 		}
-		checkNumber, foreignNumber = assignConstraintSymbol(table, constraint, checkNumber, foreignNumber)
-		if err := recordConstraintSymbol(seen, constraint.Name); err != nil {
-			return err
+		key := catalog.Key(constraint.Name)
+		if seen[key] {
+			return nil, sqlFailure{1061, "42000", "duplicate constraint name '" + constraint.Name + "'"}
+		}
+		seen[key] = true
+		if constraint.Type == catalog.ConstraintTypeUnique {
+			keys[key] = true
 		}
 	}
-	return nil
+	primary := 0
+	for _, constraint := range constraints {
+		if constraint.Type == catalog.ConstraintTypePrimary {
+			primary++
+		}
+	}
+	if primary > 1 {
+		return nil, sqlFailure{1068, "42000", "multiple primary keys"}
+	}
+	return constraints, nil
 }
 
-func unnamedUnique(constraint catalog.Constraint) bool {
-	return constraint.Type == catalog.ConstraintTypeUnique && constraint.Name == ""
-}
-
-func assignConstraintSymbol(table string, constraint *catalog.Constraint, checkNumber, foreignNumber int) (int, int) {
+func assignConstraintName(table string, constraint *catalog.Constraint, keys map[string]bool, checkNumber, foreignNumber int) (int, int) {
 	if constraint.Type == catalog.ConstraintTypePrimary {
 		constraint.Name = "PRIMARY"
+	}
+	if constraint.Type == catalog.ConstraintTypeUnique && constraint.Name == "" {
+		constraint.Name = availableIndexName(constraint.Columns[0], keys)
 	}
 	if constraint.Type == catalog.ConstraintTypeCheck && constraint.Name == "" {
 		checkNumber++
@@ -458,64 +425,10 @@ func assignConstraintSymbol(table string, constraint *catalog.Constraint, checkN
 	return checkNumber, foreignNumber
 }
 
-func recordConstraintSymbol(seen map[string]bool, name string) error {
-	key := catalog.Key(name)
-	if seen[key] {
-		return sqlFailure{1061, "42000", "duplicate constraint name '" + name + "'"}
-	}
-	seen[key] = true
-	return nil
-}
-
-func assignIndexedConstraintName(constraint *catalog.Constraint, taken map[string]bool) error {
-	if constraint.Type == catalog.ConstraintTypePrimary {
-		constraint.Name = "PRIMARY"
-	}
-	if unnamedUnique(*constraint) {
-		constraint.Name = availableIndexName(constraint.Columns[0], taken)
-	}
-	key := catalog.Key(constraint.Name)
-	if taken[key] {
-		return sqlFailure{1061, "42000", "duplicate constraint name '" + constraint.Name + "'"}
-	}
-	taken[key] = true
-	return nil
-}
-
-func isIndexedConstraint(constraint catalog.Constraint) bool {
-	return constraint.Type == catalog.ConstraintTypePrimary || constraint.Type == catalog.ConstraintTypeUnique
-}
-
-func constraintSymbolKey(constraint catalog.Constraint) string {
-	return constraintNameNamespace(constraint.Type) + "\x00" + catalog.Key(constraint.Name)
-}
-
-func constraintNameNamespace(constraintType string) string {
-	if isIndexedConstraint(catalog.Constraint{Type: constraintType}) {
-		return "key"
-	}
-	return constraintType
-}
-
-func rejectMultiplePrimaryKeys(constraints []catalog.Constraint) error {
-	primary := 0
-	for _, constraint := range constraints {
-		if constraint.Type == catalog.ConstraintTypePrimary {
-			primary++
-		}
-	}
-	if primary > 1 {
-		return sqlFailure{1068, "42000", "multiple primary keys"}
-	}
-	return nil
-}
-
 func copyKeyNames(names map[string]bool) map[string]bool {
 	taken := make(map[string]bool, len(names))
-	for name, present := range names {
-		if present {
-			taken[name] = true
-		}
+	for name := range names {
+		taken[name] = true
 	}
 	return taken
 }

@@ -273,7 +273,7 @@ func validateConstraintDeclaration(seen map[string]bool, previous, definition ca
 	if constraint.Name == "" || constraint.Type == "" {
 		return errorsConstraintDefinition("constraint requires a name and type")
 	}
-	key := constraintSymbolKey(constraint)
+	key := constraint.Type + "\x00" + catalog.Key(constraint.Name)
 	if seen[key] {
 		return errorsConstraintDefinition("duplicate constraint name '" + constraint.Name + "'")
 	}
