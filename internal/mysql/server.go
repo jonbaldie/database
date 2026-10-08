@@ -1440,7 +1440,7 @@ func parseCreateTable(query string) (tableDefinition, error) {
 	if err := validateTableColumns(columns.columns); err != nil {
 		return tableDefinition{}, err
 	}
-	constraints, err := namedTableConstraints(target[len(target)-1], columns.constraints)
+	constraints, err := namedTableConstraints(target[len(target)-1], columns.constraints, explicitIndexNames(columns.indexes))
 	if err != nil {
 		return tableDefinition{}, err
 	}
