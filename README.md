@@ -309,7 +309,9 @@ GOMAXPROCS=2 GOFLAGS='-p=2' make mutation
 [`scripts/mutation-threshold.sh`](scripts/mutation-threshold.sh) checks changed
 production lines, including staged and unstaged edits. It uses the PR base in CI
 and `origin/main` locally. `MUTATION_THRESHOLD` is a fraction and defaults to
-`0.80`; both overall and covered-code MSI must meet it. Exit 4 is a gate failure;
+`0.80`; both overall and covered-code MSI must meet it. Mutant timeouts are twice
+the measured clean coverage run, with an uncached baseline and a finite limit.
+Exit 4 is a gate failure;
 other nonzero exits are tool errors. Untested changed mutants fail the gate.
 The gate leaves existing reports intact and deletes its private cache on exit.
 If you set `GOCACHE` to reuse a cache you own, delete it at the end of the session.

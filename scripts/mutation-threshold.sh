@@ -47,6 +47,7 @@ mutago \
 	--config "$temporary_directory/config.yml" \
 	--workers=2 \
 	--exec-timeout 10 \
+	--timeout-coefficient 2 \
 	--coverage \
 	--git-diff-lines \
 	--git-diff-base "$base" \

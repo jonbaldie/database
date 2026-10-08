@@ -130,3 +130,22 @@ if ! grep -Fq 'mutation score is 100.00%' "$temporary_directory/unstaged.log"; t
 	exit 1
 fi
 echo "mutation threshold regression: staged and unstaged lines were checked"
+
+cat > slow_test.go <<'EOF'
+package mutationprobe
+
+import (
+	"testing"
+	"time"
+)
+
+func TestSlowHealthySuite(t *testing.T) {
+	time.Sleep(11 * time.Second)
+}
+EOF
+GITHUB_BASE_SHA="$local_base" "$gate_script" > "$temporary_directory/slow-suite.log" 2>&1
+if ! grep -Fq 'mutation score is 100.00%' "$temporary_directory/slow-suite.log"; then
+	echo "mutation threshold regression: a healthy suite slower than ten seconds was rejected" >&2
+	exit 1
+fi
+echo "mutation threshold regression: the mutant budget follows the healthy baseline"
