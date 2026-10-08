@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Mutation testing is deliberately changed-code scoped. The CI job checks out
-# the complete history so this script can compare the PR with its merge base.
+# Compare changed production lines with the PR merge base, including local edits.
 threshold="${MUTATION_THRESHOLD:-0.80}"
 base="${GITHUB_BASE_SHA:-}"
 if [[ -z "$base" ]]; then
@@ -15,16 +14,13 @@ if [[ -z "$base" ]]; then
 	done
 fi
 if [[ -z "$base" ]]; then
-	base="$(git merge-base HEAD origin/main 2>/dev/null || true)"
-fi
-if [[ -z "$base" ]]; then
 	echo "mutation threshold: cannot determine the comparison base" >&2
 	exit 1
 fi
+git rev-parse --verify "$base^{commit}" >/dev/null
 
 files=()
 while IFS= read -r file; do
-	# A deleted file has nothing left to mutate.
 	[[ -f "$file" ]] && files+=("$file")
 done < <({ git diff --name-only "$base"...HEAD; git diff --cached --name-only; git diff --name-only; } | sort -u | sed -nE '/\.go$/p' | grep -vE '(_test\.go|^$)' || true)
 if ((${#files[@]} == 0)); then
@@ -32,45 +28,29 @@ if ((${#files[@]} == 0)); then
 	exit 0
 fi
 
-if ! command -v go-mutesting >/dev/null 2>&1; then
-	echo "mutation threshold: install go-mutesting before running this gate" >&2
+if ! command -v mutago >/dev/null 2>&1; then
+	echo "mutation threshold: install mutago before running this gate" >&2
 	exit 1
 fi
+minimum="$(awk -v threshold="$threshold" 'BEGIN {
+	if (threshold !~ /^[0-9]+([.][0-9]+)?$/ || threshold < 0 || threshold > 1) exit 1
+	print threshold * 100
+}')" || { echo "mutation threshold: MUTATION_THRESHOLD must be between 0 and 1" >&2; exit 1; }
 
-packages=()
-patterns=()
-for file in "${files[@]}"; do
-	directory="$(dirname "$file")"
-	package="$(go list "./$directory")"
-	packages+=("$package")
-	while read -r function; do
-		[[ -n "$function" ]] && patterns+=("$function")
-	done < <(sed -nE 's/^func ([A-Za-z_][A-Za-z0-9_]*).*/\1/p' "$file")
-done
+temporary_directory="$(mktemp -d)"
+trap 'rm -rf "$temporary_directory"' EXIT
+export GOCACHE="${GOCACHE:-$temporary_directory/cache}"
+# Include code without tests. Keep existing reports intact.
+printf 'skip_without_test: false\njson_output: false\n' > "$temporary_directory/config.yml"
 
-unique_packages=()
-while IFS= read -r package; do
-	[[ -n "$package" ]] && unique_packages+=("$package")
-done < <(printf '%s\n' "${packages[@]}" | sort -u)
-packages=("${unique_packages[@]}")
-if ((${#patterns[@]} == 0)); then
-	echo "mutation threshold: changed files contain no mutatable functions"
-	exit 0
-fi
-match="$(IFS='|'; echo "${patterns[*]}")"
-output="$(mktemp)"
-trap 'rm -f "$output"' EXIT
-go-mutesting --match="$match" "${packages[@]}" 2>&1 | tee "$output"
-
-score="$(sed -nE 's/.*mutation score is ([0-9.]+).*/\1/p' "$output" | tail -1)"
-if [[ -z "$score" ]]; then
-	echo "mutation threshold: mutation tool did not report a score" >&2
-	exit 1
-fi
-awk -v score="$score" -v threshold="$threshold" 'BEGIN {
-	if (score + 0 < threshold + 0) {
-		printf "mutation threshold: %.2f is below required %.2f\n", score, threshold > "/dev/stderr"
-		exit 1
-	}
-	printf "mutation threshold: %.2f meets required %.2f\n", score, threshold
-}'
+mutago \
+	--config "$temporary_directory/config.yml" \
+	--workers=2 \
+	--exec-timeout 10 \
+	--coverage \
+	--git-diff-lines \
+	--git-diff-base "$base" \
+	--ignore-msi-with-no-mutations \
+	--min-msi "$minimum" \
+	--min-covered-msi "$minimum" \
+	"${files[@]}"
