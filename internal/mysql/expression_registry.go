@@ -449,7 +449,8 @@ func leastValue(arguments []exprValue) (exprValue, error) {
 
 // extremeValue folds the arguments to the greatest (direction 1) or least
 // (direction -1) value, propagating NULL and surfacing any comparison-domain
-// error.
+// error. The winner is converted to the merged argument type, so every row
+// matches the advertised column type whichever argument it selects.
 func extremeValue(arguments []exprValue, direction int) (exprValue, error) {
 	best := arguments[0]
 	for _, argument := range arguments {

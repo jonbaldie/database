@@ -32,6 +32,8 @@ func TestIssue473MixedNumericExtremesBinaryProtocol(t *testing.T) {
 		"INSERT INTO app.least_values VALUES (1, 2.5), (2, 0.5)",
 		"CREATE TABLE app.greatest_values (id INT PRIMARY KEY, d DOUBLE)",
 		"INSERT INTO app.greatest_values VALUES (1, 0.5), (2, 2.5)",
+		"CREATE TABLE app.decimal_values (id INT PRIMARY KEY, n DECIMAL(5,2))",
+		"INSERT INTO app.decimal_values VALUES (1, 2.50), (2, 0.50)",
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatalf("%s: %v", statement, err)
@@ -39,13 +41,16 @@ func TestIssue473MixedNumericExtremesBinaryProtocol(t *testing.T) {
 	}
 
 	cases := []struct {
-		name  string
-		query string
-		want  []string
+		name     string
+		query    string
+		want     []string
+		wantType string
 	}{
-		{"LEAST", "SELECT LEAST(id, d) FROM app.least_values ORDER BY id", []string{"1", "0.5"}},
-		{"LEASTReverseOrder", "SELECT LEAST(id, d) FROM app.least_values ORDER BY id DESC", []string{"0.5", "1"}},
-		{"GREATEST", "SELECT GREATEST(id, d) FROM app.greatest_values ORDER BY id", []string{"1", "2.5"}},
+		{"LEAST", "SELECT LEAST(id, d) FROM app.least_values ORDER BY id", []string{"1", "0.5"}, "DOUBLE"},
+		{"LEASTReverseOrder", "SELECT LEAST(id, d) FROM app.least_values ORDER BY id DESC", []string{"0.5", "1"}, "DOUBLE"},
+		{"GREATEST", "SELECT GREATEST(id, d) FROM app.greatest_values ORDER BY id", []string{"1", "2.5"}, "DOUBLE"},
+		{"LEASTDecimal", "SELECT LEAST(id, n) FROM app.decimal_values ORDER BY id", []string{"1.00", "0.50"}, "DECIMAL"},
+		{"GREATESTDecimal", "SELECT GREATEST(id, n) FROM app.decimal_values ORDER BY id", []string{"2.50", "2.00"}, "DECIMAL"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,7 +58,7 @@ func TestIssue473MixedNumericExtremesBinaryProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatalf("text %s: %v", tc.query, err)
 			}
-			checkIssue473Rows(t, "text "+tc.query, textRows, tc.want)
+			checkIssue473Rows(t, "text "+tc.query, textRows, tc.want, tc.wantType)
 
 			prepared, err := db.PrepareContext(ctx, tc.query)
 			if err != nil {
@@ -63,13 +68,13 @@ func TestIssue473MixedNumericExtremesBinaryProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatalf("binary %s: %v", tc.query, err)
 			}
-			checkIssue473Rows(t, tc.query, rows, tc.want)
+			checkIssue473Rows(t, tc.query, rows, tc.want, tc.wantType)
 			_ = prepared.Close()
 		})
 	}
 }
 
-func checkIssue473Rows(t *testing.T, query string, rows *sql.Rows, want []string) {
+func checkIssue473Rows(t *testing.T, query string, rows *sql.Rows, want []string, wantType string) {
 	t.Helper()
 	defer rows.Close()
 	columns, err := rows.ColumnTypes()
@@ -81,8 +86,8 @@ func checkIssue473Rows(t *testing.T, query string, rows *sql.Rows, want []string
 		t.Errorf("%s column count = %d, want 1", query, len(columns))
 		return
 	}
-	if got := columns[0].DatabaseTypeName(); got != "DOUBLE" {
-		t.Errorf("%s type = %s, want DOUBLE", query, got)
+	if got := columns[0].DatabaseTypeName(); got != wantType {
+		t.Errorf("%s type = %s, want %s", query, got, wantType)
 	}
 	var got []string
 	for rows.Next() {
