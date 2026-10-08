@@ -1865,7 +1865,7 @@ func setOrderColumn(expression string, columns []string) (int, error) {
 	}
 	found := -1
 	for index, name := range columns {
-		if catalog.SameIdentifier(name, expression) {
+		if identifiersEqual(name, expression) {
 			if found >= 0 {
 				return 0, sqlFailure{1052, "23000", "Column '" + expression + "' in order clause is ambiguous"}
 			}

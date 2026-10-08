@@ -5,8 +5,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func parseRelationalProjection(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope) ([]relationalProjection, bool, error) {
@@ -113,7 +111,7 @@ func wildcardProjections(expression string, columns []relationColumn) ([]relatio
 	}
 	projections := make([]relationalProjection, 0)
 	for index, column := range columns {
-		if catalog.SameIdentifier(column.qualifier, qualifier) {
+		if identifiersEqual(column.qualifier, qualifier) {
 			projections = append(projections, relationProjection(index, ""))
 		}
 	}
@@ -558,7 +556,7 @@ func projectionIndex(projections []relationalProjection, expression string) (int
 			return index, true
 		}
 		if name, identifier := singleIdentifier(expression); identifier &&
-			(catalog.SameIdentifier(projection.alias, name) || catalog.SameIdentifier(projection.name, name)) {
+			(identifiersEqual(projection.alias, name) || identifiersEqual(projection.name, name)) {
 			return index, true
 		}
 	}

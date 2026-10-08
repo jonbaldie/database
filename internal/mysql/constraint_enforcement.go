@@ -219,7 +219,7 @@ func uniqueIndexUnchanged(previous, table catalog.Table, index catalog.Index, co
 // same key parts. Only then have the previous rows already been checked.
 func previousUniqueIndex(previous catalog.Table, index catalog.Index) bool {
 	for _, candidate := range previous.Indexes {
-		if !candidate.Unique || !catalog.SameIdentifier(candidate.Name, index.Name) || len(candidate.Parts) != len(index.Parts) {
+		if !candidate.Unique || catalog.Key(candidate.Name) != catalog.Key(index.Name) || len(candidate.Parts) != len(index.Parts) {
 			continue
 		}
 		same := true
@@ -735,7 +735,7 @@ func tableHasReferencedKey(table catalog.Table, columns []string) bool {
 		}
 		matches := true
 		for index := range columns {
-			matches = matches && catalog.SameIdentifier(constraint.Columns[index], columns[index])
+			matches = matches && catalog.Key(constraint.Columns[index]) == catalog.Key(columns[index])
 		}
 		if matches {
 			return true

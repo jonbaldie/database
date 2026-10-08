@@ -2,7 +2,13 @@ package mysql
 
 import (
 	"strings"
+
+	"github.com/jonbaldie/database/internal/catalog"
 )
+
+func identifiersEqual(left, right string) bool {
+	return catalog.SameIdentifier(left, right)
+}
 
 func identifier(value string) string {
 	name, ok := singleIdentifier(value)

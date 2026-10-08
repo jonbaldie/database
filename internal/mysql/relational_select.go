@@ -764,7 +764,7 @@ func (p *relationalSelectPlan) chooseIndexAccesses() error {
 	}
 	for number := range p.source.joins {
 		for _, table := range p.source.tables {
-			if catalog.SameIdentifier(table.alias, p.source.joins[number].right.alias) {
+			if identifiersEqual(table.alias, p.source.joins[number].right.alias) {
 				p.source.joins[number].right.access = table.access
 				p.source.joins[number].right.bounds = table.bounds
 				p.source.joins[number].right.forced = table.forced
@@ -846,7 +846,7 @@ func indexCoversColumnProjection(parts map[string]bool, table relationalTableSou
 		return false
 	}
 	column := columns[position]
-	return catalog.SameIdentifier(column.qualifier, table.alias) && parts["column:"+catalog.Key(column.name)]
+	return identifiersEqual(column.qualifier, table.alias) && parts["column:"+catalog.Key(column.name)]
 }
 
 func normalizedIndexExpression(value string) string {
@@ -895,7 +895,7 @@ func namedIndexCandidates(indexes []catalog.Index, names []string, ignored map[s
 	result := make([]catalog.Index, 0, len(names))
 	for _, name := range names {
 		for _, index := range indexes {
-			if catalog.SameIdentifier(index.Name, name) && !ignored[catalog.Key(index.Name)] {
+			if catalog.Key(index.Name) == catalog.Key(name) && !ignored[catalog.Key(index.Name)] {
 				result = append(result, index)
 				break
 			}

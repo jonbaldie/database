@@ -79,7 +79,7 @@ func parseRelationalJoinCondition(kind, text string, left, right []relationColum
 
 func (source *relationalSource) appendTable(table relationalTableSource, using []string) error {
 	for _, existing := range source.tables {
-		if catalog.SameIdentifier(existing.alias, table.alias) {
+		if identifiersEqual(existing.alias, table.alias) {
 			return sqlFailure{1066, "42000", "Not unique table/alias: '" + table.alias + "'"}
 		}
 	}
@@ -142,10 +142,10 @@ func parseInformationSchemaTableSource(s *relationExecutor, parts []string, rema
 }
 
 func informationSchemaTableName(s *relationExecutor, parts []string) (string, bool) {
-	if len(parts) == 2 && catalog.IsInformationSchema(parts[0]) {
+	if len(parts) == 2 && strings.EqualFold(parts[0], informationSchemaName) {
 		return parts[1], true
 	}
-	if len(parts) == 1 && s != nil && catalog.IsInformationSchema(s.database) {
+	if len(parts) == 1 && s != nil && strings.EqualFold(s.database, informationSchemaName) {
 		return parts[0], true
 	}
 	return "", false

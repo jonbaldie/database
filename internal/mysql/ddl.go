@@ -187,7 +187,7 @@ func dropIndexFromDefinition(definition *catalog.Definition, namespaceName, tabl
 
 func withoutTableIndex(indexes []catalog.Index, name string) ([]catalog.Index, bool) {
 	for number, index := range indexes {
-		if !catalog.SameIdentifier(index.Name, name) {
+		if catalog.Key(index.Name) != catalog.Key(name) {
 			continue
 		}
 		return append(indexes[:number:number], indexes[number+1:]...), true
@@ -521,7 +521,7 @@ func columnRenames(actions []ddlAction) [][2]string {
 		if action.kind != ddlRenameColumn && action.kind != ddlModifyColumn {
 			continue
 		}
-		if action.newName == "" || catalog.SameIdentifier(action.newName, action.name) {
+		if action.newName == "" || catalog.Key(action.newName) == catalog.Key(action.name) {
 			continue
 		}
 		renames = append(renames, [2]string{action.name, action.newName})
@@ -930,7 +930,7 @@ func dropTableIndex(table *catalog.Table, name string) error {
 
 func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]catalog.Constraint, bool) {
 	for number, constraint := range constraints {
-		if constraint.Type != catalog.ConstraintTypeUnique || !catalog.SameIdentifier(constraint.Name, name) {
+		if constraint.Type != catalog.ConstraintTypeUnique || catalog.Key(constraint.Name) != catalog.Key(name) {
 			continue
 		}
 		return append(constraints[:number:number], constraints[number+1:]...), true
@@ -940,13 +940,13 @@ func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]c
 
 func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool) error {
 	for number := range table.Indexes {
-		if !catalog.SameIdentifier(table.Indexes[number].Name, name) {
+		if catalog.Key(table.Indexes[number].Name) != catalog.Key(name) {
 			continue
 		}
 		table.Indexes[number].Invisible = invisible
 		return nil
 	}
-	if catalog.SameIdentifier(name, "PRIMARY") {
+	if catalog.Key(name) == catalog.Key("PRIMARY") {
 		if invisible {
 			return sqlFailure{3522, "HY000", "a primary key index cannot be invisible"}
 		}
@@ -963,7 +963,7 @@ func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) err
 	}
 	constraint = named[len(named)-1]
 	for _, existing := range table.Constraints {
-		if catalog.SameIdentifier(existing.Name, constraint.Name) {
+		if catalog.Key(existing.Name) == catalog.Key(constraint.Name) {
 			return errors.New("constraint already exists")
 		}
 	}
@@ -1083,7 +1083,7 @@ func renameTableConstraintColumns(table *catalog.Table, oldName, newName string)
 
 func renameColumnList(columns []string, oldName, newName string) {
 	for index := range columns {
-		if catalog.SameIdentifier(columns[index], oldName) {
+		if catalog.Key(columns[index]) == catalog.Key(oldName) {
 			columns[index] = newName
 		}
 	}
@@ -1092,7 +1092,7 @@ func renameColumnList(columns []string, oldName, newName string) {
 func renameTableIndexColumns(table *catalog.Table, oldName, newName string) {
 	for index := range table.Indexes {
 		for part := range table.Indexes[index].Parts {
-			if catalog.SameIdentifier(table.Indexes[index].Parts[part].Column, oldName) {
+			if catalog.Key(table.Indexes[index].Parts[part].Column) == catalog.Key(oldName) {
 				table.Indexes[index].Parts[part].Column = newName
 			}
 		}

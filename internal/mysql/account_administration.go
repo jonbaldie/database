@@ -73,7 +73,7 @@ func accountSeesAllNamespaces(account catalog.Account) bool {
 
 func accountSeesNamespace(account catalog.Account, namespace string) bool {
 	for _, grant := range account.Grants {
-		if catalog.SameIdentifier(grant.Namespace, namespace) {
+		if catalog.Key(grant.Namespace) == catalog.Key(namespace) {
 			return true
 		}
 	}
@@ -193,21 +193,21 @@ func startsStatement(lower string, prefixes []string) bool {
 }
 
 func writeGrant(namespace string) (string, string) {
-	if namespace == "" || catalog.IsInformationSchema(namespace) {
+	if namespace == "" || strings.EqualFold(namespace, informationSchemaName) {
 		return "", ""
 	}
 	return "DATA_WRITE", namespace
 }
 
 func schemaGrant(namespace string) (string, string) {
-	if namespace == "" || catalog.IsInformationSchema(namespace) {
+	if namespace == "" || strings.EqualFold(namespace, informationSchemaName) {
 		return "", ""
 	}
 	return "SCHEMA_MANAGEMENT", namespace
 }
 
 func readGrant(namespace string) (string, string) {
-	if namespace == "" || catalog.IsInformationSchema(namespace) {
+	if namespace == "" || strings.EqualFold(namespace, informationSchemaName) {
 		return "", ""
 	}
 	return "DATA_READ", namespace
@@ -566,7 +566,7 @@ func grantChange(privilege, namespace string, grant bool) func(*catalog.Account)
 
 func accountGrantIndex(account catalog.Account, privilege, namespace string) int {
 	for index, grant := range account.Grants {
-		if grant.Privilege == privilege && catalog.SameIdentifier(grant.Namespace, namespace) {
+		if grant.Privilege == privilege && catalog.Key(grant.Namespace) == catalog.Key(namespace) {
 			return index
 		}
 	}
