@@ -3,6 +3,7 @@ package mysql
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jonbaldie/database/internal/catalog"
 )
@@ -276,17 +277,31 @@ func namedTableIndexes(tableName string, indexes []catalog.Index, constraints []
 	result := catalog.CloneIndexes(indexes)
 	taken := tableConstraintIndexNames(constraints)
 	for number := range result {
-		index := &result[number]
-		if index.Name == "" {
-			index.Name = availableIndexName(indexNameBase(tableName, *index), taken)
+		if err := assignIndexName(tableName, &result[number], taken); err != nil {
+			return nil, err
 		}
-		key := catalog.Key(index.Name)
-		if taken[key] {
-			return nil, sqlFailure{1061, "42000", "duplicate key name '" + index.Name + "'"}
-		}
-		taken[key] = true
 	}
 	return result, nil
+}
+
+func assignIndexName(tableName string, index *catalog.Index, taken map[string]bool) error {
+	if index.Name == "" {
+		index.Name = availableIndexName(indexNameBase(tableName, *index), taken)
+	}
+	key := catalog.Key(index.Name)
+	if taken[key] {
+		return sqlFailure{1061, "42000", "duplicate key name '" + index.Name + "'"}
+	}
+	taken[key] = true
+	return nil
+}
+
+func indexKeyNames(indexes []catalog.Index) map[string]bool {
+	taken := make(map[string]bool, len(indexes))
+	for _, index := range indexes {
+		taken[catalog.Key(index.Name)] = true
+	}
+	return taken
 }
 
 func tableConstraintIndexNames(constraints []catalog.Constraint) map[string]bool {
@@ -310,15 +325,32 @@ func indexNameBase(tableName string, index catalog.Index) string {
 }
 
 func availableIndexName(base string, taken map[string]bool) string {
-	if !taken[catalog.Key(base)] {
+	if !generatedKeyNameTaken(base, taken) {
 		return base
 	}
+	shortened := truncateKeyNameBase(base)
 	for suffix := 2; ; suffix++ {
-		candidate := base + "_" + strconv.Itoa(suffix)
-		if !taken[catalog.Key(candidate)] {
+		candidate := shortened + "_" + strconv.Itoa(suffix)
+		if !generatedKeyNameTaken(candidate, taken) {
 			return candidate
 		}
 	}
+}
+
+func generatedKeyNameTaken(name string, taken map[string]bool) bool {
+	if catalog.Key(name) == catalog.Key("PRIMARY") {
+		return true
+	}
+	return taken[catalog.Key(name)]
+}
+
+func truncateKeyNameBase(base string) string {
+	limit := catalog.IdentifierLimit - 3
+	if utf8.RuneCountInString(base) <= limit {
+		return base
+	}
+	runes := []rune(base)
+	return string(runes[:limit])
 }
 
 // effectiveTableIndexes returns the table keys in MySQL key order: PRIMARY,

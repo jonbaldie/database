@@ -1413,6 +1413,7 @@ type parsedTableColumns struct {
 	attributes  []catalog.ColumnAttribute
 	constraints []catalog.Constraint
 	indexes     []catalog.Index
+	keyOrder    []tableKeyRef
 }
 
 func parseCreateTable(query string) (tableDefinition, error) {
@@ -1440,7 +1441,7 @@ func parseCreateTable(query string) (tableDefinition, error) {
 	if err := validateTableColumns(columns.columns); err != nil {
 		return tableDefinition{}, err
 	}
-	constraints, err := namedTableConstraints(target[len(target)-1], columns.constraints)
+	constraints, indexes, err := nameCreateTableKeys(target[len(target)-1], columns.constraints, columns.indexes, columns.keyOrder)
 	if err != nil {
 		return tableDefinition{}, err
 	}
@@ -1450,11 +1451,29 @@ func parseCreateTable(query string) (tableDefinition, error) {
 		types:                   columns.types,
 		attributes:              columns.attributes,
 		constraints:             constraints,
-		indexes:                 columns.indexes,
+		indexes:                 indexes,
 		initialAutoIncrement:    initialAutoIncrement,
 		initialAutoIncrementSet: initialAutoIncrementSet,
 		ifNotExists:             ifNotExists,
 	}, nil
+}
+
+func (parsed *parsedTableColumns) addIndex(index catalog.Index) {
+	parsed.indexes = append(parsed.indexes, index)
+	parsed.keyOrder = append(parsed.keyOrder, tableKeyRef{isIndex: true, offset: len(parsed.indexes) - 1})
+}
+
+func (parsed *parsedTableColumns) addConstraint(constraint catalog.Constraint) {
+	parsed.constraints = append(parsed.constraints, constraint)
+	if isIndexedConstraint(constraint) {
+		parsed.keyOrder = append(parsed.keyOrder, tableKeyRef{offset: len(parsed.constraints) - 1})
+	}
+}
+
+func (parsed *parsedTableColumns) addConstraints(constraints []catalog.Constraint) {
+	for _, constraint := range constraints {
+		parsed.addConstraint(constraint)
+	}
 }
 
 func createTableTarget(head string) ([]string, error) {
@@ -1530,7 +1549,7 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 			if err != nil {
 				return parsedTableColumns{}, err
 			}
-			parsed.indexes = append(parsed.indexes, index)
+			parsed.addIndex(index)
 			continue
 		}
 		if isTableConstraintDefinition(part) {
@@ -1538,7 +1557,7 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 			if err != nil {
 				return parsedTableColumns{}, err
 			}
-			parsed.constraints = append(parsed.constraints, constraint)
+			parsed.addConstraint(constraint)
 			continue
 		}
 		column, typeName, attribute, _, columnConstraints, err := parseTableColumn(part)
@@ -1548,7 +1567,7 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 		parsed.columns = append(parsed.columns, column)
 		parsed.types = append(parsed.types, typeName)
 		parsed.attributes = append(parsed.attributes, attribute)
-		parsed.constraints = append(parsed.constraints, columnConstraints...)
+		parsed.addConstraints(columnConstraints)
 	}
 	return parsed, nil
 }
