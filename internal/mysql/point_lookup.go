@@ -2,23 +2,66 @@ package mysql
 
 import (
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
 )
 
-func tryPointLookup(plan *relationalSelectPlan) ([]relationalResultRow, bool) {
+// relationalPointLookup is a probe of one unique key for one literal value.
+// The planner and the executor use the same probe, so a Query explanation
+// reports the path that the statement runs.
+type relationalPointLookup struct {
+	index  string
+	column string
+	value  string
+}
+
+func planPointLookup(plan *relationalSelectPlan) (relationalPointLookup, bool) {
 	if !pointLookupEligible(plan) {
-		return nil, false
+		return relationalPointLookup{}, false
 	}
 	column, value, ok := parseSimpleEqualityWhere(plan.whereText)
 	if !ok {
-		return nil, false
+		return relationalPointLookup{}, false
 	}
-	row, ok := lookupStatementRow(plan, column, value)
+	index, ok := pointLookupIndex(plan.source.tables[0].table, column)
+	if !ok {
+		return relationalPointLookup{}, false
+	}
+	return relationalPointLookup{index: index, column: column, value: value}, true
+}
+
+// tryPointLookup returns false when the probe finds no matching row. The
+// caller then compares the stored rows, because equal values can have a
+// different stored form.
+func tryPointLookup(plan *relationalSelectPlan) ([]relationalResultRow, bool) {
+	lookup, ok := planPointLookup(plan)
 	if !ok {
 		return nil, false
 	}
-	return projectPointLookup(plan, row)
+	started := time.Now()
+	row, ok := lookupStatementRow(plan, lookup.column, lookup.value)
+	if !ok {
+		return nil, false
+	}
+	rows, ok := projectPointLookup(plan, row)
+	if !ok {
+		return nil, false
+	}
+	plan.recordPointLookup(row, rows, time.Since(started))
+	return rows, true
+}
+
+func (p *relationalSelectPlan) recordPointLookup(row []string, rows []relationalResultRow, elapsed time.Duration) {
+	if p.runtime == nil {
+		return
+	}
+	bytes := 0
+	for _, value := range row {
+		bytes += len(value)
+	}
+	p.runtime.recordScan(0, 1, bytes, elapsed)
+	p.recordReadPipeline(1, 1, rows, elapsed)
 }
 
 func pointLookupEligible(plan *relationalSelectPlan) bool {
@@ -29,6 +72,32 @@ func pointLookupEligible(plan *relationalSelectPlan) bool {
 		return false
 	}
 	return !plan.hasAggregateOrWindow() && !plan.distinct && len(plan.order) == 0
+}
+
+func pointLookupIndex(table catalog.Table, column string) (string, bool) {
+	if primaryColumn(table) == column {
+		return "PRIMARY", true
+	}
+	if uniqueColumn(table) != column {
+		return "", false
+	}
+	return uniqueKeyName(table, column), true
+}
+
+// uniqueKeyName names the single-column unique key on column. It uses the
+// column name when the catalog records the key on the column only.
+func uniqueKeyName(table catalog.Table, column string) string {
+	for _, constraint := range table.Constraints {
+		if constraint.Type == catalog.ConstraintTypeUnique && len(constraint.Columns) == 1 && constraint.Columns[0] == column {
+			return constraint.Name
+		}
+	}
+	for _, index := range table.Indexes {
+		if index.Unique && len(index.Parts) == 1 && index.Parts[0].Column == column {
+			return index.Name
+		}
+	}
+	return column
 }
 
 func projectPointLookup(plan *relationalSelectPlan, row []string) ([]relationalResultRow, bool) {

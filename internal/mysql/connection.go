@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jonbaldie/database/internal/queryexplanation"
 )
 
 // conversation owns one accepted connection from greeting through cleanup.
@@ -177,8 +179,8 @@ func (c *conversation) initDatabase(sequence byte, payload []byte) bool {
 
 func (c *conversation) query(sequence byte, payload []byte) bool {
 	query := string(payload[1:])
-	return c.runStatement(query, func() error {
-		return c.queries.writeQueryResult(c.connection, sequence, query)
+	return c.runStatement(query, func(recorder *queryexplanation.RuntimeMetrics) error {
+		return c.queries.writeQueryResult(c.connection, sequence, query, recorder)
 	})
 }
 
@@ -189,12 +191,12 @@ func (c *conversation) prepare(sequence byte, payload []byte) bool {
 }
 
 func (c *conversation) executePrepared(sequence byte, payload []byte) bool {
-	return c.runStatement("", func() error {
+	return c.runStatement("", func(*queryexplanation.RuntimeMetrics) error {
 		return c.execution.executePrepared(c.connection, sequence, payload)
 	})
 }
 
-func (c *conversation) runStatement(query string, run func() error) bool {
+func (c *conversation) runStatement(query string, run func(*queryexplanation.RuntimeMetrics) error) bool {
 	if !c.server.connections.beginStatement() {
 		return false
 	}
@@ -202,7 +204,7 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	defer c.control.running.Store(false)
 	c.control.activeQuery.Store(query)
 	defer c.control.activeQuery.Store("")
-	finishExplanation := c.recordActiveExplanation(query)
+	recorder, finishExplanation := c.recordActiveExplanation(query)
 	defer finishExplanation()
 	watch := c.watchStatement()
 	c.control.setWatch(watch)
@@ -212,14 +214,13 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	resources := newStatementResources(c.server.resources, config, watch.cancelled)
 	c.session.resources = resources
 	defer func() {
-		recordRuntimeResources(c.session.runtimeMetrics, statementResourceSnapshot(resources))
 		closeStatementResources(resources)
 		if c.session.resources == resources {
 			c.session.resources = nil
 		}
 		c.session.statementCancel = nil
 	}()
-	err := run()
+	err := run(recorder)
 	c.server.connections.endStatement()
 	return err == nil && !c.control.revoked.Load()
 }
@@ -247,19 +248,19 @@ func (c *conversationControl) cancelStatement() {
 	}
 }
 
-func (c *conversation) recordActiveExplanation(query string) func() {
+func (c *conversation) recordActiveExplanation(query string) (*queryexplanation.RuntimeMetrics, func()) {
 	if c.session == nil {
-		return func() {}
+		return nil, func() {}
 	}
 	statement, err := normalizeStatement(query)
 	if err != nil {
-		return func() {}
+		return nil, func() {}
 	}
 	started := time.Now()
 	planner := textStatementExecutor{session: c.session}
 	plan, err := planner.planExplanation(statement.query)
 	if err != nil {
-		return func() {}
+		return nil, func() {}
 	}
 	plan.Timing.PlanningMS = float64(time.Since(started)) / float64(time.Millisecond)
 	return c.server.explanations.begin(c.session.connectionID, plan, c.session)

@@ -68,6 +68,11 @@ func newSelectRuntimeBinding(metrics *queryexplanation.RuntimeMetrics, plan *rel
 	for index := range plan.source.tables {
 		binding.scans = append(binding.scans, runtimeOperatorID(metrics, plan.runtimeKey, "scan", index))
 	}
+	if _, ok := planPointLookup(plan); ok {
+		// The point lookup is the only source. A probe that finds no row
+		// compares the stored rows, and the lookup operator records that work.
+		binding.scans[0] = runtimeOperatorID(metrics, plan.runtimeKey, "lookup", 0)
+	}
 	for index := range plan.source.joins {
 		binding.joins = append(binding.joins, runtimeOperatorID(metrics, plan.runtimeKey, "join", len(plan.source.joins)-index-1))
 	}
@@ -347,9 +352,6 @@ func executeRelationalSelectPlan(plan *relationalSelectPlan, streamRows bool) (*
 }
 
 func tryRelationalPointLookup(plan *relationalSelectPlan) (*queryResult, bool) {
-	if plan.session != nil && plan.session.runtimeMetrics != nil {
-		return nil, false
-	}
 	rows, ok := tryPointLookup(plan)
 	if !ok {
 		return nil, false
@@ -687,7 +689,7 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err := prepareScalarSubqueries(plan); err != nil {
 		return nil, err
 	}
-	plan.runtime = newSelectRuntimeBinding(plan.session.runtimeMetrics, plan)
+	plan.runtime = newSelectRuntimeBinding(s.recorder, plan)
 	plan.source.runtime = plan.runtime
 	return plan, nil
 }
@@ -1261,6 +1263,9 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 	}
 	for _, table := range p.source.tables {
 		read.Tables = append(read.Tables, relationSourceInfo(table))
+	}
+	if lookup, ok := planPointLookup(p); ok {
+		read.Tables[0].Lookup = &queryexplanation.PointLookup{Name: lookup.index, Column: lookup.column}
 	}
 	if len(read.Tables) > 0 {
 		read.Table = read.Tables[0]
