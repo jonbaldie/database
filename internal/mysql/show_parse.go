@@ -206,29 +206,39 @@ func filterShowWhere(session *session, result *queryResult, where string) (*quer
 	if result == nil || strings.TrimSpace(where) == "" {
 		return result, nil
 	}
-	predicate, err := compileShowWhere(session, result.columns, where)
+	predicate, err := compileShowWhere(session, result.columns, result.filterTypes, where)
 	if err != nil {
 		return nil, err
 	}
-	kept, err := matchingShowRows(result.rows, predicate)
+	kept, err := matchingShowRows(result.rows, result.nulls, predicate)
 	if err != nil {
 		return nil, err
 	}
 	return keepShowRows(result, kept), nil
 }
 
-func compileShowWhere(session *session, names []string, where string) (relationPredicate, error) {
+func compileShowWhere(session *session, names, types []string, where string) (relationPredicate, error) {
 	columns := make([]relationColumn, len(names))
 	for index, name := range names {
-		columns[index] = relationColumn{name: name, typeName: "VARCHAR(256)", index: index}
+		typeName := "VARCHAR(256)"
+		if index < len(types) && types[index] != "" {
+			typeName = types[index]
+		}
+		columns[index] = relationColumn{name: name, typeName: typeName, index: index, coalesce: -1}
 	}
 	return compileRelationPredicate(where, columns, session)
 }
 
-func matchingShowRows(rows [][]string, predicate relationPredicate) ([]int, error) {
+// matchingShowRows evaluates the predicate against the displayed row, so a
+// cell sent as SQL NULL is also SQL NULL to the WHERE clause.
+func matchingShowRows(rows [][]string, nulls [][]bool, predicate relationPredicate) ([]int, error) {
 	kept := make([]int, 0, len(rows))
 	for index, row := range rows {
-		matched, err := predicateMatches(predicate, relationRow{values: row})
+		values := row
+		if index < len(nulls) {
+			values = showFilterValues(row, nulls[index])
+		}
+		matched, err := predicateMatches(predicate, relationRow{values: values})
 		if err != nil {
 			return nil, err
 		}
@@ -237,6 +247,16 @@ func matchingShowRows(rows [][]string, predicate relationPredicate) ([]int, erro
 		}
 	}
 	return kept, nil
+}
+
+func showFilterValues(row []string, nulls []bool) []string {
+	values := append([]string(nil), row...)
+	for column, null := range nulls {
+		if null && column < len(values) {
+			values[column] = storedSQLNullValue
+		}
+	}
+	return values
 }
 
 func keepShowRows(result *queryResult, kept []int) *queryResult {

@@ -1,9 +1,9 @@
 # v0.1 catalog metadata contract
 
 This document is the normative v0.1 contract for the
-[catalog metadata surface](../CONTEXT.md). It defines what an authenticated
+[catalog metadata surface](../GLOSSARY.md). It defines what an authenticated
 database account may discover through supported `SHOW` statements and the
-always-visible [catalog namespace](../CONTEXT.md), and the MySQL-shaped shape
+always-visible [catalog namespace](../GLOSSARY.md), and the MySQL-shaped shape
 and meaning of those results. It is a finite compatibility surface, not an
 open-ended system catalog.
 
@@ -20,7 +20,7 @@ authorization-filtering algorithms remain implementation choices.
 authenticated database account may select from it and use its supported
 metadata statements.
 
-A [database namespace](../CONTEXT.md) is visible when the current account holds
+A [database namespace](../GLOSSARY.md) is visible when the current account holds
 any namespace-scoped grant on it: `DATA_READ`, `DATA_WRITE`, or
 `SCHEMA_MANAGEMENT`. One of these grants exposes the complete relational
 definition of every table, column, index, and constraint in that namespace.
@@ -118,7 +118,7 @@ represented by absent rows or documented `NULL` fields, never guessed or
 fabricated values.
 
 Catalog identifiers preserve their declared spelling. Lookup follows the
-portable [SQL identifier](../CONTEXT.md) rule. Catalog-name fields report
+portable [SQL identifier](../GLOSSARY.md) rule. Catalog-name fields report
 `def`, matching the compatibility baseline. Standard view and column names use
 their MySQL spellings; the project-specific `ACCOUNTS` and `ACCOUNT_GRANTS`
 views retain their explicitly defined schemas.
@@ -192,7 +192,7 @@ the project's portable identifier rules and limits.
 ## Canonical schema definitions
 
 `SHOW CREATE DATABASE` and `SHOW CREATE TABLE` return a [canonical schema
-definition](../CONTEXT.md): stable, replayable SQL representing the current
+definition](../GLOSSARY.md): stable, replayable SQL representing the current
 public schema rather than the originally submitted text.
 
 The output preserves declared identifier spelling, comments, defaults,

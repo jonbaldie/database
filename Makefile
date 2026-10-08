@@ -1,4 +1,4 @@
-VERSION ?= 0.2.16
+VERSION ?= 0.2.18
 BUILD_IDENTITY ?= local
 GO ?= go
 LDFLAGS = -s -w -X github.com/jonbaldie/database/internal/buildinfo.ProductVersion=$(VERSION) -X github.com/jonbaldie/database/internal/buildinfo.BuildIdentity=$(BUILD_IDENTITY)
@@ -45,6 +45,7 @@ goreportcard:
 	GOREPORTCARD_GOCYCLO="$$tool_directory/gocyclo" GOREPORTCARD_INEFFASSIGN="$$tool_directory/ineffassign" python3 scripts/goreportcard.py
 
 mutation:
+	./scripts/test-mutation-threshold.sh
 	./scripts/mutation-threshold.sh
 
 performance:

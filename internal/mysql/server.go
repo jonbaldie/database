@@ -109,10 +109,11 @@ type Config struct {
 	// LockWaitTimeout bounds the time a statement waits for a conflicting row
 	// lock. It defaults to five seconds.
 	LockWaitTimeout time.Duration
+	IdleTimeouts    IdleTimeouts
 	ResourceLimits  ResourceLimits
 	// TimeZone is the fixed-offset session time zone that TIMESTAMP instants and
 	// current-time functions render through. It defaults to UTC and accepts UTC
-	// or a ±HH:MM offset within ±14:00.
+	// or a ±HH:MM offset from -13:59 to +14:00.
 	TimeZone string
 	// Clock supplies the current instant for current-time functions. It defaults
 	// to time.Now and is injectable so rendering is reproducible under test.
@@ -231,6 +232,7 @@ func normalizedConfig(config Config) Config {
 	if config.LockWaitTimeout <= 0 {
 		config.LockWaitTimeout = 5 * time.Second
 	}
+	config.IdleTimeouts = normalizedIdleTimeouts(config.IdleTimeouts)
 	config.ResourceLimits = normalizedResourceLimits(config.ResourceLimits)
 	if config.TimeZone == "" {
 		config.TimeZone = "UTC"
@@ -708,6 +710,9 @@ type queryResult struct {
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
 	nulls [][]bool
+	// filterTypes mirrors columns with the SQL types that SHOW ... WHERE
+	// compares. An empty entry, or a missing slice, compares as VARCHAR.
+	filterTypes []string
 }
 
 // columnMetadata is the complete ColumnDefinition41 contract for one result
@@ -764,46 +769,63 @@ var informationSchemaViews = []informationSchemaView{
 		},
 	},
 	{name: "statistics", columns: []informationSchemaColumn{
+		{name: "TABLE_CATALOG", typeName: "VARCHAR(64)"},
 		{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
 		{name: "NON_UNIQUE", typeName: "INT"},
+		{name: "INDEX_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "INDEX_NAME", typeName: "VARCHAR(64)"},
 		{name: "SEQ_IN_INDEX", typeName: "INT"},
 		{name: "COLUMN_NAME", typeName: "VARCHAR(64)"},
 		{name: "COLLATION", typeName: "VARCHAR(1)"},
+		{name: "CARDINALITY", typeName: "BIGINT"},
 		{name: "SUB_PART", typeName: "INT"},
+		{name: "PACKED", typeName: "VARCHAR(10)"},
 		{name: "NULLABLE", typeName: "VARCHAR(3)"},
 		{name: "INDEX_TYPE", typeName: "VARCHAR(16)"},
 		{name: "COMMENT", typeName: "VARCHAR(16)"},
 		{name: "INDEX_COMMENT", typeName: "VARCHAR(2048)"},
-		{name: "VISIBLE", typeName: "VARCHAR(3)"},
+		{name: "IS_VISIBLE", typeName: "VARCHAR(3)"},
 		{name: "EXPRESSION", typeName: "VARCHAR(64)"},
 	}},
 	{name: "table_constraints", columns: []informationSchemaColumn{
+		{name: "CONSTRAINT_CATALOG", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
 		{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_TYPE", typeName: "VARCHAR(64)"},
+		{name: "ENFORCED", typeName: "VARCHAR(3)"},
 	}},
 	{name: "key_column_usage", columns: []informationSchemaColumn{
+		{name: "CONSTRAINT_CATALOG", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
+		{name: "TABLE_CATALOG", typeName: "VARCHAR(64)"},
 		{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
 		{name: "COLUMN_NAME", typeName: "VARCHAR(64)"},
 		{name: "ORDINAL_POSITION", typeName: "INT"},
+		{name: "POSITION_IN_UNIQUE_CONSTRAINT", typeName: "INT"},
 		{name: "REFERENCED_TABLE_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "REFERENCED_TABLE_NAME", typeName: "VARCHAR(64)"},
 		{name: "REFERENCED_COLUMN_NAME", typeName: "VARCHAR(64)"},
 	}},
 	{name: "referential_constraints", columns: []informationSchemaColumn{
+		{name: "CONSTRAINT_CATALOG", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
+		{name: "UNIQUE_CONSTRAINT_CATALOG", typeName: "VARCHAR(64)"},
+		{name: "UNIQUE_CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
+		{name: "UNIQUE_CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
+		{name: "MATCH_OPTION", typeName: "VARCHAR(7)"},
+		{name: "UPDATE_RULE", typeName: "VARCHAR(11)"},
+		{name: "DELETE_RULE", typeName: "VARCHAR(11)"},
 		{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
 		{name: "REFERENCED_TABLE_NAME", typeName: "VARCHAR(64)"},
 	}},
 	{name: "check_constraints", columns: []informationSchemaColumn{
+		{name: "CONSTRAINT_CATALOG", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_SCHEMA", typeName: "VARCHAR(64)"},
 		{name: "CONSTRAINT_NAME", typeName: "VARCHAR(64)"},
 		{name: "CHECK_CLAUSE", typeName: "VARCHAR(2048)"},
@@ -1655,6 +1677,7 @@ func showIndexPrefix(lower string) string {
 
 func showTableIndexes(table catalog.Table) *queryResult {
 	columns := []string{"Table", "Non_unique", "Key_name", "Seq_in_index", "Column_name", "Collation", "Cardinality", "Sub_part", "Packed", "Null", "Index_type", "Comment", "Index_comment", "Visible", "Expression"}
+	types := []string{"", "INT", "", "INT UNSIGNED", "", "", "BIGINT", "BIGINT", "", "", "", "", "", "", ""}
 	rows := [][]string{}
 	nulls := [][]bool{}
 	for _, index := range effectiveTableIndexes(table) {
@@ -1664,17 +1687,16 @@ func showTableIndexes(table catalog.Table) *queryResult {
 			nulls = append(nulls, null)
 		}
 	}
-	return &queryResult{columns: columns, rows: rows, nulls: nulls}
+	return &queryResult{columns: columns, rows: rows, nulls: nulls, filterTypes: types}
 }
 
 func showIndexRow(table catalog.Table, index catalog.Index, part catalog.IndexPart, number int) ([]string, []bool) {
 	column, expression := part.Column, part.Expression
-	nullable := false
-	if column != "" {
-		columnIndex := tableColumnIndex(table.Columns, column)
-		nullable = columnIndex >= 0 && catalog.ColumnAttributeAt(table, columnIndex).Nullable
+	nullable := ""
+	if columnNullable(table, column) {
+		nullable = "YES"
 	}
-	null := []bool{false, false, false, false, column == "", false, false, part.PrefixLength == 0, true, !nullable, false, false, false, false, expression == ""}
+	null := []bool{false, false, false, false, column == "", false, false, part.PrefixLength == 0, true, false, false, false, false, false, expression == ""}
 	return []string{
 		table.Name,
 		strconv.Itoa(boolToInt(!index.Unique)),
@@ -1685,7 +1707,7 @@ func showIndexRow(table catalog.Table, index catalog.Index, part catalog.IndexPa
 		strconv.Itoa(len(table.Rows)),
 		strconv.Itoa(part.PrefixLength),
 		"",
-		"YES",
+		nullable,
 		"BTREE",
 		"",
 		index.Comment,
@@ -4344,7 +4366,7 @@ func (s *preparedPreparation) allocate(query string) (uint32, int, []columnMetad
 		return 0, 0, nil, sqlFailure{1390, "HY000", "prepared statement contains too many placeholders"}
 	}
 	if !s.server.connections.reservePreparedStatement() {
-		return 0, 0, nil, sqlFailure{1461, "HY000", "can't create more than max_prepared_stmt_count statements"}
+		return 0, 0, nil, sqlFailure{1461, "42000", "can't create more than max_prepared_stmt_count statements"}
 	}
 	id := s.prepared.nextStmtID
 	s.prepared.nextStmtID++

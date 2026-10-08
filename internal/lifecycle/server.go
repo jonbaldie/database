@@ -22,6 +22,16 @@ import (
 	"github.com/jonbaldie/database/internal/mysql"
 )
 
+// ErrPrecondition marks a failure where data directory state or exclusivity
+// prevents the server from starting.
+var ErrPrecondition = errors.New("precondition")
+
+type preconditionError struct{ message string }
+
+func (e preconditionError) Error() string { return e.message }
+
+func (preconditionError) Unwrap() error { return ErrPrecondition }
+
 // Options controls the process-level server seam. An empty DiagnosticsAddress
 // disables the diagnostics listener, which keeps the default command useful
 // for smoke tests and local process supervision.
@@ -315,6 +325,10 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 		MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount,
 		MaxAllowedPacket: opts.MaxAllowedPacket,
 		LockWaitTimeout:  millisecondsDuration(opts.LockWaitTimeoutMilliseconds),
+		IdleTimeouts: mysql.IdleTimeouts{
+			InTransaction: millisecondsDuration(opts.IdleInTransactionTimeoutMilliseconds),
+			Session:       millisecondsDuration(opts.IdleSessionTimeoutMilliseconds),
+		},
 		ResourceLimits: mysql.ResourceLimits{
 			StatementTimeout:                    millisecondsDuration(opts.StatementTimeoutMilliseconds),
 			ExecutionMemoryLimitBytes:           opts.ExecutionMemoryLimitBytes,
@@ -393,7 +407,7 @@ func claimDataDirectory(directory string) (claimedState, error) {
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
-		return claimedState{}, errors.New("data directory is already in use")
+		return claimedState{}, preconditionError{"data directory is already in use"}
 	}
 	return claimedState{release: releaseFileLock(file)}, nil
 }
@@ -448,12 +462,12 @@ func validateInstance(directory string) error {
 	info, err := os.Stat(directory)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return errors.New("data directory does not exist")
+			return preconditionError{"data directory does not exist"}
 		}
 		return fmt.Errorf("inspect data directory: %w", err)
 	}
 	if !info.IsDir() {
-		return errors.New("data directory is not a directory")
+		return preconditionError{"data directory is not a directory"}
 	}
 	if err := validateInstanceMetadata(directory); err != nil {
 		return err
@@ -467,7 +481,7 @@ func validateInstance(directory string) error {
 func validateInstanceMetadata(directory string) error {
 	instanceMetadata, err := instance.Load(directory)
 	if err != nil {
-		return errors.New("data directory is not initialized")
+		return preconditionError{"data directory is not initialized"}
 	}
 	if instanceMetadata.State != "stopped" {
 		return errors.New("data directory has invalid instance metadata")

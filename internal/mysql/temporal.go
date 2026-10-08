@@ -456,7 +456,7 @@ func parseFixedDigits(run string) (int, bool) {
 }
 
 // parseFixedOffset resolves a supported fixed-offset session time-zone value to
-// its signed offset in minutes. UTC and a ±HH:MM offset within ±14:00 are
+// its signed offset in minutes. UTC and a ±HH:MM offset from -13:59 to +14:00 are
 // supported; a named zone, the SYSTEM zone, and a malformed or out-of-range
 // offset are rejected so session rendering stays reproducible.
 func parseFixedOffset(zone string) (int, error) {
@@ -465,7 +465,7 @@ func parseFixedOffset(zone string) (int, error) {
 		return 0, nil
 	}
 	total, ok := parseSignedOffset(trimmed)
-	if !ok || total > 14*60 || total < -14*60 {
+	if !ok || total > 14*60 || total < -(13*60+59) {
 		return 0, sqlFailure{1298, "HY000", fmt.Sprintf("Unknown or unsupported time zone: '%s'", zone)}
 	}
 	return total, nil

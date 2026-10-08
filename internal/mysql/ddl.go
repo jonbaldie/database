@@ -177,11 +177,9 @@ func dropIndexFromDefinition(definition *catalog.Definition, namespaceName, tabl
 	if !found {
 		return errors.New("table does not exist")
 	}
-	indexes, found := withoutTableIndex(table.Indexes, name)
-	if !found {
-		return errors.New("can't drop index; check that it exists")
+	if err := dropTableIndex(&table, name); err != nil {
+		return err
 	}
-	table.Indexes = indexes
 	namespace.Tables[catalog.Key(tableName)] = table
 	definition.Namespaces[catalog.Key(namespaceName)] = namespace
 	return nil
@@ -915,13 +913,29 @@ func addTableIndex(table *catalog.Table, index catalog.Index) error {
 	return validateTableIndexes(*table)
 }
 
+// dropTableIndex removes the named index. A UNIQUE key from a table
+// definition is a unique constraint, but SHOW INDEX lists it as an index, so
+// DROP INDEX removes it too.
 func dropTableIndex(table *catalog.Table, name string) error {
-	indexes, found := withoutTableIndex(table.Indexes, name)
-	if !found {
-		return errors.New("can't drop index; check that it exists")
+	if indexes, found := withoutTableIndex(table.Indexes, name); found {
+		table.Indexes = indexes
+		return nil
 	}
-	table.Indexes = indexes
-	return nil
+	if constraints, found := withoutUniqueConstraint(table.Constraints, name); found {
+		table.Constraints = constraints
+		return nil
+	}
+	return errors.New("can't drop index; check that it exists")
+}
+
+func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]catalog.Constraint, bool) {
+	for number, constraint := range constraints {
+		if constraint.Type != catalog.ConstraintTypeUnique || catalog.Key(constraint.Name) != catalog.Key(name) {
+			continue
+		}
+		return append(constraints[:number:number], constraints[number+1:]...), true
+	}
+	return constraints, false
 }
 
 func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool) error {

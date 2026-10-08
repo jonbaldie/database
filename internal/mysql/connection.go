@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,7 @@ type conversationControl struct {
 type pendingCommand struct {
 	sequence byte
 	payload  []byte
+	failure  error
 }
 
 type statementWatch struct {
@@ -129,18 +131,20 @@ func (c *conversation) acceptCommand() bool {
 	if c.control.revoked.Load() {
 		return false
 	}
-	if watch := c.control.takeWatch(); watch != nil {
-		pending := <-watch.finished
-		if pending == nil {
-			return false
-		}
-		return c.dispatch(pending.sequence, pending.payload)
+	watch := c.control.takeWatch()
+	idleRead := watch == nil
+	if idleRead {
+		watch = c.watchStatement()
 	}
-	sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
-	if err != nil || len(payload) == 0 || !c.server.connections.acceptingWork() {
+	pending := c.server.config.IdleTimeouts.await(c.session, c.connection, watch)
+	if pending == nil || (idleRead && !c.server.connections.acceptingWork()) {
 		return false
 	}
-	return c.dispatch(sequence+1, payload)
+	if pending.failure != nil {
+		_ = c.write(pending.sequence, mysqlError(pending.failure))
+		return false
+	}
+	return c.dispatch(pending.sequence, pending.payload)
 }
 
 func (c *conversation) dispatch(sequence byte, payload []byte) bool {
@@ -267,16 +271,25 @@ func (c *conversation) watchStatement() *statementWatch {
 		cancelled: make(chan struct{}),
 	}
 	go func() {
-		sequence, payload, err := readPacket(c.connection, c.server.config.MaxAllowedPacket)
-		if err == nil && len(payload) > 0 {
-			watch.cancelOnce.Do(func() { close(watch.cancelled) })
-			watch.finished <- &pendingCommand{sequence: sequence + 1, payload: payload}
-			return
-		}
+		pending := readPendingCommand(c.connection, c.server.config.MaxAllowedPacket)
 		watch.cancelOnce.Do(func() { close(watch.cancelled) })
-		watch.finished <- nil
+		watch.finished <- pending
 	}()
 	return watch
+}
+
+// readPendingCommand reads the next client command. An oversized command
+// becomes a failure that the conversation reports before it closes; any other
+// read failure or an empty command returns nil.
+func readPendingCommand(connection net.Conn, maximum int64) *pendingCommand {
+	sequence, payload, err := readPacket(connection, maximum)
+	if errors.Is(err, errPacketTooLarge) {
+		return &pendingCommand{sequence: sequence + 1, failure: err}
+	}
+	if err != nil || len(payload) == 0 {
+		return nil
+	}
+	return &pendingCommand{sequence: sequence + 1, payload: payload}
 }
 
 func (c *conversation) closePrepared(sequence byte, payload []byte) bool {

@@ -8,6 +8,13 @@ import (
 	"github.com/jonbaldie/database/internal/catalog"
 )
 
+// informationSchemaCatalogName is the MySQL catalog-name field value.
+const informationSchemaCatalogName = "def"
+
+// foreignKeyRule is the referential action for every v0.1 foreign key. v0.1
+// has no ON UPDATE or ON DELETE clauses and checks each statement at once.
+const foreignKeyRule = "NO ACTION"
+
 type informationSchemaRowBuilder func(*session, catalog.Definition) [][]metadataValue
 
 var informationSchemaRowBuilders = map[string]informationSchemaRowBuilder{
@@ -64,8 +71,8 @@ func informationSchemaTableStatistics(namespace string, table catalog.Table) [][
 			visible = "NO"
 		}
 		for number, part := range index.Parts {
-			column := part.Column
-			expression := part.Expression
+			column := metadataValue{value: part.Column, null: part.Column == ""}
+			expression := metadataValue{value: part.Expression, null: part.Expression == ""}
 			collation := "A"
 			if part.Descending {
 				collation = "D"
@@ -75,24 +82,28 @@ func informationSchemaTableStatistics(namespace string, table catalog.Table) [][
 				subPart = metadataValue{value: strconv.Itoa(part.PrefixLength)}
 			}
 			nullable := ""
-			if columnNullable(table, column) {
+			if columnNullable(table, part.Column) {
 				nullable = "YES"
 			}
 			rows = append(rows, []metadataValue{
+				{value: informationSchemaCatalogName},
 				{value: namespace},
 				{value: table.Name},
 				{value: nonUnique},
+				{value: namespace},
 				{value: index.Name},
 				{value: strconv.Itoa(number + 1)},
-				{value: column},
+				column,
 				{value: collation},
+				{value: strconv.Itoa(len(table.Rows))},
 				subPart,
+				{null: true},
 				{value: nullable},
 				{value: "BTREE"},
 				{value: ""},
 				{value: index.Comment},
 				{value: visible},
-				{value: expression},
+				expression,
 			})
 		}
 	}
@@ -121,11 +132,13 @@ func informationSchemaTableConstraintRows(definition catalog.Definition) [][]met
 		for _, table := range sortedTables(namespace) {
 			for _, constraint := range table.Constraints {
 				rows = append(rows, []metadataValue{
+					{value: informationSchemaCatalogName},
 					{value: namespace.Name},
 					{value: constraint.Name},
 					{value: namespace.Name},
 					{value: table.Name},
 					{value: constraintTypeLabel(constraint.Type)},
+					{value: "YES"},
 				})
 			}
 		}
@@ -167,7 +180,9 @@ func keyColumnUsageRows(namespace, table string, constraint catalog.Constraint) 
 	rows := make([][]metadataValue, 0, len(constraint.Columns))
 	for index, column := range constraint.Columns {
 		referencedSchema, referencedTable, referencedColumn := metadataValue{null: true}, metadataValue{null: true}, metadataValue{null: true}
+		uniquePosition := metadataValue{null: true}
 		if constraint.Type == catalog.ConstraintTypeForeignKey {
+			uniquePosition = metadataValue{value: strconv.Itoa(index + 1)}
 			referencedSchema = metadataValue{value: constraint.ReferencedNamespace}
 			if referencedSchema.value == "" {
 				referencedSchema.value = namespace
@@ -178,12 +193,15 @@ func keyColumnUsageRows(namespace, table string, constraint catalog.Constraint) 
 			}
 		}
 		rows = append(rows, []metadataValue{
+			{value: informationSchemaCatalogName},
 			{value: namespace},
 			{value: constraint.Name},
+			{value: informationSchemaCatalogName},
 			{value: namespace},
 			{value: table},
 			{value: column},
 			{value: strconv.Itoa(index + 1)},
+			uniquePosition,
 			referencedSchema,
 			referencedTable,
 			referencedColumn,
@@ -200,9 +218,20 @@ func informationSchemaReferentialRows(definition catalog.Definition) [][]metadat
 				if constraint.Type != catalog.ConstraintTypeForeignKey {
 					continue
 				}
+				referencedNamespace := constraint.ReferencedNamespace
+				if referencedNamespace == "" {
+					referencedNamespace = namespace.Name
+				}
 				rows = append(rows, []metadataValue{
+					{value: informationSchemaCatalogName},
 					{value: namespace.Name},
 					{value: constraint.Name},
+					{value: informationSchemaCatalogName},
+					{value: referencedNamespace},
+					referencedUniqueConstraintName(definition, referencedNamespace, constraint),
+					{value: "NONE"},
+					{value: foreignKeyRule},
+					{value: foreignKeyRule},
 					{value: table.Name},
 					{value: constraint.ReferencedTable},
 				})
@@ -210,6 +239,40 @@ func informationSchemaReferentialRows(definition catalog.Definition) [][]metadat
 		}
 	}
 	return rows
+}
+
+// referencedUniqueConstraintName names the parent unique key whose columns
+// match the foreign key's referenced columns. It is NULL when the parent table
+// is not visible or no such key exists.
+func referencedUniqueConstraintName(definition catalog.Definition, namespaceName string, constraint catalog.Constraint) metadataValue {
+	for _, namespace := range definition.Namespaces {
+		if !identifiersEqual(namespace.Name, namespaceName) {
+			continue
+		}
+		for _, table := range namespace.Tables {
+			if !identifiersEqual(table.Name, constraint.ReferencedTable) {
+				continue
+			}
+			for _, index := range effectiveTableIndexes(table) {
+				if index.Unique && indexCoversColumns(index, constraint.ReferencedColumns) {
+					return metadataValue{value: index.Name}
+				}
+			}
+		}
+	}
+	return metadataValue{null: true}
+}
+
+func indexCoversColumns(index catalog.Index, columns []string) bool {
+	if len(index.Parts) != len(columns) {
+		return false
+	}
+	for number, part := range index.Parts {
+		if part.Column == "" || part.PrefixLength > 0 || !identifiersEqual(part.Column, columns[number]) {
+			return false
+		}
+	}
+	return true
 }
 
 func informationSchemaCheckRows(definition catalog.Definition) [][]metadataValue {
@@ -221,6 +284,7 @@ func informationSchemaCheckRows(definition catalog.Definition) [][]metadataValue
 					continue
 				}
 				rows = append(rows, []metadataValue{
+					{value: informationSchemaCatalogName},
 					{value: namespace.Name},
 					{value: constraint.Name},
 					{value: constraint.Check},
