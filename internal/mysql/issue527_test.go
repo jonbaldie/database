@@ -82,3 +82,22 @@ func TestIssue527InvisibleUniqueKeyRoundTripsAndRejectsHints(t *testing.T) {
 		t.Fatalf("SHOW INDEX after re-create = %v, want Visible NO", result.rows)
 	}
 }
+
+func TestIssue527UniqueConstraintRejectsUnsupportedSuffix(t *testing.T) {
+	if _, err := parseTableConstraint("CONSTRAINT uq_code UNIQUE (code) INVISIBLE unsupported"); !isFailureCode(err, 1064) {
+		t.Fatalf("unsupported UNIQUE suffix: expected 1064, got %v", err)
+	}
+}
+
+func TestIssue527AlterIndexDoesNotChangeCheckConstraint(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	if _, err := executeStatement(executor, "CREATE TABLE p (code INT, CONSTRAINT uq_code CHECK (code > 0))"); err != nil {
+		t.Fatalf("create check constraint: %v", err)
+	}
+	if _, err := executeStatement(executor, "ALTER TABLE p ALTER INDEX uq_code INVISIBLE"); !isFailureCode(err, 1176) {
+		t.Fatalf("ALTER INDEX on CHECK constraint: expected 1176, got %v", err)
+	}
+	if _, err := executeStatement(executor, "INSERT INTO p VALUES (-1)"); !isFailureCode(err, 3819) {
+		t.Fatalf("CHECK constraint after ALTER INDEX: expected 3819, got %v", err)
+	}
+}

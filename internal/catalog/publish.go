@@ -145,50 +145,6 @@ func sameCatalogStrings(left, right []string) bool {
 	return true
 }
 
-func sameConstraints(left, right []Constraint) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if !sameConstraint(left[index], right[index]) {
-			return false
-		}
-	}
-	return true
-}
-
-func sameConstraint(left, right Constraint) bool {
-	return left.Name == right.Name && left.Type == right.Type && left.Check == right.Check &&
-		left.Invisible == right.Invisible && left.ReferencedNamespace == right.ReferencedNamespace &&
-		left.ReferencedTable == right.ReferencedTable && sameCatalogStrings(left.Columns, right.Columns) &&
-		sameCatalogStrings(left.ReferencedColumns, right.ReferencedColumns)
-}
-
-func sameIndexes(left, right []Index) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if !sameIndex(left[index], right[index]) {
-			return false
-		}
-	}
-	return true
-}
-
-func sameIndex(left, right Index) bool {
-	if left.Name != right.Name || left.Unique != right.Unique || left.Invisible != right.Invisible ||
-		left.Comment != right.Comment || len(left.Parts) != len(right.Parts) {
-		return false
-	}
-	for part := range left.Parts {
-		if left.Parts[part] != right.Parts[part] {
-			return false
-		}
-	}
-	return true
-}
-
 func sameColumnAttributes(left, right []ColumnAttribute) bool {
 	if len(left) != len(right) {
 		return false

@@ -128,7 +128,7 @@ func sameIndexes(left, right []catalog.Index) bool {
 }
 
 func sameConstraint(left, right catalog.Constraint) bool {
-	return left.Name == right.Name && left.Type == right.Type && left.Check == right.Check && left.Invisible == right.Invisible &&
+	return left.Name == right.Name && left.Type == right.Type && left.Check == right.Check &&
 		left.ReferencedNamespace == right.ReferencedNamespace && left.ReferencedTable == right.ReferencedTable &&
 		sameStrings(left.Columns, right.Columns) && sameStrings(left.ReferencedColumns, right.ReferencedColumns)
 }

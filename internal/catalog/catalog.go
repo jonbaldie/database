@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -495,8 +496,8 @@ func sameSchema(left, right Definition) bool {
 func sameSchemaTable(left, right Table) bool {
 	return sameCatalogStrings(left.Columns, right.Columns) &&
 		sameCatalogStrings(left.ColumnTypes, right.ColumnTypes) &&
-		sameConstraints(left.Constraints, right.Constraints) &&
-		sameIndexes(left.Indexes, right.Indexes) &&
+		reflect.DeepEqual(left.Constraints, right.Constraints) &&
+		reflect.DeepEqual(left.Indexes, right.Indexes) &&
 		sameColumnAttributes(left.ColumnAttributes, right.ColumnAttributes) &&
 		left.AutoIncrement == right.AutoIncrement &&
 		left.AutoIncrementExhausted == right.AutoIncrementExhausted
