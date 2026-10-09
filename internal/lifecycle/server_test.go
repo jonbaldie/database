@@ -51,8 +51,8 @@ func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 		t.Fatalf("Serve after SHUTDOWN: %v", err)
 	}
 	stopping := receiveEvent(t, events, "stopping")
-	if stopping.OperationID != "op-remote-shutdown" {
-		t.Fatalf("stopping operation_id = %q, want op-remote-shutdown", stopping.OperationID)
+	if stopping.OperationID != "op-remote-shutdown" || stopping.ShutdownReason != "shutdown_request" {
+		t.Fatalf("stopping event = %#v, want operation_id op-remote-shutdown and shutdown_reason shutdown_request", stopping)
 	}
 	receiveEvent(t, events, "stopped")
 }
@@ -259,8 +259,12 @@ func TestLifecycleEventsHaveStableCodesAndOperationIdentity(t *testing.T) {
 	go func() {
 		done <- Serve(ctx, Options{DataDirectory: directory, OperationID: "op-test"}, func(event Event) { events <- event })
 	}()
+	metadata, err := instance.Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ready := receiveEvent(t, events, "ready")
-	if ready.EventCode != "server.ready" || ready.Severity != "info" || ready.OperationID != "op-test" {
+	if ready.EventCode != "server.ready" || ready.Severity != "info" || ready.OperationID != "op-test" || ready.InstanceID == "" || ready.InstanceID != metadata.InstanceID {
 		stop()
 		<-done
 		t.Fatalf("ready event = %#v", ready)
@@ -271,7 +275,7 @@ func TestLifecycleEventsHaveStableCodesAndOperationIdentity(t *testing.T) {
 	}
 	stopping := receiveEvent(t, events, "stopping")
 	stopped := receiveEvent(t, events, "stopped")
-	if stopping.EventCode != "server.stopping" || stopped.EventCode != "server.stopped" || stopping.OperationID != "op-test" || stopped.OperationID != "op-test" {
+	if stopping.EventCode != "server.stopping" || stopped.EventCode != "server.stopped" || stopping.OperationID != "op-test" || stopped.OperationID != "op-test" || stopping.ShutdownReason != "signal" {
 		t.Fatalf("shutdown events = %#v / %#v", stopping, stopped)
 	}
 }

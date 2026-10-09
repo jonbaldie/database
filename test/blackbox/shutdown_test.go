@@ -49,6 +49,9 @@ func TestOperatorShutdownStopsRunningServerWithResultAndProgress(t *testing.T) {
 	if serveResult.ExitCode != 0 {
 		t.Fatalf("serve after operator shutdown: %#v", serveResult)
 	}
+	if reason := serveResultDetail(t, serveResult.Stdout, "shutdown_reason"); reason != "shutdown_request" {
+		t.Fatalf("serve shutdown_reason = %#v, want shutdown_request; stdout=%q", reason, serveResult.Stdout)
+	}
 
 	restart, restartAddress := startMySQLServer(t, runner, directory)
 	defer func() { _ = restart.Stop(); _ = restart.Wait() }()
@@ -149,4 +152,22 @@ func assertShutdownProgress(t *testing.T, stderr string) {
 			t.Fatalf("progress phases = %#v, want %#v", phases, want)
 		}
 	}
+}
+
+func serveResultDetail(t *testing.T, stdout, key string) any {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		var record struct {
+			Schema  string         `json:"schema"`
+			Details map[string]any `json:"details"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode serve output line %q: %v", line, err)
+		}
+		if record.Schema == "database.operator.result/v1" {
+			return record.Details[key]
+		}
+	}
+	t.Fatalf("serve output has no terminal result: %q", stdout)
+	return nil
 }

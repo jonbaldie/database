@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/jonbaldie/database/internal/lifecycle"
 )
@@ -110,11 +111,19 @@ func recordServeEvent(reporter *operationReporter, event lifecycle.Event, detail
 		} else {
 			writeHumanServeEvent(reporter.stdout, event)
 		}
-	} else {
+	} else if isServeProgressPhase(event.State) {
 		reporter.progress(event.State)
+	}
+	if event.State == "stopping" {
+		details["stopping_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		details["shutdown_reason"] = event.ShutdownReason
 	}
 	if event.State == "ready" {
 		details["state"] = "ready"
+		details["ready_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		if event.InstanceID != "" {
+			details["instance_id"] = event.InstanceID
+		}
 		if event.DiagnosticsAddress != "" {
 			details["diagnostics_address"] = event.DiagnosticsAddress
 		}
@@ -122,6 +131,16 @@ func recordServeEvent(reporter *operationReporter, event lifecycle.Event, detail
 			details["warnings"] = event.Warnings
 		}
 	}
+}
+
+// isServeProgressPhase reports whether a lifecycle state belongs to the closed
+// serve progress vocabulary. Terminal states are reported only by the result.
+func isServeProgressPhase(state string) bool {
+	switch state {
+	case "starting", "recovering", "ready", "stopping":
+		return true
+	}
+	return false
 }
 
 func reportServeLifecycleFailure(reporter *operationReporter, err error, details map[string]any) int {
