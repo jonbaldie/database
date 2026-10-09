@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM golang:1.26.6-bookworm
+FROM golang:1.26.9-bookworm
 
 # Install development tools and system utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \

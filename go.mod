@@ -1,6 +1,6 @@
 module github.com/jonbaldie/database
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3
