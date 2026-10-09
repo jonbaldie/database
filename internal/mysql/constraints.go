@@ -382,7 +382,7 @@ func namedTableConstraints(table string, constraints []catalog.Constraint) ([]ca
 		checkNumber, foreignNumber = assignConstraintName(table, constraint, checkNumber, foreignNumber)
 		key := catalog.Key(constraint.Name)
 		if seen[key] {
-			return nil, sqlFailure{1061, "42000", "duplicate constraint name '" + constraint.Name + "'"}
+			return nil, duplicateConstraintName(*constraint)
 		}
 		seen[key] = true
 	}

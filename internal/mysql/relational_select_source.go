@@ -496,7 +496,7 @@ func resolveHintIndex(table catalog.Table, name string) (string, error) {
 		return "", sqlFailure{1176, "42000", "key '" + name + "' doesn't exist in table '" + table.Name + "'"}
 	}
 	if matches[0].Invisible {
-		return "", sqlFailure{3522, "HY000", "an invisible index cannot be used in a hint"}
+		return "", sqlFailure{1176, "42000", "Key '" + name + "' doesn't exist in table '" + table.Name + "'"}
 	}
 	return matches[0].Name, nil
 }
