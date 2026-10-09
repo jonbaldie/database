@@ -66,3 +66,33 @@ func TestRegistryLimitsUnauthenticatedConnections(t *testing.T) {
 	}
 	registry.unregister(first, false)
 }
+
+func TestRunStatementShowsOnlyExplainableStatementAsActive(t *testing.T) {
+	executor := newPointLookupTestExecutor(t)
+	server := executor.session.server
+	accepted, peer := net.Pipe()
+	defer accepted.Close()
+	defer peer.Close()
+	conversation := newConversation(server, accepted)
+	conversation.session = executor.session
+	query := "UPDATE items SET label = 'hopper' WHERE id = 7"
+
+	conversation.runStatement(query, func() error {
+		active, _ := conversation.control.activeQuery.Load().(string)
+		if !conversation.control.running.Load() || active != query {
+			t.Fatalf("statement during execution: running=%t query=%q", conversation.control.running.Load(), active)
+		}
+		if _, found := server.explanations.snapshot(executor.session.connectionID); !found {
+			t.Fatal("active statement has no live explanation")
+		}
+		return nil
+	})
+
+	active, _ := conversation.control.activeQuery.Load().(string)
+	if conversation.control.running.Load() || active != "" {
+		t.Fatalf("statement after execution: running=%t query=%q", conversation.control.running.Load(), active)
+	}
+	if _, found := server.explanations.snapshot(executor.session.connectionID); found {
+		t.Fatal("finished statement kept its live explanation")
+	}
+}

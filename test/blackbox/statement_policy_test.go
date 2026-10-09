@@ -363,10 +363,9 @@ func TestMySQLLocksResourcesCancellationAndExplanationKeepWireContract(t *testin
 	blockedSQL := "/* application update */ UPDATE entries SET value = 30 WHERE id = 1"
 	blocked := queryAsync(worker, blockedSQL)
 	waitForProcessListQuery(t, observer, worker.connectionID)
-	snapshot := liveQueryExplanation(t, observer, worker.connectionID)
+	snapshot := waitForLiveLockWait(t, observer, worker.connectionID)
 	statement := snapshot["statement"].(map[string]any)
-	actual := snapshot["plan"].(map[string]any)["actual"].(map[string]any)
-	if statement["sql"] != "UPDATE entries SET value = 30 WHERE id = 1" || statement["kind"] != "update" || actual["wait"].(map[string]any)["lock_ms"].(float64) <= 0 {
+	if statement["sql"] != "UPDATE entries SET value = 30 WHERE id = 1" || statement["kind"] != "update" {
 		t.Fatalf("live Query explanation execution = %#v", snapshot)
 	}
 	mustQuery(t, observer, "KILL QUERY "+strconv.FormatUint(uint64(worker.connectionID), 10))
