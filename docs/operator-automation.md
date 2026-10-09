@@ -182,6 +182,11 @@ Successful command details contain these stable operator facts:
 | `data inspect` | Identity, versions, compatibility, state, and whether recovery or upgrade is required |
 | `version` | Product, build, and platform identity plus data, backup, and named MySQL application compatibility ranges |
 
+Successful `serve` details include `instance_id`, `ready_at`, `stopping_at`,
+`shutdown_reason`, and `state` `stopped`. The times are UTC RFC 3339 times.
+`shutdown_reason` is `signal` after `SIGINT` or `SIGTERM`, and
+`shutdown_request` after a `database shutdown` request.
+
 Successful `data validate` details include `checked_at`, the UTC RFC 3339
 time at which the checks finished. If `examined` is present, it contains
 logical component names such as `instance_metadata`, `catalog`, and
