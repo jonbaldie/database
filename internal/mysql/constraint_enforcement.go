@@ -275,7 +275,7 @@ func validateConstraintDeclaration(seen map[string]bool, previous, definition ca
 		return errorsConstraintDefinition("constraint requires a name and type")
 	}
 	if seen[catalog.Key(constraint.Name)] {
-		return duplicateConstraintName(constraint)
+		return errorsConstraintDefinition("duplicate constraint name '" + constraint.Name + "'")
 	}
 	seen[catalog.Key(constraint.Name)] = true
 	if err := validateConstraintColumns(constraint, indexes); err != nil {
