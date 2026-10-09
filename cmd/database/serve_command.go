@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/signal"
 
 	"github.com/jonbaldie/database/internal/lifecycle"
 )
@@ -79,8 +77,7 @@ func reportServeConfigurationFailure(reporter *operationReporter, err error, std
 }
 
 func serveLifecycleWithReporter(opts lifecycle.Options, reporter *operationReporter) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	ctx := context.Background()
 	opts.OperationID = reporter.id
 	state := ""
 	recovered := false
@@ -110,17 +107,32 @@ func recordServeEvent(reporter *operationReporter, event lifecycle.Event, detail
 		} else {
 			writeHumanServeEvent(reporter.stdout, event)
 		}
-	} else {
+	} else if isServeProgressPhase(event.State) {
 		reporter.progress(event.State)
 	}
 	if event.State == "ready" {
 		details["state"] = "ready"
+		details["instance_id"] = event.InstanceID
+		details["ready_at"] = event.RecordedAt
 		if event.DiagnosticsAddress != "" {
 			details["diagnostics_address"] = event.DiagnosticsAddress
 		}
 		if len(event.Warnings) != 0 {
 			details["warnings"] = event.Warnings
 		}
+	}
+	if event.State == "stopping" {
+		details["stopping_at"] = event.RecordedAt
+		details["shutdown_reason"] = event.ShutdownReason
+	}
+}
+
+func isServeProgressPhase(phase string) bool {
+	switch phase {
+	case "recovering", "ready", "stopping":
+		return true
+	default:
+		return false
 	}
 }
 
