@@ -235,6 +235,8 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 	}
 	for name, query := range queries {
 		t.Run(name, func(t *testing.T) {
+			// The analysis must stream even when its caller does not.
+			executor.streamRows = false
 			result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON "+query)
 			if err != nil {
 				t.Fatalf("analyze: %v", err)
@@ -470,6 +472,8 @@ func TestExplainAnalyzeStreamsRowsLikeTheSelectItAnalyzes(t *testing.T) {
 		t.Fatalf("streamed rows = %d, want %d", streamed, 49*300)
 	}
 
+	// The analysis must stream even when its caller does not.
+	executor.streamRows = false
 	result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON "+query)
 	if err != nil {
 		t.Fatalf("analyze streamed select: %v", err)
@@ -484,5 +488,56 @@ func TestExplainAnalyzeStreamsRowsLikeTheSelectItAnalyzes(t *testing.T) {
 	}
 	if peak, _ := actual["peak_memory_bytes"].(float64); peak <= 0 || peak > 20000 {
 		t.Fatalf("analyzed peak memory = %#v, want a streamed peak within the 20000-byte limit", actual["peak_memory_bytes"])
+	}
+
+	// A LIMIT puts the project operator below the root, so its own evidence shows.
+	result, err = executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON "+query+" LIMIT 20000")
+	if err != nil {
+		t.Fatalf("analyze limited streamed select: %v", err)
+	}
+	document = map[string]any{}
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode limited analysis: %v", err)
+	}
+	project := findExplainOperator(document["plan"].(map[string]any), "project")
+	if project == nil || document["plan"].(map[string]any)["kind"] == "project" {
+		t.Fatalf("limited analysis has no project operator below the root: %#v", document["plan"])
+	}
+	// One projected row is two BIGINT ids, so its peak is far below the sum of all rows.
+	if peak, _ := project["actual"].(map[string]any)["peak_memory_bytes"].(float64); peak <= 0 || peak > 100 {
+		t.Fatalf("project peak memory = %#v, want the largest streamed row", project["actual"])
+	}
+}
+
+func findExplainOperator(operator map[string]any, kind string) map[string]any {
+	if operator["kind"] == kind {
+		return operator
+	}
+	children, _ := operator["children"].([]any)
+	for _, child := range children {
+		if found := findExplainOperator(child.(map[string]any), kind); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func TestDiscardResultRowsReportsTheLargestStreamedRow(t *testing.T) {
+	streamed := [][]string{{"a", "bb"}, {"cccccccccc", "d"}, {"e", "f"}}
+	result := &queryResult{stream: func(yield func([]string, []bool) error) error {
+		for _, row := range streamed {
+			if err := yield(row, []bool{false, false}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+	rows, memory, err := discardResultRows(result)
+	if err != nil {
+		t.Fatalf("discard streamed rows: %v", err)
+	}
+	// The largest row holds 11 value bytes and 2 null flags.
+	if rows != 3 || memory != 13 {
+		t.Fatalf("discardResultRows = %d rows, %d bytes; want 3 rows, 13 bytes", rows, memory)
 	}
 }
