@@ -336,7 +336,7 @@ func effectiveTableIndexes(table catalog.Table) []catalog.Index {
 		for number, column := range constraint.Columns {
 			parts[number].Column = column
 		}
-		index := catalog.Index{Name: constraint.Name, Unique: true, Parts: parts}
+		index := catalog.Index{Name: constraint.Name, Unique: true, Parts: parts, Invisible: constraint.Invisible}
 		if constraint.Type == catalog.ConstraintTypePrimary {
 			primary = append(primary, index)
 		} else {

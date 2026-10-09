@@ -1,6 +1,9 @@
 package catalog
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 func (s *Store) replaceLocked(definition Definition) error {
 	staged := cloneDefinition(definition)
@@ -143,6 +146,25 @@ func sameCatalogStrings(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func sameCatalogConstraints(left, right []Constraint) bool {
+	return slices.EqualFunc(left, right, sameCatalogConstraint)
+}
+
+func sameCatalogConstraint(left, right Constraint) bool {
+	return left.Name == right.Name && left.Type == right.Type && left.Check == right.Check && left.Invisible == right.Invisible &&
+		left.ReferencedNamespace == right.ReferencedNamespace && left.ReferencedTable == right.ReferencedTable &&
+		slices.Equal(left.Columns, right.Columns) && slices.Equal(left.ReferencedColumns, right.ReferencedColumns)
+}
+
+func sameCatalogIndexes(left, right []Index) bool {
+	return slices.EqualFunc(left, right, sameCatalogIndex)
+}
+
+func sameCatalogIndex(left, right Index) bool {
+	return left.Name == right.Name && left.Unique == right.Unique && left.Invisible == right.Invisible &&
+		left.Comment == right.Comment && slices.Equal(left.Parts, right.Parts)
 }
 
 func sameColumnAttributes(left, right []ColumnAttribute) bool {

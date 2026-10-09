@@ -291,8 +291,11 @@ is not chosen automatically. A primary index cannot be invisible.
 
 `CREATE INDEX`, `CREATE UNIQUE INDEX`, `DROP INDEX`, and the corresponding
 `ALTER TABLE` index actions are supported. `SHOW INDEX` and `SHOW CREATE TABLE`
-expose the durable index definition. A unique index rejects duplicate non-NULL
-key values. Functional and prefix key values use the same rule.
+expose the durable index definition. These index actions also apply to a
+`UNIQUE` key from a table definition, by the name that `SHOW INDEX` lists. An
+invisible unique key continues to reject duplicate values. A unique index
+rejects duplicate non-NULL key values. Functional and prefix key values use the
+same rule.
 
 `USE INDEX`, `FORCE INDEX`, and `IGNORE INDEX` support `FOR JOIN`, `FOR ORDER
 BY`, and `FOR GROUP BY` scopes. A hint can name an unambiguous index-name

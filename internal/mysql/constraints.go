@@ -276,6 +276,9 @@ func parseUniqueConstraint(constraint catalog.Constraint, value string) (catalog
 		value = remainder
 	}
 	columns, remainder, ok := parseConstraintColumns(value)
+	if ok {
+		remainder, _, constraint.Invisible, _ = parseIndexVisibility(remainder)
+	}
 	if !ok || strings.TrimSpace(remainder) != "" {
 		return catalog.Constraint{}, sqlFailure{1064, "42000", "invalid UNIQUE constraint"}
 	}

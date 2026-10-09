@@ -92,6 +92,7 @@ type Constraint struct {
 	ReferencedNamespace string   `json:"referenced_namespace,omitempty"`
 	ReferencedTable     string   `json:"referenced_table,omitempty"`
 	ReferencedColumns   []string `json:"referenced_columns,omitempty"`
+	Invisible           bool     `json:"invisible,omitempty"`
 }
 
 // ErrRevisionConflict reports that a concurrent catalog commit superseded the
@@ -489,11 +490,14 @@ func sameSchema(left, right Definition) bool {
 	return true
 }
 
+// sameSchemaTable reports whether a table's durable schema is unchanged.
+// Comparing only constraint and index counts let a change that keeps the
+// counts, such as ALTER INDEX ... INVISIBLE, skip the catalog file write.
 func sameSchemaTable(left, right Table) bool {
 	return sameCatalogStrings(left.Columns, right.Columns) &&
 		sameCatalogStrings(left.ColumnTypes, right.ColumnTypes) &&
-		len(left.Constraints) == len(right.Constraints) &&
-		len(left.Indexes) == len(right.Indexes) &&
+		sameCatalogConstraints(left.Constraints, right.Constraints) &&
+		sameCatalogIndexes(left.Indexes, right.Indexes) &&
 		sameColumnAttributes(left.ColumnAttributes, right.ColumnAttributes) &&
 		left.AutoIncrement == right.AutoIncrement &&
 		left.AutoIncrementExhausted == right.AutoIncrementExhausted
