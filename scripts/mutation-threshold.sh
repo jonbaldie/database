@@ -28,8 +28,20 @@ if ((${#files[@]} == 0)); then
 	exit 0
 fi
 
-if ! command -v mutago >/dev/null 2>&1; then
+if ! mutago_path="$(command -v mutago)"; then
 	echo "mutation threshold: install mutago before running this gate" >&2
+	exit 1
+fi
+if [[ -z "${MUTAGO_VERSION:-}" ]]; then
+	echo "mutation threshold: MUTAGO_VERSION is not set; run make mutation" >&2
+	exit 1
+fi
+# Only the pinned mutago build may report the covered-code MSI.
+mutago_module=github.com/quality-gates/mutago/v2
+if ! go version -m "$mutago_path" 2>/dev/null | awk -v module="$mutago_module" -v version="$MUTAGO_VERSION" '
+	$1 == "mod" && $2 == module && $3 == version { found = 1 }
+	END { exit !found }'; then
+	echo "mutation threshold: $mutago_path is not $mutago_module $MUTAGO_VERSION" >&2
 	exit 1
 fi
 minimum="$(awk -v threshold="$threshold" 'BEGIN {

@@ -23,8 +23,6 @@ jobs:
           cache: true
       - name: Production quality gate
         run: make quality
-      - name: Install mutation tester
-        run: go install github.com/quality-gates/mutago/v2/cmd/mutago@v2.10.24
       - name: Changed-code mutation threshold
         run: make mutation
         env:
