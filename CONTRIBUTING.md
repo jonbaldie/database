@@ -5,7 +5,7 @@ and feature contributions through ordinary GitHub pull requests.
 
 ## Before opening a pull request
 
-- Follow the repository's `AGENTS.md` and the domain language in `CONTEXT.md`.
+- Follow the repository's `AGENTS.md` and the domain language in `GLOSSARY.md`.
 - Keep each pull request focused and explain its behaviour and verification.
 - Run the relevant checks locally. `make quality` is the project quality gate.
 - A prior issue is welcome when it helps discussion, but it is not required.

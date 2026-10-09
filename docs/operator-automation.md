@@ -8,10 +8,10 @@ parsers, process structure, control channels, credential-reading libraries,
 workflow algorithms, or serialization implementation beyond the observable
 records described here.
 
-The single supported [`database` operator command family](../CONTEXT.md) uses
+The single supported [`database` operator command family](../GLOSSARY.md) uses
 one command and one result contract for initialization, service lifecycle,
 backup, restore, upgrade, configuration, validation, inspection, and version
-reporting. Every invocation has an [operator operation identity](../CONTEXT.md)
+reporting. Every invocation has an [operator operation identity](../GLOSSARY.md)
 and reaches either a documented terminal result or an explicit process-loss
 boundary.
 
@@ -53,7 +53,7 @@ treat that absence as failure requiring its own recovery policy.
 
 ## Secret input and confirmation
 
-An [operator secret input](../CONTEXT.md) is a database-account password read
+An [operator secret input](../GLOSSARY.md) is a database-account password read
 from exactly one named file or standard input. Password arguments and password
 environment variables are unsupported. The source must contain 12–1,024 valid
 UTF-8 bytes. One final LF, or one final CRLF, is removed; every other byte,
@@ -73,9 +73,9 @@ command prompts for confirmation.
 The following table is the complete command-specific input surface. Options not
 listed here or in the server configuration registry are unsupported.
 
-| Command | Required product inputs |
+| Command | Product inputs |
 | --- | --- |
-| `database init` | `--data-directory PATH`; `--initial-account NAME`; exactly one of `--initial-password-file PATH` or `--initial-password-stdin` |
+| `database init` | `--data-directory PATH`; optional `--initial-account NAME` (default: `admin`); exactly one of `--initial-password-file PATH` or `--initial-password-stdin` |
 | `database serve` | Effective closed server configuration, optionally selected by `--config PATH` and overridden by the registry's exact flags |
 | `database shutdown` | Online connection inputs below, plus `--yes` for non-interactive confirmation |
 | `database backup create` | Online connection inputs below and new `--output PATH` |
@@ -154,7 +154,7 @@ The machine-readable terminal envelope is identified by
 | `details` | Command-specific terminal facts |
 | `diagnostics` | Zero or more structured diagnostic records |
 
-Every invocation receives one opaque [operator operation identity](../CONTEXT.md).
+Every invocation receives one opaque [operator operation identity](../GLOSSARY.md).
 The same `operation_id` appears in progress, the terminal result, related
 structured diagnostics, and server-side operational visibility when the
 workflow reaches the server. It correlates records; it is not a durable

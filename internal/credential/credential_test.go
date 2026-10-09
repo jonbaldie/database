@@ -7,7 +7,7 @@ import (
 )
 
 func TestValidateAccountName(t *testing.T) {
-	for _, name := range []string{"a", "Z", "9", "admin", "Admin.ops_2-x", strings.Repeat("a", 32)} {
+	for _, name := range []string{"a", "Z", "z", "0", "9", "admin", "Admin.ops_2-x", strings.Repeat("a", 32)} {
 		if err := ValidateAccountName(name); err != nil {
 			t.Errorf("ValidateAccountName(%q) = %v, want nil", name, err)
 		}
@@ -51,7 +51,7 @@ func TestPasswordMatches(t *testing.T) {
 	if !PasswordMatches([]byte("contract-valid-password"), strings.ToUpper(hash)) {
 		t.Fatal("PasswordMatches rejected an uppercase stored hash")
 	}
-	for _, stored := range []string{"", "not-hex", hash[:62], PasswordHash("other-valid-password")} {
+	for _, stored := range []string{"", "not-hex", hash[:62], PasswordHash("other-valid-password"), hash + "!"} {
 		if PasswordMatches([]byte("contract-valid-password"), stored) {
 			t.Fatalf("PasswordMatches accepted stored hash %q", stored)
 		}

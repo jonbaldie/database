@@ -64,12 +64,56 @@ func TestStreamWriterBoundedPacketEnforcesLimit(t *testing.T) {
 
 	largePayload := make([]byte, 101)
 	err := writer.WritePacket(largePayload)
-	if err == nil {
-		t.Fatal("WritePacket(101) expected error for exceeding max packet, got nil")
+	if !errors.Is(err, errPacketTooLarge) {
+		t.Fatalf("WritePacket(101) error = %v, want %v", err, errPacketTooLarge)
 	}
 	// Buffer should only have written the small packet (4 byte header + 50 bytes = 54)
 	if buf.Len() != 54 {
 		t.Fatalf("buf.Len() = %d, want 54", buf.Len())
+	}
+}
+
+func TestReadPacketDiscardsOversizedPacket(t *testing.T) {
+	stream := &bytes.Buffer{}
+	if err := writePacket(stream, 3, bytes.Repeat([]byte{'x'}, 101)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePacket(stream, 0, []byte{comPing}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, payload, err := readPacket(stream, 100)
+	if !errors.Is(err, errPacketTooLarge) || sequence != 3 || payload != nil {
+		t.Fatalf("oversized readPacket = %d, %v, %v; want 3, nil, %v", sequence, payload, err, errPacketTooLarge)
+	}
+	if got := mysqlError(err); binary.LittleEndian.Uint16(got[1:3]) != 1153 || string(got[4:9]) != "08S01" {
+		t.Fatalf("oversized error packet = %q, want 1153 (08S01)", got)
+	}
+	sequence, payload, err = readPacket(stream, 100)
+	if err != nil || sequence != 0 || !bytes.Equal(payload, []byte{comPing}) {
+		t.Fatalf("packet after oversized packet = %d, %v, %v; want the next command", sequence, payload, err)
+	}
+}
+
+func TestWriteResultReportsOversizedRowAndCompletesResponse(t *testing.T) {
+	stream := &bytes.Buffer{}
+	result := &queryResult{
+		columns:  []string{"v"},
+		metadata: []columnMetadata{{catalog: "def", name: "v", typ: mysqlTypeVarString}},
+		rows:     [][]string{{"small"}, {string(bytes.Repeat([]byte{'y'}, 200))}},
+	}
+	if err := writeResult(stream, 1, result, 100); err != nil {
+		t.Fatalf("writeResult = %v, want the error reported in the response", err)
+	}
+	var last []byte
+	for stream.Len() > 0 {
+		_, payload, err := readPacket(stream, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = payload
+	}
+	if last[0] != 0xff || binary.LittleEndian.Uint16(last[1:3]) != 1153 {
+		t.Fatalf("final packet = %q, want error 1153", last)
 	}
 }
 

@@ -13,6 +13,8 @@ const (
 	maxIndexKeyWidth = 3072
 )
 
+var errTooManyKeyParts = sqlFailure{1070, "42000", "Too many key parts specified; max " + strconv.Itoa(maxIndexParts) + " parts allowed"}
+
 func isTableIndexDefinition(value string) bool {
 	lower := strings.ToLower(strings.TrimSpace(value))
 	return indexDefinitionKeyword(lower, "index") || indexDefinitionKeyword(lower, "key") || indexDefinitionKeyword(lower, "unique index") || indexDefinitionKeyword(lower, "unique key") || indexDefinitionKeyword(lower, "fulltext") || indexDefinitionKeyword(lower, "spatial")
@@ -88,7 +90,7 @@ func parseTableIndexParts(value string) ([]catalog.IndexPart, string, error) {
 	}
 	parts := splitCSV(body)
 	if len(parts) == 0 || len(parts) > maxIndexParts {
-		return nil, "", sqlFailure{1069, "42000", "too many key parts"}
+		return nil, "", errTooManyKeyParts
 	}
 	result := make([]catalog.IndexPart, len(parts))
 	for number, part := range parts {
@@ -375,7 +377,7 @@ func validateTableIndex(table catalog.Table, index catalog.Index, seen map[strin
 	}
 	seen[key] = true
 	if len(index.Parts) == 0 || len(index.Parts) > maxIndexParts {
-		return sqlFailure{1069, "42000", "invalid key part count"}
+		return errTooManyKeyParts
 	}
 	return validateTableIndexParts(table, index)
 }

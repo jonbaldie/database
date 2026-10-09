@@ -152,6 +152,7 @@ func TestParseFixedOffset(t *testing.T) {
 		"+05:30": 330,
 		"-08:00": -480,
 		"+14:00": 840,
+		"-13:59": -839,
 	}
 	for input, want := range cases {
 		got, err := parseFixedOffset(input)
@@ -162,7 +163,7 @@ func TestParseFixedOffset(t *testing.T) {
 			t.Errorf("parseFixedOffset(%q) = %d, want %d", input, got, want)
 		}
 	}
-	for _, bad := range []string{"", "Europe/London", "+5:30", "+15:00", "-15:00", "+05:60", "SYSTEM"} {
+	for _, bad := range []string{"", "Europe/London", "+5:30", "+15:00", "-15:00", "-14:00", "+14:01", "+05:60", "SYSTEM"} {
 		if _, err := parseFixedOffset(bad); err == nil {
 			t.Errorf("parseFixedOffset(%q) accepted an unsupported zone", bad)
 		}

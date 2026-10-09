@@ -17,14 +17,14 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          # Go 1.26.6 fixes reachable standard-library vulnerabilities. It
+          # Go 1.26.9 fixes reachable standard-library vulnerabilities. It
           # also supports messgo v0.2.0 and makes quality results reproducible.
-          go-version: 1.26.6
+          go-version: 1.26.9
           cache: true
       - name: Production quality gate
         run: make quality
       - name: Install mutation tester
-        run: go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@v0.0.0-20251226130216-48d0401f00fb
+        run: go install github.com/quality-gates/mutago/v2/cmd/mutago@v2.10.24
       - name: Changed-code mutation threshold
         run: make mutation
         env:

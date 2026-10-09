@@ -680,6 +680,35 @@ func TestOperatorServeKeepsDefaultHumanOutput(t *testing.T) {
 	}
 }
 
+func TestOperatorServeReportsUnusableDataDirectoryAsPrecondition(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	empty := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	for _, directory := range []string{empty, missing} {
+		for _, flag := range []string{"", "--format=json", "--result=json"} {
+			arguments := []string{"serve", "--data-directory", directory, "--mysql-listen-address", freeAddress(t)}
+			if flag != "" {
+				arguments = append(arguments, flag)
+			}
+			run := runner.Run(context.Background(), arguments...)
+			if run.ExitCode != 3 {
+				t.Fatalf("serve %s %s exit = %d, want 3; %#v", directory, flag, run.ExitCode, run)
+			}
+			if flag == "" {
+				if !strings.Contains(run.Stderr, "database serve: ") {
+					t.Fatalf("serve %s human failure output: %#v", directory, run)
+				}
+				continue
+			}
+			result := decodeOperatorResult(t, run.Stdout)
+			assertOperatorResultEnvelope(t, result, "serve", "failure")
+			if result["exit_class"] != "precondition" || result["exit_code"] != float64(3) {
+				t.Fatalf("serve %s %s result = %#v, want precondition/3", directory, flag, result)
+			}
+		}
+	}
+}
+
 func assertOperatorResultEnvelope(t *testing.T, result map[string]any, command, status string) {
 	t.Helper()
 	for _, field := range []string{

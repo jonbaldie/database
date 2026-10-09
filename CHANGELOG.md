@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.18] - 2026-10-07
+
+### Changed
+
+- Sped up predicate evaluation on stored numeric row values.
+
+### Fixed
+
+- Returned MySQL error 1153 (`ER_NET_PACKET_TOO_LARGE`, SQLSTATE `08S01`) for an inbound command larger than `max_allowed_packet` before closing the session, instead of resetting the connection.
+
+## [0.2.17] - 2026-10-04
+
+### Added
+
+- Added the MySQL 8.4 columns to the constraint and `STATISTICS` views in `information_schema`.
+
+### Changed
+
+- Routed `--format` and `--result` operator output through one result builder, so JSON results from `init`, `config`, and `serve` are complete `database.operator.result/v1` objects.
+
+### Fixed
+
+- Enforced `--idle-session-timeout-ms` and `--idle-in-transaction-timeout-ms`, and reported their values in the matching session variables.
+- Reported a missing or uninitialized data directory for `database serve` as a precondition failure with the same exit code in each output mode.
+- Printed a `database.operator.result/v1` failure result for an invalid `database init` with `--result=json`, and a human result without it.
+- Reported `"state": "stopped"` and the `preflight`, `initializing`, and `validating` phases for `database init`.
+- Emitted the `preflight` and `validating` phases for `database data validate` instead of `reading`.
+- Rejected `SET time_zone='-14:00'` with MySQL error 1298.
+- Returned SQLSTATE `42000` with error 1461 when the prepared statement limit is reached.
+- Rejected a column-level `CHECK` that references another column with MySQL error 3813.
+- Rejected foreign keys with incompatible child and parent column types with MySQL error 3780.
+- Let `DROP INDEX` remove a `UNIQUE` key defined in `CREATE TABLE`.
+- Listed `PRIMARY` first, then unique keys, then other keys in `SHOW INDEX` and `information_schema.STATISTICS`.
+- Reported the `Null` column of `SHOW INDEX` correctly and filtered `SHOW INDEX ... WHERE` on displayed values.
+- Merged `IF` result argument types so all rows share one type.
+- Kept temporal kind and collation across subquery boundaries in comparisons.
+- Keyed row locks and point lookups by the canonical table identity instead of the statement spelling.
+
 ## [0.2.16] - 2026-09-30
 
 ### Fixed

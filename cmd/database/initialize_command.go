@@ -11,7 +11,7 @@ import (
 	"github.com/jonbaldie/database/internal/instance"
 )
 
-const initializationUsage = "usage: database init DIRECTORY (--password-file FILE | --password-stdin) [--format=human|json]"
+const initializationUsage = "usage: database init --data-directory PATH [--initial-account NAME] (--initial-password-file PATH | --initial-password-stdin) [--result=human|json]"
 
 type initializationRequest struct {
 	directory       string
@@ -86,9 +86,6 @@ func initializeValidatedRequest(request initializationRequest, reporter *operati
 }
 
 func initializationFailure(reporter *operationReporter, class, summary string) int {
-	if reporter.output.legacy && reporter.output.result == "human" {
-		reporter.output.result = "json"
-	}
 	return reporter.failure(class, "", summary, nil)
 }
 
