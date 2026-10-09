@@ -198,10 +198,6 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 	if !c.server.connections.beginStatement() {
 		return false
 	}
-	c.control.running.Store(true)
-	defer c.control.running.Store(false)
-	c.control.activeQuery.Store(query)
-	defer c.control.activeQuery.Store("")
 	finishExplanation := c.recordActiveExplanation(query)
 	defer finishExplanation()
 	watch := c.watchStatement()
@@ -219,6 +215,14 @@ func (c *conversation) runStatement(query string, run func() error) bool {
 		}
 		c.session.statementCancel = nil
 	}()
+	// Show the statement only once it can be cancelled and a text statement can
+	// be explained, and hide it before that state is released, so an observer
+	// that sees a text statement active never gets "unknown or inactive
+	// connection ID".
+	c.control.activeQuery.Store(query)
+	defer c.control.activeQuery.Store("")
+	c.control.running.Store(true)
+	defer c.control.running.Store(false)
 	err := run()
 	c.server.connections.endStatement()
 	return err == nil && !c.control.revoked.Load()
