@@ -173,6 +173,75 @@ func TestApplyDurablePersistsTypeOnlyAndAttributeOnlyChanges(t *testing.T) {
 	}
 }
 
+func TestApplyDurablePersistsVisibilityOnlyChanges(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		addKey        func(*Table)
+		makeInvisible func(*Table)
+		isInvisible   func(Table) bool
+	}{
+		{
+			name: "unique constraint",
+			addKey: func(table *Table) {
+				table.Constraints = []Constraint{{Name: "uq_code", Type: ConstraintTypeUnique, Columns: []string{"code"}}}
+			},
+			makeInvisible: func(table *Table) { table.Constraints[0].Invisible = true },
+			isInvisible:   func(table Table) bool { return table.Constraints[0].Invisible },
+		},
+		{
+			name: "index",
+			addKey: func(table *Table) {
+				table.Indexes = []Index{{Name: "idx_code", Parts: []IndexPart{{Column: "code"}}}}
+			},
+			makeInvisible: func(table *Table) { table.Indexes[0].Invisible = true },
+			isInvisible:   func(table Table) bool { return table.Indexes[0].Invisible },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			store, err := Open(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateNamespace("app"); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateTable("app", "accounts", []string{"id", "code"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.ApplyDurable(func(definition Definition) (Definition, error) {
+				table := definition.Namespaces["app"].Tables["accounts"]
+				test.addKey(&table)
+				definition.Namespaces["app"].Tables["accounts"] = table
+				return definition, nil
+			}); err != nil {
+				t.Fatalf("add key: %v", err)
+			}
+			if err := store.ApplyDurable(func(definition Definition) (Definition, error) {
+				table := definition.Namespaces["app"].Tables["accounts"]
+				test.makeInvisible(&table)
+				definition.Namespaces["app"].Tables["accounts"] = table
+				return definition, nil
+			}); err != nil {
+				t.Fatalf("make key invisible: %v", err)
+			}
+			if err := store.Rows().Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			reopened, err := Open(directory)
+			if err != nil {
+				t.Fatalf("reopen after visibility change: %v", err)
+			}
+			defer reopened.Rows().Close()
+			table := reopened.Snapshot().Namespaces["app"].Tables["accounts"]
+			if !test.isInvisible(table) {
+				t.Fatalf("key after reopen = %#v, want invisible", table)
+			}
+		})
+	}
+}
+
 func sameRows(left, right [][]string) bool {
 	if len(left) != len(right) {
 		return false

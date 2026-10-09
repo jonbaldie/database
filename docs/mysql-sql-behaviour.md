@@ -286,8 +286,10 @@ parser organization, collation machinery, or storage layout.
 
 The server supports B-tree primary, unique, secondary, composite, prefix, and
 functional indexes. A key part is ascending by default and can be descending.
-Indexes are visible by default; an invisible secondary index is maintained but
-is not chosen automatically. A primary index cannot be invisible.
+Indexes are visible by default; an invisible secondary or unique index is
+maintained but is not chosen automatically. A unique key declared in a table
+definition can be made invisible like any other unique index. A primary index
+cannot be invisible.
 
 `CREATE INDEX`, `CREATE UNIQUE INDEX`, `DROP INDEX`, and the corresponding
 `ALTER TABLE` index actions are supported. `SHOW INDEX` and `SHOW CREATE TABLE`

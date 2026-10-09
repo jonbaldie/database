@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -92,6 +93,9 @@ type Constraint struct {
 	ReferencedNamespace string   `json:"referenced_namespace,omitempty"`
 	ReferencedTable     string   `json:"referenced_table,omitempty"`
 	ReferencedColumns   []string `json:"referenced_columns,omitempty"`
+	// Invisible applies only to a unique constraint, which SHOW INDEX lists
+	// as a unique index.
+	Invisible bool `json:"invisible,omitempty"`
 }
 
 // ErrRevisionConflict reports that a concurrent catalog commit superseded the
@@ -492,8 +496,8 @@ func sameSchema(left, right Definition) bool {
 func sameSchemaTable(left, right Table) bool {
 	return sameCatalogStrings(left.Columns, right.Columns) &&
 		sameCatalogStrings(left.ColumnTypes, right.ColumnTypes) &&
-		len(left.Constraints) == len(right.Constraints) &&
-		len(left.Indexes) == len(right.Indexes) &&
+		reflect.DeepEqual(left.Constraints, right.Constraints) &&
+		reflect.DeepEqual(left.Indexes, right.Indexes) &&
 		sameColumnAttributes(left.ColumnAttributes, right.ColumnAttributes) &&
 		left.AutoIncrement == right.AutoIncrement &&
 		left.AutoIncrementExhausted == right.AutoIncrementExhausted
