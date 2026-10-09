@@ -925,7 +925,7 @@ func dropTableIndex(table *catalog.Table, name string) error {
 		table.Constraints = constraints
 		return nil
 	}
-	return errors.New("can't drop index; check that it exists")
+	return sqlFailure{1091, "42000", "Can't DROP '" + name + "'; check that column/key exists"}
 }
 
 func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]catalog.Constraint, bool) {
@@ -952,7 +952,7 @@ func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool
 		}
 		return errors.New("can't alter primary index visibility")
 	}
-	return errors.New("can't alter index; check that it exists")
+	return sqlFailure{1176, "42000", "Key '" + name + "' doesn't exist in table '" + table.Name + "'"}
 }
 
 func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) error {
@@ -1009,7 +1009,7 @@ func dropTableColumn(table *catalog.Table, action ddlAction) error {
 		if action.ifExists {
 			return nil
 		}
-		return errors.New("unknown column")
+		return sqlFailure{1091, "42000", "Can't DROP '" + action.name + "'; check that column/key exists"}
 	}
 	if len(table.Columns) == 1 {
 		return errors.New("a table must retain one column")
