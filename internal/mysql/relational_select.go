@@ -605,7 +605,9 @@ func (s *relationalResultStream) yieldSourceRow(row relationRow, yield func([]st
 	}
 	values, nulls := s.outputRow(result)
 	s.emitted++
-	s.projectMemory += resultMemory([]relationalResultRow{result})
+	// The stream holds one projected row at a time, so its peak is the largest
+	// row, not the sum of all emitted rows.
+	s.projectMemory = max(s.projectMemory, resultMemory([]relationalResultRow{result}))
 	if err := s.yieldDeliveredRow(values, nulls, yield); err != nil {
 		return err
 	}
