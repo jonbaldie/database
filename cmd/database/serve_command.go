@@ -104,16 +104,7 @@ func serveLifecycleWithReporter(opts lifecycle.Options, reporter *operationRepor
 }
 
 func recordServeEvent(reporter *operationReporter, event lifecycle.Event, details map[string]any) {
-	if usesLegacyServeOutput(reporter.output) {
-		event.OperationID = reporter.id
-		if reporter.output.result == "json" {
-			_ = json.NewEncoder(reporter.stdout).Encode(event)
-		} else {
-			writeHumanServeEvent(reporter.stdout, event)
-		}
-	} else if isServeProgressPhase(event.State) {
-		reporter.progress(event.State)
-	}
+	publishServeEvent(reporter, event)
 	if event.State == "stopping" {
 		details["stopping_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 		details["shutdown_reason"] = event.ShutdownReason
@@ -131,6 +122,39 @@ func recordServeEvent(reporter *operationReporter, event lifecycle.Event, detail
 			details["warnings"] = event.Warnings
 		}
 	}
+}
+
+func publishServeEvent(reporter *operationReporter, event lifecycle.Event) {
+	if usesLegacyServeOutput(reporter.output) {
+		event.OperationID = reporter.id
+		if reporter.output.result == "json" {
+			_ = json.NewEncoder(reporter.stdout).Encode(event)
+		} else {
+			writeHumanServeEvent(reporter.stdout, event)
+		}
+		return
+	}
+	if isServeProgressPhase(event.State) {
+		reporter.progress(event.State)
+	}
+	if event.State == "ready" {
+		writeOperatorReadyEvent(reporter, event)
+	}
+}
+
+// writeOperatorReadyEvent publishes the ready lifecycle record, and with it
+// any listener warning, on stderr when the server becomes ready. Progress is
+// optional and stdout is reserved for the terminal result, so neither can
+// carry a warning that must be visible while the server accepts connections.
+func writeOperatorReadyEvent(reporter *operationReporter, event lifecycle.Event) {
+	if reporter.output.result != "json" {
+		for _, warning := range event.Warnings {
+			fmt.Fprintf(reporter.stderr, "database: WARNING [%s] %s\n", warning.Code, warning.Summary)
+		}
+		return
+	}
+	event.OperationID = reporter.id
+	_ = json.NewEncoder(reporter.stderr).Encode(event)
 }
 
 // isServeProgressPhase reports whether a lifecycle state belongs to the closed

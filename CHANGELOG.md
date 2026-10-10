@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Wrote the `serve` ready lifecycle record, with the `UNSAFE_NON_TLS_LISTENER` warning, to standard error at ready time in operator result mode, instead of reporting the warning only after shutdown.
+
 ## [0.2.18] - 2026-10-07
 
 ### Changed
