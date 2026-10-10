@@ -1,0 +1,16 @@
+{
+  "exit_code": 5,
+  "exit_class": "invalid_artifact",
+  "details": {
+    "cleanup_required": false,
+    "output_usable": false,
+    "target_state": "not_created"
+  },
+  "diagnostics": [
+    {
+      "code": "artifact_unusable",
+      "severity": "error",
+      "summary": "invalid backup archive"
+    }
+  ]
+}

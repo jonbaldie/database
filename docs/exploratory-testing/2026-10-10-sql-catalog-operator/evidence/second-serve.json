@@ -1,0 +1,11 @@
+{
+  "exit_code": 3,
+  "exit_class": "precondition",
+  "diagnostics": [
+    {
+      "code": "precondition",
+      "severity": "error",
+      "summary": "data directory is already in use"
+    }
+  ]
+}

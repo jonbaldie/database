@@ -1,0 +1,8 @@
+{"name":"s1","sql":"USE app","ok":true}
+{"name":"s2","sql":"CREATE INDEX missing_idx ON no_such (id)","ok":false,"errno":1061,"sqlstate":"42000","err":"Error 1061 (42000): table does not exist"}
+{"name":"s3","sql":"CREATE UNIQUE INDEX missing_uidx ON no_such (id)","ok":false,"errno":1061,"sqlstate":"42000","err":"Error 1061 (42000): table does not exist"}
+{"name":"s4","sql":"ALTER TABLE no_such ADD COLUMN x INT NULL","ok":false,"errno":1025,"sqlstate":"HY000","err":"Error 1025 (HY000): table does not exist"}
+{"name":"s5","sql":"ALTER TABLE no_such DROP COLUMN id","ok":false,"errno":1025,"sqlstate":"HY000","err":"Error 1025 (HY000): table does not exist"}
+{"name":"s6","sql":"ALTER TABLE no_such RENAME TO other_name","ok":false,"errno":1025,"sqlstate":"HY000","err":"Error 1025 (HY000): table does not exist"}
+{"name":"s7","sql":"DROP INDEX missing_idx ON no_such","ok":false,"errno":1091,"sqlstate":"42000","err":"Error 1091 (42000): table does not exist"}
+{"name":"s8","sql":"DROP TABLE no_such","ok":false,"errno":1051,"sqlstate":"42S02","err":"Error 1051 (42S02): table does not exist"}
