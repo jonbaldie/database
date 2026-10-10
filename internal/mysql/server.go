@@ -4190,7 +4190,17 @@ func projectInformationSchemaRows(view informationSchemaView, projection []int, 
 			resultNulls[rowIndex][resultIndex] = row[sourceIndex].null
 		}
 	}
-	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls}
+	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls, metadata: informationSchemaMetadata(view, projection)}
+}
+
+// informationSchemaMetadata advertises each view column's declared type, so a
+// relational query compares, orders, and encodes an INT column as a number.
+func informationSchemaMetadata(view informationSchemaView, projection []int) []columnMetadata {
+	table := catalog.Table{Columns: make([]string, len(view.columns)), ColumnTypes: make([]string, len(view.columns))}
+	for index, column := range view.columns {
+		table.Columns[index], table.ColumnTypes[index] = column.name, column.typeName
+	}
+	return tableMetadata("", "", table, projection)
 }
 
 type metadataValue struct {
