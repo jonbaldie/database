@@ -41,6 +41,8 @@ type ddlAction struct {
 
 const maxTableColumns = 1024
 
+var errTableDoesNotExist = sqlFailure{1146, "42S02", "table does not exist"}
+
 type ddlExecutor struct{ *session }
 
 func (s *textStatementExecutor) ddlStatement(query, lower string) (*queryResult, bool, error) {
@@ -156,7 +158,7 @@ func addIndexToDefinition(definition *catalog.Definition, namespaceName, tableNa
 	}
 	table, found := namespace.Tables[catalog.Key(tableName)]
 	if !found {
-		return errors.New("table does not exist")
+		return errTableDoesNotExist
 	}
 	indexes, err := namedTableIndexes(table.Name, append(catalog.CloneIndexes(table.Indexes), index), table.Constraints)
 	if err != nil {
@@ -175,7 +177,7 @@ func dropIndexFromDefinition(definition *catalog.Definition, namespaceName, tabl
 	}
 	table, found := namespace.Tables[catalog.Key(tableName)]
 	if !found {
-		return errors.New("table does not exist")
+		return errTableDoesNotExist
 	}
 	if err := dropTableIndex(&table, name); err != nil {
 		return err
@@ -409,7 +411,7 @@ func truncateTable(s *session, query string) error {
 		}
 		table, found := namespaceDefinition.Tables[catalog.Key(name)]
 		if !found {
-			return errors.New("table does not exist")
+			return errTableDoesNotExist
 		}
 		if err := checkTableNotReferencedByForeignKeyForTruncate(definition, catalog.Key(namespace), catalog.Key(name)); err != nil {
 			return err
@@ -459,7 +461,7 @@ func renameTableInDefinition(definition *catalog.Definition, namespaceName, oldN
 	namespace := definition.Namespaces[catalog.Key(namespaceName)]
 	table, found := namespace.Tables[catalog.Key(oldName)]
 	if !found {
-		return errors.New("table does not exist")
+		return errTableDoesNotExist
 	}
 	if _, found := namespace.Tables[catalog.Key(newName)]; found {
 		return errors.New("table already exists")
@@ -493,7 +495,7 @@ func (s *ddlExecutor) alterTable(query string) error {
 		}
 		table, found := namespaceDefinition.Tables[catalog.Key(name)]
 		if !found {
-			return errors.New("table does not exist")
+			return errTableDoesNotExist
 		}
 		updated, err := applyTableDefinitionActions(table, actions)
 		if err != nil {
