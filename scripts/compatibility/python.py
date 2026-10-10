@@ -17,7 +17,7 @@ def main() -> None:
     try:
         cursor = connection.cursor()
         cursor.execute("SELECT VERSION()")
-        if cursor.fetchone()[0] != "8.4.11-database-0.2.0-dev":
+        if cursor.fetchone()[0] != os.environ["DATABASE_COMPAT_VERSION"]:
             raise RuntimeError("unexpected version")
         cursor.execute("CREATE DATABASE IF NOT EXISTS compatibility")
         cursor.execute("USE compatibility")

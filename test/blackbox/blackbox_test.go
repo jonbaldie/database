@@ -48,7 +48,9 @@ func TestMain(m *testing.M) {
 		executable = configured
 	} else {
 		executable = filepath.Join(directory, "database")
-		build := exec.Command("go", "build", "-trimpath", "-o", executable, "./cmd/database")
+		// Use a linked test identity distinct from the development default so
+		// public version checks also prove that the server uses build metadata.
+		build := exec.Command("go", "build", "-trimpath", "-ldflags", "-X github.com/jonbaldie/database/internal/buildinfo.ProductVersion=0.2.18-blackbox", "-o", executable, "./cmd/database")
 		build.Dir = root
 		if err := build.Run(); err != nil {
 			os.Exit(1)
