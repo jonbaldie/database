@@ -48,8 +48,8 @@ func TestIssue542InformationSchemaOrdinalSortsNumerically(t *testing.T) {
 			t.Fatalf("%s query: %v", name, err)
 		}
 		types, err := rows.ColumnTypes()
-		if err != nil || types[1].DatabaseTypeName() != "INT" {
-			t.Fatalf("%s ORDINAL_POSITION type = %v, %v; want INT", name, types, err)
+		if err != nil || types[1].DatabaseTypeName() != "UNSIGNED INT" {
+			t.Fatalf("%s ORDINAL_POSITION type = %v, %v; want UNSIGNED INT", name, types, err)
 		}
 		var names []string
 		for rows.Next() {
