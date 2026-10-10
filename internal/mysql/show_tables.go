@@ -1,7 +1,7 @@
 package mysql
 
 import (
-	"strings"
+	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func isShowTablesStatement(lower string) bool {
@@ -45,7 +45,7 @@ func (s *catalogExecutor) showTablesIn(name string, full bool) (*queryResult, er
 	if name == "" {
 		return nil, sqlFailure{1046, "3D000", "no database selected"}
 	}
-	if strings.EqualFold(name, informationSchemaName) {
+	if catalog.IsInformationSchema(name) {
 		result := informationSchemaTables()
 		if full {
 			return withShowTableType(result, "SYSTEM VIEW"), nil
