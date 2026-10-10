@@ -17,7 +17,7 @@ func TestRecordServeEventKeepsProgressInServeVocabularyAndCollectsDetails(t *tes
 	before := time.Now().UTC()
 	for _, event := range []lifecycle.Event{
 		{State: "recovering", Recovered: true},
-		{State: "ready", InstanceID: "instance-497", DiagnosticsAddress: "127.0.0.1:9"},
+		{Schema: "database.lifecycle/v1", State: "ready", InstanceID: "instance-497", DiagnosticsAddress: "127.0.0.1:9"},
 		{State: "stopping", ShutdownReason: "signal"},
 		{State: "stopped"},
 		{State: "failed"},
@@ -25,18 +25,29 @@ func TestRecordServeEventKeepsProgressInServeVocabularyAndCollectsDetails(t *tes
 		recordServeEvent(reporter, event, details)
 	}
 
-	var phases []string
+	var phases, lifecycleStates []string
 	decoder := json.NewDecoder(&stderr)
 	for decoder.More() {
 		var record map[string]any
 		if err := decoder.Decode(&record); err != nil {
 			t.Fatal(err)
 		}
+		if record["schema"] == "database.lifecycle/v1" {
+			state, _ := record["state"].(string)
+			lifecycleStates = append(lifecycleStates, state)
+			continue
+		}
 		phase, _ := record["phase"].(string)
 		phases = append(phases, phase)
 	}
 	if got := strings.Join(phases, ","); got != "recovering,ready,stopping" {
 		t.Fatalf("serve progress phases = %q, want recovering,ready,stopping", got)
+	}
+	if got := strings.Join(lifecycleStates, ","); got != "ready" {
+		t.Fatalf("serve lifecycle records on stderr = %q, want only ready", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("serve stdout before the result = %q, want empty", stdout.String())
 	}
 	if details["instance_id"] != "instance-497" || details["shutdown_reason"] != "signal" || details["diagnostics_address"] != "127.0.0.1:9" {
 		t.Fatalf("serve details = %#v", details)
@@ -69,5 +80,16 @@ func TestIsServeProgressPhaseAcceptsOnlyTheClosedVocabulary(t *testing.T) {
 		if isServeProgressPhase(state) {
 			t.Fatalf("isServeProgressPhase(%q) = true", state)
 		}
+	}
+}
+
+func TestRecordServeEventWritesReadyWarningToStderrForHumanOperatorResult(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	reporter := newOperationReporter("serve", commandOutput{result: "human", progress: "none", progressSet: true}, &stdout, &stderr)
+	warning := lifecycle.Warning{Code: "UNSAFE_NON_TLS_LISTENER", Severity: "warning", Summary: "MySQL listener is reachable beyond loopback without TLS"}
+	recordServeEvent(reporter, lifecycle.Event{State: "ready", Warnings: []lifecycle.Warning{warning}}, map[string]any{})
+	want := "database: WARNING [UNSAFE_NON_TLS_LISTENER] MySQL listener is reachable beyond loopback without TLS\n"
+	if stderr.String() != want || stdout.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q, want only the warning on stderr", stdout.String(), stderr.String())
 	}
 }

@@ -51,6 +51,14 @@ result is emitted only after graceful stop. An abrupt process loss may leave
 progress without a terminal result or conforming exit code; automation must
 treat that absence as failure requiring its own recovery policy.
 
+In operator result mode, `serve` writes the `ready` record in
+`database.lifecycle/v1` to standard error when the server becomes ready, for
+every `--progress` mode. That record carries any ready-time warning, such as
+`UNSAFE_NON_TLS_LISTENER`. With `--result=human`, the same warnings are printed
+on standard error. Standard output stays empty until the terminal result, which
+may repeat the warnings in `details.warnings`. A progress consumer skips
+records whose `schema` is not `database.operator.progress/v1`.
+
 ## Secret input and confirmation
 
 An [operator secret input](../GLOSSARY.md) is a database-account password read

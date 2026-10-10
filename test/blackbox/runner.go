@@ -121,9 +121,7 @@ func (r Runner) Start(ctx context.Context, args ...string) (*Process, error) {
 	}()
 	go func() {
 		defer read.Done()
-		var captured bytes.Buffer
-		_, _ = io.Copy(&captured, stderr)
-		process.output.appendStderr(captured.Bytes())
+		_, _ = io.Copy(stderrWriter{output: &process.output}, stderr)
 	}()
 	return process, nil
 }
@@ -174,10 +172,22 @@ func (output *processOutput) appendStdout(line string) {
 	output.stdout.WriteByte('\n')
 }
 
-func (output *processOutput) appendStderr(data []byte) {
-	output.mu.Lock()
-	defer output.mu.Unlock()
-	output.stderr.Write(data)
+// stderrWriter appends standard error as it arrives so a test can observe
+// records written before the process exits.
+type stderrWriter struct{ output *processOutput }
+
+func (writer stderrWriter) Write(data []byte) (int, error) {
+	writer.output.mu.Lock()
+	defer writer.output.mu.Unlock()
+	return writer.output.stderr.Write(data)
+}
+
+// Snapshot returns the standard output and standard error observed so far,
+// while the process may still be running.
+func (p *Process) Snapshot() (stdout, stderr string) {
+	p.output.mu.Lock()
+	defer p.output.mu.Unlock()
+	return p.output.stdout.String(), p.output.stderr.String()
 }
 
 // HTTPJSON performs one diagnostics request and decodes its JSON response.
