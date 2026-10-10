@@ -363,6 +363,9 @@ func liveQueryExplanation(t *testing.T, client *wireClient, connectionID uint32)
 	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
 		t.Fatalf("decode live Query explanation: %v", err)
 	}
+	if want := executableProductVersion(t); document["server_version"] != want {
+		t.Fatalf("live server_version = %v, want %q", document["server_version"], want)
+	}
 	return document
 }
 

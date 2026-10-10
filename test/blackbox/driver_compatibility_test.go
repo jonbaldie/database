@@ -45,7 +45,7 @@ func TestGoDriverCompatibilityProfile(t *testing.T) {
 		t.Fatalf("select compatibility schema: %v", err)
 	}
 
-	assertSingleValue(t, db, ctx, "SELECT VERSION()", "8.4.11-database-0.2.0-dev")
+	assertSingleValue(t, db, ctx, "SELECT VERSION()", "8.4.11-database-"+executableProductVersion(t))
 	assertSingleValue(t, db, ctx, "SELECT @@time_zone", "+00:00")
 	if _, err := db.ExecContext(ctx, "SET time_zone = '+05:30'"); err != nil {
 		t.Fatalf("set session variable: %v", err)
@@ -145,6 +145,7 @@ func TestExternalDriverCompatibilityProfile(t *testing.T) {
 		"DATABASE_COMPAT_USER=admin",
 		"DATABASE_COMPAT_PASSWORD=lifecycle-secret",
 		"DATABASE_COMPAT_TLS=1",
+		"DATABASE_COMPAT_VERSION=8.4.11-database-"+executableProductVersion(t),
 	)
 
 	run := func(name, command string, args ...string) {
