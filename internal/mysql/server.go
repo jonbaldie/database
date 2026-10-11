@@ -728,7 +728,7 @@ type columnMetadata struct {
 	coercibility                                              byte
 }
 
-const informationSchemaName = "information_schema"
+const informationSchemaName = catalog.InformationSchemaName
 
 type informationSchemaColumn struct {
 	name     string
@@ -1215,7 +1215,7 @@ func (s *catalogExecutor) createDatabase(query string) error {
 	if err := validateIdentifierLength(name); err != nil {
 		return err
 	}
-	if strings.EqualFold(name, informationSchemaName) {
+	if catalog.IsInformationSchema(name) {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
 	noOp := false
@@ -1598,7 +1598,7 @@ func (s *catalogExecutor) showCreateDatabase(query string) (*queryResult, error)
 	if !ok {
 		return nil, sqlFailure{1064, "42000", "invalid database name"}
 	}
-	if strings.EqualFold(name, informationSchemaName) {
+	if catalog.IsInformationSchema(name) {
 		return nil, sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
 	if name == "" || s.server.config.Catalog == nil {
@@ -1731,7 +1731,7 @@ func (s *catalogExecutor) qualifiedShowTableTarget(target string, parts []string
 	if namespaceName == "" {
 		return "", "", sqlFailure{1046, "3D000", "no database selected"}
 	}
-	if strings.EqualFold(namespaceName, informationSchemaName) {
+	if catalog.IsInformationSchema(namespaceName) {
 		return "", "", sqlFailure{1044, "42000", "information_schema definitions are virtual"}
 	}
 	return namespaceName, tableName, nil
@@ -4019,7 +4019,7 @@ func tableTarget(s *relationExecutor, parts []string, privilege string) (string,
 	if err != nil {
 		return "", "", err
 	}
-	if strings.EqualFold(namespace, informationSchemaName) {
+	if catalog.IsInformationSchema(namespace) {
 		return "", "", sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
 	// parts have already been parsed as SQL identifiers. Re-parsing would turn
@@ -4108,7 +4108,7 @@ func informationSchemaViewFor(sourceText string) (informationSchemaView, error) 
 		return informationSchemaView{}, sqlFailure{1105, "HY000", "information_schema aliases and clauses are unsupported"}
 	}
 	parts, ok := splitQualifiedIdentifier(sourceText)
-	if !ok || len(parts) != 2 || !strings.EqualFold(parts[0], informationSchemaName) {
+	if !ok || len(parts) != 2 || !catalog.IsInformationSchema(parts[0]) {
 		return informationSchemaView{}, sqlFailure{1105, "HY000", "unsupported information_schema source; supported views are schemata, tables, and columns"}
 	}
 	view, ok := findInformationSchemaView(parts[1])
@@ -4150,7 +4150,7 @@ func informationSchemaColumnIndex(view informationSchemaView, item string) (int,
 		return 0, sqlFailure{1064, "42000", "unsupported information_schema projection"}
 	}
 	for index, column := range view.columns {
-		if strings.EqualFold(column.name, name) {
+		if catalog.SameIdentifier(column.name, name) {
 			return index, nil
 		}
 	}
@@ -4201,7 +4201,7 @@ type metadataValue struct {
 
 func findInformationSchemaView(name string) (informationSchemaView, bool) {
 	for _, view := range informationSchemaViews {
-		if strings.EqualFold(view.name, name) {
+		if catalog.SameIdentifier(view.name, name) {
 			return view, true
 		}
 	}
@@ -4209,7 +4209,7 @@ func findInformationSchemaView(name string) (informationSchemaView, bool) {
 }
 
 func informationSchemaRows(viewName string, s *session) [][]metadataValue {
-	builder, ok := informationSchemaRowBuilders[strings.ToLower(viewName)]
+	builder, ok := informationSchemaRowBuilders[catalog.Key(viewName)]
 	if !ok {
 		return nil
 	}
@@ -4332,7 +4332,7 @@ func baseType(typeName string) string {
 func sortedNamespaces(definition catalog.Definition) []catalog.Namespace {
 	namespaces := make([]catalog.Namespace, 0, len(definition.Namespaces))
 	for key, namespace := range definition.Namespaces {
-		if strings.EqualFold(key, informationSchemaName) {
+		if catalog.IsInformationSchema(key) {
 			continue
 		}
 		if namespace.Name == "" {
@@ -4340,9 +4340,7 @@ func sortedNamespaces(definition catalog.Definition) []catalog.Namespace {
 		}
 		namespaces = append(namespaces, namespace)
 	}
-	sort.Slice(namespaces, func(i, j int) bool {
-		return strings.ToLower(namespaces[i].Name) < strings.ToLower(namespaces[j].Name)
-	})
+	sort.Slice(namespaces, func(i, j int) bool { return identifierLess(namespaces[i].Name, namespaces[j].Name) })
 	return namespaces
 }
 
@@ -4354,8 +4352,17 @@ func sortedTables(namespace catalog.Namespace) []catalog.Table {
 		}
 		tables = append(tables, table)
 	}
-	sort.Slice(tables, func(i, j int) bool { return strings.ToLower(tables[i].Name) < strings.ToLower(tables[j].Name) })
+	sort.Slice(tables, func(i, j int) bool { return identifierLess(tables[i].Name, tables[j].Name) })
 	return tables
+}
+
+// identifierLess orders declared identifier spellings by their canonical key,
+// then by spelling so equal keys still sort deterministically.
+func identifierLess(left, right string) bool {
+	if order := strings.Compare(catalog.Key(left), catalog.Key(right)); order != 0 {
+		return order < 0
+	}
+	return left < right
 }
 
 func (s *preparedPreparation) prepare(connection net.Conn, sequence byte, query string) error {

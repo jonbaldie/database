@@ -3,6 +3,8 @@ package mysql
 import (
 	"strconv"
 	"strings"
+
+	"github.com/jonbaldie/database/internal/catalog"
 )
 
 type relationPredicate func(relationRow) (exprValue, error)
@@ -541,13 +543,13 @@ func relationColumnMatches(columns []relationColumn, qualifier, name string) []i
 }
 
 func relationColumnMatchesName(column relationColumn, qualifier, name string) bool {
-	if !identifiersEqual(column.name, name) {
+	if !catalog.SameIdentifier(column.name, name) {
 		return false
 	}
 	if qualifier == "" && column.hidden {
 		return false
 	}
-	return qualifier == "" || identifiersEqual(qualifier, column.qualifier)
+	return qualifier == "" || catalog.SameIdentifier(qualifier, column.qualifier)
 }
 
 func resolveRelationColumnMatch(text string, matched []int) (int, error) {
@@ -565,13 +567,13 @@ func findNamedColumn(columns []relationColumn, qualifier, name string) (relation
 	var found relationColumn
 	count := 0
 	for _, column := range columns {
-		if !identifiersEqual(column.name, name) {
+		if !catalog.SameIdentifier(column.name, name) {
 			continue
 		}
 		if qualifier == "" && column.hidden {
 			continue
 		}
-		if qualifier != "" && !identifiersEqual(column.qualifier, qualifier) {
+		if qualifier != "" && !catalog.SameIdentifier(column.qualifier, qualifier) {
 			continue
 		}
 		found, count = column, count+1

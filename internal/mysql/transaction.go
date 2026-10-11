@@ -773,7 +773,7 @@ func parseSavepointName(value string) (string, error) {
 
 func (s *transactionExecutor) savepointIndex(name string) int {
 	for index := len(s.savepoints) - 1; index >= 0; index-- {
-		if identifiersEqual(s.savepoints[index].name, name) {
+		if catalog.SameIdentifier(s.savepoints[index].name, name) {
 			return index
 		}
 	}
