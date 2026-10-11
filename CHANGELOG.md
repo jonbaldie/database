@@ -5,11 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.19] - 2026-10-11
+
+### Changed
+
+- Built with Go 1.26.9 to fix standard library vulnerabilities.
+- Streamed result rows during `EXPLAIN ANALYZE` like ordinary `SELECT` queries to stay within session memory limits.
 
 ### Fixed
 
+- Used the linked build version for `SELECT VERSION()`, `@@version`, and `EXPLAIN FORMAT=JSON` reports instead of a development default.
 - Wrote the `serve` ready lifecycle record, with the `UNSAFE_NON_TLS_LISTENER` warning, to standard error at ready time in operator result mode, instead of reporting the warning only after shutdown.
+- Returned MySQL 8.4 error 1146 (`ER_NO_SUCH_TABLE`, SQLSTATE `42S02`) for `CREATE INDEX`, `ALTER TABLE`, `DROP INDEX`, and `RENAME TABLE` on missing tables.
+- Preserved declared column types on `information_schema` views so numeric columns sort and compare as integers.
+- Exposed contracted metadata columns for `information_schema.TABLES` and `information_schema.COLUMNS`.
+- Permitted `ALTER TABLE ... ALTER INDEX` to change visibility of unique constraint keys, and persisted index visibility changes across restarts.
+- Prevented races between statement execution registration and live query explanation reporting.
+- Kept `database serve` progress reporting within its closed vocabulary and included instance identity, ready and stopping timestamps, and shutdown reason in success details.
+- Returned specific MySQL 8.4 error numbers (1091, 1176, 1070, 3822, 1826, 6125, 1824, 3734, 3820) for schema-change and constraint definition failures.
+- Merged `LEAST` and `GREATEST` result types so return values match planned column metadata.
 
 ## [0.2.18] - 2026-10-07
 
@@ -386,6 +400,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.19]: https://github.com/jonbaldie/database/compare/v0.2.18...v0.2.19
+[0.2.18]: https://github.com/jonbaldie/database/compare/v0.2.17...v0.2.18
+[0.2.17]: https://github.com/jonbaldie/database/compare/v0.2.16...v0.2.17
+[0.2.16]: https://github.com/jonbaldie/database/compare/v0.2.15...v0.2.16
+[0.2.15]: https://github.com/jonbaldie/database/compare/v0.2.14...v0.2.15
 [0.2.14]: https://github.com/jonbaldie/database/compare/v0.2.13...v0.2.14
 [0.2.13]: https://github.com/jonbaldie/database/compare/v0.2.12...v0.2.13
 [0.2.12]: https://github.com/jonbaldie/database/compare/v0.2.11...v0.2.12
