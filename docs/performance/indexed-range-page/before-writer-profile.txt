@@ -1,0 +1,35 @@
+File: database-range-before.test
+Type: cpu
+Time: 2026-10-12 14:14:19 BST
+Duration: 5.11s, Total samples = 5.49s (107.48%)
+Active filters:
+   focus=StreamWriter|sourceRowBytes
+Showing nodes accounting for 3.79s, 69.03% of 5.49s total
+Dropped 12 nodes (cum <= 0.03s)
+Showing top 25 nodes out of 42
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      3.96s 72.13%  github.com/jonbaldie/database/internal/mysql.(*StreamWriter).WriteResultSet
+         0     0%     0%      3.96s 72.13%  github.com/jonbaldie/database/internal/mysql.(*conversation).acceptCommand
+         0     0%     0%      3.96s 72.13%  github.com/jonbaldie/database/internal/mysql.(*conversation).dispatch
+         0     0%     0%      3.96s 72.13%  github.com/jonbaldie/database/internal/mysql.(*conversation).executePrepared
+         0     0%     0%      3.96s 72.13%  github.com/jonbaldie/database/internal/mysql.(*conversation).executePrepared-fm.(*conversation).executePrepared.func1
+         0     0%     0%      3.96s 72.13%  github.com/jonbaldie/database/internal/mysql.(*conversation).runStatement
+         0     0%     0%      3.96s 72.13%  github.com/jonbaldie/database/internal/mysql.(*conversation).serve
+         0     0%     0%      3.96s 72.13%  github.com/jonbaldie/database/internal/mysql.(*preparedExecution).executePrepared
+         0     0%     0%      3.79s 69.03%  github.com/jonbaldie/database/internal/mysql.(*StreamWriter).WritePacket (inline)
+         0     0%     0%      3.79s 69.03%  github.com/jonbaldie/database/internal/mysql.(*StreamWriter).writeRawPacket
+         0     0%     0%      3.79s 69.03%  internal/poll.(*FD).Write
+         0     0%     0%      3.79s 69.03%  internal/poll.ignoringEINTRIO (inline)
+         0     0%     0%      3.79s 69.03%  net.(*conn).Write
+         0     0%     0%      3.79s 69.03%  net.(*netFD).Write
+         0     0%     0%      3.79s 69.03%  syscall.Write (inline)
+     3.79s 69.03% 69.03%      3.79s 69.03%  syscall.rawsyscalln
+         0     0% 69.03%      3.79s 69.03%  syscall.syscall
+         0     0% 69.03%      3.79s 69.03%  syscall.syscalln
+         0     0% 69.03%      3.79s 69.03%  syscall.write
+         0     0% 69.03%      3.46s 63.02%  github.com/jonbaldie/database/internal/mysql.(*relationalResultStream).incrementalRows
+         0     0% 69.03%      3.46s 63.02%  github.com/jonbaldie/database/internal/mysql.(*relationalResultStream).rows
+         0     0% 69.03%      3.46s 63.02%  github.com/jonbaldie/database/internal/mysql.(*relationalSelectPlan).forEachSourceRow
+         0     0% 69.03%      3.46s 63.02%  github.com/jonbaldie/database/internal/mysql.relationalSource.rowIterator.tableRowIterator.func1
+         0     0% 69.03%      3.46s 63.02%  github.com/jonbaldie/database/internal/mysql.writeBinaryResultRows
+         0     0% 69.03%      3.46s 63.02%  github.com/jonbaldie/database/internal/mysql.writeRows
