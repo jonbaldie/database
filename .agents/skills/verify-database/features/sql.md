@@ -1,0 +1,27 @@
+# SQL and indexes
+
+## Sub-features
+
+- Authentication and session state.
+- SQL reads and durable writes.
+- Index DDL, hints, bounded scans, and uniqueness.
+
+## How to get to it (user POV)
+
+Connect a supported MySQL client to the address from `database serve`. Use the Go client trial in `README.md`. The executable does not contain a SQL client.
+
+## Driving it with Go process tests
+
+Run from the repository root.
+
+```sh
+GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
+	-run '^(TestGoDriverCompatibilityProfile|TestMySQLClientCanAuthenticatePersistAndResetSession|TestMySQLBTreeIndexesUseThePublicWireContract)$' \
+	-count=1 -v > "$evidence/sql.log" 2>&1
+```
+
+The index test checks literal rows from forward, reverse, and bounded scans. It also checks duplicate-key errors and public index metadata. The client state test checks persisted rows after restart. The Go driver test proves the named driver connection path.
+
+## Gotchas
+
+Use the supported subset in `docs/mysql-sql-behaviour.md`. Driver coverage is finite. Read `docs/compatibility-evidence.md` before claiming another driver's behavior. An in-process executor test alone does not prove authentication or wire encoding.
