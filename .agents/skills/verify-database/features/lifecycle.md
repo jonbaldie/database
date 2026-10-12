@@ -12,12 +12,12 @@ Use `database version`, `database init`, and `database serve` from `README.md`. 
 
 ## Driving it with Go process tests
 
-Run from the repository root.
+Run from the repository root, in the shell where you completed [Launch](../SKILL.md#launch). Use `verify_command` for every attempt and retry.
 
 ```sh
-GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
+verify_command lifecycle env GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
 	-run '^(TestExecutableVersionAndLifecycleArePublic|TestDiagnosticsHTTPContractIsObservableEndToEnd)$' \
-	-count=1 -v > "$evidence/lifecycle.log" 2>&1
+	-count=1 -v
 ```
 
 `TestExecutableVersionAndLifecycleArePublic` checks the version, readiness event, public health response, and clean process exit. Read `test/blackbox/diagnostics_test.go` for the endpoint assertions.
