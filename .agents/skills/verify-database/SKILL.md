@@ -9,12 +9,28 @@ Read [the feature map](features/README.md). Select every affected entry point be
 
 ## Launch
 
-Run from the repository root. Use an evidence directory that you own.
+Run from the repository root. Create an evidence directory that you own and define `verify_command` in the current shell. Use it for each command, including retries.
 
 ```sh
-evidence="$(mktemp -d /tmp/database-verification.XXXXXX)"
-GOMAXPROCS=2 GOFLAGS='-p=2' make build > "$evidence/build.log" 2>&1
+evidence="$(mktemp -d "${TMPDIR:-/tmp}/database-verification.XXXXXX")"
+verify_command() (
+	label="$1"
+	shift
+	attempt="$(mktemp -d "$evidence/$label.XXXXXX")" || exit
+	printf '%s\n' "$@" > "$attempt/command.txt" || exit
+	if "$@" > "$attempt/output.log" 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	printf '%s\n' "$status" > "$attempt/exit-status.txt" || exit
+	printf 'Evidence: %s\n' "$attempt" >&2
+	exit "$status"
+)
+verify_command build env GOMAXPROCS=2 GOFLAGS='-p=2' make build
 ```
+
+Each call creates a new attempt directory under `$evidence`, even when its label is reused. `command.txt` records one command argument per line. `output.log` keeps stdout and stderr. `exit-status.txt` keeps the command exit status, and the function returns that status. A missing exit-status file means the attempt did not finish recording its result.
 
 The process tests build the executable, initialize private data directories, and start their own servers. They wait for lifecycle readiness before they send requests. Use those tests rather than a shared server.
 
@@ -25,7 +41,7 @@ For a manual server or a new client journey, follow `README.md` under `Try it`. 
 Check the built executable before you drive it.
 
 ```sh
-./bin/database version --format=json > "$evidence/version.json"
+verify_command version ./bin/database version --format=json
 ```
 
 Check the command exit status and the reported product version. If a process test fails, inspect its output before another attempt. For a manual server, check the owned process, `/ready`, and an authenticated client ping.
@@ -35,9 +51,8 @@ Check the command exit status and the reported product version. If a process tes
 Run the exact tests named by the affected feature files. Use an uncached run and keep its output.
 
 ```sh
-GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
-	-run '^TestExecutableVersionAndLifecycleArePublic$' -count=1 -v \
-	> "$evidence/lifecycle.log" 2>&1
+verify_command lifecycle env GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
+	-run '^TestExecutableVersionAndLifecycleArePublic$' -count=1 -v
 ```
 
 A passing test must observe the built server through commands, TCP, or HTTP. If no mapped test covers the changed entry point, add a process test for that path before declaring it verified.
@@ -46,7 +61,7 @@ A passing test must observe the built server through commands, TCP, or HTTP. If 
 
 Keep the action, result, and command exit status. A query proof checks exact returned values. A durable write proof checks the state after restart. A diagnostics proof checks the response code and body. Compilation alone is not evidence of user-visible behavior.
 
-The commands above keep evidence in `$evidence`. Report its path and the affected test names. Retain failed attempts as well as successful attempts. Use mocks only outside an existing production boundary.
+The commands above keep evidence in `$evidence`. Keep the same evidence directory and use `verify_command` for later commands and retries. Report each attempt path, its exit status, and the affected test names. Retain failed attempts as well as successful attempts. Use mocks only outside an existing production boundary.
 
 ## Cleanup
 

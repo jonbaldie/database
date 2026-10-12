@@ -12,12 +12,12 @@ Connect a supported MySQL client to the address from `database serve`. Use the G
 
 ## Driving it with Go process tests
 
-Run from the repository root.
+Run from the repository root, in the shell where you completed [Launch](../SKILL.md#launch). Use `verify_command` for every attempt and retry.
 
 ```sh
-GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
+verify_command sql env GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
 	-run '^(TestGoDriverCompatibilityProfile|TestMySQLClientCanAuthenticatePersistAndResetSession|TestMySQLBTreeIndexesUseThePublicWireContract)$' \
-	-count=1 -v > "$evidence/sql.log" 2>&1
+	-count=1 -v
 ```
 
 The index test checks literal rows from forward, reverse, and bounded scans. It also checks duplicate-key errors and public index metadata. The client state test checks persisted rows after restart. The Go driver test proves the named driver connection path.
