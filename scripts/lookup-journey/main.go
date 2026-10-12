@@ -299,11 +299,6 @@ func createSchema(db *sql.DB) error {
 func loadRows(db *sql.DB, cfg config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	statement, err := db.PrepareContext(ctx, "INSERT INTO narrow_records (id, unique_key, secondary_key, base_secondary_key, numeric_value, payload) VALUES (?, ?, ?, ?, ?, ?)")
-	if err != nil {
-		return fmt.Errorf("prepare narrow loader: %w", err)
-	}
-	defer statement.Close()
 	body := strings.Repeat("x", cfg.payload)
 	const batchSize = 500
 	for start := 1; start <= cfg.rows; start += batchSize {
@@ -311,19 +306,17 @@ func loadRows(db *sql.DB, cfg config) error {
 		if end > cfg.rows+1 {
 			end = cfg.rows + 1
 		}
-		transaction, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin load transaction: %w", err)
-		}
+		var statement strings.Builder
+		statement.WriteString("INSERT INTO narrow_records (id, unique_key, secondary_key, base_secondary_key, numeric_value, payload) VALUES ")
 		for id := start; id < end; id++ {
-			secondary := fmt.Sprintf("secondary-%d", id%10000)
-			if _, err := transaction.StmtContext(ctx, statement).ExecContext(ctx, int64(id), fmt.Sprintf("unique-%d", id), secondary, secondary, 0, body); err != nil {
-				_ = transaction.Rollback()
-				return fmt.Errorf("load row %d: %w", id, err)
+			if id != start {
+				statement.WriteByte(',')
 			}
+			secondary := fmt.Sprintf("secondary-%d", id%10000)
+			fmt.Fprintf(&statement, "(%d,'unique-%d','%s','%s',0,'%s')", id, id, secondary, secondary, body)
 		}
-		if err := transaction.Commit(); err != nil {
-			return fmt.Errorf("commit load batch at %d: %w", start, err)
+		if _, err := db.ExecContext(ctx, statement.String()); err != nil {
+			return fmt.Errorf("load rows starting at %d: %w", start, err)
 		}
 	}
 	return nil
