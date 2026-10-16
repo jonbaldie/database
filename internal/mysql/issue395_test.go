@@ -11,7 +11,7 @@ import (
 func TestIssue395StatementTimeoutEnforcedDuringLike(t *testing.T) {
 	timeout := 50 * time.Millisecond
 	resources := newStatementResources(nil, Config{ResourceLimits: ResourceLimits{StatementTimeout: timeout}}, nil)
-	session := &session{resources: resources}
+	session := newTestSession(newTestServer(t, Config{}), testSessionOptions{resources: resources})
 	defer closeStatementResources(resources)
 
 	value := strings.Repeat("a", 16384)
@@ -36,7 +36,7 @@ func TestIssue395StatementTimeoutEnforcedDuringLike(t *testing.T) {
 func TestIssue395DoubledInputDoesNotIncreaseTimeoutDuration(t *testing.T) {
 	timeout := 50 * time.Millisecond
 	resources := newStatementResources(nil, Config{ResourceLimits: ResourceLimits{StatementTimeout: timeout}}, nil)
-	session := &session{resources: resources}
+	session := newTestSession(newTestServer(t, Config{}), testSessionOptions{resources: resources})
 	defer closeStatementResources(resources)
 
 	// Doubled inputs (98 KB variant).
@@ -64,7 +64,7 @@ func TestIssue395CancellationDuringLikeEvaluation(t *testing.T) {
 	close(cancelled)
 
 	resources := newStatementResources(nil, Config{ResourceLimits: ResourceLimits{StatementTimeout: time.Hour}}, cancelled)
-	session := &session{resources: resources}
+	session := newTestSession(newTestServer(t, Config{}), testSessionOptions{resources: resources})
 	defer closeStatementResources(resources)
 
 	value := strings.Repeat("a", 16384)
@@ -90,7 +90,7 @@ func TestIssue395ExecutionThroughPolicyKeepsSessionUsable(t *testing.T) {
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
-	session := &session{server: server, database: "app", initialDB: "app", timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{}}
+	session := newTestSession(server, testSessionOptions{database: "app"})
 	executor := &textStatementExecutor{session: session}
 
 	timeout := 50 * time.Millisecond

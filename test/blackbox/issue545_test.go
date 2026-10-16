@@ -3,7 +3,6 @@ package blackbox_test
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"strings"
 	"testing"
 	"time"
@@ -16,19 +15,19 @@ func TestIssue545OperatorResultServeWarnsOnStandardErrorWhenReady(t *testing.T) 
 		t.Run("progress="+progress, func(t *testing.T) {
 			runner := blackbox.Runner{Executable: executable}
 			directory := initializedInstance(t, runner)
-			mysqlAddress := nonLoopbackAddress(t)
-			diagnosticsAddress := freeAddress(t)
+			mysqlAddress := nonLoopbackAddress
 			process, err := runner.Start(context.Background(), "serve",
 				"--data-directory="+directory,
 				"--mysql-listen-address="+mysqlAddress,
-				"--diagnostics-listen-address="+diagnosticsAddress,
+				"--diagnostics-listen-address=127.0.0.1:0",
 				"--result=json", "--progress="+progress,
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			awaitReadyProbe(t, process, diagnosticsAddress)
 			record, stdout := awaitReadyLifecycleRecord(t, process)
+			_, diagnosticsAddress := readyAddresses(t, process)
+			awaitReadyProbe(t, process, diagnosticsAddress)
 			if stdout != "" {
 				t.Fatalf("stdout before stop = %q, want empty", stdout)
 			}
@@ -58,18 +57,18 @@ func TestIssue545OperatorResultServeWarnsOnStandardErrorWhenReady(t *testing.T) 
 func TestIssue545OperatorResultServeOnLoopbackHasNoUnsafeListenerWarning(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := initializedInstance(t, runner)
-	diagnosticsAddress := freeAddress(t)
 	process, err := runner.Start(context.Background(), "serve",
 		"--data-directory="+directory,
-		"--mysql-listen-address="+freeAddress(t),
-		"--diagnostics-listen-address="+diagnosticsAddress,
+		"--mysql-listen-address=127.0.0.1:0",
+		"--diagnostics-listen-address=127.0.0.1:0",
 		"--result=json", "--progress=none",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	awaitReadyProbe(t, process, diagnosticsAddress)
 	record, _ := awaitReadyLifecycleRecord(t, process)
+	_, diagnosticsAddress := readyAddresses(t, process)
+	awaitReadyProbe(t, process, diagnosticsAddress)
 	if _, found := record["warnings"]; found {
 		t.Fatalf("loopback ready record = %#v, want no warnings", record)
 	}
@@ -84,12 +83,11 @@ func TestIssue545LegacyServeOutputStillWarnsBeforeStop(t *testing.T) {
 		t.Run("format="+format, func(t *testing.T) {
 			runner := blackbox.Runner{Executable: executable}
 			directory := initializedInstance(t, runner)
-			mysqlAddress := nonLoopbackAddress(t)
-			diagnosticsAddress := freeAddress(t)
+			mysqlAddress := nonLoopbackAddress
 			args := []string{"serve",
 				"--data-directory=" + directory,
 				"--mysql-listen-address=" + mysqlAddress,
-				"--diagnostics-listen-address=" + diagnosticsAddress,
+				"--diagnostics-listen-address=127.0.0.1:0",
 			}
 			if format == "json" {
 				args = append(args, "--format=json")
@@ -98,8 +96,9 @@ func TestIssue545LegacyServeOutputStillWarnsBeforeStop(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			awaitReadyProbe(t, process, diagnosticsAddress)
 			stdout := awaitStdoutContaining(t, process, "ready")
+			_, diagnosticsAddress := readyAddresses(t, process)
+			awaitReadyProbe(t, process, diagnosticsAddress)
 			if format == "human" {
 				warning := strings.Index(stdout, "database: WARNING [UNSAFE_NON_TLS_LISTENER]")
 				if warning < 0 || warning > strings.Index(stdout, "database: ready") {
@@ -113,21 +112,17 @@ func TestIssue545LegacyServeOutputStillWarnsBeforeStop(t *testing.T) {
 	}
 }
 
-func nonLoopbackAddress(t *testing.T) string {
-	t.Helper()
-	_, port, err := net.SplitHostPort(freeAddress(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return net.JoinHostPort("0.0.0.0", port)
-}
+// nonLoopbackAddress listens on every interface on a kernel-chosen port. The
+// unsafe-listener warning reports this configured address.
+const nonLoopbackAddress = "0.0.0.0:0"
 
 func awaitReadyLifecycleRecord(t *testing.T, process *blackbox.Process) (map[string]any, string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		stdout, stderr := process.Snapshot()
-		if strings.Contains(stderr, "database.lifecycle/v1") {
+		// Standard error arrives in chunks; decode only complete records.
+		if strings.Contains(stderr, "database.lifecycle/v1") && strings.HasSuffix(stderr, "\n") {
 			return readyLifecycleRecord(t, stderr), stdout
 		}
 		if time.Now().After(deadline) {

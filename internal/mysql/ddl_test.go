@@ -21,7 +21,7 @@ func ddlExecutorForTest(t *testing.T) *textStatementExecutor {
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
-	return &textStatementExecutor{session: &session{server: server, database: "app", initialDB: "app", timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{}}}
+	return &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app"})}
 }
 
 func TestTableDefinitionEvolutionThroughSQL(t *testing.T) {

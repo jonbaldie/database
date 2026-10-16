@@ -80,7 +80,8 @@ func TestExecutableVersionAndLifecycleArePublic(t *testing.T) {
 	}
 
 	directory := initializedInstance(t, runner)
-	process, address := startServer(t, runner, directory)
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Diagnostics: true})
+	process, address := instance.Process, instance.DiagnosticsAddress
 	var live map[string]string
 	status, err := blackbox.HTTPJSON(ctx, address, "/live", &live)
 	if err != nil || status != 200 || live["status"] != "live" {
@@ -205,33 +206,65 @@ func TestInitializeRejectsAmbiguousOrMalformedSecretInputs(t *testing.T) {
 func initializedInstance(t *testing.T, runner blackbox.Runner) string {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "instance")
-	password := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(password, []byte("lifecycle-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", password, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize instance: %#v", result)
-	}
+	initializeServer(t, runner, directory, "lifecycle-secret")
 	return directory
 }
 
-func startServer(t *testing.T, runner blackbox.Runner, directory string) (*blackbox.Process, string) {
+// initializeServer runs init as test setup and fails the test when init fails.
+func initializeServer(t *testing.T, runner blackbox.Runner, directory, password string) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err := blackbox.Initialize(context.Background(), runner, directory, password); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// startInstance starts serve on kernel-chosen ports and fails the test when
+// serve does not report ready. Use the returned addresses, which come from the
+// ready event. Cleanup kills serve if the test ends before it stops serve.
+func startInstance(t *testing.T, runner blackbox.Runner, options blackbox.InstanceOptions) *blackbox.Instance {
+	t.Helper()
+	instance, err := blackbox.StartInstance(context.Background(), runner, options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	process, err := runner.Start(context.Background(), "serve", "--format=json", "--data-directory="+directory, "--mysql-listen-address="+freeAddress(t), "--diagnostics-listen-address="+address)
-	if err != nil {
-		t.Fatal(err)
+	t.Cleanup(func() {
+		_ = instance.Process.Crash()
+		_ = instance.Process.Wait()
+	})
+	return instance
+}
+
+// readyAddresses waits for serve to report ready and returns the MySQL and
+// diagnostics addresses that it reports. The ready report is a lifecycle
+// record on standard error in operator result mode, a lifecycle record on
+// standard output with --format=json, and a "database: ready
+// (diagnostics=...)" line on standard output in human mode. Human mode does
+// not report the MySQL address, so mysql is empty in that mode.
+func readyAddresses(t *testing.T, process *blackbox.Process) (mysql, diagnostics string) {
+	t.Helper()
+	const humanReady = "database: ready (diagnostics="
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stdout, stderr := process.Snapshot()
+		for _, stream := range []string{stderr, stdout} {
+			for _, line := range strings.Split(stream, "\n") {
+				if rest, found := strings.CutPrefix(line, humanReady); found && strings.HasSuffix(rest, ")") {
+					return "", strings.TrimSuffix(rest, ")")
+				}
+				var record map[string]any
+				if json.Unmarshal([]byte(line), &record) == nil && record["schema"] == "database.lifecycle/v1" && record["state"] == "ready" {
+					mysql, _ = record["mysql_address"].(string)
+					diagnostics, _ = record["diagnostics_address"].(string)
+					return mysql, diagnostics
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			_ = process.Crash()
+			t.Fatalf("serve did not report ready addresses: stdout=%q stderr=%q", stdout, stderr)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	event := nextReadyEvent(t, process)
-	if event["diagnostics_address"] != address {
-		t.Fatalf("ready event: %#v", event)
-	}
-	return process, address
 }
 
 func nextReadyEvent(t *testing.T, process *blackbox.Process) map[string]any {
@@ -296,25 +329,13 @@ func TestCommandFailureIsObservable(t *testing.T) {
 func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("secret-password\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	initialized := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json")
-	if initialized.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", initialized)
-	}
+	initializeServer(t, runner, directory, "secret-password")
 
-	diagnostics := freeAddress(t)
-	mysql := freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", mysql, "--diagnostics-listen-address", diagnostics, "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Diagnostics: true})
+	process := instance.Process
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	nextReadyEvent(t, process)
 
-	client := newWireClient(t, mysql, "admin", "secret-password")
+	client := newWireClient(t, instance.MySQLAddress, "admin", "secret-password")
 	defer client.close()
 	if got := client.query("BEGIN"); got.err != "" {
 		t.Fatalf("begin: %#v", got)
@@ -369,13 +390,9 @@ func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	if result := process.Wait(); result.ExitCode != 0 {
 		t.Fatalf("stop: %#v", result)
 	}
-	process = nil
-	process, err = runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", mysql, "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	nextReadyEvent(t, process)
-	reopened := newWireClient(t, mysql, "admin", "secret-password")
+	instance = startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory})
+	process = instance.Process
+	reopened := newWireClient(t, instance.MySQLAddress, "admin", "secret-password")
 	defer reopened.close()
 	rows = reopened.query("USE app")
 	if rows.err != "" {
@@ -449,13 +466,7 @@ func TestMySQLDurabilityPreservesControlBytes(t *testing.T) {
 func TestMySQLTransactionsProvideIsolationAndReadYourOwnWrites(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("transaction-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "transaction-secret")
 	process, address := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	first := newWireClient(t, address, "admin", "transaction-secret")
@@ -570,13 +581,7 @@ func TestMySQLTransactionsProvideIsolationAndReadYourOwnWrites(t *testing.T) {
 func TestMySQLTransactionsEnforceAutocommitReadOnlyAndAtomicErrors(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("transaction-settings-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "transaction-settings-secret")
 	process, address := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	first := newWireClient(t, address, "admin", "transaction-settings-secret")
@@ -691,13 +696,7 @@ func TestMySQLTransactionsEnforceAutocommitReadOnlyAndAtomicErrors(t *testing.T)
 func TestMySQLNamespacesAndBasicTablesSurviveRestartAndSupportQualifiedAccess(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("namespace-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "namespace-secret")
 	process, address := startMySQLServer(t, runner, directory)
 	client := newWireClient(t, address, "admin", "namespace-secret")
 	for _, query := range []string{
@@ -759,13 +758,7 @@ func TestMySQLNamespacesAndBasicTablesSurviveRestartAndSupportQualifiedAccess(t 
 func TestMySQLCRUDStatementsAreAtomicAndPreparedExecutionMatchesText(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("crud-test-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "crud-test-secret")
 	process, address := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	client := newWireClient(t, address, "admin", "crud-test-secret")
@@ -868,13 +861,7 @@ func TestMySQLCRUDStatementsAreAtomicAndPreparedExecutionMatchesText(t *testing.
 func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("prepared-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "prepared-secret")
 	process, mysqlAddress := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	client := newWireClient(t, mysqlAddress, "admin", "prepared-secret")
@@ -995,13 +982,7 @@ func TestMySQLPreparedStatementsUseBinaryRowsAndResetSafely(t *testing.T) {
 func TestMySQLPreparedCloseKeepsWireConnectionReady(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("prepared-close-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "prepared-close-secret")
 	process, mysqlAddress := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	client := newWireClient(t, mysqlAddress, "admin", "prepared-close-secret")
@@ -1032,13 +1013,7 @@ func TestMySQLPreparedCloseKeepsWireConnectionReady(t *testing.T) {
 func TestMySQLTextErrorsKeepWireConnectionReady(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("text-error-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "text-error-secret")
 	process, mysqlAddress := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	client := newWireClient(t, mysqlAddress, "admin", "text-error-secret")
@@ -1061,13 +1036,7 @@ func TestMySQLTextErrorsKeepWireConnectionReady(t *testing.T) {
 func TestMySQLPreparedStatementCountIsBounded(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("prepared-limit-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "prepared-limit-secret")
 	process, mysqlAddress := startMySQLServer(t, runner, directory, "--max-prepared-stmt-count", "1")
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	client := newWireClient(t, mysqlAddress, "admin", "prepared-limit-secret")
@@ -1108,21 +1077,11 @@ func TestMySQLSessionCeilingRejectsAdditionalConnections(t *testing.T) {
 func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("secure-password\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "secure-password")
 	certificate, key := testTLSCertificate(t)
-	address := freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", address, "--tls-certificate-file", certificate, "--tls-private-key-file", key, "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Arguments: []string{"--tls-certificate-file", certificate, "--tls-private-key-file", key}})
+	process, address := instance.Process, instance.MySQLAddress
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	nextReadyEvent(t, process)
 
 	client := newTLSWireClient(t, address, "admin", "secure-password")
 	defer client.close()
@@ -1209,13 +1168,7 @@ func TestMySQLTLSAuthenticationTextLiteralAndProtocolFailures(t *testing.T) {
 func TestMySQLCatalogReturnsCanonicalCreateDefinitions(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("catalog-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "catalog-secret")
 	process, mysqlAddress := startMySQLServer(t, runner, directory)
 	defer func() {
 		_ = process.Stop()
@@ -1263,13 +1216,7 @@ func TestMySQLCatalogReturnsCanonicalCreateDefinitions(t *testing.T) {
 func TestMySQLMetadataIsHonestEscapedAndCommittedConsistent(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("metadata-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "metadata-secret")
 	process, mysqlAddress := startMySQLServer(t, runner, directory)
 	defer func() {
 		_ = process.Stop()
@@ -1366,40 +1313,21 @@ func TestMySQLMetadataIsHonestEscapedAndCommittedConsistent(t *testing.T) {
 	}
 }
 
+// startMySQLServer starts serve with diagnostics enabled and returns the
+// process and its reported MySQL address.
 func startMySQLServer(t *testing.T, runner blackbox.Runner, directory string, extraArguments ...string) (*blackbox.Process, string) {
-	process, address, _ := startMySQLServerWithReady(t, runner, directory, extraArguments...)
-	return process, address
-}
-
-func startMySQLServerWithReady(t *testing.T, runner blackbox.Runner, directory string, extraArguments ...string) (*blackbox.Process, string, bool) {
 	t.Helper()
-	diagnostics := freeAddress(t)
-	mysqlAddress := freeAddress(t)
-	arguments := []string{"serve", "--data-directory", directory, "--mysql-listen-address", mysqlAddress, "--diagnostics-listen-address", diagnostics}
-	arguments = append(arguments, extraArguments...)
-	arguments = append(arguments, "--format=json")
-	process, err := runner.Start(context.Background(), arguments...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	event := nextReadyEvent(t, process)
-	recovered, _ := event["recovered"].(bool)
-	return process, mysqlAddress, recovered
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Diagnostics: true, Arguments: extraArguments})
+	return instance.Process, instance.MySQLAddress
 }
 
 func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("shutdown-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "shutdown-secret")
 
 	process, address := startMySQLServer(t, runner, directory)
-	second := runner.Run(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", freeAddress(t), "--format=json")
+	second := runner.Run(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address=127.0.0.1:0", "--format=json")
 	if second.ExitCode != 3 || !strings.Contains(second.Stdout, "already in use") {
 		t.Fatalf("second owner: %#v", second)
 	}
@@ -1443,13 +1371,11 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 	}
 
 	damaged := filepath.Join(t.TempDir(), "damaged-instance")
-	if result := runner.Run(context.Background(), "init", damaged, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize damaged fixture: %#v", result)
-	}
+	initializeServer(t, runner, damaged, "shutdown-secret")
 	if err := os.Remove(filepath.Join(damaged, "catalog.json")); err != nil {
 		t.Fatal(err)
 	}
-	if result := runner.Run(context.Background(), "serve", "--data-directory", damaged, "--mysql-listen-address", freeAddress(t), "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stdout, "catalog") {
+	if result := runner.Run(context.Background(), "serve", "--data-directory", damaged, "--mysql-listen-address=127.0.0.1:0", "--format=json"); result.ExitCode != 1 || !strings.Contains(result.Stdout, "catalog") {
 		t.Fatalf("damaged directory: %#v", result)
 	}
 }
@@ -1457,15 +1383,11 @@ func TestServingInstanceOwnsDirectoryRejectsDamageAndRollsBackOnStop(t *testing.
 func TestCrashRecoveryPreservesDurableCommitAndDropsInFlightTransaction(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("crash-recovery-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "crash-recovery-secret")
 
-	process, address, recovered := startMySQLServerWithReady(t, runner, directory)
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Diagnostics: true})
+	process, address := instance.Process, instance.MySQLAddress
+	recovered, _ := instance.Ready["recovered"].(bool)
 	if recovered {
 		t.Fatal("first start reported recovery")
 	}
@@ -1491,7 +1413,9 @@ func TestCrashRecoveryPreservesDurableCommitAndDropsInFlightTransaction(t *testi
 	}
 	_ = client.conn.Close()
 
-	process, address, recovered = startMySQLServerWithReady(t, runner, directory)
+	instance = startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Diagnostics: true})
+	process, address = instance.Process, instance.MySQLAddress
+	recovered, _ = instance.Ready["recovered"].(bool)
 	defer func() {
 		_ = process.Stop()
 		_ = process.Wait()
@@ -1514,13 +1438,7 @@ func TestCrashRecoveryPreservesDurableCommitAndDropsInFlightTransaction(t *testi
 func TestServeEmitsTerminalOperatorResult(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("result-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "result-secret")
 	process, _ := startMySQLServer(t, runner, directory)
 	if err := process.Stop(); err != nil {
 		t.Fatal(err)
@@ -2051,17 +1969,6 @@ func (c *wireClient) readResultHeader() (wireResult, bool) {
 	return result, false
 }
 
-func freeAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	return address
-}
-
 func readWirePacket(t *testing.T, conn net.Conn) []byte {
 	t.Helper()
 	payload := []byte{}
@@ -2151,13 +2058,7 @@ func bytesIndex(value []byte, target byte) int {
 func TestMySQLStrictNumericAndBitSemantics(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("numeric-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "numeric-secret")
 	process, address := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	client := newWireClient(t, address, "admin", "numeric-secret")
@@ -2237,13 +2138,7 @@ func TestMySQLStrictNumericAndBitSemantics(t *testing.T) {
 func TestMySQLEnforcesCharacterCollationAndIdentifierSemantics(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte("charset-secret\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize: %#v", result)
-	}
+	initializeServer(t, runner, directory, "charset-secret")
 	process, address := startMySQLServer(t, runner, directory)
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	client := newWireClient(t, address, "admin", "charset-secret")
@@ -2315,5 +2210,40 @@ func TestMySQLEnforcesCharacterCollationAndIdentifierSemantics(t *testing.T) {
 	overLong := strings.Repeat("n", 65)
 	if bad := client.query("CREATE TABLE " + overLong + " (id INT)"); bad.err == "" {
 		t.Fatalf("over-length identifier accepted: %#v", bad)
+	}
+}
+
+func TestServeReportsKernelChosenListenerAddressesInReadyEvent(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, err := runner.Start(context.Background(), "serve", "--format=json", "--data-directory="+directory, "--mysql-listen-address=127.0.0.1:0", "--diagnostics-listen-address=127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	event := nextReadyEvent(t, process)
+	mysqlAddress, _ := event["mysql_address"].(string)
+	diagnosticsAddress, _ := event["diagnostics_address"].(string)
+	for name, address := range map[string]string{"mysql_address": mysqlAddress, "diagnostics_address": diagnosticsAddress} {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil || host != "127.0.0.1" || port == "0" {
+			t.Fatalf("ready event %s = %q, want a bound loopback port; event=%#v", name, address, event)
+		}
+	}
+	if mysqlAddress == diagnosticsAddress {
+		t.Fatalf("ready event reports one address for both listeners: %#v", event)
+	}
+	db, err := sql.Open("mysql", "admin:lifecycle-secret@tcp("+mysqlAddress+")/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var one int
+	if err := db.QueryRow("SELECT 1").Scan(&one); err != nil || one != 1 {
+		t.Fatalf("query through reported mysql_address = %d, %v", one, err)
+	}
+	var ready map[string]any
+	if status, err := blackbox.HTTPJSON(context.Background(), diagnosticsAddress, "/ready", &ready); err != nil || status != 200 {
+		t.Fatalf("readiness through reported diagnostics_address = %d, %v", status, err)
 	}
 }

@@ -127,12 +127,8 @@ func TestExternalDriverCompatibilityProfile(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := initializedInstance(t, runner)
 	certificate, key := testTLSCertificate(t)
-	address := freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", address, "--tls-certificate-file", certificate, "--tls-private-key-file", key, "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	nextReadyEvent(t, process)
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Arguments: []string{"--tls-certificate-file", certificate, "--tls-private-key-file", key}})
+	process, address := instance.Process, instance.MySQLAddress
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	host, port, err := splitAddress(address)
 	if err != nil {

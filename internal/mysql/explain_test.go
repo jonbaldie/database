@@ -31,7 +31,7 @@ func explainExecutor(t *testing.T) *textStatementExecutor {
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
-	session := &session{server: server, database: "app", initialDB: "app", timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{}}
+	session := newTestSession(server, testSessionOptions{database: "app"})
 	return &textStatementExecutor{session: session}
 }
 

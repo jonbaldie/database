@@ -1,7 +1,6 @@
 package blackbox_test
 
 import (
-	"context"
 	"reflect"
 	"testing"
 
@@ -12,13 +11,9 @@ func TestMySQLSessionSettingsUseTheWireContract(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := t.TempDir()
 	initializeServer(t, runner, directory, "settings-secret")
-	mysqlAddress := freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", mysqlAddress, "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory})
+	process, mysqlAddress := instance.Process, instance.MySQLAddress
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	nextReadyEvent(t, process)
 	client := newWireClient(t, mysqlAddress, "admin", "settings-secret")
 	defer client.close()
 

@@ -29,7 +29,7 @@ func TestIssue543ColumnPrivilegesFollowVisibleNamespaceGrants(t *testing.T) {
 			if err := executor.server.config.Catalog.CreateAccount(catalog.Account{Name: test.name, PasswordHash: "hash", Grants: []catalog.Grant{grant}}); err != nil {
 				t.Fatal(err)
 			}
-			reader := &textStatementExecutor{session: &session{server: executor.server, username: test.name, timeZone: "UTC", initialTimeZone: "UTC"}}
+			reader := &textStatementExecutor{session: newTestSession(executor.server, testSessionOptions{account: test.name})}
 			result, err := executeStatement(reader, "SELECT TABLE_SCHEMA, PRIVILEGES FROM information_schema.COLUMNS WHERE TABLE_SCHEMA <> 'information_schema'")
 			want := [][]string{{"app", test.want}}
 			if test.privilege == "NAMESPACE_MANAGER" {

@@ -14,18 +14,18 @@ import (
 func TestIssue497ServeProgressAndResultFollowTheOperatorContract(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := initializedInstance(t, runner)
-	diagnosticsAddress := freeAddress(t)
 	process, err := runner.Start(context.Background(),
 		"serve",
 		"--data-directory="+directory,
-		"--mysql-listen-address="+freeAddress(t),
-		"--diagnostics-listen-address="+diagnosticsAddress,
+		"--mysql-listen-address=127.0.0.1:0",
+		"--diagnostics-listen-address=127.0.0.1:0",
 		"--result=json",
 		"--progress=json",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, diagnosticsAddress := readyAddresses(t, process)
 	awaitReadyProbe(t, process, diagnosticsAddress)
 	if err := process.Stop(); err != nil {
 		t.Fatal(err)

@@ -7,7 +7,7 @@ import (
 
 func TestCompileRelationPredicateHandlesLargeLogicalExpressions(t *testing.T) {
 	columns := []relationColumn{{name: "id", typeName: "INT", index: 0}}
-	session := &session{timeZone: "UTC"}
+	session := newTestSession(newTestServer(t, Config{}), testSessionOptions{})
 	tests := []struct {
 		name string
 		text string

@@ -640,7 +640,7 @@ func validateConfigurationParts(parts configurationParts) error {
 	if parts.limits.temporaryStorage > parts.limits.aggregateTemporaryStorage {
 		return invalidConfiguration("temporary_storage_limit_bytes cannot exceed aggregate_temporary_storage_limit_bytes")
 	}
-	if parts.diagnosticsAddress != "" && parts.diagnosticsAddress == parts.mysqlAddress {
+	if lifecycle.ListenersConflict(parts.mysqlAddress, parts.diagnosticsAddress) {
 		return invalidConfiguration("MySQL and diagnostics listeners must use different addresses")
 	}
 	return nil
@@ -713,8 +713,8 @@ func networkAddress(name, value string) (string, error) {
 		return "", invalidConfiguration(name + " must be an IPv4 address or bracketed IPv6 address with a port")
 	}
 	portNumber, err := strconv.Atoi(port)
-	if err != nil || portNumber < 1 || portNumber > 65535 {
-		return "", invalidConfiguration(name + " port must be between 1 and 65535")
+	if err != nil || portNumber < 0 || portNumber > 65535 {
+		return "", invalidConfiguration(name + " port must be between 0 and 65535")
 	}
 	canonicalHost := ip.String()
 	if strings.Contains(canonicalHost, ":") {

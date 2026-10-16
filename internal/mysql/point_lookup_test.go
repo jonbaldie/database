@@ -19,10 +19,7 @@ func TestLiveExplanationDoesNotDisablePointLookup(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
 
-	executor := &textStatementExecutor{session: &session{
-		server: server, database: "app", initialDB: "app", connectionID: 7,
-		timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{},
-	}}
+	executor := &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app", connectionID: 7})}
 	for _, query := range []string{
 		"CREATE DATABASE app",
 		"USE app",
@@ -64,10 +61,7 @@ func newPointLookupTestExecutor(t *testing.T) *textStatementExecutor {
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
-	executor := &textStatementExecutor{session: &session{
-		server: server, database: "app", initialDB: "app", connectionID: 7,
-		timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{},
-	}}
+	executor := &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app", connectionID: 7})}
 	for _, query := range []string{
 		"CREATE DATABASE app",
 		"USE app",

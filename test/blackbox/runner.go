@@ -190,6 +190,101 @@ func (p *Process) Snapshot() (stdout, stderr string) {
 	return p.output.stdout.String(), p.output.stderr.String()
 }
 
+// InstanceOptions selects how StartInstance launches serve. Both listeners
+// bind port 0 on loopback, so the operating system selects free ports and the
+// ready event reports them.
+type InstanceOptions struct {
+	DataDirectory string
+	// Diagnostics enables the diagnostics listener.
+	Diagnostics bool
+	// Arguments are extra serve arguments, such as TLS files or limits.
+	Arguments []string
+	// ReadyTimeout bounds the wait for the ready event. Zero selects 5 seconds.
+	ReadyTimeout time.Duration
+}
+
+// Instance is a serve process that has reported ready. The addresses come
+// from the ready event, not from the test.
+type Instance struct {
+	Process            *Process
+	MySQLAddress       string
+	DiagnosticsAddress string
+	Ready              map[string]any
+}
+
+// Initialize creates a data directory through the operator init command.
+func Initialize(ctx context.Context, runner Runner, directory, password string) error {
+	result := runner.RunWithStdin(ctx, password+"\n", "init", directory, "--password-stdin", "--format=json")
+	if result.ExitCode != 0 {
+		return fmt.Errorf("initialize instance: exit %d: %s%s", result.ExitCode, strings.TrimSpace(result.Stdout), strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
+// StartInstance launches serve with JSON lifecycle output and waits for its
+// ready event. As with Runner.Start, ctx bounds the life of the process, not
+// only the wait. When serve stops before it is ready, the error contains the
+// process output.
+func StartInstance(ctx context.Context, runner Runner, options InstanceOptions) (*Instance, error) {
+	arguments := []string{"serve", "--format=json", "--data-directory=" + options.DataDirectory, "--mysql-listen-address=127.0.0.1:0"}
+	if options.Diagnostics {
+		arguments = append(arguments, "--diagnostics-listen-address=127.0.0.1:0")
+	}
+	process, err := runner.Start(ctx, append(arguments, options.Arguments...)...)
+	if err != nil {
+		return nil, err
+	}
+	ready, err := process.awaitReady(ctx, options.ReadyTimeout)
+	if err != nil {
+		_ = process.Crash()
+		result := process.Wait()
+		return nil, fmt.Errorf("wait for ready event: %w; stdout=%q stderr=%q", err, result.Stdout, result.Stderr)
+	}
+	instance := &Instance{Process: process, Ready: ready}
+	instance.MySQLAddress, _ = ready["mysql_address"].(string)
+	instance.DiagnosticsAddress, _ = ready["diagnostics_address"].(string)
+	if instance.MySQLAddress == "" || options.Diagnostics && instance.DiagnosticsAddress == "" {
+		_ = process.Crash()
+		_ = process.Wait()
+		return nil, fmt.Errorf("ready event does not report the bound listener addresses: %#v", ready)
+	}
+	return instance, nil
+}
+
+// defaultReadyTimeout bounds the wait for a ready event when
+// InstanceOptions does not set ReadyTimeout.
+const defaultReadyTimeout = 5 * time.Second
+
+// awaitReady skips recovery events and returns the ready event. Any other
+// state before ready is an error.
+func (p *Process) awaitReady(parent context.Context, timeout time.Duration) (map[string]any, error) {
+	if timeout == 0 {
+		timeout = defaultReadyTimeout
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	for {
+		var event map[string]any
+		if err := p.NextJSONEvent(ctx, &event); err != nil {
+			return nil, err
+		}
+		switch event["state"] {
+		case "recovering":
+			continue
+		case "ready":
+			return event, nil
+		default:
+			return nil, fmt.Errorf("unexpected event before ready: %#v", event)
+		}
+	}
+}
+
+// Stop requests a graceful stop and waits for the process to exit.
+func (i *Instance) Stop() Result {
+	_ = i.Process.Stop()
+	return i.Process.Wait()
+}
+
 // HTTPJSON performs one diagnostics request and decodes its JSON response.
 func HTTPJSON(ctx context.Context, address, path string, target any) (int, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+path, nil)

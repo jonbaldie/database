@@ -1,7 +1,6 @@
 package blackbox_test
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,13 +16,9 @@ func TestMySQLBoundsOrderedReadsAndPublishesResourceEvidence(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
 	initializeServer(t, runner, directory, "resource-secret")
-	diagnostics, mysqlAddress := freeAddress(t), freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", mysqlAddress, "--diagnostics-listen-address", diagnostics, "--execution-memory-limit-bytes=50", "--aggregate-execution-memory-limit-bytes=50", "--temporary-storage-limit-bytes=1024", "--aggregate-temporary-storage-limit-bytes=1024", "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Diagnostics: true, Arguments: []string{"--execution-memory-limit-bytes=50", "--aggregate-execution-memory-limit-bytes=50", "--temporary-storage-limit-bytes=1024", "--aggregate-temporary-storage-limit-bytes=1024"}})
+	process, mysqlAddress, diagnostics := instance.Process, instance.MySQLAddress, instance.DiagnosticsAddress
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	nextReadyEvent(t, process)
 
 	client := newWireClient(t, mysqlAddress, "admin", "resource-secret")
 	defer client.close()

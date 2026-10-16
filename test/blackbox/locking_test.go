@@ -1,9 +1,7 @@
 package blackbox_test
 
 import (
-	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -252,16 +250,5 @@ func assertCancelledLockReleased(t *testing.T, address, id string) {
 			t.Fatalf("cancelled lock state: %#v", result)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func initializeServer(t *testing.T, runner blackbox.Runner, directory, password string) {
-	t.Helper()
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte(password+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if result := runner.Run(context.Background(), "init", directory, "--password-file", passwordFile, "--format=json"); result.ExitCode != 0 {
-		t.Fatalf("initialize server: %#v", result)
 	}
 }

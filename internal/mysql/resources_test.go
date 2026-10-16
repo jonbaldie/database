@@ -58,7 +58,7 @@ func TestSpillWriterReservesEncodedTemporaryBytes(t *testing.T) {
 	manager := newResourceManager(config)
 	resources := newStatementResources(manager, config, nil)
 	defer closeStatementResources(resources)
-	sorter := relationalSpillSorter{plan: &relationalSelectPlan{relationalSelectEnvironment: relationalSelectEnvironment{session: &session{resources: resources}}}}
+	sorter := relationalSpillSorter{plan: &relationalSelectPlan{relationalSelectEnvironment: relationalSelectEnvironment{session: newTestSession(newTestServer(t, Config{}), testSessionOptions{resources: resources})}}}
 	writer, err := sorter.newRunWriter()
 	if err != nil {
 		t.Fatalf("create spill writer: %v", err)

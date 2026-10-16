@@ -82,6 +82,7 @@ type Event struct {
 	Severity           string    `json:"severity,omitempty"`
 	Message            string    `json:"message,omitempty"`
 	OperationID        string    `json:"operation_id,omitempty"`
+	MySQLAddress       string    `json:"mysql_address,omitempty"`
 	DiagnosticsAddress string    `json:"diagnostics_address,omitempty"`
 	InstanceID         string    `json:"instance_id,omitempty"`
 	ShutdownReason     string    `json:"shutdown_reason,omitempty"`
@@ -134,7 +135,7 @@ func validateOptions(opts *Options) error {
 	if (opts.TLSCertFile == "") != (opts.TLSKeyFile == "") {
 		return errors.New("TLS certificate and private key must be provided together")
 	}
-	if opts.DiagnosticsAddress != "" && opts.DiagnosticsAddress == opts.MySQLAddress {
+	if ListenersConflict(opts.MySQLAddress, opts.DiagnosticsAddress) {
 		return errors.New("MySQL and diagnostics listeners must use different addresses")
 	}
 	if opts.DataDirectory != "" {
@@ -143,6 +144,17 @@ func validateOptions(opts *Options) error {
 		}
 	}
 	return nil
+}
+
+// ListenersConflict reports whether the MySQL and diagnostics listeners would
+// select the same address. Port 0 asks the kernel for a free port for each
+// listener, so two port-0 addresses on one host do not conflict.
+func ListenersConflict(mysqlAddress, diagnosticsAddress string) bool {
+	if diagnosticsAddress == "" || diagnosticsAddress != mysqlAddress {
+		return false
+	}
+	_, port, err := net.SplitHostPort(diagnosticsAddress)
+	return err != nil || port != "0"
 }
 
 func (s *server) serve(ctx context.Context) error {
@@ -183,6 +195,7 @@ func (s *server) serve(ctx context.Context) error {
 func (s *server) reportReady(recovered bool, runtime runtime) {
 	s.health.set("ready")
 	event := s.lifecycleEvent("ready", "server.ready", "info", "database ready")
+	event.MySQLAddress = runtime.mysqlAddress()
 	event.DiagnosticsAddress = runtime.diagnosticsAddress
 	event.InstanceID = runtime.instanceID
 	event.Recovered = recovered
@@ -262,6 +275,15 @@ type runtime struct {
 	diagnosticsAddress string
 	instanceID         string
 	mysql              *mysql.Server
+}
+
+// mysqlAddress is the bound MySQL listener address, which differs from the
+// configured address when the configured port is 0.
+func (r runtime) mysqlAddress() string {
+	if r.mysql == nil {
+		return ""
+	}
+	return r.mysql.Listener.Addr().String()
 }
 
 func startRuntime(opts Options, health *health) (runtime, error) {

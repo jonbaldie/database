@@ -89,6 +89,7 @@ type StatefulHarness struct {
 	passwordFile string
 	password     string
 	adminUser    string
+	// mysqlAddr and diagAddr are the addresses from the latest ready event.
 	mysqlAddr    string
 	diagAddr     string
 	serveProcess *blackbox.Process
@@ -114,8 +115,6 @@ func NewStatefulHarness(t *testing.T) *StatefulHarness {
 		passwordFile: passFile,
 		password:     pass,
 		adminUser:    "admin",
-		mysqlAddr:    freeAddress(t),
-		diagAddr:     freeAddress(t),
 	}
 	h.Reset()
 	return h
@@ -275,7 +274,7 @@ func (h *StatefulHarness) Execute(step Step) StepRecord {
 		res = h.runner.Run(ctx, "upgrade")
 
 	case ActServeStart:
-		args := []string{"serve", "--data-directory", h.dataDir, "--mysql-listen-address", h.mysqlAddr, "--diagnostics-listen-address", h.diagAddr, "--format=json"}
+		args := []string{"serve", "--data-directory", h.dataDir, "--mysql-listen-address=127.0.0.1:0", "--diagnostics-listen-address=127.0.0.1:0", "--format=json"}
 		if len(step.Args) > 0 {
 			args = step.Args
 		}
@@ -288,20 +287,30 @@ func (h *StatefulHarness) Execute(step Step) StepRecord {
 			var event map[string]any
 			waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer waitCancel()
-			if err := proc.NextJSONEvent(waitCtx, &event); err != nil {
+			// Skip recovery progress after a crash: only the ready event
+			// reports the kernel-chosen listener addresses.
+			err := proc.NextJSONEvent(waitCtx, &event)
+			for err == nil && event["state"] == "recovering" {
+				event = nil
+				err = proc.NextJSONEvent(waitCtx, &event)
+			}
+			if err == nil && event["state"] != "ready" {
+				err = fmt.Errorf("serve reported %v before ready", event["state"])
+			}
+			if err != nil {
 				stepErr = fmt.Errorf("wait for ready event: %w", err)
 				_ = proc.Crash()
 				res = proc.Wait()
 				h.serveProcess = nil
 			} else {
+				h.mysqlAddr, _ = event["mysql_address"].(string)
+				h.diagAddr, _ = event["diagnostics_address"].(string)
 				res = blackbox.Result{ExitCode: 0, Stdout: fmt.Sprintf("%v", event)}
 			}
 		}
 
 	case ActDoubleServe:
-		secondDiag := freeAddress(h.t)
-		secondMySQL := freeAddress(h.t)
-		res = h.runner.Run(ctx, "serve", "--data-directory", h.dataDir, "--mysql-listen-address", secondMySQL, "--diagnostics-listen-address", secondDiag, "--result=json")
+		res = h.runner.Run(ctx, "serve", "--data-directory", h.dataDir, "--mysql-listen-address=127.0.0.1:0", "--diagnostics-listen-address=127.0.0.1:0", "--result=json")
 
 	case ActSQL:
 		if h.serveProcess == nil {

@@ -17,7 +17,7 @@ func TestRecordServeEventKeepsProgressInServeVocabularyAndCollectsDetails(t *tes
 	before := time.Now().UTC()
 	for _, event := range []lifecycle.Event{
 		{State: "recovering", Recovered: true},
-		{Schema: "database.lifecycle/v1", State: "ready", InstanceID: "instance-497", DiagnosticsAddress: "127.0.0.1:9"},
+		{Schema: "database.lifecycle/v1", State: "ready", InstanceID: "instance-497", MySQLAddress: "127.0.0.1:8", DiagnosticsAddress: "127.0.0.1:9"},
 		{State: "stopping", ShutdownReason: "signal"},
 		{State: "stopped"},
 		{State: "failed"},
@@ -49,7 +49,7 @@ func TestRecordServeEventKeepsProgressInServeVocabularyAndCollectsDetails(t *tes
 	if stdout.Len() != 0 {
 		t.Fatalf("serve stdout before the result = %q, want empty", stdout.String())
 	}
-	if details["instance_id"] != "instance-497" || details["shutdown_reason"] != "signal" || details["diagnostics_address"] != "127.0.0.1:9" {
+	if details["instance_id"] != "instance-497" || details["shutdown_reason"] != "signal" || details["mysql_address"] != "127.0.0.1:8" || details["diagnostics_address"] != "127.0.0.1:9" {
 		t.Fatalf("serve details = %#v", details)
 	}
 	for _, key := range []string{"ready_at", "stopping_at"} {

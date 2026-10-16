@@ -22,19 +22,18 @@ import (
 
 func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 	directory := initializedDirectory(t)
-	address := freeLocalAddress(t)
 	ctx := context.Background()
 	events := make(chan Event, 4)
 	done := make(chan error, 1)
 	go func() {
 		done <- Serve(ctx, Options{
 			DataDirectory: directory,
-			MySQLAddress:  address,
+			MySQLAddress:  "127.0.0.1:0",
 			MySQLEnabled:  true,
 			OperationID:   "op-serve",
 		}, func(event Event) { events <- event })
 	}()
-	receiveEvent(t, events, "ready")
+	address := receiveEvent(t, events, "ready").MySQLAddress
 
 	db, err := sql.Open("mysql", "admin:test-password@tcp("+address+")/")
 	if err != nil {
@@ -57,15 +56,22 @@ func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 	receiveEvent(t, events, "stopped")
 }
 
-func freeLocalAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+func TestListenersConflictOnlyForTheSameFixedAddress(t *testing.T) {
+	for _, test := range []struct {
+		mysql, diagnostics string
+		want               bool
+	}{
+		{"127.0.0.1:3306", "", false},
+		{"", "", false},
+		{"127.0.0.1:3306", "127.0.0.1:9090", false},
+		{"127.0.0.1:3306", "127.0.0.1:3306", true},
+		{"127.0.0.1:0", "127.0.0.1:0", false},
+		{"no-port", "no-port", true},
+	} {
+		if got := ListenersConflict(test.mysql, test.diagnostics); got != test.want {
+			t.Fatalf("ListenersConflict(%q, %q) = %v, want %v", test.mysql, test.diagnostics, got, test.want)
+		}
 	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	return address
 }
 
 func TestServeRejectsDamagedInitializedDirectory(t *testing.T) {
