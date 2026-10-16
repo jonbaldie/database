@@ -251,11 +251,15 @@ func StartInstance(ctx context.Context, runner Runner, options InstanceOptions) 
 	return instance, nil
 }
 
+// defaultReadyTimeout bounds the wait for a ready event when
+// InstanceOptions does not set ReadyTimeout.
+const defaultReadyTimeout = 5 * time.Second
+
 // awaitReady skips recovery events and returns the ready event. Any other
 // state before ready is an error.
 func (p *Process) awaitReady(parent context.Context, timeout time.Duration) (map[string]any, error) {
 	if timeout == 0 {
-		timeout = 5 * time.Second
+		timeout = defaultReadyTimeout
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()

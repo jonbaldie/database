@@ -30,6 +30,8 @@ const (
 	insertBase      = int64(1 << 61)
 	warmupBase      = int64(1 << 60)
 	maxPayloadBytes = 16384
+	// readyTimeout allows a restart with the full corpus to recover.
+	readyTimeout = 30 * time.Second
 )
 
 type config struct {
@@ -602,12 +604,13 @@ func initialize(executable, directory string) error {
 // invocation to that ping, as the clean-start gate defines it.
 func startServer(executable, directory string) (*runningServer, *sql.DB, time.Duration, error) {
 	started := time.Now()
-	instance, err := blackbox.StartInstance(context.Background(), blackbox.Runner{Executable: executable}, blackbox.InstanceOptions{DataDirectory: directory, ReadyTimeout: 30 * time.Second})
+	instance, err := blackbox.StartInstance(context.Background(), blackbox.Runner{Executable: executable}, blackbox.InstanceOptions{DataDirectory: directory, ReadyTimeout: readyTimeout})
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("server did not become ready: %w", err)
+		return nil, nil, 0, err
 	}
-	server := &runningServer{instance: instance, address: instance.MySQLAddress}
-	db, err := openRootDB(server.address)
+	address := instance.MySQLAddress
+	server := &runningServer{instance: instance, address: address}
+	db, err := openRootDB(address)
 	if err != nil {
 		_ = server.stop()
 		return nil, nil, 0, err

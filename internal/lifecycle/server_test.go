@@ -56,6 +56,24 @@ func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 	receiveEvent(t, events, "stopped")
 }
 
+func TestListenersConflictOnlyForTheSameFixedAddress(t *testing.T) {
+	for _, test := range []struct {
+		mysql, diagnostics string
+		want               bool
+	}{
+		{"127.0.0.1:3306", "", false},
+		{"", "", false},
+		{"127.0.0.1:3306", "127.0.0.1:9090", false},
+		{"127.0.0.1:3306", "127.0.0.1:3306", true},
+		{"127.0.0.1:0", "127.0.0.1:0", false},
+		{"no-port", "no-port", true},
+	} {
+		if got := ListenersConflict(test.mysql, test.diagnostics); got != test.want {
+			t.Fatalf("ListenersConflict(%q, %q) = %v, want %v", test.mysql, test.diagnostics, got, test.want)
+		}
+	}
+}
+
 func TestServeRejectsDamagedInitializedDirectory(t *testing.T) {
 	directory := initializedDirectory(t)
 	if err := os.Remove(filepath.Join(directory, "catalog.json")); err != nil {
