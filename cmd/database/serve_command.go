@@ -115,6 +115,9 @@ func recordServeEvent(reporter *operationReporter, event lifecycle.Event, detail
 		if event.InstanceID != "" {
 			details["instance_id"] = event.InstanceID
 		}
+		if event.MySQLAddress != "" {
+			details["mysql_address"] = event.MySQLAddress
+		}
 		if event.DiagnosticsAddress != "" {
 			details["diagnostics_address"] = event.DiagnosticsAddress
 		}

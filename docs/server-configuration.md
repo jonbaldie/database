@@ -44,10 +44,10 @@ variables are ignored.
 | Canonical name | Type | Default | Allowed value |
 | --- | --- | ---: | --- |
 | `data_directory` | absolute path | required | One non-empty absolute path |
-| `mysql_listen_address` | network address | `127.0.0.1:3306` | One IPv4 address and port or bracketed IPv6 address and port; port 1–65535 |
+| `mysql_listen_address` | network address | `127.0.0.1:3306` | One IPv4 address and port or bracketed IPv6 address and port; port 0–65535 |
 | `tls_certificate_file` | absolute path | unset | One readable PEM certificate-and-optional-chain file; valid only with `tls_private_key_file` |
 | `tls_private_key_file` | absolute path | unset | One readable unencrypted PEM private-key file matching the certificate; valid only with `tls_certificate_file` |
-| `diagnostics_listen_address` | network address | unset | One IPv4 address and port or bracketed IPv6 address and port; port 1–65535 |
+| `diagnostics_listen_address` | network address | unset | One IPv4 address and port or bracketed IPv6 address and port; port 0–65535 |
 | `log_format` | enum | `json` | `json` or `text` |
 | `statement_timeout_ms` | integer milliseconds | `300000` | 1–9,223,372,036,854,775,807 |
 | `lock_wait_timeout_ms` | integer milliseconds | `5000` | 1–9,223,372,036,854,775,807 |
@@ -116,6 +116,15 @@ memory and temporary-storage reservations, plus cumulative spill, cancellation,
 timeout, execution-memory-exhaustion, and temporary-storage-exhaustion counts.
 It contains no SQL text, bound values, session identifiers, or temporary-file
 paths.
+
+Port 0 tells the operating system to select a free port when the listener
+starts. The MySQL and diagnostics settings can both use port 0 on the same
+host. The `ready` record in `database.lifecycle/v1` reports the bound listener
+addresses: `mysql_address` when the MySQL listener is enabled, and
+`diagnostics_address` when diagnostics is enabled. These fields always contain
+the port that the server bound, also when the configuration supplied port 0.
+Automation that needs a free port can supply port 0 and read the address from
+the `ready` record. It does not need to select a port before the server starts.
 
 Lifecycle JSON records retain the `database.lifecycle/v1` schema and include
 stable `event_code` and `severity` fields for startup, recovery, readiness,

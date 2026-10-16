@@ -54,7 +54,8 @@ treat that absence as failure requiring its own recovery policy.
 In operator result mode, `serve` writes the `ready` record in
 `database.lifecycle/v1` to standard error when the server becomes ready, for
 every `--progress` mode. That record carries any ready-time warning, such as
-`UNSAFE_NON_TLS_LISTENER`. With `--result=human`, the same warnings are printed
+`UNSAFE_NON_TLS_LISTENER`, and the bound `mysql_address` and
+`diagnostics_address`. With `--result=human`, the same warnings are printed
 on standard error. Standard output stays empty until the terminal result, which
 may repeat the warnings in `details.warnings`. A progress consumer skips
 records whose `schema` is not `database.operator.progress/v1`.
@@ -191,7 +192,9 @@ Successful command details contain these stable operator facts:
 | `version` | Product, build, and platform identity plus data, backup, and named MySQL application compatibility ranges |
 
 Successful `serve` details include `instance_id`, `ready_at`, `stopping_at`,
-`shutdown_reason`, and `state` `stopped`. The times are UTC RFC 3339 times.
+`shutdown_reason`, and `state` `stopped`. They also include `mysql_address`
+and `diagnostics_address`, the bound listener addresses from the `ready`
+record, when those listeners are enabled. The times are UTC RFC 3339 times.
 `shutdown_reason` is `signal` after `SIGINT` or `SIGTERM`, and
 `shutdown_request` after a `database shutdown` request.
 

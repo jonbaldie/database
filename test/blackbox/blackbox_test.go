@@ -2317,3 +2317,38 @@ func TestMySQLEnforcesCharacterCollationAndIdentifierSemantics(t *testing.T) {
 		t.Fatalf("over-length identifier accepted: %#v", bad)
 	}
 }
+
+func TestServeReportsKernelChosenListenerAddressesInReadyEvent(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := initializedInstance(t, runner)
+	process, err := runner.Start(context.Background(), "serve", "--format=json", "--data-directory="+directory, "--mysql-listen-address=127.0.0.1:0", "--diagnostics-listen-address=127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = process.Stop(); _ = process.Wait() }()
+	event := nextReadyEvent(t, process)
+	mysqlAddress, _ := event["mysql_address"].(string)
+	diagnosticsAddress, _ := event["diagnostics_address"].(string)
+	for name, address := range map[string]string{"mysql_address": mysqlAddress, "diagnostics_address": diagnosticsAddress} {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil || host != "127.0.0.1" || port == "0" {
+			t.Fatalf("ready event %s = %q, want a bound loopback port; event=%#v", name, address, event)
+		}
+	}
+	if mysqlAddress == diagnosticsAddress {
+		t.Fatalf("ready event reports one address for both listeners: %#v", event)
+	}
+	db, err := sql.Open("mysql", "admin:lifecycle-secret@tcp("+mysqlAddress+")/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var one int
+	if err := db.QueryRow("SELECT 1").Scan(&one); err != nil || one != 1 {
+		t.Fatalf("query through reported mysql_address = %d, %v", one, err)
+	}
+	var ready map[string]any
+	if status, err := blackbox.HTTPJSON(context.Background(), diagnosticsAddress, "/ready", &ready); err != nil || status != 200 {
+		t.Fatalf("readiness through reported diagnostics_address = %d, %v", status, err)
+	}
+}
