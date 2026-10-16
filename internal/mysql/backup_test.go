@@ -34,10 +34,7 @@ func backupExecutor(t *testing.T, username string, grants []catalog.Grant) *text
 			t.Fatalf("create account: %v", err)
 		}
 	}
-	return &textStatementExecutor{session: &session{
-		server: server, username: username, database: "app", initialDB: "app",
-		timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{},
-	}}
+	return &textStatementExecutor{session: newTestSession(server, testSessionOptions{account: username, database: "app"})}
 }
 
 func TestBackupInstanceCapturesCommittedCatalogSnapshot(t *testing.T) {

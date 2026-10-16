@@ -568,12 +568,10 @@ func TestOperatorResultFormatsShareOneEnvelope(t *testing.T) {
 		for _, option := range options {
 			directory := filepath.Join(t.TempDir(), "instance")
 			initializeServer(t, runner, directory, password)
-			mysqlAddress := freeAddress(t)
-			diagnosticsAddress := freeAddress(t)
 			process, err := runner.Start(context.Background(), "serve",
 				"--data-directory", directory,
-				"--mysql-listen-address", mysqlAddress,
-				"--diagnostics-listen-address", diagnosticsAddress,
+				"--mysql-listen-address=127.0.0.1:0",
+				"--diagnostics-listen-address=127.0.0.1:0",
 				option.flag,
 			)
 			if err != nil {
@@ -586,6 +584,7 @@ func TestOperatorResultFormatsShareOneEnvelope(t *testing.T) {
 					_ = process.Wait()
 				}
 			})
+			mysqlAddress, diagnosticsAddress := readyAddresses(t, process)
 			waitForDiagnosticsReady(t, diagnosticsAddress)
 			stopped := runner.Run(context.Background(), "shutdown", "--yes", "--address="+mysqlAddress,
 				"--account=admin", "--password-file", passwordFile, "--result=json")
@@ -643,16 +642,10 @@ func TestOperatorServeKeepsDefaultHumanOutput(t *testing.T) {
 	password := "operator-human-serve-secret"
 	directory := filepath.Join(t.TempDir(), "instance")
 	initializeServer(t, runner, directory, password)
-	passwordFile := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(passwordFile, []byte(password+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	mysqlAddress := freeAddress(t)
-	diagnosticsAddress := freeAddress(t)
 	process, err := runner.Start(context.Background(), "serve",
 		"--data-directory", directory,
-		"--mysql-listen-address", mysqlAddress,
-		"--diagnostics-listen-address", diagnosticsAddress,
+		"--mysql-listen-address=127.0.0.1:0",
+		"--diagnostics-listen-address=127.0.0.1:0",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -664,11 +657,12 @@ func TestOperatorServeKeepsDefaultHumanOutput(t *testing.T) {
 			_ = process.Wait()
 		}
 	})
+	_, diagnosticsAddress := readyAddresses(t, process)
 	waitForDiagnosticsReady(t, diagnosticsAddress)
-	stopped := runner.Run(context.Background(), "shutdown", "--yes", "--address="+mysqlAddress,
-		"--account=admin", "--password-file", passwordFile, "--result=json")
-	if stopped.ExitCode != 0 {
-		t.Fatalf("shutdown after human serve: %#v", stopped)
+	// Human output does not report the MySQL address, so stop with the
+	// operator stop signal instead of the shutdown command.
+	if err := process.Stop(); err != nil {
+		t.Fatal(err)
 	}
 	served := process.Wait()
 	processFinished = true
@@ -686,7 +680,7 @@ func TestOperatorServeReportsUnusableDataDirectoryAsPrecondition(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	for _, directory := range []string{empty, missing} {
 		for _, flag := range []string{"", "--format=json", "--result=json"} {
-			arguments := []string{"serve", "--data-directory", directory, "--mysql-listen-address", freeAddress(t)}
+			arguments := []string{"serve", "--data-directory", directory, "--mysql-listen-address=127.0.0.1:0"}
 			if flag != "" {
 				arguments = append(arguments, flag)
 			}

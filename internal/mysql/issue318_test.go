@@ -40,15 +40,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("select with empty session database should require grant on target db", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "",
-				initialDB:       "",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "SELECT * FROM db_secret.confidential")
@@ -62,15 +54,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("insert with db_public session database should require grant on target db", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "db_public",
-				initialDB:       "db_public",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob", database: "db_public"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "INSERT INTO db_secret.confidential VALUES ('unauthorized_row')")
@@ -84,15 +68,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("create table with db_public session database should require grant on target db", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "db_public",
-				initialDB:       "db_public",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob", database: "db_public"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "CREATE TABLE db_secret.pwned (id INT)")
@@ -106,15 +82,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("truncate table with db_public session database should require grant on target db", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "db_public",
-				initialDB:       "db_public",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob", database: "db_public"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "TRUNCATE TABLE db_secret.confidential")
@@ -128,15 +96,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("update with db_public session database should require grant on target db", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "db_public",
-				initialDB:       "db_public",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob", database: "db_public"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "UPDATE db_secret.confidential SET secret_data = 'hacked'")
@@ -150,15 +110,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("delete with db_public session database should require grant on target db", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "db_public",
-				initialDB:       "db_public",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob", database: "db_public"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "DELETE FROM db_secret.confidential")
@@ -172,15 +124,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("alter table with db_public session database should require grant on target db", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "db_public",
-				initialDB:       "db_public",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob", database: "db_public"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "ALTER TABLE db_secret.confidential ADD COLUMN extra INT")
@@ -194,15 +138,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("drop table with db_public session database should require grant on target db", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "db_public",
-				initialDB:       "db_public",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob", database: "db_public"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "DROP TABLE db_secret.confidential")
@@ -223,15 +159,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 		}
 
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "db_public",
-				initialDB:       "db_public",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob", database: "db_public"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "SELECT * FROM db_public.allowed JOIN db_secret.confidential ON 1=1")
@@ -245,15 +173,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("unqualified table without session database should return 1046", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "",
-				initialDB:       "",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob"}),
 		}
 
 		_, err := executeStatement(bobExecutor, "SELECT * FROM confidential")
@@ -264,15 +184,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 
 	t.Run("select 1 without session database should succeed", func(t *testing.T) {
 		bobExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "bob",
-				database:        "",
-				initialDB:       "",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "bob"}),
 		}
 
 		res, err := executeStatement(bobExecutor, "SELECT 1")
@@ -298,15 +210,7 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 		}
 
 		aliceExecutor := &textStatementExecutor{
-			session: &session{
-				server:          executor.server,
-				username:        "alice",
-				database:        "",
-				initialDB:       "",
-				timeZone:        "UTC",
-				initialTimeZone: "UTC",
-				statements:      map[uint32]*preparedStatement{},
-			},
+			session: newTestSession(executor.server, testSessionOptions{account: "alice"}),
 		}
 
 		res, err := executeStatement(aliceExecutor, "SELECT * FROM db_secret.confidential")

@@ -84,8 +84,8 @@ and session enforcement is defined by the SQL and session-settings contracts.
 
 ## Network, TLS, logging, and secrets
 
-v0.1 has one MySQL TCP listener. Hostnames, Unix sockets, multiple application
-listeners, and automatic port assignment are unsupported. Native and OCI
+v0.1 has one MySQL TCP listener. Hostnames, Unix sockets, and multiple
+application listeners are unsupported. Native and OCI
 defaults are the same; a container deployment explicitly selects
 `0.0.0.0:3306` or `[::]:3306` when needed.
 

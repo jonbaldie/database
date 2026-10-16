@@ -89,7 +89,7 @@ func relationalIndexScanBenchmark(rowCount int) relationalTableSource {
 
 func benchmarkCompileRelationalPredicate(b *testing.B, text string, columns []relationColumn) {
 	b.Helper()
-	session := &session{timeZone: "UTC"}
+	session := newTestSession(newTestServer(b, Config{}), testSessionOptions{})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
@@ -197,6 +197,6 @@ func relationalJoinBenchmarkExecutor(b *testing.B, rows int) *textStatementExecu
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = server.Listener.Close() })
-	session := &session{server: server, database: "benchmark", initialDB: "benchmark", timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{}}
+	session := newTestSession(server, testSessionOptions{database: "benchmark"})
 	return &textStatementExecutor{session: session}
 }

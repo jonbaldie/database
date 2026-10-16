@@ -9,8 +9,9 @@ import (
 
 func TestLockManagerUpgradeWaitsForOtherSharedOwner(t *testing.T) {
 	manager := newLockManager(time.Second)
-	first := &session{}
-	second := &session{}
+	server := newTestServer(t, Config{})
+	first := newTestSession(server, testSessionOptions{})
+	second := newTestSession(server, testSessionOptions{})
 	resource := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "1"}
 	for _, owner := range []*session{first, second} {
 		acquired, err := manager.acquire(owner, []rowLockResource{resource}, lockShared, lockNoWait)

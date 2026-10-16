@@ -19,10 +19,7 @@ func TestConcurrentAutocommitInsertsDoNotDeadlock(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
 
-	setup := &textStatementExecutor{session: &session{
-		server: server, database: "app", initialDB: "app",
-		timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{},
-	}}
+	setup := &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app"})}
 	for _, query := range []string{
 		"CREATE DATABASE app",
 		"USE app",
@@ -40,10 +37,7 @@ func TestConcurrentAutocommitInsertsDoNotDeadlock(t *testing.T) {
 		wait.Add(1)
 		go func(id int) {
 			defer wait.Done()
-			executor := &textStatementExecutor{session: &session{
-				server: server, database: "app", initialDB: "app",
-				timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{},
-			}}
+			executor := &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app"})}
 			query := fmt.Sprintf("INSERT INTO items VALUES (%d, 'row-%d')", id+1, id+1)
 			if _, err := executeStatement(executor, query); err != nil {
 				errors <- err
@@ -75,10 +69,7 @@ func TestAutocommitInsertUsesDirectDurablePublication(t *testing.T) {
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
-	executor := &textStatementExecutor{session: &session{
-		server: server, database: "app", initialDB: "app",
-		timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{},
-	}}
+	executor := &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app"})}
 	for _, query := range []string{
 		"CREATE DATABASE app",
 		"USE app",

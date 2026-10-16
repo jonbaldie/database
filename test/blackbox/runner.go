@@ -222,7 +222,8 @@ func Initialize(ctx context.Context, runner Runner, directory, password string) 
 }
 
 // StartInstance launches serve with JSON lifecycle output and waits for its
-// ready event. When serve stops before it is ready, the error contains the
+// ready event. As with Runner.Start, ctx bounds the life of the process, not
+// only the wait. When serve stops before it is ready, the error contains the
 // process output.
 func StartInstance(ctx context.Context, runner Runner, options InstanceOptions) (*Instance, error) {
 	arguments := []string{"serve", "--format=json", "--data-directory=" + options.DataDirectory, "--mysql-listen-address=127.0.0.1:0"}
