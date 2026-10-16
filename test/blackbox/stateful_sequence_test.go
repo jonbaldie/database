@@ -294,6 +294,9 @@ func (h *StatefulHarness) Execute(step Step) StepRecord {
 				event = nil
 				err = proc.NextJSONEvent(waitCtx, &event)
 			}
+			if err == nil && event["state"] != "ready" {
+				err = fmt.Errorf("serve reported %v before ready", event["state"])
+			}
 			if err != nil {
 				stepErr = fmt.Errorf("wait for ready event: %w", err)
 				_ = proc.Crash()

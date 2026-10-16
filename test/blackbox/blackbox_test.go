@@ -220,13 +220,17 @@ func initializeServer(t *testing.T, runner blackbox.Runner, directory, password 
 
 // startInstance starts serve on kernel-chosen ports and fails the test when
 // serve does not report ready. Use the returned addresses, which come from the
-// ready event.
+// ready event. Cleanup kills serve if the test ends before it stops serve.
 func startInstance(t *testing.T, runner blackbox.Runner, options blackbox.InstanceOptions) *blackbox.Instance {
 	t.Helper()
 	instance, err := blackbox.StartInstance(context.Background(), runner, options)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = instance.Process.Crash()
+		_ = instance.Process.Wait()
+	})
 	return instance
 }
 

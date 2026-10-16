@@ -22,19 +22,18 @@ import (
 
 func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 	directory := initializedDirectory(t)
-	address := freeLocalAddress(t)
 	ctx := context.Background()
 	events := make(chan Event, 4)
 	done := make(chan error, 1)
 	go func() {
 		done <- Serve(ctx, Options{
 			DataDirectory: directory,
-			MySQLAddress:  address,
+			MySQLAddress:  "127.0.0.1:0",
 			MySQLEnabled:  true,
 			OperationID:   "op-serve",
 		}, func(event Event) { events <- event })
 	}()
-	receiveEvent(t, events, "ready")
+	address := receiveEvent(t, events, "ready").MySQLAddress
 
 	db, err := sql.Open("mysql", "admin:test-password@tcp("+address+")/")
 	if err != nil {
@@ -55,17 +54,6 @@ func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 		t.Fatalf("stopping event = %#v, want operation_id op-remote-shutdown and shutdown_reason shutdown_request", stopping)
 	}
 	receiveEvent(t, events, "stopped")
-}
-
-func freeLocalAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	return address
 }
 
 func TestServeRejectsDamagedInitializedDirectory(t *testing.T) {
