@@ -88,4 +88,5 @@ Process tests remove their private data directories and stop the processes they 
 
 ## Helpers
 
-Use `test/blackbox` and its process tests. No separate helper or global MySQL client is required. To update the feature map after a product change, use `maintain-verification-skill` when that skill is available.
+Use `test/blackbox` and its process tests. No separate helper or global MySQL client is required. To update the feature map after a product change, edit the feature map directly in `features/README.md` and `features/`.
+
