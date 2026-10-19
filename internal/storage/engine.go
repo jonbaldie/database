@@ -3,10 +3,14 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 )
+
+// ErrDuplicateKey indicates that an insert or update violates a primary or unique key constraint.
+var ErrDuplicateKey = errors.New("duplicate key")
 
 // Engine is the durable row store for one initialized data directory.
 type Engine struct {
@@ -37,7 +41,7 @@ type table struct {
 
 var (
 	errClosed       = errString("storage engine is closed")
-	errDuplicateKey = errString("duplicate key")
+	errDuplicateKey = ErrDuplicateKey
 	errMissingTable = errString("table does not exist")
 	errMissingRow   = errString("row does not exist")
 	errInvalidRow   = errString("row has invalid column count")

@@ -602,7 +602,7 @@ func catalogMutationFailure(err error, fallback sqlFailure) error {
 	if errors.As(err, &failure) {
 		return err
 	}
-	if strings.Contains(err.Error(), "duplicate key") {
+	if errors.Is(err, catalog.ErrDuplicateKey) {
 		return sqlFailure{1062, "23000", "Duplicate entry for key 'PRIMARY'"}
 	}
 	fallback.message = err.Error()

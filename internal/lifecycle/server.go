@@ -210,14 +210,14 @@ func (s *server) lifecycleEvent(state, code, severity, message string) Event {
 }
 
 func startFailureReason(err error) string {
-	if strings.Contains(err.Error(), "recover catalog") || strings.Contains(err.Error(), "damaged") || strings.Contains(err.Error(), "corruption") {
+	if errors.Is(err, catalog.ErrCorrupt) {
 		return "corruption"
 	}
 	return "starting"
 }
 
 func startFailureCode(err error) string {
-	if startFailureReason(err) == "corruption" {
+	if errors.Is(err, catalog.ErrCorrupt) {
 		return "corruption.detected"
 	}
 	return "server.start_failed"
@@ -227,7 +227,7 @@ func unsafeListenerWarning(opts Options) (Warning, bool) {
 	if !opts.MySQLEnabled || opts.MySQLAddress == "" || opts.TLSCertFile != "" || opts.TLSKeyFile != "" {
 		return Warning{}, false
 	}
-	if listenerIsLoopback(opts.MySQLAddress) {
+	if IsLoopback(opts.MySQLAddress) {
 		return Warning{}, false
 	}
 	return Warning{
@@ -238,13 +238,17 @@ func unsafeListenerWarning(opts Options) (Warning, bool) {
 	}, true
 }
 
-func listenerIsLoopback(address string) bool {
+// IsLoopback reports whether the host portion of address is a loopback address.
+// It treats "localhost" and IPv4 and IPv6 loopback literals as loopback.
+func IsLoopback(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return false
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsLoopback() || ip.To4() != nil && ip.To4().IsLoopback())
+	if host == "localhost" {
+		return true
+	}
+	return net.ParseIP(host).IsLoopback()
 }
 
 func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server, signals <-chan os.Signal) {
@@ -529,7 +533,7 @@ func validateInstanceCatalog(directory string) error {
 		return errors.New("data directory has missing or invalid catalog")
 	}
 	if _, err := catalog.Open(directory); err != nil {
-		return errors.New("data directory has damaged catalog")
+		return fmt.Errorf("data directory has damaged catalog: %w", err)
 	}
 	return nil
 }

@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+
+	"github.com/jonbaldie/database/internal/storage"
 )
 
 type Definition struct {
@@ -102,6 +104,12 @@ type Constraint struct {
 // snapshot a caller tried to publish.
 var ErrRevisionConflict = errors.New("catalog changed concurrently")
 
+// ErrCorrupt indicates that catalog data or persistent storage is corrupted.
+var ErrCorrupt = errors.New("catalog corrupted")
+
+// ErrDuplicateKey indicates that a row mutation violates a primary or unique key constraint.
+var ErrDuplicateKey = storage.ErrDuplicateKey
+
 // ColumnType reports the recorded logical type without inventing a fallback
 // for catalog entries written before column types were persisted.
 func (t Table) ColumnType(index int) (string, bool) {
@@ -169,16 +177,16 @@ func Open(directory string) (*Store, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, &s.definition); err != nil {
-		return nil, fmt.Errorf("decode catalog: %w", err)
+		return nil, fmt.Errorf("%w: decode catalog: %w", ErrCorrupt, err)
 	}
 	if s.definition.Namespaces == nil {
-		return nil, errors.New("catalog namespaces are missing")
+		return nil, fmt.Errorf("%w: catalog namespaces are missing", ErrCorrupt)
 	}
 	if s.definition.Accounts == nil {
 		s.definition.Accounts = map[string]Account{}
 	}
 	if err := validateDefinition(s.definition); err != nil {
-		return nil, fmt.Errorf("invalid catalog: %w", err)
+		return nil, fmt.Errorf("%w: invalid catalog: %w", ErrCorrupt, err)
 	}
 	return openWithRows(s, directory)
 }
