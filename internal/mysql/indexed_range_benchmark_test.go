@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime/pprof"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,32 +23,30 @@ func BenchmarkMySQLIndexedRangePage(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = store.Rows().Close() })
-	table := catalog.Table{
-		Name: "tasks", Columns: []string{"id", "created", "title"},
-		ColumnTypes: []string{"INT", "INT", "VARCHAR(64)"},
-		Constraints: []catalog.Constraint{{Name: "PRIMARY", Type: catalog.ConstraintTypePrimary, Columns: []string{"id"}}},
-		Indexes:     []catalog.Index{{Name: "idx_created", Parts: []catalog.IndexPart{{Column: "created"}}}},
-		Rows:        make([][]string, rowCount),
-	}
-	for index := range rowCount {
-		key := strconv.Itoa(index)
-		table.Rows[index] = []string{key, key, "task-" + key}
-	}
-	definition := catalog.Definition{
-		Namespaces: map[string]catalog.Namespace{
-			"app": {Name: "app", Tables: map[string]catalog.Table{"tasks": table}},
-		},
-		Accounts: map[string]catalog.Account{
-			"admin": {Name: "admin", PasswordHash: credential.PasswordHash("range-benchmark"), Grants: []catalog.Grant{{Privilege: "DATA_READ", Namespace: "app"}}},
-		},
-	}
-	if err := store.Replace(definition); err != nil {
-		b.Fatal(err)
-	}
 	server, err := NewWithConfig("127.0.0.1:0", Config{
 		Catalog: store, Username: "admin", PasswordHash: credential.PasswordHash("range-benchmark"),
 	})
 	if err != nil {
+		b.Fatal(err)
+	}
+	admin := &textStatementExecutor{session: newTestSession(server, testSessionOptions{account: "admin"})}
+	seedSQL(b, admin, "CREATE DATABASE app", "USE app",
+		"CREATE TABLE tasks (id INT PRIMARY KEY, created INT, title VARCHAR(64), INDEX idx_created (created))")
+	const batchSize = 1000
+	for first := 0; first < rowCount; first += batchSize {
+		values := make([]string, 0, batchSize)
+		for index := first; index < first+batchSize; index++ {
+			key := strconv.Itoa(index)
+			values = append(values, "("+key+", "+key+", 'task-"+key+"')")
+		}
+		seedSQL(b, admin, "INSERT INTO tasks VALUES "+strings.Join(values, ", "))
+	}
+	// The measured client reads with DATA_READ on app only, as before the
+	// setup moved to SQL.
+	if err := store.UpdateAccount("admin", func(account *catalog.Account) error {
+		account.Grants = []catalog.Grant{{Privilege: "DATA_READ", Namespace: "app"}}
+		return nil
+	}); err != nil {
 		b.Fatal(err)
 	}
 	go server.Serve()

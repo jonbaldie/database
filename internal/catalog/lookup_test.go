@@ -13,10 +13,10 @@ func TestStoreLookupsUseCanonicalTableIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Rows().Close()
-	if err := store.CreateNamespace("App"); err != nil {
+	if err := store.createNamespace("App"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateTableWithTypes("App", "Café", []string{"id", "name"}, []string{"INT", "VARCHAR(20)"}); err != nil {
+	if err := store.createTableWithTypes("App", "Café", []string{"id", "name"}, []string{"INT", "VARCHAR(20)"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.ApplyDurable(func(definition Definition) (Definition, error) {

@@ -4,35 +4,16 @@ import (
 	"encoding/json"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
-
-	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func explainExecutor(t *testing.T) *textStatementExecutor {
 	t.Helper()
-	store, err := catalog.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open catalog: %v", err)
-	}
-	if err := store.CreateNamespace("app"); err != nil {
-		t.Fatalf("create namespace: %v", err)
-	}
-	columns := []string{"id", "customer_id", "total"}
-	types := []string{"BIGINT", "BIGINT", "INT"}
-	if err := store.CreateTableWithTypes("app", "orders", columns, types); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	if err := store.Insert("app", "orders", []string{"1", "7", "50"}); err != nil {
-		t.Fatalf("seed row: %v", err)
-	}
-	server, err := NewWithConfig("127.0.0.1:0", Config{Catalog: store, Version: "0.1.0"})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	t.Cleanup(func() { _ = server.Listener.Close() })
-	session := newTestSession(server, testSessionOptions{database: "app"})
-	return &textStatementExecutor{session: session}
+	return newSeededExecutor(t,
+		"CREATE TABLE orders (id BIGINT, customer_id BIGINT, total INT)",
+		"INSERT INTO orders VALUES (1, 7, 50)",
+	)
 }
 
 func TestExplainTraditionalProjection(t *testing.T) {
@@ -167,11 +148,7 @@ func TestExplainOrderingDirectionIsLowerCase(t *testing.T) {
 
 func TestExplainAnalyzeReportsSpillEvidence(t *testing.T) {
 	executor := explainExecutor(t)
-	for _, values := range [][]string{{"2", "8", "20"}, {"3", "9", "30"}, {"4", "10", "40"}, {"5", "11", "60"}} {
-		if err := executor.server.config.Catalog.Insert("app", "orders", values); err != nil {
-			t.Fatalf("seed order: %v", err)
-		}
-	}
+	seedSQL(t, executor, "INSERT INTO orders VALUES (2, 8, 20), (3, 9, 30), (4, 10, 40), (5, 11, 60)")
 	config := Config{ResourceLimits: ResourceLimits{
 		ExecutionMemoryLimitBytes: 50, AggregateExecutionMemoryLimitBytes: 50,
 		TemporaryStorageLimitBytes: 1024, AggregateTemporaryStorageLimitBytes: 1024,
@@ -441,12 +418,12 @@ func assertOperatorNoNullArrays(t *testing.T, operator map[string]any) {
 
 func TestExplainAnalyzeStreamsRowsLikeTheSelectItAnalyzes(t *testing.T) {
 	executor := explainExecutor(t)
+	values := make([]string, 0, 299)
 	for id := 2; id <= 300; id++ {
 		value := strconv.Itoa(id)
-		if err := executor.server.config.Catalog.Insert("app", "orders", []string{value, value, "50"}); err != nil {
-			t.Fatalf("seed order: %v", err)
-		}
+		values = append(values, "("+value+", "+value+", 50)")
 	}
+	seedSQL(t, executor, "INSERT INTO orders VALUES "+strings.Join(values, ", "))
 	config := Config{ResourceLimits: ResourceLimits{
 		ExecutionMemoryLimitBytes: 20000, AggregateExecutionMemoryLimitBytes: 20000,
 		TemporaryStorageLimitBytes: 1024, AggregateTemporaryStorageLimitBytes: 1024,

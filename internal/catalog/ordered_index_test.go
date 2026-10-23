@@ -8,13 +8,13 @@ func TestOrderedIndexCacheIsSharedUntilRowsChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.rows.Close() })
-	if err := store.CreateNamespace("app"); err != nil {
+	if err := store.createNamespace("app"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateTableWithTypes("app", "entries", []string{"id"}, []string{"INT"}); err != nil {
+	if err := store.createTableWithTypes("app", "entries", []string{"id"}, []string{"INT"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Insert("app", "entries", []string{"2"}); err != nil {
+	if err := store.insert("app", "entries", []string{"2"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,7 +35,7 @@ func TestOrderedIndexCacheIsSharedUntilRowsChange(t *testing.T) {
 		t.Fatalf("unchanged row image built index %d times, want 1", builds)
 	}
 
-	if err := store.Insert("app", "entries", []string{"1"}); err != nil {
+	if err := store.insert("app", "entries", []string{"1"}); err != nil {
 		t.Fatal(err)
 	}
 	changed := store.Snapshot().Namespaces["app"].Tables["entries"]
