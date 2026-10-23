@@ -76,19 +76,19 @@ func TestReplaceRowsClearAllowsReinsert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateNamespace("app"); err != nil {
+	if err := store.createNamespace("app"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateTable("app", "items", []string{"id", "name"}); err != nil {
+	if err := store.createTable("app", "items", []string{"id", "name"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Insert("app", "items", []string{"1", "alpha"}); err != nil {
+	if err := store.insert("app", "items", []string{"1", "alpha"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ReplaceRows("app", "items", nil); err != nil {
+	if err := store.replaceRows("app", "items", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Insert("app", "items", []string{"1", "alpha"}); err != nil {
+	if err := store.insert("app", "items", []string{"1", "alpha"}); err != nil {
 		t.Fatalf("reinsert after clear: %v", err)
 	}
 	rows := store.Snapshot().Namespaces["app"].Tables["items"].Rows

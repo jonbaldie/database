@@ -10,21 +10,12 @@ func TestIssue318CrossDatabaseGrantAuthorization(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	store := executor.server.config.Catalog
 
-	if err := store.CreateNamespace("db_public"); err != nil {
-		t.Fatalf("create db_public: %v", err)
-	}
-	if err := store.CreateNamespace("db_secret"); err != nil {
-		t.Fatalf("create db_secret: %v", err)
-	}
-
-	for _, stmt := range []string{
+	seedSQL(t, executor,
+		"CREATE DATABASE db_public",
+		"CREATE DATABASE db_secret",
 		"CREATE TABLE db_secret.confidential (secret_data VARCHAR(100) PRIMARY KEY)",
 		"INSERT INTO db_secret.confidential VALUES ('nuclear_launch_codes')",
-	} {
-		if _, err := executeStatement(executor, stmt); err != nil {
-			t.Fatalf("admin setup %q: %v", stmt, err)
-		}
-	}
+	)
 
 	if err := store.CreateAccount(catalog.Account{
 		Name:         "bob",

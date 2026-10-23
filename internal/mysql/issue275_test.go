@@ -168,13 +168,7 @@ func TestIssue275CastBetweenTemporalFamilies(t *testing.T) {
 
 func TestIssue275CastsTableColumns(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	if err := store.CreateTableWithTypes("app", "issue275rel", []string{"id", "moment"}, []string{"INT", "DATETIME"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Insert("app", "issue275rel", []string{"1", "2024-01-15 10:30:00"}); err != nil {
-		t.Fatal(err)
-	}
+	seedSQL(t, executor, "CREATE TABLE issue275rel (id INT, moment DATETIME)", "INSERT INTO issue275rel VALUES (1, '2024-01-15 10:30:00')")
 
 	result, err := executeStatement(executor, "SELECT CAST(moment AS DATE) FROM issue275rel WHERE id = 1")
 	if err != nil {

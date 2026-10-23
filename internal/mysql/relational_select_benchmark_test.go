@@ -175,28 +175,13 @@ func windowFunctionBenchmark(rowCount int) (*relationalSelectPlan, []relationalR
 
 func relationalJoinBenchmarkExecutor(b *testing.B, rows int) *textStatementExecutor {
 	b.Helper()
-	store, err := catalog.Open(b.TempDir())
-	if err != nil {
-		b.Fatal(err)
+	values := make([]string, rows)
+	for row := range rows {
+		values[row] = "(" + strconv.Itoa(row) + ")"
 	}
-	if err := store.CreateNamespace("benchmark"); err != nil {
-		b.Fatal(err)
-	}
+	statements := []string{}
 	for _, table := range []string{"join_left", "join_right"} {
-		if err := store.CreateTableWithTypes("benchmark", table, []string{"id"}, []string{"INT"}); err != nil {
-			b.Fatal(err)
-		}
-		for row := range rows {
-			if err := store.Insert("benchmark", table, []string{strconv.Itoa(row)}); err != nil {
-				b.Fatal(err)
-			}
-		}
+		statements = append(statements, "CREATE TABLE "+table+" (id INT)", "INSERT INTO "+table+" VALUES "+strings.Join(values, ", "))
 	}
-	server, err := NewWithConfig("127.0.0.1:0", Config{Catalog: store, Version: "0.1.0"})
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(func() { _ = server.Listener.Close() })
-	session := newTestSession(server, testSessionOptions{database: "benchmark"})
-	return &textStatementExecutor{session: session}
+	return newSeededExecutor(b, statements...)
 }

@@ -51,16 +51,16 @@ func TestOpenAfterSchemaChangeReplaysDurableRows(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.CreateNamespace("app"); err != nil {
+			if err := store.createNamespace("app"); err != nil {
 				t.Fatal(err)
 			}
-			if err := store.CreateTableWithTypes("app", "items", []string{"id", "name", "value"}, []string{"INT", "VARCHAR(20)", "INT"}); err != nil {
+			if err := store.createTableWithTypes("app", "items", []string{"id", "name", "value"}, []string{"INT", "VARCHAR(20)", "INT"}); err != nil {
 				t.Fatal(err)
 			}
-			if err := store.Insert("app", "items", []string{"1", "alpha", "10"}); err != nil {
+			if err := store.insert("app", "items", []string{"1", "alpha", "10"}); err != nil {
 				t.Fatal(err)
 			}
-			if err := store.Insert("app", "items", []string{"2", "beta", "20"}); err != nil {
+			if err := store.insert("app", "items", []string{"2", "beta", "20"}); err != nil {
 				t.Fatal(err)
 			}
 			if err := store.ApplyDurable(test.mutate); err != nil {
@@ -141,10 +141,10 @@ func TestApplyDurablePersistsTypeOnlyAndAttributeOnlyChanges(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.CreateNamespace("app"); err != nil {
+			if err := store.createNamespace("app"); err != nil {
 				t.Fatal(err)
 			}
-			if err := store.CreateTableWithTypes("app", "v", []string{"id", "val"}, []string{"INT", "INT"}); err != nil {
+			if err := store.createTableWithTypes("app", "v", []string{"id", "val"}, []string{"INT", "INT"}); err != nil {
 				t.Fatal(err)
 			}
 			if test.seed != nil {
@@ -203,10 +203,10 @@ func TestApplyDurablePersistsVisibilityOnlyChanges(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.CreateNamespace("app"); err != nil {
+			if err := store.createNamespace("app"); err != nil {
 				t.Fatal(err)
 			}
-			if err := store.CreateTable("app", "accounts", []string{"id", "code"}); err != nil {
+			if err := store.createTable("app", "accounts", []string{"id", "code"}); err != nil {
 				t.Fatal(err)
 			}
 			if err := store.ApplyDurable(func(definition Definition) (Definition, error) {

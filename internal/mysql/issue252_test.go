@@ -11,15 +11,7 @@ import (
 // is valid even when absent from the SELECT list; a superset of it is not.
 func TestIssue252OrderMatchesGroupByExpression(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	if err := store.CreateTableWithTypes("app", "issue252", []string{"a", "b"}, []string{"INT", "INT"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range [][]string{{"10", "3"}, {"20", "1"}, {"10", "3"}} {
-		if err := store.Insert("app", "issue252", row); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedSQL(t, executor, "CREATE TABLE issue252 (a INT, b INT)", "INSERT INTO issue252 VALUES (10, 3), (20, 1), (10, 3)")
 
 	result, err := executeStatement(executor, "SELECT COUNT(*) FROM issue252 GROUP BY a + b ORDER BY a + b")
 	if err != nil {
@@ -56,13 +48,7 @@ func TestIssue252OrderMatchesGroupByExpression(t *testing.T) {
 
 func TestIssue252OrderStillRejectsUngroupedExpressions(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	if err := store.CreateTableWithTypes("app", "issue252_bad", []string{"a", "b"}, []string{"INT", "INT"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Insert("app", "issue252_bad", []string{"1", "1"}); err != nil {
-		t.Fatal(err)
-	}
+	seedSQL(t, executor, "CREATE TABLE issue252_bad (a INT, b INT)", "INSERT INTO issue252_bad VALUES (1, 1)")
 
 	rejected := func(query string) {
 		t.Helper()

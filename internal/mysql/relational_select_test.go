@@ -6,62 +6,22 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func relationalSelectExecutor(t *testing.T) *textStatementExecutor {
 	t.Helper()
-	store, err := catalog.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateNamespace("app"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateTableWithTypes("app", "authors", []string{"id", "name"}, []string{"INT", "VARCHAR(32)"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateTableWithTypes("app", "posts", []string{"id", "author_id", "title", "score"}, []string{"INT", "INT", "VARCHAR(32)", "INT"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateTableWithTypes("app", "author_labels", []string{"id", "label"}, []string{"INT", "VARCHAR(32)"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateTableWithTypes("app", "unicode_rows", []string{"café"}, []string{"INT"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateTableWithTypes("app", "unicode_other", []string{"café"}, []string{"INT"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range [][]string{{"1", "Ada"}, {"2", "Grace"}, {"3", "Linus"}} {
-		if err := store.Insert("app", "authors", row); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, row := range [][]string{{"10", "1", "first", "5"}, {"11", "1", "second", "20"}, {"12", "2", "third", "15"}} {
-		if err := store.Insert("app", "posts", row); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, row := range [][]string{{"1", "A"}, {"2", "G"}} {
-		if err := store.Insert("app", "author_labels", row); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.Insert("app", "unicode_rows", []string{"7"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Insert("app", "unicode_other", []string{"7"}); err != nil {
-		t.Fatal(err)
-	}
-	server, err := NewWithConfig("127.0.0.1:0", Config{Catalog: store, Version: "0.1.0"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = server.Listener.Close() })
-	session := newTestSession(server, testSessionOptions{database: "app"})
-	return &textStatementExecutor{session: session}
+	return newSeededExecutor(t,
+		"CREATE TABLE authors (id INT, name VARCHAR(32))",
+		"CREATE TABLE posts (id INT, author_id INT, title VARCHAR(32), score INT)",
+		"CREATE TABLE author_labels (id INT, label VARCHAR(32))",
+		"CREATE TABLE unicode_rows (café INT)",
+		"CREATE TABLE unicode_other (café INT)",
+		"INSERT INTO authors VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Linus')",
+		"INSERT INTO posts VALUES (10, 1, 'first', 5), (11, 1, 'second', 20), (12, 2, 'third', 15)",
+		"INSERT INTO author_labels VALUES (1, 'A'), (2, 'G')",
+		"INSERT INTO unicode_rows VALUES (7)",
+		"INSERT INTO unicode_other VALUES (7)",
+	)
 }
 
 func TestRelationalSelectUsesCanonicalCaselessIdentifiers(t *testing.T) {
@@ -151,14 +111,8 @@ func TestRelationalSelectUsingCoalescesColumns(t *testing.T) {
 
 func TestRelationalSelectUsingPreservesQuotedIdentifiers(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
 	for _, table := range []string{"quoted_left", "quoted_right"} {
-		if err := store.CreateTableWithTypes("app", table, []string{"odd.name"}, []string{"INT"}); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Insert("app", table, []string{"7"}); err != nil {
-			t.Fatal(err)
-		}
+		seedSQL(t, executor, "CREATE TABLE "+table+" (`odd.name` INT)", "INSERT INTO "+table+" VALUES (7)")
 	}
 	query := "SELECT * FROM quoted_left AS `l.alias` JOIN quoted_right AS `r``alias` USING (`odd.name`)"
 	result, err := executeStatement(executor, query)
@@ -291,9 +245,8 @@ func TestRelationalSelectStreamsFromStatementSnapshot(t *testing.T) {
 	if result.stream == nil || len(result.rows) != 0 {
 		t.Fatalf("result was buffered: %#v", result)
 	}
-	if err := executor.server.config.Catalog.Insert("app", "authors", []string{"4", "Margaret"}); err != nil {
-		t.Fatal(err)
-	}
+	writer := &textStatementExecutor{session: newTestSession(executor.server, testSessionOptions{database: "app"})}
+	seedSQL(t, writer, "INSERT INTO authors VALUES (4, 'Margaret')")
 	var rows [][]string
 	if err := result.stream(func(row []string, _ []bool) error {
 		rows = append(rows, append([]string(nil), row...))
@@ -369,11 +322,7 @@ func TestRelationalSelectSpillsOrderedRowsWithinTheTemporaryBudget(t *testing.T)
 func TestRelationalSpillSortCoalescesRunsWithBoundedFanIn(t *testing.T) {
 	executor := relationalSelectExecutor(t)
 	executor.streamRows = true
-	for _, row := range [][]string{{"4", "same"}, {"5", "same"}, {"6", "same"}, {"7", "same"}, {"8", "same"}, {"9", "same"}, {"10", "same"}, {"11", "same"}, {"12", "same"}} {
-		if err := executor.server.config.Catalog.Insert("app", "authors", row); err != nil {
-			t.Fatalf("seed ordered row: %v", err)
-		}
-	}
+	seedSQL(t, executor, "INSERT INTO authors VALUES (4, 'same'), (5, 'same'), (6, 'same'), (7, 'same'), (8, 'same'), (9, 'same'), (10, 'same'), (11, 'same'), (12, 'same')")
 	config := Config{ResourceLimits: ResourceLimits{
 		ExecutionMemoryLimitBytes: 50, AggregateExecutionMemoryLimitBytes: 50,
 		TemporaryStorageLimitBytes: 4096, AggregateTemporaryStorageLimitBytes: 4096,

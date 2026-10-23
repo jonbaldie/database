@@ -7,33 +7,14 @@ import (
 
 func TestIssue216MixedOuterJoinChains(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	for _, table := range []struct {
-		name    string
-		columns []string
-		types   []string
-	}{
-		{name: "issue216_a", columns: []string{"id"}, types: []string{"INT"}},
-		{name: "issue216_b", columns: []string{"id", "a_ref"}, types: []string{"INT", "INT"}},
-		{name: "issue216_c", columns: []string{"b_ref", "label"}, types: []string{"INT", "VARCHAR(32)"}},
-	} {
-		if err := store.CreateTableWithTypes("app", table.name, table.columns, table.types); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, row := range [][]string{{"1"}, {"2"}, {"3"}} {
-		if err := store.Insert("app", "issue216_a", row); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, row := range [][]string{{"10", "1"}, {"20", "2"}} {
-		if err := store.Insert("app", "issue216_b", row); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.Insert("app", "issue216_c", []string{"10", "first"}); err != nil {
-		t.Fatal(err)
-	}
+	seedSQL(t, executor,
+		"CREATE TABLE issue216_a (id INT)",
+		"CREATE TABLE issue216_b (id INT, a_ref INT)",
+		"CREATE TABLE issue216_c (b_ref INT, label VARCHAR(32))",
+		"INSERT INTO issue216_a VALUES (1), (2), (3)",
+		"INSERT INTO issue216_b VALUES (10, 1), (20, 2)",
+		"INSERT INTO issue216_c VALUES (10, 'first')",
+	)
 
 	query := "SELECT a.id, b.id, c.label FROM issue216_a a JOIN issue216_b b ON b.a_ref = a.id LEFT JOIN issue216_c c ON c.b_ref = b.id ORDER BY a.id, b.id"
 	result, err := executeStatement(executor, query)
