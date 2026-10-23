@@ -30,7 +30,8 @@ func BenchmarkMySQLIndexedRangePage(b *testing.B) {
 		b.Fatal(err)
 	}
 	admin := &textStatementExecutor{session: newTestSession(server, testSessionOptions{account: "admin"})}
-	seedSQL(b, admin, "CREATE DATABASE app", "USE app", "CREATE TABLE tasks (id INT PRIMARY KEY, created INT, title VARCHAR(64), INDEX idx_created (created))")
+	seedSQL(b, admin, "CREATE DATABASE app", "USE app",
+		"CREATE TABLE tasks (id INT PRIMARY KEY, created INT, title VARCHAR(64), INDEX idx_created (created))")
 	const batchSize = 1000
 	for first := 0; first < rowCount; first += batchSize {
 		values := make([]string, 0, batchSize)
@@ -39,6 +40,14 @@ func BenchmarkMySQLIndexedRangePage(b *testing.B) {
 			values = append(values, "("+key+", "+key+", 'task-"+key+"')")
 		}
 		seedSQL(b, admin, "INSERT INTO tasks VALUES "+strings.Join(values, ", "))
+	}
+	// The measured client reads with DATA_READ on app only, as before the
+	// setup moved to SQL.
+	if err := store.UpdateAccount("admin", func(account *catalog.Account) error {
+		account.Grants = []catalog.Grant{{Privilege: "DATA_READ", Namespace: "app"}}
+		return nil
+	}); err != nil {
+		b.Fatal(err)
 	}
 	go server.Serve()
 	b.Cleanup(func() { _ = server.CloseGracefully() })

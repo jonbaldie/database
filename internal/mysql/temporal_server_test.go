@@ -3,29 +3,15 @@ package mysql
 import (
 	"testing"
 	"time"
-
-	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func currentTimeExecutor(t *testing.T, zone string, instant time.Time) *textStatementExecutor {
 	t.Helper()
-	store, err := catalog.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open catalog: %v", err)
-	}
-	server, err := NewWithConfig("127.0.0.1:0", Config{
-		Catalog:  store,
+	return newSeededExecutorWithConfig(t, Config{
 		Version:  "0.1.0",
 		TimeZone: zone,
 		Clock:    func() time.Time { return instant },
 	})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	t.Cleanup(func() { _ = server.Listener.Close() })
-	executor := &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app"})}
-	seedSQL(t, executor, "CREATE DATABASE app")
-	return executor
 }
 
 func TestCurrentTimeRendersThroughFixedOffset(t *testing.T) {

@@ -13,13 +13,21 @@ import (
 // then runs statements through seedSQL.
 func newSeededExecutor(tb testing.TB, statements ...string) *textStatementExecutor {
 	tb.Helper()
+	return newSeededExecutorWithConfig(tb, Config{Version: "0.1.0"}, statements...)
+}
+
+// newSeededExecutorWithConfig is newSeededExecutor for a test that needs
+// other server settings. It sets config.Catalog to a new empty catalog.
+func newSeededExecutorWithConfig(tb testing.TB, config Config, statements ...string) *textStatementExecutor {
+	tb.Helper()
 	store, err := catalog.Open(tb.TempDir())
 	if err != nil {
 		tb.Fatalf("open catalog: %v", err)
 	}
-	server := newTestServer(tb, Config{Catalog: store, Version: "0.1.0"})
+	config.Catalog = store
+	server := newTestServer(tb, config)
 	executor := &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app"})}
-	seedSQL(tb, executor, append([]string{"CREATE DATABASE app", "USE app"}, statements...)...)
+	seedSQL(tb, executor, append([]string{"CREATE DATABASE app"}, statements...)...)
 	return executor
 }
 
@@ -58,6 +66,12 @@ func TestSeedSQLAppliesProductionSchemaAndWriteRules(t *testing.T) {
 	}
 
 	table := executor.server.config.Catalog.Snapshot().Namespaces[catalog.Key("app")].Tables[catalog.Key("probe")]
+	if want := []string{"INT", "DECIMAL(5,2)"}; !reflect.DeepEqual(table.ColumnTypes, want) {
+		t.Fatalf("column types = %#v, want %#v", table.ColumnTypes, want)
+	}
+	if want := [][]string{{"1", "1.50"}}; !reflect.DeepEqual(table.Rows, want) {
+		t.Fatalf("stored rows = %#v, want %#v", table.Rows, want)
+	}
 	if want := []catalog.ColumnAttribute{{Nullable: false}, {Nullable: false}}; !reflect.DeepEqual(table.ColumnAttributes, want) {
 		t.Fatalf("column attributes = %#v, want %#v", table.ColumnAttributes, want)
 	}

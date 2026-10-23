@@ -1,9 +1,6 @@
 package catalog
 
-import (
-	"errors"
-	"fmt"
-)
+import "errors"
 
 // These writes seed catalog-package tests. They publish through mutate, so
 // they run structural catalog validation but not the SQL publish validator or
@@ -67,36 +64,4 @@ func (s *Store) insert(namespace, table string, row []string) error {
 		definition.Namespaces[Key(namespace)] = ns
 		return nil
 	})
-}
-
-func (s *Store) replaceRows(namespace, table string, rows [][]string) error {
-	return s.mutate(func(definition *Definition) error {
-		key := Key(namespace)
-		ns, ok := definition.Namespaces[key]
-		if !ok {
-			return errors.New("namespace does not exist")
-		}
-		tableKey := Key(table)
-		current, ok := ns.Tables[tableKey]
-		if !ok {
-			return errors.New("table does not exist")
-		}
-		for index, row := range rows {
-			if len(row) != len(current.Columns) {
-				return fmt.Errorf("row %d column count does not match table", index)
-			}
-		}
-		current.Rows = cloneRows(rows)
-		ns.Tables[tableKey] = current
-		definition.Namespaces[key] = ns
-		return nil
-	})
-}
-
-func cloneRows(rows [][]string) [][]string {
-	copy := make([][]string, len(rows))
-	for index, row := range rows {
-		copy[index] = append([]string(nil), row...)
-	}
-	return copy
 }

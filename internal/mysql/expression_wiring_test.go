@@ -1,25 +1,10 @@
 package mysql
 
-import (
-	"testing"
-
-	"github.com/jonbaldie/database/internal/catalog"
-)
+import "testing"
 
 func expressionExecutor(t *testing.T) *textStatementExecutor {
 	t.Helper()
-	store, err := catalog.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open catalog: %v", err)
-	}
-	server, err := NewWithConfig("127.0.0.1:0", Config{Catalog: store, Version: "0.1.0", TimeZone: "UTC"})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	t.Cleanup(func() { _ = server.Listener.Close() })
-	executor := &textStatementExecutor{session: newTestSession(server, testSessionOptions{database: "app"})}
-	seedSQL(t, executor, "CREATE DATABASE app")
-	return executor
+	return newSeededExecutorWithConfig(t, Config{Version: "0.1.0", TimeZone: "UTC"})
 }
 
 // TestSelectExpressionThroughSQL exercises the full text-execution seam so the
