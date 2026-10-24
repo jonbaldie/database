@@ -1158,9 +1158,9 @@ func materializeCTE(context *composedQueryContext, key string, relation composed
 
 func composedMaterializeKey(context *composedQueryContext, name, query string, reference int) string {
 	if context != nil && context.runtimePrefix != "" {
-		return context.runtimePrefix + "/materialize:" + strings.ToLower(name) + "/" + strconv.Itoa(reference)
+		return context.runtimePrefix + "/materialize:" + catalog.Key(name) + "/" + strconv.Itoa(reference)
 	}
-	return "materialize:" + strings.ToLower(name) + ":" + relationalRuntimeKey(query) + "/" + strconv.Itoa(reference)
+	return "materialize:" + catalog.Key(name) + ":" + relationalRuntimeKey(query) + "/" + strconv.Itoa(reference)
 }
 
 func recordMaterializedResult(context *composedQueryContext, key string, result *queryResult, elapsed time.Duration) {
@@ -1865,7 +1865,7 @@ func setOrderColumn(expression string, columns []string) (int, error) {
 	}
 	found := -1
 	for index, name := range columns {
-		if identifiersEqual(name, expression) {
+		if catalog.SameIdentifier(name, expression) {
 			if found >= 0 {
 				return 0, sqlFailure{1052, "23000", "Column '" + expression + "' in order clause is ambiguous"}
 			}

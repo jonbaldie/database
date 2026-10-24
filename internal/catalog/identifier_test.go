@@ -87,3 +87,27 @@ func TestTableRefIdentifiesEquivalentSpellings(t *testing.T) {
 		}
 	}
 }
+
+func TestSameIdentifierFollowsKey(t *testing.T) {
+	for _, pair := range [][2]string{{"straße", "STRASSE"}, {"é", "É"}, {"Users", "users"}} {
+		if !SameIdentifier(pair[0], pair[1]) {
+			t.Fatalf("SameIdentifier(%q, %q) = false, want true", pair[0], pair[1])
+		}
+	}
+	if SameIdentifier("café", "cafe") || SameIdentifier("Ａ", "A") {
+		t.Fatal("SameIdentifier matched distinct identifiers")
+	}
+}
+
+func TestIsInformationSchemaFollowsKey(t *testing.T) {
+	for _, name := range []string{"information_schema", "INFORMATION_SCHEMA", "Information_Schema", "information_\u017fchema"} {
+		if !IsInformationSchema(name) {
+			t.Fatalf("IsInformationSchema(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"", "information", "information_schema2", "ｉnformation_schema"} {
+		if IsInformationSchema(name) {
+			t.Fatalf("IsInformationSchema(%q) = true, want false", name)
+		}
+	}
+}

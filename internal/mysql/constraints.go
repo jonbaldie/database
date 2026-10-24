@@ -203,7 +203,7 @@ func columnCheckReferencesOtherColumn(column, expression string) bool {
 	other := false
 	_, _ = evaluateScalarResolved(expression, func(name string) (exprValue, error) {
 		parts, valid := splitQualifiedIdentifier(strings.TrimSpace(name))
-		if !valid || len(parts) == 0 || !identifiersEqual(parts[len(parts)-1], column) {
+		if !valid || len(parts) == 0 || !catalog.SameIdentifier(parts[len(parts)-1], column) {
 			other = true
 		}
 		return nullValue(), nil
