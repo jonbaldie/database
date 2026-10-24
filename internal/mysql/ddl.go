@@ -206,7 +206,7 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 	if !ok {
 		return sqlFailure{1064, "42000", "malformed DROP DATABASE"}
 	}
-	if strings.EqualFold(name, informationSchemaName) {
+	if catalog.IsInformationSchema(name) {
 		return sqlFailure{1044, "42000", "information_schema is read-only"}
 	}
 	noOp := false
@@ -217,7 +217,7 @@ func (s *ddlExecutor) dropDatabase(query string) error {
 	}); err != nil {
 		return catalogMutationFailure(err, sqlFailure{1008, "HY000", err.Error()})
 	}
-	if strings.EqualFold(s.database, name) {
+	if catalog.SameIdentifier(s.database, name) {
 		s.database = ""
 	}
 	recordDropDatabaseDiagnostic(s.session, name, noOp)
@@ -446,7 +446,7 @@ func (s *ddlExecutor) renameTable(query string) error {
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(fromNamespace, toNamespace) {
+	if !catalog.SameIdentifier(fromNamespace, toNamespace) {
 		return sqlFailure{1146, "42S02", "cross-database table rename is unsupported"}
 	}
 	if err := s.mutateCatalog(func(definition *catalog.Definition) error {
