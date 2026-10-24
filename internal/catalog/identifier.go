@@ -30,6 +30,18 @@ func Key(name string) string {
 	return norm.NFD.String(folded)
 }
 
+// SameIdentifier reports whether two SQL identifier spellings have the same
+// canonical caseless matching key.
+func SameIdentifier(left, right string) bool {
+	return Key(left) == Key(right)
+}
+
+// IsInformationSchema reports whether name identifies the virtual
+// information_schema namespace.
+func IsInformationSchema(name string) bool {
+	return SameIdentifier(name, "information_schema")
+}
+
 // IdentifierLength counts the Unicode scalar values in a declared identifier
 // spelling, the unit the length ceiling is measured in.
 func IdentifierLength(name string) int {
