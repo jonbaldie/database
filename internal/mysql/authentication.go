@@ -177,14 +177,11 @@ func (a authenticator) validate(response handshakeResponse, nonce []byte) (strin
 }
 
 func (a authenticator) accountPasswordHash(name string) (string, bool) {
-	if a.config.Catalog != nil {
-		account, found := a.config.Catalog.Account(name)
-		return account.PasswordHash, found && !account.Locked
-	}
-	if a.config.Username != "" && name != a.config.Username {
+	if a.config.Catalog == nil {
 		return "", false
 	}
-	return a.config.PasswordHash, a.config.PasswordHash != ""
+	account, found := a.config.Catalog.Account(name)
+	return account.PasswordHash, found && !account.Locked
 }
 
 func (e *authenticationExchange) fullPassword(nonce []byte) ([]byte, error) {

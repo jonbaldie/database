@@ -4,12 +4,67 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/credential"
 )
+
+func TestInitializeCreatesInitialAdministratorInCatalog(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "instance")
+	if _, err := Initialize(directory, "admin", "contract-valid-password"); err != nil {
+		t.Fatalf("initialize instance: %v", err)
+	}
+	store, err := catalog.Open(directory)
+	if err != nil {
+		t.Fatalf("open initialized catalog: %v", err)
+	}
+	admin, found := store.Account("admin")
+	wantGrants := []catalog.Grant{
+		{Privilege: "ACCOUNT_MANAGER"},
+		{Privilege: "NAMESPACE_MANAGER"},
+		{Privilege: "OPERATIONAL_OBSERVATION"},
+		{Privilege: "OPERATIONAL_CONTROL"},
+	}
+	if !found || admin.PasswordHash != credential.PasswordHash("contract-valid-password") || !reflect.DeepEqual(admin.Grants, wantGrants) {
+		t.Fatalf("initial administrator = %#v, found=%t", admin, found)
+	}
+	metadata, err := os.ReadFile(filepath.Join(directory, "instance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metadata), `"password_hash"`) {
+		t.Fatalf("instance metadata contains a second password verifier: %s", metadata)
+	}
+}
+
+func TestLoadAndClearLegacyPasswordHash(t *testing.T) {
+	directory := t.TempDir()
+	contents := []byte(`{"schema":"database.instance/v1","instance_id":"legacy","state":"stopped","admin_account":"admin","password_hash":"legacy-hash"}`)
+	if err := os.WriteFile(filepath.Join(directory, "instance.json"), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := Load(directory)
+	if err != nil {
+		t.Fatalf("load legacy metadata: %v", err)
+	}
+	if metadata.LegacyPasswordHash != "legacy-hash" {
+		t.Fatalf("legacy password hash = %q", metadata.LegacyPasswordHash)
+	}
+	if err := ClearLegacyPasswordHash(directory, &metadata); err != nil {
+		t.Fatalf("clear legacy password hash: %v", err)
+	}
+	updated, err := os.ReadFile(filepath.Join(directory, "instance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(updated), `"password_hash"`) || metadata.LegacyPasswordHash != "" {
+		t.Fatalf("legacy hash was not removed: metadata=%#v contents=%s", metadata, updated)
+	}
+}
 
 func TestInitializeAllowsExactlyOneConcurrentCreator(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "instance")
@@ -73,7 +128,7 @@ func TestFailedInstallRemovesPartialCatalogAndClaim(t *testing.T) {
 		t.Fatalf("claim initialization: %v", err)
 	}
 	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
-	if err := paths.writeStaged([]byte("metadata")); err != nil {
+	if err := paths.writeStaged([]byte("catalog"), []byte("metadata")); err != nil {
 		t.Fatalf("stage instance files: %v", err)
 	}
 	if err := os.Remove(paths.metadataTemporary()); err != nil {
@@ -101,7 +156,7 @@ func TestInstallDoesNotOverwriteConcurrentCatalog(t *testing.T) {
 		t.Fatalf("claim initialization: %v", err)
 	}
 	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
-	if err := paths.writeStaged([]byte("metadata")); err != nil {
+	if err := paths.writeStaged([]byte("catalog"), []byte("metadata")); err != nil {
 		t.Fatalf("stage instance files: %v", err)
 	}
 	if err := os.WriteFile(paths.catalog(), []byte("existing"), 0o600); err != nil {

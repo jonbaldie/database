@@ -788,7 +788,7 @@ func validateBackupFileEntries(entries []backupFile, files map[string]storedBack
 
 func validateDurableBackupFiles(sourceID, dataVersion string, files map[string]storedBackupFile) error {
 	metadata, err := decodeBackupMetadataFile(files["instance.json"].path)
-	if err != nil || metadata.Schema != "database.instance/v1" || metadata.InstanceID != sourceID || metadata.AdminAccount == "" || metadata.PasswordHash == "" {
+	if err != nil || metadata.Schema != "database.instance/v1" || metadata.InstanceID != sourceID || metadata.AdminAccount == "" {
 		return errors.New("backup instance identity is invalid")
 	}
 	if dataVersion != "" && effectiveDataVersion(metadata) != dataVersion {
@@ -957,7 +957,7 @@ func restoreBackup(input, directory string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := applyRestoreStaging(directory, archive.files, metadataBytes); err != nil {
+	if err := applyRestoreStaging(directory, archive.files, metadataBytes, restoredMeta.LegacyPasswordHash); err != nil {
 		return nil, err
 	}
 	details := map[string]any{
@@ -987,12 +987,12 @@ func prepareRestoredMetadata(path string) (instance.Metadata, []byte, error) {
 	return restoredMeta, metadataBytes, nil
 }
 
-func applyRestoreStaging(directory string, files map[string]storedBackupFile, metadataBytes []byte) error {
+func applyRestoreStaging(directory string, files map[string]storedBackupFile, metadataBytes []byte, legacyPasswordHash string) error {
 	staging, existed, err := createRestoreStaging(directory)
 	if err != nil {
 		return err
 	}
-	if err := populateAndValidateRestore(staging, files, metadataBytes); err != nil {
+	if err := populateAndValidateRestore(staging, files, metadataBytes, legacyPasswordHash); err != nil {
 		return discardRestoreStaging(staging, err)
 	}
 	if err := installRestoreStaging(staging, directory, existed); err != nil {
@@ -1111,15 +1111,25 @@ func copyStoredBackupFile(source, target string) error {
 	return closeErr
 }
 
-func populateAndValidateRestore(staging string, files map[string]storedBackupFile, metadata []byte) error {
+func populateAndValidateRestore(staging string, files map[string]storedBackupFile, metadata []byte, legacyPasswordHash string) error {
 	if err := populateRestoreStaging(staging, files, metadata); err != nil {
 		return err
 	}
-	if _, err := instance.Load(staging); err != nil {
+	instanceMetadata, err := instance.Load(staging)
+	if err != nil {
 		return fmt.Errorf("restored instance validation failed: %w", err)
 	}
-	if _, err := catalog.Open(staging); err != nil {
+	store, err := catalog.Open(staging)
+	if err != nil {
 		return fmt.Errorf("restored catalog validation failed: %w", err)
+	}
+	if len(store.Snapshot().Accounts) == 0 {
+		if legacyPasswordHash == "" {
+			return errors.New("restored catalog has no accounts or legacy administrator credential")
+		}
+		if _, err := store.MigrateInitialAdministrator(instanceMetadata.AdminAccount, legacyPasswordHash); err != nil {
+			return fmt.Errorf("migrate restored initial administrator: %w", err)
+		}
 	}
 	return nil
 }

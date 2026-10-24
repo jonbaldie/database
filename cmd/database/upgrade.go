@@ -406,7 +406,7 @@ func backupMatchesSource(directory string, archive backupArchive, metadata insta
 }
 
 func validateBackupMetadata(backupMetadata, current instance.Metadata, resuming bool) error {
-	if backupMetadata.InstanceID != current.InstanceID || backupMetadata.AdminAccount != current.AdminAccount || backupMetadata.PasswordHash != current.PasswordHash {
+	if backupMetadata.InstanceID != current.InstanceID || backupMetadata.AdminAccount != current.AdminAccount {
 		return errors.New("backup does not match the current instance")
 	}
 	if !resuming && effectiveDataVersion(backupMetadata) != effectiveDataVersion(current) {
