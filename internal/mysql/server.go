@@ -707,6 +707,8 @@ type queryResult struct {
 	affected uint64
 	warnings uint16
 	stream   queryRowStream
+	// release owns resources allocated before row delivery starts.
+	release func()
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
@@ -714,6 +716,16 @@ type queryResult struct {
 	// filterTypes mirrors columns with the SQL types that SHOW ... WHERE
 	// compares. An empty entry, or a missing slice, compares as VARCHAR.
 	filterTypes []string
+}
+
+// close releases result resources even when delivery never starts. Consumers
+// must close results on both success and failure. Repeated closure is safe.
+func (r *queryResult) close() {
+	if r != nil && r.release != nil {
+		release := r.release
+		r.release = nil
+		release()
+	}
 }
 
 // columnMetadata is the complete ColumnDefinition41 contract for one result

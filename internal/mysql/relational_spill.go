@@ -114,7 +114,7 @@ func (p *relationalSelectPlan) spilledSortResult() (*queryResult, error) {
 	p.recordReadPipelineCounts(sourceRows, matchedRows, sorter.inputRows, 0, time.Since(started))
 	p.recordSpillSort(sorter.inputRows, time.Since(started))
 	columns, metadata := p.resultColumns()
-	return &queryResult{columns: columns, metadata: metadata, stream: sorter.stream}, nil
+	return &queryResult{columns: columns, metadata: metadata, stream: sorter.stream, release: sorter.close}, nil
 }
 
 func (p *relationalSelectPlan) recordSpillSort(rows int, elapsed time.Duration) {

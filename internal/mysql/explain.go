@@ -149,6 +149,7 @@ func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*query
 }
 
 func discardResultRows(result *queryResult) (int, int, error) {
+	defer result.close()
 	if result == nil {
 		return 0, 0, nil
 	}

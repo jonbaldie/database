@@ -115,10 +115,14 @@ func isImmediateStatement(lower string) bool {
 
 func (s *textStatementExecutor) dispatchAndCheckResources(query, lower string) (*queryResult, error) {
 	result, err := s.dispatchStatement(query, lower)
-	if err != nil {
-		return result, err
+	if err == nil {
+		err = s.session.checkStatementResources()
 	}
-	return result, s.session.checkStatementResources()
+	if err != nil {
+		result.close()
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *textStatementExecutor) beginStatementTransaction(lower string) (statementTransaction, error) {
@@ -188,7 +192,13 @@ func (s *textStatementExecutor) beginAutocommitOrTransaction(dataDefinition, mut
 	return autocommit
 }
 
-func (e statementTransaction) finish(s *session, result *queryResult, err error) (*queryResult, error) {
+func (e statementTransaction) finish(s *session, result *queryResult, err error) (finished *queryResult, failure error) {
+	// Keep the allocated result even when abort or commit returns a nil result.
+	defer func() {
+		if failure != nil {
+			result.close()
+		}
+	}()
 	if err != nil {
 		return e.abort(s, err)
 	}
