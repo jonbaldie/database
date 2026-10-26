@@ -86,6 +86,43 @@ func TestPreparedLexicalBoundaryRegression(t *testing.T) {
 	}
 }
 
+func TestPreparedAllocationKeepsNormalizedSQLAndOffsets(t *testing.T) {
+	executor := expressionExecutor(t)
+	preparation := &preparedPreparation{executor.session}
+	id, count, metadata, err := preparation.allocate(" /* ? */ SELECT ?, ? /* ? */ ; ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preparation.release(id)
+	statement := executor.statements[id]
+	if statement == nil {
+		t.Fatal("allocation did not retain the prepared statement")
+	}
+	if count != 2 || statement.parameters != count || len(metadata) != 2 {
+		t.Fatalf("parameter count = %d, stored = %d, metadata = %v", count, statement.parameters, metadata)
+	}
+	if statement.query != "SELECT ?, ?" || !reflect.DeepEqual(statement.positions, []int{7, 10}) {
+		t.Fatalf("stored lexical result = (%q, %v)", statement.query, statement.positions)
+	}
+	if statement.longData == nil {
+		t.Fatal("allocation did not initialize long parameter data")
+	}
+	payload := make([]byte, 10)
+	payload[6] = 1 // One iteration, no cursor.
+	payload = append(payload, 0, preparedTypesSupplied, mysqlTypeLongLong, 0, mysqlTypeLongLong, 0)
+	payload = binary.LittleEndian.AppendUint64(payload, 42)
+	payload = binary.LittleEndian.AppendUint64(payload, 91)
+	execution := &preparedExecution{executor.session}
+	bound, err := execution.boundStatement(payload, statement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := newStatementExecutionPolicy(executor).execute(bound)
+	if err != nil || !reflect.DeepEqual(result.rows, [][]string{{"42", "91"}}) {
+		t.Fatalf("prepared result = %#v, error = %v", result, err)
+	}
+}
+
 func TestPreparedPlaceholderLimitCountsOnlyBindMarkers(t *testing.T) {
 	count, withinLimit := countPreparedParameters("SELECT '?', ?, ?", 1)
 	if count != 2 || withinLimit {
