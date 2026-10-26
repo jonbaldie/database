@@ -137,6 +137,29 @@ func TestUpdateAccountsCanTransferManager(t *testing.T) {
 	}
 }
 
+func TestAccountHasGrantRequiresPrivilegeAndScope(t *testing.T) {
+	account := catalog.Account{Locked: true, Grants: []catalog.Grant{
+		{Privilege: catalog.AccountManagerPrivilege},
+		{Privilege: "DATA_READ", Namespace: "Straße"},
+	}}
+	for _, test := range []struct {
+		privilege string
+		namespace string
+		want      bool
+	}{
+		{catalog.AccountManagerPrivilege, "", true},
+		{"DATA_READ", "STRASSE", true},
+		{"DATA_WRITE", "STRASSE", false},
+		{"DATA_READ", "private", false},
+		{"DATA_READ", "", false},
+		{catalog.AccountManagerPrivilege, "STRASSE", false},
+	} {
+		if got := account.HasGrant(test.privilege, test.namespace); got != test.want {
+			t.Errorf("HasGrant(%q, %q) = %v, want %v", test.privilege, test.namespace, got, test.want)
+		}
+	}
+}
+
 func managerStore(t *testing.T, directory string) *catalog.Store {
 	t.Helper()
 	store, err := catalog.Open(directory)
