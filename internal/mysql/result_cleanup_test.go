@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -71,15 +72,37 @@ func TestResultDeliveryReleasesSpillFiles(t *testing.T) {
 		} {
 			t.Run(mode.name+"/"+delivery.name, func(t *testing.T) {
 				result, manager, files, _ := spillResultForCleanup(t)
-				err := NewStreamWriter(delivery.output, 1, delivery.maximum).WriteResultSet(result, mode.mode)
+				var packets bytes.Buffer
+				output := delivery.output
+				if !delivery.wantError {
+					output = &packets
+				}
+				err := NewStreamWriter(output, 1, delivery.maximum).WriteResultSet(result, mode.mode)
 				if (err != nil) != delivery.wantError {
 					t.Fatalf("delivery error = %v", err)
+				}
+				if !delivery.wantError {
+					for _, value := range []string{"Linus", "Grace", "Ada"} {
+						if !bytes.Contains(packets.Bytes(), []byte(value)) {
+							t.Errorf("result packets omitted %q: %x", value, packets.Bytes())
+						}
+					}
 				}
 				assertSpillReleased(t, manager, files)
 				result.close()
 				assertSpillReleased(t, manager, files)
 			})
 		}
+	}
+}
+
+func TestResultCloseReleasesOwnershipOnce(t *testing.T) {
+	calls := 0
+	result := &queryResult{release: func() { calls++ }}
+	result.close()
+	result.close()
+	if calls != 1 {
+		t.Fatalf("release calls = %d, want 1", calls)
 	}
 }
 
