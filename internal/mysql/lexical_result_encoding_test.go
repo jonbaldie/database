@@ -51,6 +51,41 @@ func TestPreparedPlaceholdersIgnoreQuotedQuestionMarks(t *testing.T) {
 	}
 }
 
+func TestPreparedLexicalBoundaryRegression(t *testing.T) {
+	tests := []struct{ query, bound string }{
+		{"SELECT ? /* ? */", "SELECT 42"},
+		{"SELECT `column\\`, ? FROM t", "SELECT `column\\`, 42 FROM t"},
+		{"SELECT ? # ?", "SELECT 42"},
+		{"SELECT ? -- ?\n", "SELECT 42"},
+		{"SELECT /* ? */ ?", "SELECT   42"},
+		{" /* ? */ SELECT ? ; # ?", "SELECT 42"},
+		{"SELECT '?' AS `/* ? */`, ?", "SELECT '?' AS `/* ? */`, 42"},
+		{"SELECT 'it\\'s ? # /*', ?", "SELECT 'it\\'s ? # /*', 42"},
+		{"SELECT 'it''s ?', ?", "SELECT 'it''s ?', 42"},
+		{"SELECT \"a\"\"?\", ?", "SELECT \"a\"\"?\", 42"},
+		{"SELECT `a``?`, ?", "SELECT `a``?`, 42"},
+		{"SELECT 1--?", "SELECT 1--42"},
+	}
+	for _, test := range tests {
+		t.Run(test.query, func(t *testing.T) {
+			statement, positions, withinLimit := preparedSQLLexicalResult(test.query, 1)
+			bound, err := bindPreparedPositions(statement.query, positions, []string{"42"})
+			if !withinLimit || len(positions) != 1 || err != nil || bound != test.bound {
+				t.Fatalf("paired lexical result = (%q, %v, %t), binding = (%q, %v), want %q", statement.query, positions, withinLimit, bound, err, test.bound)
+			}
+			for _, query := range []string{test.query, statement.query} {
+				if got := parameterCount(query); got != 1 {
+					t.Fatalf("parameterCount(%q) = %d, want 1", query, got)
+				}
+				bound, err := bindPreparedQuery(query, []string{"42"})
+				if err != nil || normalizeStatementText(bound).query != test.bound {
+					t.Fatalf("bindPreparedQuery(%q) = (%q, %v), want %q", query, bound, err, test.bound)
+				}
+			}
+		})
+	}
+}
+
 func TestPreparedPlaceholderLimitCountsOnlyBindMarkers(t *testing.T) {
 	count, withinLimit := countPreparedParameters("SELECT '?', ?, ?", 1)
 	if count != 2 || withinLimit {
