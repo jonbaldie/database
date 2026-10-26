@@ -344,7 +344,7 @@ func accountIsManager(s *session, definition catalog.Definition) bool {
 		return true
 	}
 	account, found := definition.Accounts[s.username]
-	return found && !account.Locked && accountHasGrant(account, accountManagerPrivilege)
+	return found && !account.Locked && accountHasGrant(account, catalog.AccountManagerPrivilege)
 }
 
 func informationSchemaProcessListRows(s *session) [][]metadataValue {

@@ -12,7 +12,7 @@ func TestShowGrantsReportsCurrentAccountPrivileges(t *testing.T) {
 		Name:         "admin",
 		PasswordHash: "hash",
 		Grants: []catalog.Grant{
-			{Privilege: accountManagerPrivilege},
+			{Privilege: catalog.AccountManagerPrivilege},
 			{Privilege: "DATA_READ", Namespace: "app"},
 		},
 	}); err != nil {
@@ -42,7 +42,7 @@ func TestShowGrantsReportsCurrentAccountPrivileges(t *testing.T) {
 func TestShowGrantsForOtherAccountRequiresManager(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	for _, account := range []catalog.Account{
-		{Name: "admin", PasswordHash: "hash", Grants: []catalog.Grant{{Privilege: accountManagerPrivilege}}},
+		{Name: "admin", PasswordHash: "hash", Grants: []catalog.Grant{{Privilege: catalog.AccountManagerPrivilege}}},
 		{Name: "reader", PasswordHash: "hash", Grants: []catalog.Grant{{Privilege: "DATA_READ", Namespace: "app"}}},
 	} {
 		if err := executor.server.config.Catalog.CreateAccount(account); err != nil {
