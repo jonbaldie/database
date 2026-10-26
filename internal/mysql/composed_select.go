@@ -579,6 +579,7 @@ func recordScalarSubquery(context *composedQueryContext, runtimeKey string, depe
 }
 
 func scalarSubqueryValue(result *queryResult) (exprValue, columnMetadata, error) {
+	defer result.close()
 	if len(result.columns) != 1 {
 		return exprValue{}, columnMetadata{}, sqlFailure{1241, "21000", "operand should contain 1 column"}
 	}
@@ -740,6 +741,7 @@ func executeExistsSubquery(context *composedQueryContext, query string, outer *o
 	if err != nil {
 		return false, err
 	}
+	defer result.close()
 	if result.stream == nil {
 		found := len(result.rows) > 0
 		recordExistsSubquery(context, existsProjectionQuery(query), outer != nil, found, time.Since(started))
@@ -1180,6 +1182,7 @@ func cloneComposedRelations(source map[string]composedRelation) map[string]compo
 }
 
 func materializeQueryResult(result *queryResult) (*queryResult, error) {
+	defer result.close()
 	if result == nil || result.stream == nil {
 		return result, nil
 	}
