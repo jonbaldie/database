@@ -537,9 +537,14 @@ func btreeIndexScan(table Table) *Operator {
 	}
 	strategy := &Strategy{Name: "btree_index_scan", Summary: "Traverse the selected B-tree index in key order."}
 	summary := "Read rows through the selected B-tree index."
+	opportunities := []Opportunity{{
+		Code: "INDEX_COVERAGE", Summary: "A covering index can reduce table-row reads.",
+		Evidence: []string{"The selected index is classified as non-covering for the projection."},
+	}}
 	if access.Covering {
 		strategy = &Strategy{Name: "btree_covering_index_scan", Summary: "Traverse a B-tree index that contains every projected value."}
 		summary = "Read the projected values through the selected covering B-tree index."
+		opportunities = nil
 	}
 	return &Operator{
 		Kind:      "scan",
@@ -555,10 +560,7 @@ func btreeIndexScan(table Table) *Operator {
 			Object: tableObject(table), Kind: "catalog_row_count", CollectedAt: access.CollectedAt,
 			ObservedRows: table.RowCount, Stale: false, Limitations: []string{"The statistic records the current catalog snapshot only."},
 		}},
-		Opportunities: []Opportunity{{
-			Code: "INDEX_COVERAGE", Summary: "A covering index can reduce table-row reads.",
-			Evidence: []string{"The selected path returns rows from the table after the index traversal."},
-		}},
+		Opportunities: opportunities,
 		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 2, PeakMemoryBytes: 0},
 		Output:    columnOutput(table, table.Columns),
 		Warnings:  []Warning{},
