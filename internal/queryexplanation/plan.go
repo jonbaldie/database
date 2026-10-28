@@ -561,10 +561,10 @@ func btreeIndexScan(table Table) *Operator {
 			ObservedRows: table.RowCount, Stale: false, Limitations: []string{"The statistic records the current catalog snapshot only."},
 		}},
 		Opportunities: opportunities,
-		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 2, PeakMemoryBytes: 0},
-		Output:    columnOutput(table, table.Columns),
-		Warnings:  []Warning{},
-		Children:  []*Operator{},
+		Estimates:     Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 2, PeakMemoryBytes: 0},
+		Output:        columnOutput(table, table.Columns),
+		Warnings:      []Warning{},
+		Children:      []*Operator{},
 	}
 }
 
