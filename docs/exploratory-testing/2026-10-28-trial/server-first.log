@@ -1,0 +1,4 @@
+database: ready (diagnostics=127.0.0.1:38077)
+database: stopping
+database: stopped
+database serve: success (operation_id=op-3d40d6b043a8fa00dbbd689c43314e11)

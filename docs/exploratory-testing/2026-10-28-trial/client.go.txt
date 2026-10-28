@@ -1,0 +1,17 @@
+package main
+import (
+ "context"
+ "database/sql"
+ "fmt"
+ "log"
+ "os"
+ _ "github.com/go-sql-driver/mysql"
+)
+func main() {
+ db, err := sql.Open("mysql", "admin:change-me-now!!@tcp(127.0.0.1:33377)/")
+ if err != nil { log.Fatal(err) }; defer db.Close()
+ c, err := db.Conn(context.Background()); if err != nil { log.Fatal(err) }; defer c.Close()
+ run := func(q string) { _, e := c.ExecContext(context.Background(),q); fmt.Printf("%s => %v\n",q,e); if e != nil { log.Fatal(e) } }
+ query := func(q string) { rows,e:=c.QueryContext(context.Background(),q); if e!=nil { log.Fatal(e) }; defer rows.Close(); cols,_:=rows.Columns(); fmt.Printf("%s => %v\n",q,cols); for rows.Next(){ vals:=make([]sql.RawBytes,len(cols)); args:=make([]any,len(cols)); for i:=range vals { args[i]=&vals[i] }; if e=rows.Scan(args...);e!=nil{log.Fatal(e)}; for _,v:=range vals { fmt.Printf("%s | ",v) }; fmt.Println() }; if e=rows.Err();e!=nil{log.Fatal(e)} }
+ if os.Args[1]=="create" { run("CREATE DATABASE trial"); run("USE trial"); run("CREATE TABLE tasks (id BIGINT PRIMARY KEY, title VARCHAR(100) NOT NULL, priority INT NOT NULL)"); run("INSERT INTO tasks VALUES (1, 'read the plan', 1), (2, 'test query behaviour', 2)"); query("SELECT id, title FROM tasks WHERE priority >= 2 ORDER BY id"); query("EXPLAIN FORMAT=JSON SELECT id FROM tasks WHERE priority >= 2 ORDER BY id"); query("EXPLAIN ANALYZE FORMAT=JSON SELECT id FROM tasks WHERE priority >= 2 ORDER BY id"); run("BEGIN"); run("UPDATE tasks SET priority = 9 WHERE id = 1"); run("ROLLBACK"); query("SELECT id, priority FROM tasks ORDER BY id") } else { run("USE trial"); query("SELECT id, title, priority FROM tasks ORDER BY id") }
+}

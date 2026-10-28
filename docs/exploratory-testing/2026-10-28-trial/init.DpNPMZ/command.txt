@@ -1,0 +1,8 @@
+/home/ubuntu/Code/pstack/jonbaldie/database-explore/bin/database
+init
+--data-directory
+/home/ubuntu/Code/pstack/jonbaldie/database-explore/.scratch/data
+--initial-account
+admin
+--initial-password-file
+/home/ubuntu/Code/pstack/jonbaldie/database-explore/.scratch/password

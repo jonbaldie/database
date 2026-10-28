@@ -1,0 +1,2 @@
+sha256sum
+/home/ubuntu/Code/pstack/jonbaldie/database-explore/bin/database

@@ -1,0 +1,17 @@
+dependencies exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/dependencies.8i9Xq3
+build exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/build.g2dl9u
+version exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/version.9RJxcc
+sha256 exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/sha256.Cczum8
+init exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/init.1fVHaT
+registered server pid=1384413 mysql=33377 diagnostics=38077
+curl: (7) Failed to connect to 127.0.0.1 port 38077 after 0 ms: Could not connect to server
+ready exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/ready.xafGPW
+client-create exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/client-create.ZXFSzH
+stopped server 1384413
+registered server pid=1384461 mysql=33377 diagnostics=38077
+curl: (7) Failed to connect to 127.0.0.1 port 38077 after 0 ms: Could not connect to server
+client-reopen exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/client-reopen.ByVvGf
+stopped server 1384461
+lifecycle exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/lifecycle.TTzURW
+sql exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/sql.vCpjpG
+explanation exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore/docs/exploratory-testing/2026-10-28-trial/explanation.P0Sran

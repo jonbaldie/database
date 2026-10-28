@@ -1,0 +1,2 @@
+mkdir -p bin
+go build -trimpath -buildvcs=false -ldflags '-s -w -X github.com/jonbaldie/database/internal/buildinfo.ProductVersion=0.2.19 -X github.com/jonbaldie/database/internal/buildinfo.BuildIdentity=local' -o bin/database ./cmd/database

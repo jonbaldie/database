@@ -1,0 +1,6 @@
+=== RUN   TestExecutableVersionAndLifecycleArePublic
+--- PASS: TestExecutableVersionAndLifecycleArePublic (0.15s)
+=== RUN   TestDiagnosticsHTTPContractIsObservableEndToEnd
+--- PASS: TestDiagnosticsHTTPContractIsObservableEndToEnd (0.05s)
+PASS
+ok  	github.com/jonbaldie/database/test/blackbox	1.485s
