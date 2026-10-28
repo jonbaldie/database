@@ -535,6 +535,7 @@ type statementState struct {
 type preparedStatement struct {
 	query       string
 	parameters  int
+	positions   []int // Offsets in the stored, normalized query.
 	types       []preparedParameterType
 	longData    map[uint16][]byte
 	explanation *queryexplanation.Document
@@ -4382,7 +4383,9 @@ func (s *preparedPreparation) prepare(connection net.Conn, sequence byte, query 
 }
 
 func (s *preparedPreparation) allocate(query string) (uint32, int, []columnMetadata, error) {
-	parameters, withinLimit := countPreparedParameters(query, maxPreparedParameters)
+	statement, positions, withinLimit := preparedSQLLexicalResult(query, maxPreparedParameters)
+	query = statement.query
+	parameters := len(positions)
 	if !withinLimit {
 		return 0, 0, nil, sqlFailure{1390, "HY000", "prepared statement contains too many placeholders"}
 	}
@@ -4391,8 +4394,8 @@ func (s *preparedPreparation) allocate(query string) (uint32, int, []columnMetad
 	}
 	id := s.prepared.nextStmtID
 	s.prepared.nextStmtID++
-	s.statements[id] = &preparedStatement{query: query, parameters: parameters, longData: make(map[uint16][]byte)}
-	metadata, err := s.preparedColumns(query)
+	s.statements[id] = &preparedStatement{query: query, parameters: parameters, positions: positions, longData: make(map[uint16][]byte)}
+	metadata, err := s.preparedStatementColumns(statement, positions)
 	if err != nil {
 		s.release(id)
 		return 0, 0, nil, err
@@ -4420,7 +4423,11 @@ func preparedParameterMetadata(index int) columnMetadata {
 }
 
 func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, error) {
-	statement := normalizeStatementText(query)
+	statement, positions, _ := preparedSQLLexicalResult(query, -1)
+	return s.preparedStatementColumns(statement, positions)
+}
+
+func (s *preparedPreparation) preparedStatementColumns(statement normalizedStatement, positions []int) ([]columnMetadata, error) {
 	query, lower := statement.query, statement.lower
 	if !isPreparedStatement(lower) {
 		return nil, sqlFailure{1064, "42000", "unsupported prepared statement"}
@@ -4428,8 +4435,8 @@ func (s *preparedPreparation) preparedColumns(query string) ([]columnMetadata, e
 	if !isPreparedRead(lower) {
 		return nil, nil
 	}
-	parameters := nullPreparedParameters(parameterCount(query))
-	validated, err := bindPreparedQuery(query, parameters)
+	parameters := nullPreparedParameters(len(positions))
+	validated, err := bindPreparedPositions(query, positions, parameters)
 	if err != nil {
 		return nil, sqlFailure{1064, "42000", "malformed prepared statement"}
 	}
@@ -4684,7 +4691,7 @@ func (s *preparedExecution) boundStatement(payload []byte, statement *preparedSt
 	if err != nil {
 		return normalizedStatement{}, preparedStatementError(err)
 	}
-	query, err := bindPreparedQuery(statement.query, params)
+	query, err := bindPreparedPositions(statement.query, statement.positions, params)
 	if err != nil {
 		return normalizedStatement{}, preparedStatementError(err)
 	}
@@ -5000,7 +5007,10 @@ func clearPreparedLongData(session *session, statement *preparedStatement) {
 }
 
 func bindPreparedQuery(query string, values []string) (string, error) {
-	positions := preparedPlaceholders(query)
+	return bindPreparedPositions(query, preparedPlaceholders(query), values)
+}
+
+func bindPreparedPositions(query string, positions []int, values []string) (string, error) {
 	if len(positions) != len(values) {
 		return "", errors.New("prepared statement parameter count does not match")
 	}
