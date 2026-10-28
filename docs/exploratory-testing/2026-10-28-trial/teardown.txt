@@ -1,0 +1,6 @@
+Registered PIDs: 1381293 1382707 1384413 1384461
+
+Listeners on 33377 and 38077:
+State Recv-Q Send-Q Local Address:Port Peer Address:Port
+
+No browser sessions or containers were started.
