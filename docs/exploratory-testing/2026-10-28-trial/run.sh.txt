@@ -1,0 +1,27 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export GOMODCACHE="$PWD/.scratch/mod" GOCACHE="$PWD/.scratch/cache" GOTOOLCHAIN=auto GOMAXPROCS=2 GOFLAGS='-p=2 -mod=readonly'
+evidence="$PWD/docs/exploratory-testing/2026-10-28-trial"
+pid=''
+cleanup() { if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; echo "stopped server $pid"; fi; }
+trap cleanup EXIT INT TERM
+verify_command() ( label="$1"; shift; dir="$(mktemp -d "$evidence/$label.XXXXXX")"; printf '%s\n' "$@" > "$dir/command.txt"; set +e; "$@" > "$dir/output.log" 2>&1; s=$?; echo "$s" > "$dir/exit-status.txt"; echo "$label exit=$s evidence=$dir"; exit "$s" )
+verify_command dependencies go mod download
+verify_command build make build
+verify_command version "$PWD/bin/database" version --format=json
+verify_command sha256 sha256sum "$PWD/bin/database"
+printf 'change-me-now!!' > .scratch/password
+chmod 600 .scratch/password
+verify_command init "$PWD/bin/database" init --data-directory "$PWD/.scratch/data" --initial-account admin --initial-password-file "$PWD/.scratch/password"
+start() { "$PWD/bin/database" serve --data-directory "$PWD/.scratch/data" --mysql-listen-address=127.0.0.1:33377 --diagnostics-listen-address=127.0.0.1:38077 > "$evidence/server-$1.log" 2>&1 & pid=$!; echo "registered server pid=$pid mysql=33377 diagnostics=38077"; for i in $(seq 1 100); do if curl -fsS http://127.0.0.1:38077/ready > /dev/null; then return; fi; kill -0 "$pid"; sleep .2; done; return 1; }
+start first
+verify_command ready curl -i -sS http://127.0.0.1:38077/ready
+verify_command client-create go run .scratch/client.go create
+kill -TERM "$pid"; wait "$pid"; echo "stopped server $pid"; pid=''
+start second
+verify_command client-reopen go run .scratch/client.go reopen
+kill -TERM "$pid"; wait "$pid"; echo "stopped server $pid"; pid=''
+verify_command lifecycle env -u DATABASE_BLACKBOX_EXECUTABLE go test ./test/blackbox -run '^(TestExecutableVersionAndLifecycleArePublic|TestDiagnosticsHTTPContractIsObservableEndToEnd)$' -count=1 -v
+verify_command sql env -u DATABASE_BLACKBOX_EXECUTABLE go test ./test/blackbox -run '^(TestGoDriverCompatibilityProfile|TestMySQLClientCanAuthenticatePersistAndResetSession|TestMySQLBTreeIndexesUseThePublicWireContract)$' -count=1 -v
+verify_command explanation env -u DATABASE_BLACKBOX_EXECUTABLE go test ./test/blackbox -run '^(TestMySQLPlannedExplanationUsesTheWireContract|TestMySQLAnalyzeAndLiveExplanationUseTheWireContract)$' -count=1 -v

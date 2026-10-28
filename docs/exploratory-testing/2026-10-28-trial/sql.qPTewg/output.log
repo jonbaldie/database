@@ -1,0 +1,8 @@
+=== RUN   TestMySQLClientCanAuthenticatePersistAndResetSession
+--- PASS: TestMySQLClientCanAuthenticatePersistAndResetSession (0.32s)
+=== RUN   TestGoDriverCompatibilityProfile
+--- PASS: TestGoDriverCompatibilityProfile (0.13s)
+=== RUN   TestMySQLBTreeIndexesUseThePublicWireContract
+--- PASS: TestMySQLBTreeIndexesUseThePublicWireContract (0.19s)
+PASS
+ok  	github.com/jonbaldie/database/test/blackbox	1.916s

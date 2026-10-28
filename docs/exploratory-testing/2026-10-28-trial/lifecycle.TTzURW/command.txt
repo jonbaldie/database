@@ -1,0 +1,10 @@
+env
+-u
+DATABASE_BLACKBOX_EXECUTABLE
+go
+test
+./test/blackbox
+-run
+^(TestExecutableVersionAndLifecycleArePublic|TestDiagnosticsHTTPContractIsObservableEndToEnd)$
+-count=1
+-v
