@@ -7,16 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.20] - 2026-10-31
 
+### Added
+
+- Allowed port 0 for listeners and reported the bound MySQL address in the ready event.
+- Added the bound MySQL address to successful serve result details.
+
 ### Changed
 
 - Built with Go 1.26.10 to fix a standard library vulnerability.
-- Reported the bound MySQL address in the ready event and allowed port 0 for listeners.
 - Skipped unused scan byte accounting when query execution does not collect metrics.
 
 ### Fixed
 
 - Closed result resources when row delivery cannot start, including after a metadata error.
 - Removed the index coverage opportunity from covering index scan explanations.
+- Classified startup errors as corruption only when the catalog reports corruption.
 
 ## [0.2.19] - 2026-10-11
 
