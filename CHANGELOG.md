@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.20] - 2026-10-31
+
+### Added
+
+- Allowed port 0 for listeners and reported the bound MySQL address in the ready event.
+- Added the bound MySQL address to successful serve result details.
+
+### Changed
+
+- Built with Go 1.26.10 to fix a standard library vulnerability.
+- Skipped unused scan byte accounting when query execution does not collect metrics.
+
+### Fixed
+
+- Closed result resources when row delivery cannot start, including after a metadata error.
+- Removed the index coverage opportunity from covering index scan explanations.
+- Classified startup errors as corruption only when the catalog reports corruption.
+
 ## [0.2.19] - 2026-10-11
 
 ### Changed
@@ -400,6 +418,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.20]: https://github.com/jonbaldie/database/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/jonbaldie/database/compare/v0.2.18...v0.2.19
 [0.2.18]: https://github.com/jonbaldie/database/compare/v0.2.17...v0.2.18
 [0.2.17]: https://github.com/jonbaldie/database/compare/v0.2.16...v0.2.17
