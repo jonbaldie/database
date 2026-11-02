@@ -465,7 +465,6 @@ type session struct {
 	database        string
 	initialDB       string
 	timeZone        string
-	initialTimeZone string
 	settings        sessionSettings
 	statements      map[uint32]*preparedStatement
 	prepared        preparedCounters
@@ -924,30 +923,6 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 		s.relationStatement,
 		s.operationStatement,
 	}
-}
-
-func (s *textStatementExecutor) setTimeZone(query string) (bool, error) {
-	assignment := strings.TrimSpace(query[len("SET "):])
-	lhs, value, found := strings.Cut(assignment, "=")
-	if !found {
-		return false, nil
-	}
-	switch strings.ToLower(strings.TrimSpace(lhs)) {
-	case "time_zone", "session.time_zone", "session time_zone", "@@time_zone", "@@session.time_zone", "@@session time_zone":
-	default:
-		return false, nil
-	}
-	value = strings.TrimSpace(value)
-	if strings.EqualFold(value, "default") {
-		s.timeZone = s.initialTimeZone
-		return true, nil
-	}
-	offset, err := parseFixedOffset(scalar(value))
-	if err != nil {
-		return true, err
-	}
-	s.timeZone = formatFixedOffset(offset)
-	return true, nil
 }
 
 func (s *textStatementExecutor) builtinStatement(query, lower string) (*queryResult, bool, error) {
@@ -4964,13 +4939,7 @@ func (s *preparedLifecycle) resetConnection() error {
 	if err := rollbackTransaction(s.session); err != nil {
 		return err
 	}
-	s.autocommitOff = false
-	s.isolation = isolationRepeatableRead
-	s.readOnly = false
-	s.nextIsolation = isolationRepeatableRead
-	s.nextReadOnly = false
 	s.database = s.initialDB
-	s.timeZone = s.initialTimeZone
 	s.resetSessionSettings()
 	s.closeAllPrepared()
 	s.prepared.longDataBytes = 0

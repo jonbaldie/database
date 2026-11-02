@@ -116,15 +116,13 @@ func (c *conversation) authenticate() bool {
 }
 
 func newSession(server *Server, authentication authenticationResult, connectionID uint32) *session {
-	return &session{
+	session := &session{
 		server: server, connectionID: connectionID, username: authentication.accountName, database: authentication.database,
-		initialDB: authentication.database, timeZone: server.config.TimeZone, initialTimeZone: server.config.TimeZone,
-		settings: sessionSettings{collationConnection: collation0900AICI, statementTimeout: server.config.ResourceLimits.StatementTimeout,
-			lockWaitTimeout: server.config.LockWaitTimeout, executionMemoryLimit: server.config.ResourceLimits.ExecutionMemoryLimitBytes,
-			temporaryStorageLimit: server.config.ResourceLimits.TemporaryStorageLimitBytes},
+		initialDB:  authentication.database,
 		statements: map[uint32]*preparedStatement{}, prepared: preparedCounters{nextStmtID: 1},
-		transactionState: transactionState{},
 	}
+	session.resetSessionSettings()
+	return session
 }
 
 func (c *conversation) acceptCommand() bool {
