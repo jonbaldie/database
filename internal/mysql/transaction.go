@@ -302,36 +302,6 @@ func (s *textStatementExecutor) applySetting(query string, lower string) error {
 	return s.applySessionAssignments(query)
 }
 
-func (s *session) applyAutocommitSetting(normalized string) (bool, error) {
-	compact := strings.ReplaceAll(normalized, " ", "")
-	compact = strings.ReplaceAll(compact, "@@", "")
-	prefix := autocommitSettingPrefix(compact)
-	if prefix == "" {
-		return false, nil
-	}
-	value := compact[len(prefix):]
-	off, valid := map[string]bool{"0": true, "off": true, "false": true, "1": false, "on": false, "true": false}[value]
-	if !valid {
-		return true, sqlFailure{1231, "42000", "autocommit has an invalid value"}
-	}
-	if !off && s.transaction {
-		if err := (&transactionExecutor{s}).commit(); err != nil {
-			return true, err
-		}
-	}
-	s.autocommitOff = off
-	return true, nil
-}
-
-func autocommitSettingPrefix(compact string) string {
-	for _, prefix := range []string{"setautocommit=", "setsessionautocommit="} {
-		if strings.HasPrefix(compact, prefix) {
-			return prefix
-		}
-	}
-	return ""
-}
-
 func (s *session) applyIsolationSetting(normalized string) (bool, error) {
 	session, setting, matched := transactionSetting(normalized)
 	if !matched || !strings.HasPrefix(setting, "isolation level ") {
