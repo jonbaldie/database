@@ -10,18 +10,12 @@ func stripSQLComments(query string) string {
 	builder.Grow(len(query))
 	length := len(query)
 	for index := 0; index < length; {
-		if next, ok := consumeSQLQuoted(query, index); ok {
-			builder.WriteString(query[index:next])
-			index = next
-			continue
-		}
-		if next, ok := consumeSQLLineComment(query, index); ok {
-			builder.WriteByte(' ')
-			index = next
-			continue
-		}
-		if next, ok := consumeSQLBlockComment(query, index); ok {
-			builder.WriteByte(' ')
+		if next, comment := sqlLexicalSpan(query, index); next > index {
+			if comment {
+				builder.WriteByte(' ')
+			} else {
+				builder.WriteString(query[index:next])
+			}
 			index = next
 			continue
 		}
@@ -29,6 +23,22 @@ func stripSQLComments(query string) string {
 		index++
 	}
 	return builder.String()
+}
+
+// sqlLexicalSpan is the shared boundary for normalization and bind markers.
+// It returns the exclusive end of a quoted span or comment, or index when
+// the current byte is ordinary SQL. Unterminated spans retain existing policy.
+func sqlLexicalSpan(query string, index int) (end int, comment bool) {
+	if end, ok := consumeSQLQuoted(query, index); ok {
+		return end, false
+	}
+	if end, ok := consumeSQLLineComment(query, index); ok {
+		return end, true
+	}
+	if end, ok := consumeSQLBlockComment(query, index); ok {
+		return end, true
+	}
+	return index, false
 }
 
 func consumeSQLQuoted(query string, index int) (int, bool) {

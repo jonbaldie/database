@@ -181,6 +181,14 @@ func quotedIdentifierToken(value string) (string, string, bool) {
 	return "", "", false
 }
 
+// preparedSQLLexicalResult pairs the normalized SQL with offsets in that text.
+// Allocation, metadata planning, and execution must keep this pair together.
+func preparedSQLLexicalResult(query string, maximum int) (normalizedStatement, []int, bool) {
+	statement := normalizeStatementText(query)
+	positions, withinLimit := scanPreparedPlaceholders(statement.query, maximum)
+	return statement, positions, withinLimit
+}
+
 func parameterCount(query string) int { return len(preparedPlaceholders(query)) }
 
 func countPreparedParameters(query string, maximum int) (int, bool) {
@@ -200,8 +208,6 @@ func scanPreparedPlaceholders(query string, maximum int) ([]int, bool) {
 
 type placeholderScanner struct {
 	query     string
-	quote     byte
-	escaped   bool
 	positions []int
 }
 
@@ -209,12 +215,8 @@ func (s *placeholderScanner) scan(maximum int) ([]int, bool) {
 	queryLength := len(s.query)
 	for index := 0; index < queryLength; index++ {
 		character := s.query[index]
-		if s.inQuote() {
-			index = s.consumeQuoted(index, character)
-			continue
-		}
-		if startsQuote(character) {
-			s.quote = character
+		if next, _ := sqlLexicalSpan(s.query, index); next > index {
+			index = next - 1
 			continue
 		}
 		if character == '?' && !s.addPlaceholder(index, maximum) {
@@ -222,39 +224,6 @@ func (s *placeholderScanner) scan(maximum int) ([]int, bool) {
 		}
 	}
 	return s.positions, true
-}
-
-func (s *placeholderScanner) inQuote() bool { return s.quote != 0 }
-
-func (s *placeholderScanner) consumeQuoted(index int, character byte) int {
-	if s.escaped {
-		s.escaped = false
-		return index
-	}
-	if character == '\\' {
-		s.escaped = true
-		return index
-	}
-	if character == s.quote {
-		return s.closeQuote(index)
-	}
-	return index
-}
-
-func (s *placeholderScanner) closeQuote(index int) int {
-	if s.quote == '\'' && hasEscapedQuote(s.query, index) {
-		return index + 1
-	}
-	s.quote = 0
-	return index
-}
-
-func hasEscapedQuote(value string, index int) bool {
-	return index+1 < len(value) && value[index+1] == '\''
-}
-
-func startsQuote(character byte) bool {
-	return character == '\'' || character == '"' || character == '`'
 }
 
 func (s *placeholderScanner) addPlaceholder(index, maximum int) bool {
