@@ -1,0 +1,21 @@
+dependencies exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/dependencies.IY2LWW
+build exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/build.7K5k2r
+version exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/version.PBdVby
+sha256 exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/sha256.4sqnbA
+init exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/init.VLpTS5
+registered pid=1767853 mysql=43459 diagnostics=43460
+ready exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/ready.C1sk4F
+client-create exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/client-create.DTk7VJ
+backup exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/backup.aJ8FqC
+inspect exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/inspect.ndBwh8
+stopped pid=1767853
+registered pid=1769229 mysql=43459 diagnostics=43460
+client-restart exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/client-restart.MegKZc
+stopped pid=1769229
+restore exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/restore.iC2DFw
+registered pid=1769283 mysql=43459 diagnostics=43460
+client-restore exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/client-restore.Q1aqiq
+stopped pid=1769283
+lifecycle exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/lifecycle.9UpbUJ
+sql exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/sql.CjTo1F
+explanation exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/explanation.wEN6Ps
