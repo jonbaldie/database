@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.21] - 2026-11-05
+
+### Changed
+
+- Updated `golang.org/x/text` to v0.41.0 to address GO-2026-6629.
+
+### Fixed
+
+- Applied transaction checks and commit rules when session variables are set to `DEFAULT`.
+- Preserved open transactions when `autocommit` is set to `ON` while it is already on.
+
 ## [0.2.20] - 2026-10-31
 
 ### Added
@@ -418,6 +429,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.21]: https://github.com/jonbaldie/database/compare/v0.2.20...v0.2.21
 [0.2.20]: https://github.com/jonbaldie/database/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/jonbaldie/database/compare/v0.2.18...v0.2.19
 [0.2.18]: https://github.com/jonbaldie/database/compare/v0.2.17...v0.2.18
