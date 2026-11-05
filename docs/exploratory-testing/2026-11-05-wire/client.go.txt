@@ -1,0 +1,39 @@
+package main
+
+import (
+ "context"
+ "database/sql"
+ "fmt"
+ "log"
+ "os"
+ _ "github.com/go-sql-driver/mysql"
+)
+
+func main() {
+ ctx := context.Background()
+ db, err := sql.Open("mysql", "admin:change-me-now!!@tcp(127.0.0.1:43459)/")
+ if err != nil { log.Fatal(err) }; defer db.Close()
+ c, err := db.Conn(ctx); if err != nil { log.Fatal(err) }; defer c.Close()
+ if err = c.PingContext(ctx); err != nil { log.Fatal(err) }
+ exec := func(q string) { _, err := c.ExecContext(ctx, q); fmt.Printf("%s => %v\n", q, err); if err != nil { log.Fatal(err) } }
+ query := func(q string, args ...any) { rows, err := c.QueryContext(ctx,q,args...); if err != nil { log.Fatal(err) }; defer rows.Close(); cols, err := rows.Columns(); if err != nil { log.Fatal(err) }; fmt.Printf("%s %v => %v\n", q,args,cols); for rows.Next() { vals := make([]sql.RawBytes,len(cols)); dest := make([]any,len(cols)); for i := range vals { dest[i]=&vals[i] }; if err := rows.Scan(dest...); err != nil { log.Fatal(err) }; for _, val := range vals { fmt.Printf("%s | ",val) }; fmt.Println() }; if err := rows.Err(); err != nil { log.Fatal(err) } }
+ if os.Args[1] == "create" {
+  exec("CREATE DATABASE trial")
+  exec("USE trial")
+  exec("CREATE TABLE tasks (id BIGINT PRIMARY KEY, title VARCHAR(100) NOT NULL, priority INT NOT NULL)")
+  exec("INSERT INTO tasks VALUES (1, 'read the plan', 1), (2, 'test query behaviour', 2)")
+  query("SELECT id, title FROM tasks WHERE priority >= ? ORDER BY id",2)
+  exec("BEGIN")
+  exec("UPDATE tasks SET priority = 3 WHERE id = 1")
+  exec("SAVEPOINT s")
+  exec("UPDATE tasks SET priority = 9 WHERE id = 2")
+  exec("ROLLBACK TO SAVEPOINT s")
+  exec("COMMIT")
+  query("SELECT id, priority FROM tasks ORDER BY id")
+  query("EXPLAIN FORMAT=JSON SELECT id, title FROM tasks WHERE priority >= 2 ORDER BY id")
+  query("EXPLAIN ANALYZE FORMAT=JSON SELECT id, title FROM tasks WHERE priority >= 2 ORDER BY id")
+ } else {
+  exec("USE trial")
+  query("SELECT id, title, priority FROM tasks ORDER BY id")
+ }
+}

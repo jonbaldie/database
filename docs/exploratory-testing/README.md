@@ -11,3 +11,4 @@ operator, MySQL wire, SQL, and diagnostics interfaces.
 - [2026-09-26: transactions, backup, and prepared statements](2026-09-26-transactions-backup-prepared.md)
 - [2026-10-10: SQL, catalog, and operator journeys](2026-10-10-sql-catalog-operator.md)
 - [2026-10-28: local trial and query explanation](2026-10-28-trial.md)
+- [2026-11-05: SQL transactions and backup](2026-11-05-wire.md)

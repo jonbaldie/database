@@ -1,0 +1,11 @@
+/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/bin/database
+backup
+create
+--address
+127.0.0.1:43459
+--account
+admin
+--password-file
+/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/.explore-20261105/password
+--output
+/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/.explore-20261105/backup.tar

@@ -1,0 +1,9 @@
+Registered server PIDs: 1767853 1769229 1769283 1773038
+PID 1767853 absent
+PID 1769229 absent
+PID 1769283 absent
+PID 1773038 absent
+Listeners on ports 43459 and 43460:
+State Recv-Q Send-Q Local Address:Port Peer Address:Port
+No containers, images, volumes, or browser sessions were started.
+Owned scratch directory and build output removed after making private module-cache directories writable.
