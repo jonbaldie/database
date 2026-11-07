@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"io"
 	"os"
 	"sort"
@@ -286,9 +287,7 @@ func (txn *Transaction) lockOverlay(overlay *tableOverlay) error {
 	return nil
 }
 
-// Commit validates and applies all staged mutations before publishing them and
-// durable-syncing the WAL. A rejected overlay must never leave a replayable
-// record behind.
+// Commit validates staged mutations and syncs their WAL transaction before publication.
 func (txn *Transaction) Commit() error {
 	if txn.finished {
 		return errFinishedTxn
@@ -347,14 +346,24 @@ func appendTransactionWAL(file *os.File, overlays map[string]*tableOverlay, keys
 	if err != nil {
 		return err
 	}
+	if err := writeWALTransaction(file, overlays, keys); err != nil {
+		truncateErr := file.Truncate(start)
+		_, seekErr := file.Seek(0, io.SeekEnd)
+		return errors.Join(err, truncateErr, seekErr)
+	}
+	return file.Sync()
+}
+
+func writeWALTransaction(file *os.File, overlays map[string]*tableOverlay, keys []string) error {
+	if err := writeWALRecord(file, walBegin, "", "", nil); err != nil {
+		return err
+	}
 	for _, key := range keys {
 		if err := writeOverlay(file, overlays[key]); err != nil {
-			_ = file.Truncate(start)
-			_, _ = file.Seek(0, io.SeekEnd)
 			return err
 		}
 	}
-	return file.Sync()
+	return writeWALRecord(file, walCommit, "", "", nil)
 }
 
 func publishCommittedOverlays(engine *Engine, overlays map[string]*tableOverlay, keys []string) error {

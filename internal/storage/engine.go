@@ -57,6 +57,8 @@ const (
 	walUpdate byte = 2
 	walClear  byte = 3
 	walDelete byte = 4
+	walBegin  byte = 5
+	walCommit byte = 6
 )
 
 // Open loads durable row state from directory, replaying the WAL when present.
