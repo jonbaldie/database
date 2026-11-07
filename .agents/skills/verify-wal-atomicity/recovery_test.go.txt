@@ -1,0 +1,129 @@
+package storage_test
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/jonbaldie/database/internal/storage"
+)
+
+type walRecoveryFixture struct {
+	metadata []byte
+	wal      []byte
+	start    int
+}
+
+func makeWALRecoveryFixture(t *testing.T) walRecoveryFixture {
+	t.Helper()
+	dir := t.TempDir()
+	engine, err := storage.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.EnsureTable("app", "items", []string{"id"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	initial, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"a", "b"} {
+		if err := initial.Insert("app", "items", []string{id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := initial.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	walPath := filepath.Join(dir, "rows", "wal.log")
+	before, err := os.Stat(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replacement, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.Clear("app", "items"); err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.Insert("app", "items", []string{"b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := os.ReadFile(filepath.Join(dir, "rows", "tables.meta"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wal, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(wal)) <= before.Size() {
+		t.Fatal("replacement wrote no WAL bytes")
+	}
+	return walRecoveryFixture{metadata: metadata, wal: wal, start: int(before.Size())}
+}
+
+func (f walRecoveryFixture) recover(t *testing.T, dir string, end int) (string, error) {
+	t.Helper()
+	rowsDir := filepath.Join(dir, "rows")
+	if err := os.MkdirAll(rowsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rowsDir, "tables.meta"), f.metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rowsDir, "wal.log"), f.wal[:end], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := storage.Open(dir)
+	if err != nil {
+		return "", err
+	}
+	defer engine.Close()
+	_, hasA := engine.LookupPrimary("app", "items", "a")
+	_, hasB := engine.LookupPrimary("app", "items", "b")
+	return fmt.Sprintf("a=%t b=%t count=%d", hasA, hasB, engine.RowCount("app", "items")), nil
+}
+
+func TestFormalWALRecoveryCompletedCommit(t *testing.T) {
+	f := makeWALRecoveryFixture(t)
+	rows, err := f.recover(t, t.TempDir(), len(f.wal))
+	if err != nil {
+		t.Fatalf("reopen after Commit returned success: %v", err)
+	}
+	if rows != "a=false b=true count=1" {
+		t.Fatalf("reopen after Commit returned success: %s; want only b", rows)
+	}
+}
+
+func TestFormalWALRecoveryAllLogPrefixes(t *testing.T) {
+	f := makeWALRecoveryFixture(t)
+	dir := t.TempDir()
+	opened, rejected := 0, 0
+	for end := f.start; end <= len(f.wal); end++ {
+		rows, err := f.recover(t, dir, end)
+		if err != nil {
+			if end == f.start || end == len(f.wal) {
+				t.Fatalf("reopen with %d replacement bytes: %v", end-f.start, err)
+			}
+			rejected++
+			continue
+		}
+		opened++
+		if rows != "a=true b=true count=2" && rows != "a=false b=true count=1" {
+			t.Errorf("WAL prefix %d/%d bytes into replacement: reopened with %s; want old rows a,b or new row b", end-f.start, len(f.wal)-f.start, rows)
+		}
+	}
+	t.Logf("checked %d prefixes: %d opened, %d refused to open", len(f.wal)-f.start+1, opened, rejected)
+}
