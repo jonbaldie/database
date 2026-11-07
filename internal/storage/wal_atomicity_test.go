@@ -57,7 +57,8 @@ func TestEngineRecoveryAfterReplacementClear(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := int(before.Size())
-	clearEnd := walRecordEnd(t, wal, start, 3)
+	beginEnd := walRecordEnd(t, wal, start, 5)
+	clearEnd := walRecordEnd(t, wal, beginEnd, 3)
 	if err := os.Truncate(walPath, int64(clearEnd)); err != nil {
 		t.Fatal(err)
 	}

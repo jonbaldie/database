@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
@@ -310,6 +312,12 @@ func decodePayload(payload []byte) (byte, string, string, []string, error) {
 		return 0, "", "", nil, io.ErrUnexpectedEOF
 	}
 	if payload[0] == walPayloadMagic {
+		if len(payload) > 1 && (payload[1] == walBegin || payload[1] == walCommit) {
+			if !bytes.Equal(payload, encodePayload(payload[1], "", "", nil)) {
+				return 0, "", "", nil, fmt.Errorf("noncanonical WAL transaction marker")
+			}
+			return payload[1], "", "", nil, nil
+		}
 		return decodeVersionedPayload(payload)
 	}
 	return decodeLegacyPayload(payload)
@@ -377,6 +385,9 @@ func readWALField(payload []byte, offset *int) (string, error) {
 
 func decodeLegacyPayload(payload []byte) (byte, string, string, []string, error) {
 	kind := payload[0]
+	if kind == walBegin || kind == walCommit {
+		return 0, "", "", nil, fmt.Errorf("WAL transaction marker requires versioned payload")
+	}
 	rest := string(payload[1:])
 	parts := strings.SplitN(rest, "\x00", 3)
 	if len(parts) != 3 {
