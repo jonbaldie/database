@@ -16,11 +16,11 @@ Run from the repository root, in the shell where you completed [Launch](../SKILL
 
 ```sh
 verify_command explanation env GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
-	-run '^(TestMySQLPlannedExplanationUsesTheWireContract|TestMySQLAnalyzeAndLiveExplanationUseTheWireContract)$' \
+	-run '^(TestMySQLPlannedExplanationUsesTheWireContract|TestMySQLAnalyzeAndLiveExplanationUseTheWireContract|TestIssue569LiveExplanationRespectsObservation)$' \
 	-count=1 -v
 ```
 
-The planned test checks the envelope, scan strategy, and table columns. The analyzed and live test checks completed runtime evidence, active progress, and observer permissions. Read `test/blackbox/query_explanation_test.go` for the exact values.
+The planned test checks the envelope, scan strategy, and table columns. The analyzed and live test checks completed runtime evidence and active progress. The issue 569 test checks live explanation permissions against both process lists.
 
 ## Gotchas
 

@@ -182,7 +182,11 @@ func queryResultMemory(rows [][]string, nulls [][]bool) int {
 }
 
 func (s *textStatementExecutor) snapshotExplanation(format string, connectionID uint32) (*queryResult, error) {
-	document, found := s.server.explanations.snapshot(connectionID)
+	view, found := s.server.connections.observeOne(s.session, connectionID)
+	if !found {
+		return nil, sqlFailure{1094, "HY000", "unknown or inactive connection ID"}
+	}
+	document, found := view.explanation()
 	if !found {
 		return nil, sqlFailure{1094, "HY000", "unknown or inactive connection ID"}
 	}

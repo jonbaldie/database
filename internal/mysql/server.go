@@ -367,10 +367,7 @@ func (r *connectionRegistry) revokeAccount(name string) {
 	}
 	r.mu.Unlock()
 	for _, conversation := range sessions {
-		conversation.control.revoked.Store(true)
-		if !conversation.control.running.Load() {
-			_ = conversation.connection.Close()
-		}
+		r.terminate(conversation, terminateAfterStatement)
 	}
 }
 

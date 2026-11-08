@@ -82,8 +82,12 @@ func TestRunStatementShowsOnlyExplainableStatementAsActive(t *testing.T) {
 		if !conversation.control.running.Load() || active != query {
 			t.Fatalf("statement during execution: running=%t query=%q", conversation.control.running.Load(), active)
 		}
-		if _, found := server.explanations.snapshot(executor.session.connectionID); !found {
+		if _, found := server.explanations.snapshot(executor.session); !found {
 			t.Fatal("active statement has no live explanation")
+		}
+		other := &session{connectionID: executor.session.connectionID}
+		if _, found := server.explanations.snapshot(other); found {
+			t.Fatal("another session with the same connection ID saw the explanation")
 		}
 		return nil
 	})
@@ -92,7 +96,7 @@ func TestRunStatementShowsOnlyExplainableStatementAsActive(t *testing.T) {
 	if conversation.control.running.Load() || active != "" {
 		t.Fatalf("statement after execution: running=%t query=%q", conversation.control.running.Load(), active)
 	}
-	if _, found := server.explanations.snapshot(executor.session.connectionID); found {
+	if _, found := server.explanations.snapshot(executor.session); found {
 		t.Fatal("finished statement kept its live explanation")
 	}
 }

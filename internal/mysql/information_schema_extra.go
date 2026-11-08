@@ -352,10 +352,7 @@ func informationSchemaProcessListRows(s *session) [][]metadataValue {
 		return nil
 	}
 	rows := make([][]metadataValue, 0)
-	for _, snapshot := range s.server.connections.sessionSnapshots() {
-		if !sessionCanObserve(s, snapshot.username) {
-			continue
-		}
+	for _, snapshot := range s.server.connections.observe(s) {
 		command, info := "Sleep", ""
 		if snapshot.running {
 			command, info = "Query", snapshot.query
@@ -372,15 +369,4 @@ func informationSchemaProcessListRows(s *session) [][]metadataValue {
 		})
 	}
 	return rows
-}
-
-func sessionCanObserve(s *session, username string) bool {
-	if s.username == "" || username == s.username {
-		return true
-	}
-	if s.server.config.Catalog == nil {
-		return false
-	}
-	account, found := s.server.config.Catalog.Account(s.username)
-	return found && !account.Locked && accountGrantIndex(account, "OPERATIONAL_OBSERVATION", "") >= 0
 }

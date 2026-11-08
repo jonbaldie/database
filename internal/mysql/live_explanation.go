@@ -46,14 +46,15 @@ func (r *activeExplanationRegistry) begin(connectionID uint32, plan *queryexplan
 	}
 }
 
-func (r *activeExplanationRegistry) snapshot(connectionID uint32) (*queryexplanation.Document, bool) {
-	if r == nil || connectionID == 0 {
+func (r *activeExplanationRegistry) snapshot(owner *session) (*queryexplanation.Document, bool) {
+	if r == nil || owner == nil || owner.connectionID == 0 {
 		return nil, false
 	}
+	connectionID := owner.connectionID
 	r.mu.RLock()
 	entry := r.active[connectionID]
 	r.mu.RUnlock()
-	if entry == nil {
+	if entry == nil || entry.session != owner {
 		return nil, false
 	}
 	now := time.Now()
