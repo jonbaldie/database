@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade note
 
-- Older releases cannot read WAL transaction markers written by this release. To return to an older release, restore a backup made before upgrading. This discards changes made after that backup.
+- Older releases cannot read WAL transaction markers written by this release. Backups made after upgrading can contain these markers and may not work with older releases. To return to an older release, restore a backup made before upgrading. This discards changes made after that backup.
 
 ## [0.2.21] - 2026-11-05
 
