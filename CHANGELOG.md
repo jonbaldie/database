@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.22] - 2026-11-08
+
 ### Fixed
 
 - Preserved committed rows when a process stops during a WAL transaction, including table replacements.
+
+### Upgrade note
+
+- Older releases cannot read WAL transaction markers written by this release. To return to an older release, restore a backup made before upgrading. This discards changes made after that backup.
 
 ## [0.2.21] - 2026-11-05
 
@@ -435,6 +441,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MySQL compatibility beyond the documented contracts.
 - Parent delivery map: https://github.com/jonbaldie/database/issues/1
 
+[0.2.22]: https://github.com/jonbaldie/database/compare/v0.2.21...v0.2.22
 [0.2.21]: https://github.com/jonbaldie/database/compare/v0.2.20...v0.2.21
 [0.2.20]: https://github.com/jonbaldie/database/compare/v0.2.19...v0.2.20
 [0.2.19]: https://github.com/jonbaldie/database/compare/v0.2.18...v0.2.19
