@@ -84,7 +84,7 @@ func TestDirectSessionObservationAndExplanation(t *testing.T) {
 	for _, snapshot := range snapshots {
 		got[snapshot.id] = snapshot
 	}
-	if len(got) != 2 || got[11] != (sessionSnapshot{11, "alice", "app", true, "select 42"}) || got[12] != (sessionSnapshot{12, "alice", "app", false, ""}) {
+	if len(got) != 2 || got[11] != (sessionSnapshot{id: 11, username: "alice", database: "app", running: true, query: "select 42"}) || got[12] != (sessionSnapshot{id: 12, username: "alice", database: "app"}) {
 		t.Fatalf("snapshots = %#v", got)
 	}
 	for _, tc := range []struct {
@@ -130,7 +130,12 @@ func TestDirectSessionObservationAndExplanation(t *testing.T) {
 	plan := &queryexplanation.Document{Statement: queryexplanation.Statement{SQL: "select 42"}, Plan: &queryexplanation.Operator{}}
 	end := s.explanations.begin(11, plan, alice.session)
 	defer end()
-	view, _ := s.connections.observeOne(alice.session, 11)
+	endBob := s.explanations.begin(13, plan, bob.session)
+	defer endBob()
+	view, ok := s.connections.observeOne(alice.session, 11)
+	if !ok {
+		t.Fatal("cannot observe own active session")
+	}
 	document, ok := view.explanation()
 	if !ok || document.Snapshot == nil || document.Snapshot.ConnectionID != 11 || document.Statement.SQL != "select 42" {
 		t.Fatalf("explanation = %#v, %v", document, ok)
@@ -164,6 +169,11 @@ func TestDirectKillParsing(t *testing.T) {
 		kind, id, err := parseKill(tc.query)
 		if kind != tc.kind || id != tc.id || (err != nil) != tc.fail {
 			t.Errorf("parse %q = %v, %d, %v", tc.query, kind, id, err)
+		}
+	}
+	for _, query := range []string{"KILL", "KILL OTHER 1", "KILL QUERY 1 extra"} {
+		if _, _, err := parseKill(query); err != (sqlFailure{1064, "42000", "malformed KILL statement"}) {
+			t.Errorf("parse %q: %v", query, err)
 		}
 	}
 }
@@ -201,20 +211,89 @@ func TestDirectTermination(t *testing.T) {
 	s := controlTestServer(t)
 	alice, _ := controlTestConversation(t, s, 1, "alice")
 	bob, conn := controlTestConversation(t, s, 2, "bob")
-	for _, id := range []uint32{2, 99} {
-		if err := s.connections.terminateSession(alice.session, id, terminateConnection); err == nil {
-			t.Fatalf("kill %d succeeded", id)
+	for _, tc := range []struct {
+		id   uint32
+		want sqlFailure
+	}{
+		{2, sqlFailure{1094, "HY000", "access denied"}},
+		{99, sqlFailure{1094, "HY000", "unknown thread id"}},
+	} {
+		if err := s.connections.terminateSession(alice.session, tc.id, terminateConnection); err != tc.want {
+			t.Fatalf("kill %d: %v, want %v", tc.id, err, tc.want)
 		}
 	}
 	if conn.closed || bob.control.revoked.Load() {
 		t.Fatal("unauthorized termination changed target")
 	}
 	executor := &textStatementExecutor{session: alice.session}
-	if err := executor.killSession("KILL invalid"); err == nil {
-		t.Fatal("invalid kill succeeded")
+	if err := executor.killSession("KILL invalid"); err != (sqlFailure{1094, "HY000", "unknown thread id"}) {
+		t.Fatalf("invalid kill: %v", err)
+	}
+	if err := executor.killSession("KILL 2"); err != (sqlFailure{1094, "HY000", "access denied"}) {
+		t.Fatalf("unauthorized kill: %v", err)
 	}
 	if err := executor.killSession("KILL QUERY 1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDirectExplanationRegistryBoundaries(t *testing.T) {
+	s := controlTestServer(t)
+	owner, _ := controlTestConversation(t, s, 1, "alice")
+	plan := &queryexplanation.Document{Statement: queryexplanation.Statement{SQL: "select 1"}, Plan: &queryexplanation.Operator{}}
+	var absent *activeExplanationRegistry
+	absent.begin(1, plan, owner.session)()
+	if _, ok := absent.snapshot(owner.session); ok {
+		t.Fatal("nil registry returned an explanation")
+	}
+	for _, session := range []*session{nil, {server: s}} {
+		if _, ok := s.explanations.snapshot(session); ok {
+			t.Fatal("invalid session received an explanation")
+		}
+	}
+	s.explanations.begin(0, plan, owner.session)()
+	s.explanations.begin(1, nil, owner.session)()
+	if _, ok := s.explanations.snapshot(owner.session); ok {
+		t.Fatal("invalid plan was registered")
+	}
+	end := s.explanations.begin(1, plan, owner.session)
+	if document, ok := s.explanations.snapshot(owner.session); !ok || document.Statement.SQL != "select 1" {
+		t.Fatalf("connection 1 explanation = %#v, %v", document, ok)
+	}
+	end()
+	if _, ok := s.explanations.snapshot(owner.session); ok {
+		t.Fatal("finished explanation remained registered")
+	}
+}
+
+func TestDirectCrossAccountControl(t *testing.T) {
+	s := controlTestServer(t)
+	for _, account := range []catalog.Account{
+		{Name: "controller", PasswordHash: "hash", Grants: []catalog.Grant{{Privilege: "OPERATIONAL_CONTROL"}}},
+		{Name: "observer", PasswordHash: "hash", Grants: []catalog.Grant{{Privilege: "OPERATIONAL_OBSERVATION"}}},
+	} {
+		if err := s.config.Catalog.CreateAccount(account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controller, _ := controlTestConversation(t, s, 1, "controller")
+	observer, _ := controlTestConversation(t, s, 2, "observer")
+	target, targetConn := controlTestConversation(t, s, 3, "bob")
+	watch := &statementWatch{cancelled: make(chan struct{})}
+	target.control.setWatch(watch)
+	if err := s.connections.terminateSession(observer.session, 3, terminateConnection); err != (sqlFailure{1094, "HY000", "access denied"}) {
+		t.Fatalf("observer termination: %v", err)
+	}
+	if targetConn.closed || target.control.revoked.Load() {
+		t.Fatal("observation privilege terminated another account")
+	}
+	if err := s.connections.terminateSession(controller.session, 3, terminateQuery); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-watch.cancelled:
+	default:
+		t.Fatal("control privilege did not cancel another account's query")
 	}
 }
 
