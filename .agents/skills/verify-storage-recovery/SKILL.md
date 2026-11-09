@@ -27,7 +27,7 @@ Last source review is fc78c5417c39374ec22f9c2f4c3ea1452f7d16e1. Before use, insp
 | Sync | internal/storage/txn.go, appendTransactionWAL |
 | Publish, ReturnSuccess | internal/storage/txn.go, Transaction.Commit and publishCommittedOverlays |
 | Recover | internal/storage/engine.go, Open; internal/storage/wal.go, replayWALRecords and pendingWALTransaction.commit |
-| Closure probe | internal/storage/engine.go, Begin and Close; internal/storage/txn.go, ensureCommitReady |
+| Closure probe | internal/storage/txn.go, Begin and ensureCommitReady; internal/storage/engine.go, Close |
 | Byte-prefix recovery and selected checkpoint probes | Delegated .agents/skills/verify-wal-atomicity/SKILL.md |
 
 ## Evidence and bounds
