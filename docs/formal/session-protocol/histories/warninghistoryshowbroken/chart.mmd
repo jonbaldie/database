@@ -1,0 +1,30 @@
+---
+title: "WarningHistory"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ShowRetainsWarnings
+    lg1: Path to the ShowRetainsWarnings bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: ordinary statement
+  s1: warning added
+  s2: shown once
+  s3: shown twice
+  s4: next statement
+  s5: failure retained
+  s6: reset
+  [*] --> s0
+  s0 --> s1: Statement records warning
+  s1 --> s2: Read retained warnings
+  s2 --> s3: Read warnings again
+  s3 --> s4: Begin ordinary statement#59; clear warnings
+  s4 --> s5: Statement fails#59; replace diagnostics
+  s5 --> s6: Reset connection
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath
+  class s3 breaks

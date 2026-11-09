@@ -1,0 +1,10 @@
+{
+  "Admission": "Capacity",
+  "Handshake": "RequiredFlags",
+  "Cancellation": "CloseOnce",
+  "Prepared": "ResetReleasesBytes",
+  "Settings": "Ceiling",
+  "AccountGrant": "RevokeRemovesGrant",
+  "Diagnostics": "OwnsDiagnostics",
+  "LiveExplanation": "CleanupOwnsEntry"
+}

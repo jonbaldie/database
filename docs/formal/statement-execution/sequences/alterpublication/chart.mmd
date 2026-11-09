@@ -1,0 +1,16 @@
+---
+title: "AlterPublication"
+---
+stateDiagram-v2
+  s0: original schema
+  s1: private schema
+  s2: actions applied
+  s3: rejected
+  s4: validated
+  s5: Valid schema published
+  [*] --> s0
+  s0 --> s1: Clone
+  s1 --> s2: Apply private schema actions
+  s2 --> s3: Validate
+  s2 --> s4: Validate
+  s4 --> s5: Publish

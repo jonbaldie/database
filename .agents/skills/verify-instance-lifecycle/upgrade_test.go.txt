@@ -1,0 +1,96 @@
+package main
+
+import (
+	"github.com/jonbaldie/database/internal/instance"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestFormalUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	metadata, err := instance.Initialize(dir, "admin", "formal-password-12345")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := upgradeRequest{directory: dir, target: "0.1.1"}
+	marker := upgradeMarker{Schema: upgradeMarkerSchema, TargetVersion: request.target, SourceInstanceID: metadata.InstanceID}
+	if err := writeUpgradeMarker(dir, marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := markUpgradeIncomplete(dir, metadata); err != nil {
+		t.Fatal(err)
+	}
+	current, err := instance.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != "upgrade-incomplete" {
+		t.Fatal("incomplete metadata not installed")
+	}
+	if err := validateUpgradeState(current, &marker, request); err != nil {
+		t.Fatal(err)
+	}
+	for _, wrongID := range []bool{false, true} {
+		bad := marker
+		if wrongID {
+			bad.SourceInstanceID = "other"
+		} else {
+			bad.TargetVersion = "0.1.2"
+		}
+		if err := validateUpgradeState(current, &bad, request); err == nil {
+			t.Fatal("mismatched resume was accepted")
+		}
+	}
+	_, err, class := completeUpgrade(request, current, &marker)
+	if err != nil || class != "success" {
+		t.Fatalf("complete: %v %s", err, class)
+	}
+	current, err = instance.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.DataVersion != request.target || current.State != "stopped" {
+		t.Fatal("completed upgrade did not install target")
+	}
+	if _, err := os.Stat(filepath.Join(dir, instance.UpgradeIncompleteMarker)); !os.IsNotExist(err) {
+		t.Fatal("completed upgrade retained marker")
+	}
+	if err := validateUpgradeState(current, nil, request); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFormalUpgradePrepareMarker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "instance")
+	_, err := instance.Initialize(dir, "admin", "formal-password-12345")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "backup.tar")
+	if err := createBackup(dir, archive); err != nil {
+		t.Fatal(err)
+	}
+	request := upgradeRequest{directory: dir, target: "0.1.1", backup: archive}
+	target, err := parseDataVersion(request.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, lock, _, err := prepareUpgrade(request, target)
+	if lock != nil {
+		defer releaseUpgradeLock(lock)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := instance.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != "upgrade-incomplete" {
+		t.Fatal("prepare did not mark incomplete")
+	}
+	if _, err := os.Stat(filepath.Join(dir, instance.UpgradeIncompleteMarker)); err != nil {
+		t.Fatal("incomplete upgrade has no marker")
+	}
+}

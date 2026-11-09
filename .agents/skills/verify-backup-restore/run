@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent;repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':raise SystemExit('Use the pinned TLC 1.7.4 jar from verify-wal-atomicity.')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+with tempfile.TemporaryDirectory(prefix='database-backup-formal-') as scratch:
+ root=pathlib.Path(scratch)
+ for module,rule in [('BackupRestore','OnlyValidatedFilesInstalled'),('ArchiveValidation','ResultRequiresManifest')]:
+  for suffix in ['','Broken']:
+   name=module+suffix
+   r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/name),'-config',str(skill/(name+'.cfg')),str(skill/(module+'.tla'))],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   print(r.stdout,flush=True)
+   if not suffix and r.returncode:raise SystemExit('Current model failed: '+module)
+   if suffix and (r.returncode!=12 or ('Invariant '+rule+' is violated') not in r.stdout):raise SystemExit('Broken model missed rule: '+module)
+ source=repo/'cmd/database/backup_restore.go';text=source.read_text()
+ variants=[('manifest','if !reader.manifestFound {','if false {','missing manifest accepted'),('hash','if entry.SHA256 != file.sha256 {','if false {','hash mismatch accepted'),('stage','if err := populateAndValidateRestore(staging, files, metadataBytes); err != nil {','if err := populateAndValidateRestore(staging, files, metadataBytes); false {','invalid stage installed'),('depth','if depth >= 128 {','if depth >= 256 {','excess JSON depth accepted')]
+ for variant in [None]+variants:
+  name='current' if variant is None else variant[0]
+  overlay={'Replace':{str(repo/'cmd/database/zz_formal_backup_test.go'):str(skill/'backup_test.go.txt')}}
+  if variant:
+   _,old,new,message=variant
+   if text.count(old)!=1:raise SystemExit('Source changed: inspect '+name)
+   patched=root/(name+'.go');patched.write_text(text.replace(old,new));overlay['Replace'][str(source)]=str(patched)
+  config=root/(name+'.json');config.write_text(json.dumps(overlay))
+  r=subprocess.run(['go','test','-count=1','-overlay',str(config),'./cmd/database','-run','^TestFormalBackup'],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout,flush=True)
+  if variant is None and r.returncode:raise SystemExit('Current backup source probe failed')
+  if variant and (r.returncode==0 or message not in r.stdout):raise SystemExit('Mutation missed expected assertion: '+name)
+ print('Backup/restore checks passed; both broken models and four source mutations were caught.')
+
+subprocess.run([str(skill/"run-stream")],cwd=repo,env=env,check=True)
+
+subprocess.run([str(skill/"run-controls")],cwd=repo,env=env,check=True)
+
+subprocess.run([str(skill/"run-json")],cwd=repo,env=env,check=True)

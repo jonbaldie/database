@@ -1,0 +1,19 @@
+---
+title: "Write and publish a backup archive"
+---
+stateDiagram-v2
+  s0: temporary open
+  s1: failed
+  s2: written
+  s3: sync returned
+  s4: closed
+  s5: published
+  [*] --> s0
+  s0 --> s1: Operation fails
+  s0 --> s2: Write archive contents
+  s2 --> s1: Operation fails
+  s2 --> s3: Sync archive file
+  s3 --> s1: Operation fails
+  s3 --> s4: Close archive file
+  s4 --> s1: Operation fails
+  s4 --> s5: Install archive at output path

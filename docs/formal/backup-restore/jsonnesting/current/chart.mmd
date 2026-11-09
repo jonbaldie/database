@@ -1,0 +1,20 @@
+---
+title: "Validate nested archive JSON"
+---
+stateDiagram-v2
+  s0: Read value with 0 open containers
+  s1: Read value with 1 open containers
+  s2: value complete
+  s3: Read value with 2 open containers
+  s4: rejected
+  s5: accepted
+  [*] --> s0
+  s0 --> s1: Enter nested container
+  s0 --> s2: Read scalar
+  s1 --> s3: Enter nested container
+  s1 --> s2: Consume matching container end
+  s2 --> s4: Reject trailing value
+  s2 --> s5: Finish complete input
+  s3 --> s4: Reject nesting above limit
+  s1 --> s4: Reject unfinished input
+  s3 --> s1: Consume matching container end

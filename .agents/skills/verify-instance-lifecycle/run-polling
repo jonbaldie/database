@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+import hashlib, json, os, pathlib, subprocess, tempfile
+skill=pathlib.Path(__file__).resolve().parent
+repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':raise SystemExit('Use pinned TLC 1.7.4 from verify-wal-atomicity.')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+with tempfile.TemporaryDirectory(prefix='database-shutdown-polling-') as scratch:
+ root=pathlib.Path(scratch)
+ for suffix in ['', 'BrokenReset', 'BrokenThreshold']:
+  name='ShutdownPolling'+suffix
+  result=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/name),'-config',str(skill/(name+'.cfg')),str(skill/'ShutdownPolling.tla')],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(result.stdout,flush=True)
+  if not suffix and result.returncode:raise SystemExit('Shutdown polling model failed')
+  if suffix and (result.returncode!=12 or 'Invariant ThreeConsecutiveFailures is violated' not in result.stdout):raise SystemExit('Broken polling model missed its rule')
+ source=repo/'cmd/database/shutdown.go'
+ original=source.read_text()
+ old='func waitForOnlineShutdown(address string) error {'
+ begin=original.index(old)
+ prefix,body=original[:begin],original[begin:]
+ body=body.replace('time.Now()', 'formalPollNow()').replace('time.Sleep(', 'formalPollSleep(').replace('net.DialTimeout(', 'formalPollDial(')
+ text=(prefix+body).replace('\n\t"net"','')
+ variants=[('current',None,None),('reset','failures = 0','failures = failures'),('threshold','failures >= 3','failures >= 1')]
+ for name,old,new in variants:
+  patched=text
+  if old:
+   if text.count(old)!=1:raise SystemExit('Source changed: '+name)
+   patched=text.replace(old,new)
+  path=root/(name+'.go');path.write_text(patched)
+  overlay=root/(name+'.json');overlay.write_text(json.dumps({'Replace':{str(source):str(path),str(repo/'cmd/database/zz_formal_shutdown_polling_test.go'):str(skill/'polling_test.go.txt')}}))
+  result=subprocess.run(['go','test','-count=1','-overlay',str(overlay),'./cmd/database','-run','^TestFormalShutdownPolling$'],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+result.stdout,flush=True)
+  if not old and result.returncode:raise SystemExit('Current shutdown polling probe failed')
+  if old and (result.returncode==0 or 'shutdown confirmed without three consecutive failures' not in result.stdout):raise SystemExit('Polling mutation missed its assertion: '+name)
+print('Shutdown polling model, source probe, two broken models, and two source mutations passed.')

@@ -1,0 +1,144 @@
+package catalog
+
+import (
+	"errors"
+	"github.com/jonbaldie/database/internal/storage"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+type formalObservedRows struct {
+	rowEngine
+	store       *Store
+	requests    []*writeRequest
+	t           *testing.T
+	commits     int
+	checkpoints int
+}
+type formalObservedTxn struct {
+	rowTxn
+	owner *formalObservedRows
+}
+
+func (r *formalObservedRows) Begin() (rowTxn, error) {
+	tx, err := r.rowEngine.Begin()
+	if err != nil {
+		return nil, err
+	}
+	return formalObservedTxn{tx, r}, nil
+}
+func (x formalObservedTxn) Commit() error {
+	r := x.owner
+	for _, req := range r.requests {
+		if len(req.result) != 0 {
+			r.t.Fatal("catalog notification preceded row publication")
+		}
+	}
+	if r.store.revision != 0 || len(r.store.definition.Namespaces) != 0 {
+		r.t.Fatal("catalog revision published before row sync")
+	}
+	r.commits++
+	return x.rowTxn.Commit()
+}
+func (r *formalObservedRows) Checkpoint() error {
+	if r.commits == 0 {
+		r.t.Fatal("catalog checkpoint preceded row commit")
+	}
+	r.checkpoints++
+	return r.rowEngine.Checkpoint()
+}
+
+func TestFormalCatalogPublication(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := storage.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	store := &Store{path: filepath.Join(dir, "catalog.json"), definition: Definition{Namespaces: map[string]Namespace{}, Accounts: map[string]Account{}}, writes: make(chan *writeRequest, 2)}
+	observed := &formalObservedRows{rowEngine: storageRows{engine}, store: store, t: t}
+	store.rows = observed
+	first := &writeRequest{result: make(chan error, 1), apply: func(d Definition) (Definition, error) {
+		d.Namespaces["app"] = Namespace{Name: "app", Tables: map[string]Table{"items": {Name: "items", Columns: []string{"id"}, Rows: [][]string{{"one"}}}}}
+		return d, nil
+	}}
+	second := &writeRequest{result: make(chan error, 1), apply: func(d Definition) (Definition, error) {
+		n := d.Namespaces["app"]
+		table := n.Tables["items"]
+		table.Rows = append(table.Rows, []string{"two"})
+		n.Tables["items"] = table
+		d.Namespaces["app"] = n
+		return d, nil
+	}}
+	observed.requests = []*writeRequest{first, second}
+	store.writes <- first
+	store.writes <- second
+	close(store.writes)
+	store.writeLoop()
+	for _, req := range observed.requests {
+		if err := <-req.result; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if observed.commits != 1 || observed.checkpoints != 1 {
+		t.Fatal("catalog batch skipped durable row publication", observed.commits, observed.checkpoints)
+	}
+	if store.revision != 1 || len(store.Snapshot().Namespaces["app"].Tables["items"].Rows) != 2 {
+		t.Fatal("catalog batch did not publish one revision")
+	}
+	data, err := os.ReadFile(store.path)
+	if err != nil || len(data) == 0 {
+		t.Fatal("catalog schema was not persisted before success", err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.rows.Close()
+	if len(reopened.Snapshot().Namespaces["app"].Tables["items"].Rows) != 2 {
+		t.Fatal("successful catalog batch did not survive restart")
+	}
+}
+
+func TestFormalCatalogPublicationFailure(t *testing.T) {
+	for _, kind := range []string{"apply", "validation", "persistence"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			engine, err := storage.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			store := &Store{path: filepath.Join(dir, "missing", "catalog.json"), definition: Definition{Namespaces: map[string]Namespace{}, Accounts: map[string]Account{}}, rows: storageRows{engine}}
+			sentinel := errors.New("formal validator failure")
+			if kind == "validation" {
+				store.publishValidator = func(previous, next Definition) error { return sentinel }
+			}
+			req := &writeRequest{result: make(chan error, 1), apply: func(d Definition) (Definition, error) {
+				if kind == "apply" {
+					return d, sentinel
+				}
+				d.Namespaces["app"] = Namespace{Name: "app", Tables: map[string]Table{"items": {Name: "items", Columns: []string{"id"}, Rows: [][]string{{"one"}}}}}
+				return d, nil
+			}}
+			store.publishWriteBatch([]*writeRequest{req})
+			if err := <-req.result; err == nil {
+				t.Fatal("failed catalog publication returned success")
+			}
+			if store.revision != 0 || len(store.Snapshot().Namespaces) != 0 {
+				t.Fatal("failed catalog publication exposed a new revision")
+			}
+			rows, ok := engine.SnapshotRows("app", "items")
+			if kind != "persistence" && ok {
+				t.Fatal("validation failure changed durable rows")
+			}
+			if kind == "persistence" && (!ok || len(rows) != 1) {
+				t.Fatal("probe did not reach row sync before schema failure", rows)
+			}
+		})
+	}
+}

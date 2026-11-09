@@ -1,0 +1,32 @@
+---
+title: "Initialize allocate exhaust and reset identifiers"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks AllocationLifecycleSafe
+    lg1: Path to the AllocationLifecycleSafe bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Uninitialized identifier state
+  s1: Allocation disabled
+  s2: Next identifier exceeds stored values
+  s3: Identifier range exhausted
+  s4: Truncated#59; next identifier is one
+  s5: Truncation kept prior identifier state
+  [*] --> s0
+  s0 --> s1: Inspect column and scan existing values
+  s0 --> s2: Inspect column and scan existing values
+  s0 --> s3: Inspect column and scan existing values
+  s2 --> s4: Truncate table and reset allocator
+  s2 --> s3: Record explicit identifier or Generate next identifier
+  s2 --> s5: Truncate table and reset allocator
+  s3 --> s5: Truncate table and reset allocator
+  s4 --> s2: Accept another insert
+  s5 --> s2: Accept another insert
+  s5 --> s3: Accept another insert
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s2 bugPath
+  class s5 breaks
+  class s5 bugPath

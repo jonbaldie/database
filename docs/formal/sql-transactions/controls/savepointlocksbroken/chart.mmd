@@ -1,0 +1,26 @@
+---
+title: "Savepoint rollback retains locks"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks RollbackRetainsLocks
+    lg1: Path to the RollbackRetainsLocks bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: active
+  s1: saved
+  s2: changed
+  s3: restored
+  s4: finished
+  [*] --> s0
+  s0 --> s1: Save
+  s1 --> s2: WriteAndLock
+  s2 --> s3: RollbackTo
+  s3 --> s4: Finish
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath

@@ -1,0 +1,117 @@
+package mysql
+
+import (
+	"strings"
+	"testing"
+)
+
+func formalQuotedEnd(value string, quote byte) (int, bool) {
+	state := "body"
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		switch state {
+		case "body":
+			if character == quote {
+				state = "quote"
+			} else if character == '\\' && quote != '`' {
+				state = "escape"
+			}
+		case "escape":
+			state = "body"
+		case "quote":
+			if character == quote {
+				state = "body"
+			} else {
+				return index - 1, true
+			}
+		}
+	}
+	if state == "quote" {
+		return len(value) - 1, true
+	}
+	return 0, false
+}
+
+func TestFormalSQLQuotedBounds(t *testing.T) {
+	for _, quote := range []byte{'\'', '"', '`'} {
+		alphabet := []byte{'a', quote, '\\', ','}
+		var visit func([]byte, int)
+		visit = func(body []byte, remaining int) {
+			value := string(append([]byte{quote}, body...))
+			wantEnd, wantOK := formalQuotedEnd(value, quote)
+			gotEnd, gotOK := quotedSQLLiteralEnd(value, 0)
+			if gotOK != wantOK || (gotOK && gotEnd != wantEnd) {
+				t.Fatalf("quoted boundary mismatch for %q got %d,%v want %d,%v", value, gotEnd, gotOK, wantEnd, wantOK)
+			}
+			if remaining == 0 {
+				return
+			}
+			for _, b := range alphabet {
+				next := append(append([]byte{}, body...), b)
+				visit(next, remaining-1)
+			}
+		}
+		visit(nil, 6)
+	}
+}
+
+func TestFormalSQLQuotedCommentsAndCSV(t *testing.T) {
+	bodies := []string{"a", "# marker", "/* marker */", "-- marker", ",", "(", ")", "a,b", "a''b", "a\\'b"}
+	for _, body := range bodies {
+		literal := quote(body)
+		if got := stripSQLComments(literal + "/* outside */"); got != literal+" " {
+			t.Fatalf("quoted comment changed for %q got %q", literal, got)
+		}
+		if parts := splitCSV(literal + ",(1,2),3"); len(parts) != 3 || parts[0] != literal || parts[1] != "(1,2)" || parts[2] != "3" {
+			t.Fatalf("quoted comma split for %q got %#v", literal, parts)
+		}
+		tokens, err := tokenizeExpression(literal)
+		if err != nil || len(tokens) != 1 || tokens[0].kind != tokenString || tokens[0].str != body {
+			t.Fatalf("quoted string round trip failed for %q", body)
+		}
+	}
+	for _, quote := range []byte{'\'', '"', '`'} {
+		text := string(quote) + "/* inside */#" + string(quote)
+		if got := stripSQLComments(text); got != text {
+			t.Fatalf("quoted comment changed for %q got %q", text, got)
+		}
+	}
+	for _, input := range []string{"1e", "1e+", "1e-", "@", "'unterminated", "`unterminated"} {
+		if _, err := tokenizeExpression(input); err == nil {
+			t.Fatalf("malformed expression tokenized %q", input)
+		}
+	}
+	for count := 0; count <= 8; count++ {
+		input := strings.Repeat("(", count) + "1" + strings.Repeat(")", count)
+		tokens, err := tokenizeExpression(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := exprParser{tokens: tokens}
+		value, err := p.parseExpression()
+		if err != nil || !p.atEnd() || value.i != 1 || p.depth != 0 {
+			t.Fatalf("nested expression mismatch for %q", input)
+		}
+	}
+}
+
+func TestFormalExpressionDepthGuard(t *testing.T) {
+	for initial := 0; initial <= maxExpressionDepth+1; initial++ {
+		p := exprParser{depth: initial}
+		called := false
+		_, err := depthGuard(&p, func() (exprValue, error) {
+			called = true
+			if p.depth != initial+1 {
+				t.Fatal("callback depth mismatch")
+			}
+			return intValue(7), nil
+		})
+		if p.depth != initial {
+			t.Fatalf("expression depth was not restored at %d got %d", initial, p.depth)
+		}
+		wantCall := initial < maxExpressionDepth
+		if called != wantCall || (err == nil) != wantCall {
+			t.Fatalf("expression depth guard accepted over-bound call at %d", initial)
+		}
+	}
+}

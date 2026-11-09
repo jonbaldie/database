@@ -1,0 +1,36 @@
+---
+title: "Upgrade a stopped instance or resume an interrupted upgrade"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks CompletedTargetInstalled
+    lg1: Path to the CompletedTargetInstalled bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: stopped
+  s1: marker written
+  s2: interrupted
+  s3: incomplete
+  s4: different target requested
+  s5: same target accepted
+  s6: target written
+  s7: complete
+  [*] --> s0
+  s0 --> s1: Record upgrade target
+  s1 --> s2: Upgrade stops
+  s1 --> s3: Record incomplete upgrade
+  s2 --> s4: You request a different target
+  s2 --> s5: You request the same target
+  s3 --> s6: Install target version
+  s3 --> s2: Upgrade stops
+  s5 --> s3: Resume the upgrade
+  s6 --> s2: Upgrade stops
+  s6 --> s7: Remove upgrade marker
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s6 bugPath
+  class s7 breaks
+  class s7 bugPath

@@ -1,0 +1,65 @@
+package storage
+
+import (
+	"errors"
+	"testing"
+)
+
+func TestFormalEngineLifecycle(t *testing.T) {
+	e, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if err := e.EnsureTable("app", "items", []string{"id"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := e.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Insert("app", "items", []string{"1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if !txn.finished {
+		t.Fatal("successful commit left transaction unfinished")
+	}
+	if err := txn.Commit(); !errors.Is(err, errFinishedTxn) {
+		t.Fatal("second commit not rejected")
+	}
+	failed, err := e.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := failed.Insert("app", "items", []string{"2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.EnsureTable("app", "items", []string{"id", "extra"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := failed.Commit(); err == nil {
+		t.Fatal("stale schema commit accepted")
+	}
+	if failed.finished {
+		t.Fatal("failed validation finished transaction")
+	}
+	closed, err := e.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Commit(); !errors.Is(err, errClosed) || closed.finished {
+		t.Fatal("closed engine accepted commit or finished transaction")
+	}
+	if _, err := e.Begin(); !errors.Is(err, errClosed) {
+		t.Fatal("closed engine accepted begin")
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal("second close failed")
+	}
+}

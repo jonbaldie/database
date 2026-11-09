@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent
+repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':raise SystemExit('Use pinned TLC 1.7.4')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+models={'SavepointLocks':[('','RollbackRetainsLocks')],'SQLTransactions':[('Finished','FinishedClearsState'),('ReadOnly','ReadOnlyHasNoMutations'),('OneShot','OneShotConsumed')],'SnapshotLifecycle':[('Resources','ResourceFailureKeepsStage'),('Eager','BeginIsLazy'),('Refresh','RepeatableReadKeepsImage'),('Cleanup','RejectedPublicationClearsStage')],'LockCleanup':[('Wait','WaitExitClearsEdge'),('Restore','FailedReadRestoresLocks')]}
+faults=[
+ ('savepoint-locks','transaction.go','s.transactionSnapshot = savepoint.snapshot','s.server.locks.release(s.session)\n\ts.transactionSnapshot = savepoint.snapshot','^TestFormalSavepointLocks$','savepoint rollback released locks'),
+ ('resources','transaction.go','func (s *transactionExecutor) commitPublishedMutations(requireRevision, finalize bool) error {\n\tif !s.transaction {\n\t\treturn nil\n\t}\n\tif err := s.checkStatementResources(); err != nil {\n\t\treturn err','func (s *transactionExecutor) commitPublishedMutations(requireRevision, finalize bool) error {\n\tif !s.transaction {\n\t\treturn nil\n\t}\n\tif err := s.checkStatementResources(); err != nil {\n\t\ts.finishTransaction()\n\t\treturn err','^TestFormalTransactionResourceFailure$','resource rejection lost staged transaction'),
+ ('conflict','locking.go','if holder != requester && (wanted == lockExclusive || heldMode == lockExclusive) {','if holder != requester && false && (wanted == lockExclusive || heldMode == lockExclusive) {','^TestFormalLockProperties$','conflicting lock grants coexist'),
+ ('indexes','locking.go','held[resource] = mode','_ = mode','^TestFormalLockProperties$','lock ownership indexes disagree'),
+ ('cycle','locking.go','if m.waitGraphReaches(owners, waiter, map[*session]bool{}) {','if false {','^TestFormalLockProperties$','wait graph contains cycle'),
+ ('deadlock-edge','locking.go','if m.waitGraphReaches(owners, waiter, map[*session]bool{}) {\n\t\tdelete(m.waiting, waiter)','if m.waitGraphReaches(owners, waiter, map[*session]bool{}) {','^TestFormalLockProperties$','deadlock reply retained wait edge'),
+ ('lazy','transaction.go','s.transaction = true\n\ts.transactionSnapshot = catalog.Definition{}\n\ts.transactionRevision = 0\n\ts.transactionStateSet = false','s.transaction = true\n\ts.transactionSnapshot = catalog.Definition{}\n\ts.transactionRevision = 0\n\ts.transactionStateSet = true','^TestFormalSnapshotLifecycle$','begin captured snapshot eagerly'),
+ ('image','transaction.go','forWrite || s.transactionDirty || s.transactionIsolation == isolationRepeatableRead && s.transactionReadSet','forWrite || s.transactionDirty','^TestFormalSnapshotLifecycle$','isolation image changed across reads'),
+ ('publication','transaction.go','if err != nil {\n\t\ts.finishTransaction()','if err != nil {','^TestFormalTransactionRejectedPublication$','rejected publication retained stage'),
+ ('read-only','transaction.go','if s.transactionReadOnly {\n\t\treturn readOnlyTransactionFailure()\n\t}\n\tif s.server.config.Catalog == nil {','if false {\n\t\treturn readOnlyTransactionFailure()\n\t}\n\tif s.server.config.Catalog == nil {','^TestFormalReadOnlyMutation$','read-only transaction accepted mutation'),
+ ('wait','locking.go','m.stopWaiting(waiter)','_ = waiter','^TestFormalLockWaitCleanup$','wait exit retained wait edge'),
+ ('restore','locking.go','m.held[owner] = cloneHeldLocks(snapshot)','m.held[owner] = m.held[owner]','^TestFormalLockWaitCleanup$','failed read did not restore lock snapshot'),
+]
+with tempfile.TemporaryDirectory(prefix='database-sql-sequences-') as scratch:
+ root=pathlib.Path(scratch)
+ for model,variants in models.items():
+  for suffix,rule in [(None,None)]+variants:
+   config=model if suffix is None else model+'Broken'+suffix
+   r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/config),'-config',str(skill/(config+'.cfg')),str(skill/(model+'.tla'))],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   print(config+':\n'+r.stdout,flush=True)
+   if rule is None and r.returncode:raise SystemExit('Current model failed')
+   if rule and (r.returncode!=12 or 'Invariant '+rule+' is violated' not in r.stdout):raise SystemExit('Broken model missed rule '+config)
+ for fault in [None]+faults+[None]:
+  name='current' if fault is None else fault[0]
+  overlay={'Replace':{str(repo/'internal/mysql/zz_formal_transaction_sequence_test.go'):str(skill/'sequence_test.go.txt')}}
+  pattern='^TestFormal(SnapshotLifecycle|TransactionRejectedPublication|ReadOnlyMutation|LockWaitCleanup|LockProperties|TransactionResourceFailure|SavepointLocks)$'
+  if fault:
+   _,filename,old,new,pattern,message=fault;source=repo/'internal/mysql'/filename;original=source.read_text()
+   if original.count(old)!=1:raise SystemExit('Source anchor changed '+name)
+   patched=root/(name+'.go');patched.write_text(original.replace(old,new));overlay['Replace'][str(source)]=str(patched)
+  path=root/(name+'.json');path.write_text(json.dumps(overlay))
+  r=subprocess.run(['go','test','-timeout','30s','-count=1','-overlay',str(path),'./internal/mysql','-run',pattern],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout,flush=True)
+  if fault is None and r.returncode:raise SystemExit('Current sequence source failed')
+  if fault and (r.returncode==0 or message not in r.stdout):raise SystemExit('Source fault missed assertion '+name)
+print('Transaction snapshot and lock cleanup models, probes, and negative controls passed.')

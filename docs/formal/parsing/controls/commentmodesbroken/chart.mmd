@@ -1,0 +1,33 @@
+---
+title: "CommentModes"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks QuotedCommentSurvives
+    lg1: Path to the QuotedCommentSurvives bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Scan position 1 in sql
+  s1: Scan position 2 in sql
+  s2: Scan position 3 in sql
+  s3: Scan position 4 in block comment
+  s4: Scan position 5 in block comment
+  s5: Scan position 6 in sql
+  s6: Scan position 7 in sql
+  [*] --> s0
+  s0 --> s1: Text
+  s1 --> s2: Quoted
+  s2 --> s3: OpenComment
+  s3 --> s4: CommentText
+  s4 --> s5: CloseComment
+  s5 --> s6: Text
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath

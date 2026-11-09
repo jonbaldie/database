@@ -1,0 +1,12 @@
+---
+title: "Offset under SKIP LOCKED"
+---
+stateDiagram-v2
+  s0: skip offset, candidate 1
+  s1: skip offset, candidate 2
+  s2: acquire result, candidate 3
+  s3: Returned row 3
+  [*] --> s0
+  s0 --> s1: Inspect availability before counting offset
+  s1 --> s2: Inspect availability before counting offset
+  s2 --> s3: Lock and return candidate

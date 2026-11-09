@@ -1,0 +1,14 @@
+---
+title: "Reject a transaction staged before a schema change"
+---
+stateDiagram-v2
+  s0: Storage engine open
+  s1: Transaction staged on current schema
+  s2: Rows committed
+  s3: Transaction holds prior schema
+  s4: Stale transaction rejected
+  [*] --> s0
+  s0 --> s1: Stage row change
+  s1 --> s2: Try commit
+  s1 --> s3: Change table schema
+  s3 --> s4: Try commit

@@ -1,0 +1,33 @@
+---
+title: "PreparedHistory"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ConnectionResetReleasesPrepared
+    lg1: Path to the ConnectionResetReleasesPrepared bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: absent
+  s1: allocated
+  s2: first execution
+  s3: second execution
+  s4: long data
+  s5: reset
+  s6: closed
+  [*] --> s0
+  s0 --> s1: Prepare statement and reserve slot
+  s1 --> s2: Execute with supplied types
+  s2 --> s3: Execute with cached types
+  s3 --> s4: Append parameter bytes
+  s4 --> s5: Reset statement#59; release parameter bytes
+  s5 --> s6: Reset connection
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath

@@ -1,0 +1,20 @@
+---
+title: "Session limit selected"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks Ceiling
+    lg1: Path to the Ceiling bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Session limit selected
+  s1: Session limit assignment checked
+  s2: Session ceiling exceeded
+  [*] --> s0
+  s0 --> s1: Reject invalid assignment or Accept assignment within ceiling
+  s0 --> s2: Accept assignment above ceiling
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s2 breaks
+  class s2 bugPath

@@ -1,0 +1,30 @@
+---
+title: "Deliver a bounded row slice"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ExactSlice
+    lg1: Path to the ExactSlice bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Requested row slice complete
+  s1: Rows scanned 0, rows emitted 0
+  s2: Rows scanned 1, rows emitted 0
+  s3: Wrong row slice returned
+  s4: Rows scanned 2, rows emitted 1
+  s5: Rows scanned 2, rows emitted 0
+  [*] --> s0
+  [*] --> s1
+  s1 --> s2: Skip offset row
+  s2 --> s3: Emit next requested row
+  s2 --> s4: Emit next requested row
+  s2 --> s5: Skip offset row
+  s4 --> s3: Emit next requested row
+  s5 --> s3: Emit next requested row or Skip offset row
+  s5 --> s0: Skip offset row
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath

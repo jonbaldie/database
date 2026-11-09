@@ -1,0 +1,27 @@
+---
+title: "SpillLifecycle"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks DeliveredAndReleased
+    lg1: Path to the DeliveredAndReleased bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: buffer rows
+  s1: runs on disk
+  s2: merge ready
+  s3: delivered
+  s4: Run files remain after close
+  [*] --> s0
+  s0 --> s1: Spill
+  s1 --> s2: Merge
+  s2 --> s3: Deliver
+  s3 --> s4: Close
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 breaks
+  class s4 bugPath

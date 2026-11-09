@@ -1,0 +1,36 @@
+---
+title: "Finish or reject a storage transaction"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ClosedBeginRejected
+    lg1: Path to the ClosedBeginRejected bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Transaction active | unfinished | none
+  s1: Engine closed | unfinished | none
+  s2: Private row staged | unfinished | none
+  s3: Commit accepted | finished | success
+  s4: Commit after engine close | unfinished | closed error
+  s5: Commit rejected | unfinished | validation error
+  s6: Second commit result | finished | finished error
+  s7: Begin after engine close | unfinished | success
+  s8: Engine closed | unfinished | validation error
+  [*] --> s0
+  s0 --> s1: Close the engine
+  s0 --> s2: Stage a row
+  s1 --> s4: Try commit after close
+  s2 --> s3: Commit succeeds
+  s2 --> s5: Schema validation fails
+  s2 --> s1: Close the engine
+  s3 --> s6: Commit again
+  s4 --> s7: Try begin after close
+  s5 --> s8: Close the engine
+  s8 --> s4: Try commit after close
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s4 bugPath
+  class s7 breaks
+  class s7 bugPath

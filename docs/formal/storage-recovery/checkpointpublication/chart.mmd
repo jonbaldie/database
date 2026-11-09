@@ -1,0 +1,28 @@
+---
+title: "Checkpoint committed rows and replace the log"
+---
+stateDiagram-v2
+  s0: Committed rows in original log
+  s1: restart
+  s2: temporary snapshot synced
+  s3: Committed rows recovered
+  s4: snapshot published
+  s5: new log synced
+  s6: log replaced
+  s7: complete
+  s8: Directory sync failed#59; writer stopped
+  [*] --> s0
+  s0 --> s1: Process stops
+  s0 --> s2: Write and sync snapshot
+  s1 --> s3: Recover committed rows
+  s2 --> s1: Process stops
+  s2 --> s4: Publish snapshot and sync directory
+  s4 --> s5: Write and sync replacement log
+  s4 --> s1: Process stops
+  s5 --> s1: Process stops
+  s5 --> s6: Replace original log
+  s6 --> s7: Sync directory and finish
+  s6 --> s1: Process stops
+  s6 --> s8: Directory sync fails
+  s7 --> s1: Process stops
+  s8 --> s1: Process stops

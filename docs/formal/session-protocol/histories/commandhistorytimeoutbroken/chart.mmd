@@ -1,0 +1,30 @@
+---
+title: "CommandHistory"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks IdleExpiryRollsBack
+    lg1: Path to the IdleExpiryRollsBack bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: executing
+  s1: buffered
+  s2: idle
+  s3: revoked
+  s4: timeout
+  s5: dispatched
+  s6: closed
+  [*] --> s0
+  s0 --> s1: Read next command during active statement
+  s1 --> s2: Active statement returns
+  s2 --> s3: Account is revoked
+  s2 --> s4: Idle transaction deadline expires
+  s2 --> s5: Dispatch buffered command
+  s3 --> s6: Reject next command and close
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s4 breaks
+  class s4 bugPath

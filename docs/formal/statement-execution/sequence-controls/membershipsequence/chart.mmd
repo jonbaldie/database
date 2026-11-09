@@ -1,0 +1,28 @@
+---
+title: "MembershipSequence"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NullAwareMembership
+    lg1: Path to the NullAwareMembership bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Inspect member 1
+  s1: Inspect member 2
+  s2: Inspect member 3
+  s3: Membership false#59; inputs null, other
+  s4: Membership false#59; inputs other, other
+  s5: Membership true#59; inputs null, match
+  [*] --> s0
+  s0 --> s1: Read
+  s1 --> s2: Read
+  s2 --> s5: Finish
+  s2 --> s3: Finish
+  s2 --> s4: Finish
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath

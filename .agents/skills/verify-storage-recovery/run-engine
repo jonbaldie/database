@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent;repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':raise SystemExit('Use pinned TLC 1.7.4')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+variants=[('',None),('BrokenFailure','FailedCommitUnfinished'),('BrokenSuccess','SuccessFinishes'),('BrokenRepeat','RepeatRejected'),('BrokenCommit','ClosedCommitRejected'),('BrokenBegin','ClosedBeginRejected')]
+faults=[
+('failure','if err := validateOverlays(engine, txn.overlays, keys); err != nil {\n\t\treturn err','if err := validateOverlays(engine, txn.overlays, keys); err != nil {\n\t\ttxn.finished = true\n\t\treturn err','failed validation finished transaction'),
+('success','_ = engine.maybeCheckpointLocked()\n\ttxn.finished = true','_ = engine.maybeCheckpointLocked()\n\ttxn.finished = false','successful commit left transaction unfinished'),
+('repeat','func (txn *Transaction) Commit() error {\n\tif txn.finished {','func (txn *Transaction) Commit() error {\n\tif false {','second commit not rejected'),
+('closed commit','if engine.closed || engine.wal == nil {','if false {','closed engine accepted commit or finished transaction'),
+('closed begin','func (e *Engine) Begin() (*Transaction, error) {\n\te.mu.RLock()\n\tdefer e.mu.RUnlock()\n\tif e.closed {','func (e *Engine) Begin() (*Transaction, error) {\n\te.mu.RLock()\n\tdefer e.mu.RUnlock()\n\tif false {','closed engine accepted begin')]
+with tempfile.TemporaryDirectory(prefix='database-engine-lifecycle-') as scratch:
+ root=pathlib.Path(scratch)
+ for suffix,rule in variants:
+  name='EngineLifecycle'+suffix
+  r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/name),'-config',str(skill/(name+'.cfg')),str(skill/'EngineLifecycle.tla')],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout,flush=True)
+  if rule is None and r.returncode:raise SystemExit('Current model failed')
+  if rule and (r.returncode!=12 or 'Invariant '+rule+' is violated' not in r.stdout):raise SystemExit('Broken model missed '+rule)
+ source=repo/'internal/storage/txn.go';original=source.read_text()
+ for fault in [None]+faults+[None]:
+  name='current' if fault is None else fault[0]
+  overlay={'Replace':{str(repo/'internal/storage/zz_formal_engine_lifecycle_test.go'):str(skill/'engine_lifecycle_test.go.txt')}}
+  if fault:
+   _,old,new,message=fault
+   if original.count(old)!=1:raise SystemExit('Source anchor changed '+name)
+   patched=root/(name+'.go');patched.write_text(original.replace(old,new));overlay['Replace'][str(source)]=str(patched)
+  path=root/(name+'.json');path.write_text(json.dumps(overlay))
+  r=subprocess.run(['go','test','-timeout','20s','-count=1','-overlay',str(path),'./internal/storage','-run','^TestFormalEngineLifecycle$'],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout,flush=True)
+  if fault is None and r.returncode:raise SystemExit('Current source failed')
+  if fault and (r.returncode==0 or message not in r.stdout or '[build failed]' in r.stdout):raise SystemExit('Fault missed named behavior '+name)
+print('Engine lifecycle model, five controls, source probes and five faults passed.')

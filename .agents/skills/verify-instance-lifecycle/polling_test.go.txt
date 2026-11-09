@@ -1,0 +1,48 @@
+package main
+
+import (
+	"errors"
+	"net"
+	"testing"
+	"time"
+)
+
+var formalPollTime time.Time
+var formalPollCalls int
+var formalPollOutcomes []bool
+var formalPollStep time.Duration
+
+func formalPollNow() time.Time        { return formalPollTime }
+func formalPollSleep(_ time.Duration) { formalPollTime = formalPollTime.Add(formalPollStep) }
+func formalPollDial(_, _ string, _ time.Duration) (net.Conn, error) {
+	index := formalPollCalls
+	formalPollCalls++
+	if len(formalPollOutcomes) == 0 || formalPollOutcomes[index%len(formalPollOutcomes)] {
+		return nil, errors.New("formal connection refused")
+	}
+	left, right := net.Pipe()
+	right.Close()
+	return left, nil
+}
+func TestFormalShutdownPolling(t *testing.T) {
+	formalPollTime = time.Unix(100, 0)
+	formalPollCalls = 0
+	formalPollStep = time.Millisecond
+	formalPollOutcomes = []bool{true, true, false, true, true, true}
+	if err := waitForOnlineShutdown("formal"); err != nil {
+		t.Fatal("shutdown poll failed", err)
+	}
+	if formalPollCalls != 6 {
+		t.Fatal("shutdown confirmed without three consecutive failures", formalPollCalls)
+	}
+	formalPollTime = time.Unix(100, 0)
+	formalPollCalls = 0
+	formalPollStep = 10 * time.Second
+	formalPollOutcomes = []bool{false}
+	if err := waitForOnlineShutdown("formal"); err == nil {
+		t.Fatal("live listener was reported as stopped")
+	}
+	if formalPollCalls != 3 {
+		t.Fatal("shutdown deadline did not stop polling", formalPollCalls)
+	}
+}

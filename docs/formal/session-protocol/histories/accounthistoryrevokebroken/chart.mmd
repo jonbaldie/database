@@ -1,0 +1,31 @@
+---
+title: "AccountHistory"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks DisableRevokesSession
+    lg1: Path to the DisableRevokesSession bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: absent
+  s1: created
+  s2: changed
+  s3: locked
+  s4: unlocked
+  s5: reconnected
+  s6: dropped
+  [*] --> s0
+  s0 --> s1: Create account
+  s1 --> s2: Change password
+  s2 --> s3: Lock account and revoke sessions
+  s3 --> s4: Unlock account
+  s4 --> s5: Establish replacement session
+  s5 --> s6: Drop account and revoke sessions
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath
+  class s6 breaks

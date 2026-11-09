@@ -1,0 +1,29 @@
+---
+title: "AlterPublication"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ValidateBeforePublication
+    lg1: Path to the ValidateBeforePublication bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: original schema
+  s1: private schema
+  s2: actions applied
+  s3: validated
+  s4: Invalid schema published
+  s5: Valid schema published
+  [*] --> s0
+  s0 --> s1: Clone
+  s1 --> s2: Apply private schema actions
+  s2 --> s3: Validate
+  s3 --> s4: Publish
+  s3 --> s5: Publish
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 breaks
+  class s4 bugPath

@@ -1,0 +1,23 @@
+---
+title: "IndexBoundConstruction"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks BoundsMatchPredicates
+    lg1: Path to the BoundsMatchPredicates bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Applied 0 predicates
+  s1: Applied 1 predicates
+  s2: Applied 2 predicates
+  s3: Bounds include wrong values
+  [*] --> s0
+  s0 --> s1: Upper or Lower
+  s1 --> s2: Upper or Lower
+  s1 --> s3: Upper or Lower
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 breaks
+  class s3 bugPath

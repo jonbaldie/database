@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+import hashlib, json, os, pathlib, subprocess, tempfile
+
+skill = pathlib.Path(__file__).resolve().parent
+repo = skill.parents[2]
+jar = pathlib.Path(os.environ.get('TLA2TOOLS', pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest() != '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':
+    raise SystemExit('Install the checksum-pinned TLC 1.7.4 jar with verify-wal-atomicity.')
+env = dict(os.environ, GOMAXPROCS='2', GOFLAGS='-p=2')
+models = {
+    'CheckpointPublication': [('Snapshot', 'CheckpointKeepsRows'), ('Fence', 'FailedRotationStopsWriter')],
+    'SchemaVersion': [('Version', 'StaleSchemaStaysPrivate')],
+    'CatalogHydration': [('Hydration', 'DurableRowsWin')],
+    'CatalogRevision': [('Claim', 'OneRevisionOneReplacement')],
+    'OrderedCache': [('Cache', 'IndexMatchesRows')],
+    'AutoIncrement': [('Advance', 'FutureAboveRecordedValues'), ('Exhaust', 'FutureAboveRecordedValues')],
+}
+probes = {
+    'storage': 'details_storage_test.go.txt',
+    'catalog': 'details_catalog_test.go.txt',
+    'mysql': 'allocation_test.go.txt',
+}
+mutations = [
+    ('snapshot', 'storage', 'checkpoint.go', 'if err := e.publishCheckpointSnapshot(walOffset); err != nil {', 'if err := error(nil); err != nil {', '^TestFormalCheckpointSuccess$', 'checkpoint lost a committed row'),
+    ('rotation-fence', 'storage', 'checkpoint.go', 'e.stopAfterWALPublicationFailure(nextWAL)', '_ = nextWAL', '^TestFormalCheckpointFence$', 'failed rotation accepted another transaction'),
+    ('schema-version', 'storage', 'txn.go', '\t\tif !ok || current != overlay.base || current.version != overlay.baseVersion {', '\t\tif !ok || current != overlay.base {', '^TestFormalSchemaVersion$', 'stale schema transaction was not rejected'),
+    ('hydration', 'catalog', 'rows.go', 'table.Rows = rows', 'table.Rows = table.Rows', '^TestFormalCatalogHydration$', 'hydration did not select the durable row image'),
+    ('revision-claim', 'catalog', 'writer.go', ' || claimed[req.expectedRevision]', '', '^TestFormalCatalogRevision$', 'one revision accepted multiple replacements'),
+    ('cache-reuse', 'catalog', 'ordered_index.go', 'found && sameRowSlice(previousTable.Rows, table.Rows) &&', 'found &&', '^TestFormalOrderedCache$', 'changed row image reused a stale index'),
+    ('allocation-advance', 'mysql', 'auto_increment.go', 'state.next = value + 1', 'state.next = value', '^TestFormalAutoIncrement$', 'explicit identifier did not advance allocation'),
+    ('allocation-exhaust', 'mysql', 'auto_increment.go', 'if state.next == limit {', 'if false {', '^TestFormalAutoIncrement$', 'maximum identifier did not exhaust allocation'),
+]
+with tempfile.TemporaryDirectory(prefix='database-storage-details-') as scratch:
+    root = pathlib.Path(scratch)
+    for name, variants in models.items():
+        for suffix, rule in [(None, None)] + variants:
+            config = name if suffix is None else name+'Broken'+suffix
+            result = subprocess.run(['java', '-XX:ActiveProcessorCount=2', '-cp', str(jar), 'tlc2.TLC', '-workers', '1', '-metadir', str(root/config), '-config', str(skill/(config+'.cfg')), str(skill/(name+'.tla'))], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            print(config+':\n'+result.stdout, flush=True)
+            if rule is None and result.returncode:
+                raise SystemExit('Current model failed: '+name)
+            if rule and (result.returncode != 12 or 'Invariant '+rule+' is violated' not in result.stdout):
+                raise SystemExit('Broken model did not fail its rule: '+config)
+    cases = [('current-'+package, package, None) for package in probes]
+    cases += [(entry[0], entry[1], entry) for entry in mutations]
+    for name, package, mutation in cases:
+        overlay = {'Replace': {str(repo/'internal'/package/'zz_formal_storage_details_test.go'): str(skill/probes[package])}}
+        pattern = '^TestFormal'
+        if mutation:
+            _, _, filename, old, new, pattern, message = mutation
+            source = repo/'internal'/package/filename
+            original = source.read_text()
+            if original.count(old) != 1:
+                raise SystemExit('Source changed; inspect '+name)
+            patched = root/(name+'.go')
+            patched.write_text(original.replace(old, new))
+            overlay['Replace'][str(source)] = str(patched)
+        path = root/(name+'.json')
+        path.write_text(json.dumps(overlay))
+        result = subprocess.run(['go', 'test', '-count=1', '-overlay', str(path), './internal/'+package, '-run', pattern], cwd=repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        print(name+':\n'+result.stdout, flush=True)
+        if mutation is None and result.returncode:
+            raise SystemExit('Current source probe failed: '+package)
+        if mutation and (result.returncode == 0 or message not in result.stdout):
+            raise SystemExit('Mutation did not fail its behavioral assertion: '+name)
+print('Six storage detail models, eight broken models, source probes, and eight source mutations passed.')

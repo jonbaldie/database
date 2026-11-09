@@ -1,0 +1,14 @@
+---
+title: "SetAssignmentHistory"
+---
+stateDiagram-v2
+  s0: before USE
+  s1: before SET
+  s2: first applied
+  s3: assignment failed
+  s4: complete
+  [*] --> s0
+  s0 --> s1: Select database
+  s1 --> s2: Apply first setting
+  s2 --> s3: Next setting is unknown
+  s3 --> s4: Return error before later assignments

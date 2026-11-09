@@ -1,0 +1,8 @@
+---
+title: "Session limit selected"
+---
+stateDiagram-v2
+  s0: Session limit selected
+  s1: Session limit assignment checked
+  [*] --> s0
+  s0 --> s1: Reject invalid assignment or Accept assignment within ceiling

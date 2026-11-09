@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent
+repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':
+ raise SystemExit('Install the pinned TLC 1.7.4 jar with verify-wal-atomicity, or set TLA2TOOLS.')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+models={'Resources':'ResourceAccounting','ResultOwnership':'ReleaseOnce','LimitDelivery':'ExactSlice','CTEReuse':'BuildOnce','RollingWindow':'FrameCount','OuterJoin':'PreserveUnmatchedLeft','SetMultiplicity':'IntersectionCount','RangeSearch':'InclusiveLowerBound','MutationFinish':'RejectedAutocommitClearsStage','SpillMerge':'SortedRows'}
+mutations=[
+ ('resources','resources.go','r.manager.releaseMemory(memory)','_ = memory','Resources','closed statements retained resources'),
+ ('ownership','server.go','r.release = nil','r.release = release','ResultOwnership','result released more than once'),
+ ('materialization','composed_select.go','func materializeQueryResult(result *queryResult) (*queryResult, error) {\n\tdefer result.close()','func materializeQueryResult(result *queryResult) (*queryResult, error) {','ResultOwnership','materialization retained result ownership'),
+ ('stream-limit','relational_select.go','s.skipped < s.plan.limit.offset','s.skipped <= s.plan.limit.offset','Limit','streamed limit slice changed'),
+ ('cte','composed_select.go','relation.state.result = result','relation.state.result = nil','CTEReuse','CTE aliases repeated materialization'),
+ ('window','relational_select_window.go','state.count--\n\tif !state.kind.tracksTotal()','state.count += 0\n\tif !state.kind.tracksTotal()','Window','rolling window retained an old row'),
+ ('join','relational_select_source.go','return run.emit(appendNullRight(row, len(run.join.right.columns)))','return nil','Join','left join lost unmatched row'),
+ ('set','composed_select.go','rightCounts[key]--','rightCounts[key] += 0','Set','set multiplicity changed'),
+ ('range','relational_select_source.go','return comparison > 0 || comparison == 0 && bounds.lower.inclusive','return comparison > 0 || comparison == 0 && !bounds.lower.inclusive','Range','ordered range boundary changed'),
+ ('mutation-finish','transaction.go','if e.autocommit || isDeadlock(err) || isCancellation(err) {','if false {','MutationFinish','rejected autocommit retained staged changes'),
+ ('sort','relational_spill.go','return orderedBefore(comparison, order.direction)','return !orderedBefore(comparison, order.direction)','Sort','spill sort order changed'),
+]
+with tempfile.TemporaryDirectory(prefix='database-statements-formal-') as scratch:
+ root=pathlib.Path(scratch)
+ for name,rule in models.items():
+  for broken in [False,True]:
+   label=name+('Broken' if broken else '')
+   result=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/label),'-config',str(skill/(label+'.cfg')),str(skill/(name+'.tla'))],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   print(label+':\n'+result.stdout,flush=True)
+   if not broken and result.returncode:raise SystemExit('Current model failed: '+name)
+   if broken and (result.returncode!=12 or 'Invariant '+rule+' is violated' not in result.stdout):raise SystemExit('Broken model did not fail expected rule: '+name)
+ for variant in [None]+mutations+[None]:
+  label='current' if variant is None else variant[0]
+  overlay={'Replace':{str(repo/'internal/mysql/zz_formal_statement_test.go'):str(skill/'statement_test.go.txt')}}
+  pattern='^TestFormalStatement'
+  if variant:
+   _,filename,old,new,test,message=variant
+   source=repo/'internal/mysql'/filename;text=source.read_text()
+   if text.count(old)!=1:raise SystemExit('Source changed; inspect '+label)
+   patched=root/(label+'.go');patched.write_text(text.replace(old,new));overlay['Replace'][str(source)]=str(patched)
+   pattern='^TestFormalStatement'+test+'$'
+  path=root/(label+'.json');path.write_text(json.dumps(overlay))
+  result=subprocess.run(['go','test','-count=1','-overlay',str(path),'./internal/mysql','-run',pattern],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(label+':\n'+result.stdout,flush=True)
+  if variant is None and result.returncode:raise SystemExit('Current source probe failed')
+  if variant and (result.returncode==0 or message not in result.stdout):raise SystemExit('Source mutation was not caught at named assertion: '+label)
+print('Ten bounded statement models, current source probes, and eleven source mutations passed.')
+
+subprocess.run([str(skill/"run-sequences")],cwd=repo,check=True)
+print('Twenty-three current models, twenty-three broken models, and twenty-six source fault controls passed.')

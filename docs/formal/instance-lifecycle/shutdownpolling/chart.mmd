@@ -1,0 +1,18 @@
+---
+title: "Confirm that the database listener stopped"
+---
+stateDiagram-v2
+  s0: Wait for stop, consecutive failures 0
+  s1: Wait for stop, consecutive failures 1
+  s2: Wait for stop, consecutive failures 2
+  s3: Listener stop confirmed
+  s4: Shutdown wait timed out
+  [*] --> s0
+  s0 --> s1: Connection attempt fails
+  s1 --> s0: Listener accepts connection#59; reset failure count
+  s1 --> s2: Connection attempt fails
+  s2 --> s0: Listener accepts connection#59; reset failure count
+  s2 --> s3: Connection attempt fails
+  s0 --> s4: Shutdown deadline reached
+  s1 --> s4: Shutdown deadline reached
+  s2 --> s4: Shutdown deadline reached

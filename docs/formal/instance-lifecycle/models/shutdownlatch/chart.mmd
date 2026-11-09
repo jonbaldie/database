@@ -1,0 +1,10 @@
+---
+title: "Shutdown request ownership"
+---
+stateDiagram-v2
+  s0: Server accepts requests
+  s1: Shutdown requested by a
+  s2: Shutdown requested by b
+  [*] --> s0
+  s0 --> s1: Request shutdown
+  s0 --> s2: Request shutdown

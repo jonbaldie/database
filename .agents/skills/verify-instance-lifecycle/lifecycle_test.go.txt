@@ -1,0 +1,86 @@
+package lifecycle
+
+import (
+	"context"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestFormalLifecycleClaimAndMarker(t *testing.T) {
+	for _, clean := range []bool{false, true} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".database-state")
+		claim, err := claimState(path, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claim.recovered {
+			t.Fatal("new instance reported recovery")
+		}
+		second, err := claimState(path, dir)
+		if err == nil {
+			second.finish(false)
+			claim.finish(false)
+			t.Fatal("second owner acquired directory")
+		}
+		claim.finish(clean)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "running\n"
+		if clean {
+			want = "stopped\n"
+		}
+		if string(data) != want {
+			t.Fatal("stop marker did not match clean flag")
+		}
+		again, err := claimState(path, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer again.finish(true)
+		if again.recovered != !clean {
+			t.Fatal("recovery did not reflect prior marker")
+		}
+	}
+}
+func TestFormalLifecycleReadyAndStop(t *testing.T) {
+	var events []Event
+	s := &server{health: newHealth(), emit: func(e Event) { events = append(events, e) }}
+	handler := diagnosticsHandler(s.health)
+	check := func(want int) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/ready", nil))
+		if w.Code != want {
+			t.Fatalf("readiness status: got %d want %d", w.Code, want)
+		}
+	}
+	check(503)
+	s.reportReady(false, runtime{})
+	check(200)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.awaitStop(ctx, nil, nil)
+	check(503)
+	if s.health.current() != "shutting_down" || len(events) != 2 || events[0].State != "ready" || events[1].State != "stopping" {
+		t.Fatal("shutdown did not revoke readiness before stopping event")
+	}
+}
+
+func TestFormalLifecycleFailedStartup(t *testing.T) {
+	var events []Event
+	dir := t.TempDir()
+	s := &server{options: Options{DataDirectory: dir, StateFile: filepath.Join(dir, ".database-state")}, health: newHealth(), emit: func(e Event) { events = append(events, e) }}
+	if err := s.serve(context.Background()); err == nil {
+		t.Fatal("empty instance started")
+	}
+	for _, event := range events {
+		if event.State == "ready" {
+			t.Fatal("failed startup reported ready before runtime")
+		}
+	}
+}

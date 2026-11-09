@@ -1,0 +1,21 @@
+---
+title: "Offset under SKIP LOCKED"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks AvailableOffsetOnly
+    lg1: Path to the AvailableOffsetOnly bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: skip offset, candidate 1
+  s1: acquire result, candidate 2
+  s2: Returned row 2
+  [*] --> s0
+  s0 --> s1: Inspect availability before counting offset
+  s1 --> s2: Lock and return candidate
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath

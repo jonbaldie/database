@@ -1,0 +1,8 @@
+---
+title: "Reject an autocommit mutation"
+---
+stateDiagram-v2
+  s0: mutation staged
+  s1: statement failed
+  [*] --> s0
+  s0 --> s1: Reject autocommit statement

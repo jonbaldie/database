@@ -1,0 +1,34 @@
+---
+title: "Statement resource reservations"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ResourceAccounting
+    lg1: Path to the ResourceAccounting bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Statements hold 0 units, manager holds 0
+  s1: Statements hold 1 units, manager holds 1
+  s2: Statements hold 2 units, manager holds 2
+  s3: Both statements released
+  s4: Statements hold 0 units, manager holds 1
+  s5: Statements hold 1 units, manager holds 2
+  s6: Released statements still hold capacity
+  [*] --> s0
+  s0 --> s1: Reserve one unit
+  s1 --> s2: Reserve one unit
+  s1 --> s4: Close one statement
+  s0 --> s3: Close one statement
+  s2 --> s5: Close one statement
+  s1 --> s6: Close one statement
+  s4 --> s5: Reserve one unit
+  s4 --> s6: Close one statement
+  s5 --> s6: Close one statement
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s4 breaks
+  class s4 bugPath
+  class s5 breaks
+  class s6 breaks

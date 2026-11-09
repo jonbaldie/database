@@ -1,0 +1,22 @@
+package mysql
+
+import "testing"
+
+func TestFormalShutdownLatch(t *testing.T) {
+	s := &Server{shutdown: make(chan struct{})}
+	select {
+	case <-s.ShutdownRequested():
+		t.Fatal("shutdown requested before request")
+	default:
+	}
+	s.RequestShutdown("first")
+	select {
+	case <-s.ShutdownRequested():
+	default:
+		t.Fatal("shutdown request not delivered")
+	}
+	s.RequestShutdown("second")
+	if s.ShutdownOperationID() != "first" {
+		t.Fatal("second shutdown replaced first operation")
+	}
+}
