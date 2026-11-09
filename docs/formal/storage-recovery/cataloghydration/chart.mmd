@@ -1,0 +1,10 @@
+---
+title: "Load catalog rows from durable storage"
+---
+stateDiagram-v2
+  s0: Open catalog and row storage
+  s1: Use durable row image
+  s2: Use legacy catalog rows
+  [*] --> s0
+  s0 --> s1: Durable rows are present
+  s0 --> s2: Durable rows are empty#59; seed legacy rows

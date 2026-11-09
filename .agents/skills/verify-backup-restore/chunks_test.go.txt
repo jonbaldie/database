@@ -1,0 +1,56 @@
+package mysql
+
+import (
+	"bytes"
+	"errors"
+	"testing"
+)
+
+func TestFormalBackupChunkBoundaries(t *testing.T) {
+	for _, size := range []int{0, 1, instanceBackupChunkSize - 1, instanceBackupChunkSize, instanceBackupChunkSize + 1, 2*instanceBackupChunkSize + 1} {
+		payload := bytes.Repeat([]byte{42}, size)
+		var got bytes.Buffer
+		writer := &backupChunkWriter{yield: func(row []string, _ []bool) error {
+			if row[0] != "catalog.json" || len(row[1]) > instanceBackupChunkSize {
+				t.Fatal("invalid catalog chunk")
+			}
+			_, err := got.WriteString(row[1])
+			return err
+		}}
+		for start := 0; start < size; {
+			end := start + 7919
+			if end > size {
+				end = size
+			}
+			n, err := writer.Write(payload[start:end])
+			if err != nil || n != end-start {
+				t.Fatal("write count or error", n, err)
+			}
+			start = end
+		}
+		if err := writer.flush(); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(payload, got.Bytes()) {
+			t.Fatal("chunk stream differs from input")
+		}
+	}
+	sentinel := errors.New("yield failed")
+	writer := &backupChunkWriter{yield: func([]string, []bool) error { return sentinel }}
+	if _, err := writer.Write(make([]byte, instanceBackupChunkSize)); !errors.Is(err, sentinel) {
+		t.Fatal("yield error was lost")
+	}
+}
+func TestFormalBackupChunkReset(t *testing.T) {
+	calls := 0
+	writer := &backupChunkWriter{yield: func([]string, []bool) error { calls++; return nil }}
+	if _, err := writer.Write(make([]byte, instanceBackupChunkSize)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.flush(); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatal("full chunk was emitted twice")
+	}
+}

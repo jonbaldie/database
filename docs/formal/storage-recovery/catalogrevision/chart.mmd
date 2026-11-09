@@ -1,0 +1,10 @@
+---
+title: "Allow one replacement for one catalog revision"
+---
+stateDiagram-v2
+  s0: Requests checked 0, replacements accepted 0
+  s1: Requests checked 1, replacements accepted 1
+  s2: Requests checked 2, replacements accepted 1
+  [*] --> s0
+  s0 --> s1: Accept first revision claim
+  s1 --> s2: Reject revision already claimed

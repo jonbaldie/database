@@ -1,0 +1,10 @@
+---
+title: "Cancellation watch open"
+---
+stateDiagram-v2
+  s0: Cancellation watch open
+  s1: Cancellation delivered
+  s2: Repeated cancellation ignored
+  [*] --> s0
+  s0 --> s1: Request cancellation
+  s1 --> s2: Ignore repeated cancellation

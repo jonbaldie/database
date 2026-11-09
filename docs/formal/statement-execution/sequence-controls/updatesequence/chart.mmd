@@ -1,0 +1,30 @@
+---
+title: "UpdateSequence"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks AssignmentsSeePriorValues
+    lg1: Path to the AssignmentsSeePriorValues bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: select
+  s1: first assignment
+  s2: second assignment
+  s3: validate
+  s4: publish
+  s5: Wrong values published
+  [*] --> s0
+  s0 --> s1: Select
+  s1 --> s2: Assign First
+  s2 --> s3: Assign Second
+  s3 --> s4: Validate
+  s4 --> s5: Publish
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 breaks
+  class s5 bugPath

@@ -1,0 +1,13 @@
+---
+title: "Find an inclusive lower index bound"
+---
+stateDiagram-v2
+  s0: Search positions 0 through 3
+  s1: Search positions 0 through 1
+  s2: Search positions 2 through 3
+  s3: Lower boundary found
+  [*] --> s0
+  s0 --> s1: Search at or below middle row
+  s0 --> s2: Search above middle row
+  s1 --> s3: Search at or below middle row or Search above middle row
+  s2 --> s3: Search at or below middle row or Search above middle row

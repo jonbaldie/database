@@ -1,0 +1,295 @@
+package mysql
+
+import (
+	"errors"
+	"fmt"
+	"reflect"
+	"testing"
+)
+
+func TestFormalStatementResources(t *testing.T) {
+	config := Config{ResourceLimits: ResourceLimits{ExecutionMemoryLimitBytes: 2, AggregateExecutionMemoryLimitBytes: 3, TemporaryStorageLimitBytes: 2, AggregateTemporaryStorageLimitBytes: 3}}
+	for first := 0; first <= 2; first++ {
+		for second := 0; second <= 2; second++ {
+			manager := newResourceManager(config)
+			a := newStatementResources(manager, config, nil)
+			b := newStatementResources(manager, config, nil)
+			if err := reserveStatementMemory(a, int64(first)); err != nil {
+				t.Fatal(err)
+			}
+			err := reserveStatementMemory(b, int64(second))
+			if (err != nil) != (first+second > 3) {
+				t.Fatal("aggregate memory ceiling changed")
+			}
+			if err := reserveStatementTemporary(a, int64(first)); err != nil {
+				t.Fatal(err)
+			}
+			err = reserveStatementTemporary(b, int64(second))
+			if (err != nil) != (first+second > 3) {
+				t.Fatal("aggregate temporary ceiling changed")
+			}
+			closeStatementResources(a)
+			closeStatementResources(a)
+			closeStatementResources(b)
+			usage := manager.usage()
+			if usage.ExecutionMemoryBytes != 0 || usage.TemporaryStorageBytes != 0 {
+				t.Fatal("closed statements retained resources")
+			}
+		}
+	}
+}
+
+func TestFormalStatementResultOwnership(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		calls := 0
+		sentinel := errors.New("delivery stopped")
+		r := &queryResult{release: func() { calls++ }, stream: func(yield func([]string, []bool) error) error {
+			if err := yield([]string{"row"}, []bool{false}); err != nil {
+				return err
+			}
+			if fail {
+				return sentinel
+			}
+			return nil
+		}}
+		materialized, err := materializeQueryResult(r)
+		if fail {
+			if !errors.Is(err, sentinel) {
+				t.Fatal("materialization lost stream error")
+			}
+		} else if err != nil || !reflect.DeepEqual(materialized.rows, [][]string{{"row"}}) {
+			t.Fatal("materialized rows changed")
+		}
+		if calls != 1 {
+			t.Fatal("materialization retained result ownership")
+		}
+		r.close()
+		r.close()
+		if calls != 1 {
+			t.Fatal("result released more than once")
+		}
+	}
+}
+
+func TestFormalStatementLimit(t *testing.T) {
+	for n := 0; n <= 4; n++ {
+		for offset := 0; offset <= 5; offset++ {
+			for count := 0; count <= 5; count++ {
+				rows := make([]relationalResultRow, n)
+				for i := range rows {
+					rows[i].values = []string{fmt.Sprint(i)}
+				}
+				got := limitRelationalRows(rows, relationalLimit{present: true, offset: offset, count: count})
+				start := min(offset, n)
+				end := min(offset+count, n)
+				if !reflect.DeepEqual(got, rows[start:end]) {
+					t.Fatal("buffered limit slice changed")
+				}
+			}
+		}
+	}
+	executor := relationalSelectExecutor(t)
+	executor.streamRows = true
+	for offset := 0; offset <= 4; offset++ {
+		for count := 0; count <= 4; count++ {
+			result, err := executeStatement(executor, fmt.Sprintf("SELECT id FROM authors LIMIT %d,%d", offset, count))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := []string{}
+			if result.stream != nil {
+				err = result.stream(func(row []string, _ []bool) error { got = append(got, row[0]); return nil })
+			} else {
+				for _, row := range result.rows {
+					got = append(got, row[0])
+				}
+			}
+			result.close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{}
+			for i := offset; i < 3 && i < offset+count; i++ {
+				want = append(want, fmt.Sprint(i+1))
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatal("streamed limit slice changed")
+			}
+		}
+	}
+}
+
+func TestFormalStatementCTEReuse(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	context := newComposedQueryContext(&relationExecutor{session: executor.session})
+	context, _, err := parseAndMaterializeCTEs(context, "WITH c AS (SELECT id FROM authors) SELECT * FROM c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := context.ctes["c"]
+	first, err := materializeCTE(context, "c", original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := materializeCTE(context, "c", original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.result != second.result {
+		t.Fatal("CTE aliases repeated materialization")
+	}
+}
+
+func TestFormalStatementWindow(t *testing.T) {
+	for n := 1; n <= 4; n++ {
+		executor := newSeededExecutor(t, "CREATE TABLE values_for_window (id INT, v INT)")
+		for i := 1; i <= n; i++ {
+			if _, err := executeStatement(executor, fmt.Sprintf("INSERT INTO values_for_window VALUES (%d,%d)", i, i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		result, err := executeStatement(executor, "SELECT COUNT(*) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM values_for_window ORDER BY id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range result.rows {
+			if row[0] != "1" {
+				t.Fatal("rolling window retained an old row")
+			}
+		}
+		result.close()
+	}
+}
+
+func TestFormalStatementJoin(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	result, err := executeStatement(executor, "SELECT a.id,l.label FROM authors a LEFT JOIN author_labels l ON a.id=l.id ORDER BY a.id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.close()
+	if !reflect.DeepEqual(result.rows, [][]string{{"1", "A"}, {"2", "G"}, {"3", "NULL"}}) {
+		t.Fatal("left join lost unmatched row")
+	}
+}
+
+func TestFormalStatementSet(t *testing.T) {
+	for left := 0; left <= 4; left++ {
+		for right := 0; right <= 4; right++ {
+			for _, intersection := range []bool{false, true} {
+				for _, all := range []bool{false, true} {
+					counts := map[string]int{"x": right}
+					emitted := map[string]bool{}
+					got := 0
+					for i := 0; i < left; i++ {
+						if includeSetRow("x", counts, emitted, all, intersection) {
+							got++
+							emitted["x"] = true
+						}
+					}
+					want := 0
+					if all {
+						if intersection {
+							want = min(left, right)
+						} else {
+							want = max(left-right, 0)
+						}
+					} else if left > 0 && ((right > 0) == intersection) {
+						want = 1
+					}
+					if got != want {
+						t.Fatal("set multiplicity changed")
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestFormalStatementRange(t *testing.T) {
+	column := &relationColumn{name: "id", typeName: "INT", index: 0}
+	for length := 0; length <= 4; length++ {
+		for boundary := -1; boundary <= 5; boundary++ {
+			for _, inclusive := range []bool{false, true} {
+				for _, lower := range []bool{false, true} {
+					for _, descending := range []bool{false, true} {
+						bounds := &relationalIndexBounds{}
+						bound := relationalIndexBound{value: intValue(int64(boundary)), present: true, inclusive: inclusive}
+						if lower {
+							bounds.lower = bound
+						} else {
+							bounds.upper = bound
+						}
+						valueAt := func(i int) exprValue {
+							if descending {
+								return intValue(int64(length - 1 - i))
+							}
+							return intValue(int64(i))
+						}
+						var start, end int
+						if descending {
+							start, end = descendingOrderedIndexBounds(length, bounds, column, valueAt)
+						} else {
+							start, end = ascendingOrderedIndexBounds(length, bounds, column, valueAt)
+						}
+						got := []int{}
+						for i := start; i < end; i++ {
+							v := i
+							if descending {
+								v = length - 1 - i
+							}
+							got = append(got, v)
+						}
+						want := []int{}
+						for i := 0; i < length; i++ {
+							v := i
+							if descending {
+								v = length - 1 - i
+							}
+							keep := v < boundary || inclusive && v == boundary
+							if lower {
+								keep = v > boundary || inclusive && v == boundary
+							}
+							if keep {
+								want = append(want, v)
+							}
+						}
+						if !reflect.DeepEqual(got, want) {
+							t.Fatal("ordered range boundary changed")
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestFormalStatementMutationFinish(t *testing.T) {
+	executor := relationalSelectExecutor(t)
+	for _, query := range []string{"BEGIN", "INSERT INTO authors VALUES (4,'staged')"} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sentinel := errors.New("reject autocommit statement")
+	result, err := (statementTransaction{autocommit: true}).finish(executor.session, nil, sentinel)
+	if result != nil || !errors.Is(err, sentinel) {
+		t.Fatal("statement failure changed")
+	}
+	if executor.transaction || len(executor.transactionMutations) != 0 {
+		t.Fatal("rejected autocommit retained staged changes")
+	}
+}
+
+func TestFormalStatementSort(t *testing.T) {
+	result, manager, files, _ := spillResultForCleanup(t)
+	got := []string{}
+	if err := result.stream(func(row []string, _ []bool) error { got = append(got, row[0]); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	result.close()
+	if !reflect.DeepEqual(got, []string{"Linus", "Grace", "Ada"}) {
+		t.Fatal("spill sort order changed")
+	}
+	assertSpillReleased(t, manager, files)
+}

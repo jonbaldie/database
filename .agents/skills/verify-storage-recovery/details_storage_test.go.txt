@@ -1,0 +1,133 @@
+package storage
+
+import (
+	"errors"
+	"testing"
+)
+
+func formalStorageSeed(t *testing.T, dir string) *Engine {
+	t.Helper()
+	e, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.EnsureTable("app", "items", []string{"id"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := e.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Insert("app", "items", []string{"1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestFormalCheckpointPhases(t *testing.T) {
+	for _, phase := range []checkpointPhase{"", checkpointTempSynced, checkpointPublished, checkpointWALSynced, checkpointWALRotated} {
+		t.Run(string(phase), func(t *testing.T) {
+			dir := t.TempDir()
+			e := formalStorageSeed(t, dir)
+			defer e.Close()
+			hit := false
+			stop := errors.New("formal checkpoint stop")
+			e.checkpointHook = func(p checkpointPhase) error {
+				if phase != "" && p == phase {
+					hit = true
+					return stop
+				}
+				return nil
+			}
+			err := e.Checkpoint()
+			if phase == "" && err != nil {
+				t.Fatal(err)
+			}
+			if phase != "" && (!hit || !errors.Is(err, stop)) {
+				t.Fatal("checkpoint phase not reached", phase, err)
+			}
+			if err := e.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if reopened.RowCount("app", "items") != 1 {
+				t.Fatal("checkpoint lost a committed row")
+			}
+		})
+	}
+}
+
+func TestFormalCheckpointSuccess(t *testing.T) {
+	dir := t.TempDir()
+	e := formalStorageSeed(t, dir)
+	defer e.Close()
+	if err := e.Checkpoint(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.RowCount("app", "items") != 1 {
+		t.Fatal("checkpoint lost a committed row")
+	}
+}
+
+func TestFormalCheckpointFence(t *testing.T) {
+	e := formalStorageSeed(t, t.TempDir())
+	defer e.Close()
+	syncs := 0
+	stop := errors.New("formal sync failure")
+	e.checkpointSyncHook = func() error {
+		syncs++
+		if syncs == 2 {
+			return stop
+		}
+		return nil
+	}
+	if err := e.Checkpoint(); !errors.Is(err, stop) {
+		t.Fatal("checkpoint did not report directory sync failure", err)
+	}
+	if _, err := e.Begin(); !errors.Is(err, errClosed) {
+		t.Fatal("failed rotation accepted another transaction")
+	}
+}
+
+func TestFormalSchemaVersion(t *testing.T) {
+	e := formalStorageSeed(t, t.TempDir())
+	defer e.Close()
+	tx, err := e.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Insert("app", "items", []string{"2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.EnsureTable("app", "items", []string{"renamed"}, []string{"renamed"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); !errors.Is(err, errMissingTable) {
+		t.Fatal("stale schema transaction was not rejected", err)
+	}
+	if e.RowCount("app", "items") != 1 {
+		t.Fatal("stale schema transaction published rows")
+	}
+	if err := e.EnsureTable("app", "items", []string{"renamed", "extra"}, []string{"renamed"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	row, ok := e.LookupPrimary("app", "items", "1")
+	if !ok || len(row) != 2 || row[1] != "" {
+		t.Fatal("schema change did not pad and reindex prior row", row)
+	}
+}

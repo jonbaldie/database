@@ -1,0 +1,10 @@
+---
+title: "Read two aliases of one CTE"
+---
+stateDiagram-v2
+  s0: CTE not read
+  s1: First alias materialized
+  s2: Second alias reuses rows
+  [*] --> s0
+  s0 --> s1: Build CTE rows
+  s1 --> s2: Reuse cached CTE rows

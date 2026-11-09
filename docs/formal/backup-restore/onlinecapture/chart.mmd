@@ -1,0 +1,12 @@
+---
+title: "Capture online backup files"
+---
+stateDiagram-v2
+  s0: reading chunks
+  s1: finishing
+  s2: failed
+  s3: complete
+  [*] --> s0
+  s0 --> s1: Finish reading rows
+  s1 --> s2: Required file is missing
+  s1 --> s3: Both files are closed

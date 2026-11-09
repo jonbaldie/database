@@ -1,0 +1,27 @@
+---
+title: "Close a result on success or failure"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ReleaseOnce
+    lg1: Path to the ReleaseOnce bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: result allocated
+  s1: delivery failed
+  s2: rows delivered
+  s3: result closed
+  s4: Result released twice
+  [*] --> s0
+  s0 --> s1: Row delivery fails
+  s0 --> s2: Finish row delivery
+  s0 --> s3: Release owned resources
+  s1 --> s3: Release owned resources
+  s2 --> s3: Release owned resources
+  s3 --> s4: Release owned resources
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s3 bugPath
+  class s4 breaks
+  class s4 bugPath

@@ -1,0 +1,10 @@
+---
+title: "Caller owns a warning"
+---
+stateDiagram-v2
+  s0: Caller owns a warning
+  s1: Session stores the warning
+  s2: Caller changes its warning
+  [*] --> s0
+  s0 --> s1: Replace session diagnostics
+  s1 --> s2: Change the caller diagnostic

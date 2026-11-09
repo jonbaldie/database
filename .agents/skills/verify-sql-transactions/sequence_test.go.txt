@@ -1,0 +1,209 @@
+package mysql
+
+import (
+	"errors"
+	"github.com/jonbaldie/database/internal/catalog"
+	"testing"
+	"time"
+)
+
+func formalSequenceStore(t *testing.T) *catalog.Store {
+	t.Helper()
+	store, err := catalog.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+func formalPublishNamespace(t *testing.T, store *catalog.Store, name string) {
+	t.Helper()
+	if err := store.ApplyDurable(func(d catalog.Definition) (catalog.Definition, error) {
+		d.Namespaces[name] = catalog.Namespace{Name: name, Tables: map[string]catalog.Table{}}
+		return d, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestFormalSnapshotLifecycle(t *testing.T) {
+	for _, mode := range []isolationLevel{isolationRepeatableRead, isolationReadCommitted} {
+		store := formalSequenceStore(t)
+		s := &session{server: &Server{config: Config{Catalog: store}}}
+		s.beginTransaction(mode, false)
+		if s.transactionStateSet {
+			t.Fatal("begin captured snapshot eagerly")
+		}
+		formalPublishNamespace(t, store, "before")
+		if err := s.prepareStatementDefinition(false); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := s.statementDefinition.Namespaces["before"]; !ok {
+			t.Fatal("first read missed lazy snapshot")
+		}
+		s.clearStatementDefinition()
+		formalPublishNamespace(t, store, "after")
+		if err := s.prepareStatementDefinition(false); err != nil {
+			t.Fatal(err)
+		}
+		_, present := s.statementDefinition.Namespaces["after"]
+		if present != (mode == isolationReadCommitted) {
+			t.Fatal("isolation image changed across reads")
+		}
+		s.clearStatementDefinition()
+		if err := s.mutateTransactionCatalog(func(d *catalog.Definition) error {
+			d.Namespaces["private"] = catalog.Namespace{Name: "private", Tables: map[string]catalog.Table{}}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := store.Snapshot().Namespaces["private"]; ok {
+			t.Fatal("staged write escaped transaction")
+		}
+		if err := (&transactionExecutor{s}).commitAutocommit(); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := store.Snapshot().Namespaces["private"]; !ok {
+			t.Fatal("commit lost staged write")
+		}
+		if s.transaction || s.transactionDirty {
+			t.Fatal("commit retained transaction")
+		}
+	}
+}
+func TestFormalTransactionRejectedPublication(t *testing.T) {
+	store := formalSequenceStore(t)
+	s := &session{server: &Server{config: Config{Catalog: store}}}
+	s.beginTransaction(isolationRepeatableRead, false)
+	if err := s.ensureWorkingDefinition(); err != nil {
+		t.Fatal(err)
+	}
+	s.transactionDirty = true
+	s.transactionMutations = []func(*catalog.Definition) error{func(*catalog.Definition) error { return errors.New("formal publication rejection") }}
+	if err := (&transactionExecutor{s}).commit(); err == nil {
+		t.Fatal("failed publication accepted")
+	}
+	if s.transaction || s.transactionDirty || len(s.transactionMutations) != 0 {
+		t.Fatal("rejected publication retained stage")
+	}
+}
+func TestFormalReadOnlyMutation(t *testing.T) {
+	store := formalSequenceStore(t)
+	s := &session{server: &Server{config: Config{Catalog: store}}}
+	s.beginTransaction(isolationRepeatableRead, true)
+	if err := s.mutateCatalog(func(d *catalog.Definition) error {
+		d.Namespaces["forbidden"] = catalog.Namespace{Name: "forbidden", Tables: map[string]catalog.Table{}}
+		return nil
+	}); err == nil || s.transactionDirty {
+		t.Fatal("read-only transaction accepted mutation")
+	}
+}
+func TestFormalLockWaitCleanup(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		manager := newLockManager(time.Second)
+		owner := &session{}
+		watch := make(chan struct{})
+		timeout := -time.Second
+		if cancelled {
+			close(watch)
+			timeout = time.Second
+		}
+		waiter := &session{statementCancel: watch, settings: sessionSettings{lockWaitTimeout: timeout}}
+		row := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "1"}
+		if _, err := manager.acquire(owner, []rowLockResource{row}, lockExclusive, lockNoWait); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := manager.acquire(waiter, []rowLockResource{row}, lockExclusive, lockWait); err == nil || got {
+			t.Fatal("conflicting wait did not fail")
+		}
+		if len(manager.waiting[waiter]) != 0 || !manager.waitingSince[waiter].IsZero() {
+			t.Fatal("wait exit retained wait edge")
+		}
+		if len(manager.held[waiter]) != 0 {
+			t.Fatal("failed wait granted lock")
+		}
+		manager.release(owner)
+	}
+	manager := newLockManager(time.Second)
+	s := &session{}
+	one := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "1"}
+	two := rowLockResource{table: one.table, key: "2"}
+	_, _ = manager.acquire(s, []rowLockResource{one}, lockShared, lockNoWait)
+	saved := manager.snapshot(s)
+	_, _ = manager.acquire(s, []rowLockResource{one, two}, lockExclusive, lockNoWait)
+	manager.restore(s, saved)
+	if len(manager.held[s]) != 1 || manager.held[s][one] != lockShared || manager.granted[one][s] != lockShared {
+		t.Fatal("failed read did not restore lock snapshot")
+	}
+}
+func TestFormalLockProperties(t *testing.T) {
+	m := newLockManager(time.Second)
+	a, b, c := &session{}, &session{}, &session{}
+	row := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "1"}
+	for _, owner := range []*session{a, b} {
+		if _, err := m.acquire(owner, []rowLockResource{row}, lockShared, lockNoWait); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _ = m.acquire(c, []rowLockResource{row}, lockExclusive, lockNoWait)
+	for resource, holders := range m.granted {
+		for owner, mode := range holders {
+			for other, otherMode := range holders {
+				if owner != other && (mode == lockExclusive || otherMode == lockExclusive) {
+					t.Fatal("conflicting lock grants coexist")
+				}
+			}
+			if m.held[owner][resource] != mode {
+				t.Fatal("lock ownership indexes disagree")
+			}
+		}
+	}
+	m.release(c)
+	_, _, _ = m.waitAttempt(a, []rowLockResource{row}, lockExclusive)
+	_, _, err := m.waitAttempt(b, []rowLockResource{row}, lockExclusive)
+	if _, ab := m.waiting[a][b]; ab {
+		if _, ba := m.waiting[b][a]; ba && !isDeadlock(err) {
+			t.Fatal("wait graph contains cycle")
+		}
+	}
+	if isDeadlock(err) && len(m.waiting[b]) != 0 {
+		t.Fatal("deadlock reply retained wait edge")
+	}
+}
+
+func TestFormalTransactionResourceFailure(t *testing.T) {
+	watch := make(chan struct{})
+	close(watch)
+	s := &session{server: &Server{}, resources: &statementResources{cancel: watch}}
+	s.beginTransaction(isolationRepeatableRead, false)
+	s.transactionDirty = true
+	if err := (&transactionExecutor{s}).commit(); err == nil {
+		t.Fatal("cancelled commit accepted")
+	}
+	if !s.transaction || !s.transactionDirty {
+		t.Fatal("resource rejection lost staged transaction")
+	}
+}
+
+func TestFormalSavepointLocks(t *testing.T) {
+	store := formalSequenceStore(t)
+	manager := newLockManager(time.Second)
+	s := &session{server: &Server{config: Config{Catalog: store}, locks: manager}}
+	s.beginTransaction(isolationRepeatableRead, false)
+	executor := &transactionExecutor{s}
+	if err := executor.save("point"); err != nil {
+		t.Fatal(err)
+	}
+	row := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "1"}
+	if _, err := manager.acquire(s, []rowLockResource{row}, lockExclusive, lockNoWait); err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.rollbackTo("point"); err != nil {
+		t.Fatal(err)
+	}
+	if manager.held[s][row] != lockExclusive {
+		t.Fatal("savepoint rollback released locks")
+	}
+	executor.rollback()
+	if len(manager.held[s]) != 0 {
+		t.Fatal("full rollback retained locks")
+	}
+}

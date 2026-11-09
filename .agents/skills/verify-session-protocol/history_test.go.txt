@@ -1,0 +1,388 @@
+package mysql
+
+import (
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/binary"
+	"github.com/jonbaldie/database/internal/credential"
+	"math/big"
+	"net"
+	"testing"
+	"time"
+)
+
+func formalHistoryRead(t *testing.T, c net.Conn) (byte, []byte) {
+	t.Helper()
+	seq, p, err := readPacket(c, 1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seq, p
+}
+func formalHistoryWrite(t *testing.T, c net.Conn, seq byte, p []byte) {
+	t.Helper()
+	if err := writePacket(c, seq, p); err != nil {
+		t.Fatal(err)
+	}
+}
+func formalHistoryToken(password string, nonce []byte) []byte {
+	a := sha256.Sum256([]byte(password))
+	b := sha256.Sum256(a[:])
+	c := sha256.Sum256(append(b[:], nonce...))
+	out := make([]byte, 32)
+	for i := range out {
+		out[i] = a[i] ^ c[i]
+	}
+	return out
+}
+func formalHistoryResponse(flags uint32, nonce []byte) []byte {
+	p := make([]byte, 32)
+	binary.LittleEndian.PutUint32(p, flags)
+	p = append(p, []byte("admin")...)
+	p = append(p, 0, 32)
+	p = append(p, formalHistoryToken("secret", nonce)...)
+	p = append(p, []byte("caching_sha2_password")...)
+	return append(p, 0)
+}
+func TestFormalHistoryAuthentication(t *testing.T) {
+	config := normalizedConfig(Config{Username: "admin", PasswordHash: credential.PasswordHash("secret")})
+	auth, err := newAuthenticator(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &auth.rsaKey.PublicKey, auth.rsaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secure := range []bool{false, true} {
+		for _, password := range []string{"secret", "wrong", "bad-token", "plaintext"} {
+			if secure && password == "plaintext" {
+				continue
+			}
+			t.Run(map[bool]string{false: "RSA", true: "TLS"}[secure]+password, func(t *testing.T) {
+				a, b := net.Pipe()
+				defer a.Close()
+				defer b.Close()
+				a.SetDeadline(time.Now().Add(3 * time.Second))
+				b.SetDeadline(time.Now().Add(3 * time.Second))
+				local := auth
+				if secure {
+					local.tlsConfig = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: auth.rsaKey}}, MinVersion: tls.VersionTLS12}
+				}
+				registry := &connectionRegistry{connections: map[net.Conn]struct{}{}, sessions: map[string]map[*conversation]struct{}{}, pendingMax: 1, sessionMax: 1}
+				registry.register(a)
+				conv := newConversation(&Server{config: config, auth: local, connections: registry}, a)
+				done := make(chan bool, 1)
+				go func() { done <- conv.authenticate() }()
+				_, greeting := formalHistoryRead(t, b)
+				end := bytes.IndexByte(greeting[1:], 0) + 2
+				pos := end + 4
+				nonce := append([]byte{}, greeting[pos:pos+8]...)
+				pos += 9 + 2 + 1 + 2 + 2 + 1 + 10
+				nonce = append(nonce, greeting[pos:pos+12]...)
+				flags := uint32(clientProtocol41 | clientSecureConnection | clientPluginAuth)
+				seq := byte(1)
+				var client net.Conn = b
+				if secure {
+					request := make([]byte, 32)
+					binary.LittleEndian.PutUint32(request, flags|clientSSL)
+					formalHistoryWrite(t, b, seq, request)
+					tc := tls.Client(b, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+					if err := tc.Handshake(); err != nil {
+						t.Fatal(err)
+					}
+					client = tc
+					flags |= clientSSL
+					seq++
+				}
+				response := formalHistoryResponse(flags, nonce)
+				if password == "bad-token" {
+					response[39] ^= 1
+				}
+				formalHistoryWrite(t, client, seq, response)
+				if password == "bad-token" {
+					_, final := formalHistoryRead(t, client)
+					if len(final) == 0 || final[0] != 0xff {
+						t.Fatal("invalid initial token entered full password exchange")
+					}
+					if <-done {
+						t.Fatal("invalid initial token authenticated")
+					}
+					return
+				}
+				sequence, request := formalHistoryRead(t, client)
+				if !bytes.Equal(request, []byte{1, 4}) {
+					t.Fatalf("full password request missing: %x", request)
+				}
+				if password == "plaintext" {
+					formalHistoryWrite(t, client, sequence+1, []byte("secret\x00"))
+					_, final := formalHistoryRead(t, client)
+					if len(final) == 0 || final[0] != 0xff {
+						t.Fatal("plaintext response entered RSA key exchange")
+					}
+					if <-done {
+						t.Fatal("plaintext authenticated without TLS")
+					}
+					return
+				}
+				if secure {
+					formalHistoryWrite(t, client, sequence+1, append([]byte(password), 0))
+				} else {
+					formalHistoryWrite(t, client, sequence+1, []byte{2})
+					sequence, key := formalHistoryRead(t, client)
+					if len(key) < 2 || key[0] != 1 {
+						t.Fatal("RSA key missing")
+					}
+					plain := append([]byte(password), 0)
+					for i := range plain {
+						plain[i] ^= nonce[i%len(nonce)]
+					}
+					encrypted, err := rsa.EncryptOAEP(sha1.New(), rand.Reader, &auth.rsaKey.PublicKey, plain, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					formalHistoryWrite(t, client, sequence+1, encrypted)
+				}
+				_, final := formalHistoryRead(t, client)
+				accepted := <-done
+				if accepted != (password == "secret") || len(final) == 0 || (final[0] == 0) != (password == "secret") {
+					t.Fatalf("authentication accepted wrong full password: secure=%v accepted=%v packet=%x", secure, accepted, final)
+				}
+			})
+		}
+	}
+}
+
+func TestFormalHistoryWarnings(t *testing.T) {
+	s := &session{}
+	executor := textStatementExecutor{session: s}
+	startStatementDiagnostics(s, "select 1")
+	s.addDiagnostic("Warning", 7, "first")
+	var noerr error
+	finishStatementDiagnostics(s, &noerr)
+	for range 2 {
+		startStatementDiagnostics(s, "show warnings")
+		result, handled, err := executor.showDiagnostics("SHOW WARNINGS", "show warnings")
+		if err != nil || !handled || len(result.rows) != 1 || result.rows[0][2] != "first" {
+			t.Fatal("SHOW WARNINGS did not retain prior warning")
+		}
+	}
+	startStatementDiagnostics(s, "select 2")
+	if len(s.diagnostics) != 0 {
+		t.Fatal("ordinary statement retained prior warnings")
+	}
+	failure := error(sqlFailure{1064, "42000", "failed"})
+	finishStatementDiagnostics(s, &failure)
+	if len(s.diagnostics) != 1 || s.diagnostics[0].level != "Error" {
+		t.Fatal("statement failure did not replace warning area")
+	}
+}
+
+func TestFormalHistorySetPrefix(t *testing.T) {
+	executor := newPointLookupTestExecutor(t)
+	if _, err := executeStatement(executor, "CREATE DATABASE other"); err != nil {
+		t.Fatal(err)
+	}
+	selector := databaseSelector{executor.session}
+	if err := selector.use("other"); err != nil {
+		t.Fatal(err)
+	}
+	err := executor.applySessionAssignments("SET statement_timeout_ms=123, no_such_variable=1, statement_timeout_ms=456")
+	if err == nil || executor.session.settings.statementTimeout != 123*time.Millisecond {
+		t.Fatal("SET did not retain exactly the successful assignment prefix")
+	}
+	if executor.session.database != "other" {
+		t.Fatal("selected database did not persist across SET")
+	}
+}
+
+func TestFormalHistoryAccounts(t *testing.T) {
+	e := backupExecutor(t, "admin", nil)
+	if err := e.createAccount("CREATE USER 'worker' IDENTIFIED BY 'first-password'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.changeAccountPassword("worker", "IDENTIFIED BY 'second-password'"); err != nil {
+		t.Fatal(err)
+	}
+	account, found := e.server.config.Catalog.Account("worker")
+	if !found || account.PasswordHash != credential.PasswordHash("second-password") {
+		t.Fatal("account change was not published")
+	}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	conv := newConversation(e.server, a)
+	conv.session = &session{server: e.server, username: "worker"}
+	conv.control.running.Store(true)
+	e.server.connections.registerConversation(conv)
+	defer e.server.connections.unregisterConversation(conv)
+	if err := e.alterAccount("ALTER USER 'worker' ACCOUNT LOCK"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.server.auth.accountPasswordHash("worker"); ok {
+		t.Fatal("locked account can authenticate")
+	}
+	if !conv.control.revoked.Load() {
+		t.Fatal("account lock did not revoke existing session")
+	}
+	if err := e.alterAccount("ALTER USER 'worker' ACCOUNT UNLOCK"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.server.auth.accountPasswordHash("worker"); !ok {
+		t.Fatal("unlocked account cannot authenticate")
+	}
+	conv.control.revoked.Store(false)
+	if err := e.dropAccount("DROP USER worker"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e.server.auth.accountPasswordHash("worker"); ok {
+		t.Fatal("dropped account can authenticate")
+	}
+	if !conv.control.revoked.Load() {
+		t.Fatal("account drop did not revoke existing session")
+	}
+}
+
+func TestFormalHistoryPrepared(t *testing.T) {
+	e := newPointLookupTestExecutor(t)
+	s := e.session
+	prep := preparedPreparation{s}
+	exec := preparedExecution{s}
+	life := preparedLifecycle{s}
+	id, parameters, _, err := prep.allocate("SELECT ?")
+	if err != nil || parameters != 1 {
+		t.Fatal("prepare allocation failed", err)
+	}
+	statement := s.statements[id]
+	for i, value := range []byte{7, 9} {
+		p := make([]byte, 10)
+		p[0] = comStmtExecute
+		binary.LittleEndian.PutUint32(p[1:5], id)
+		p[6] = 1
+		p = append(p, 0)
+		if i == 0 {
+			p = append(p, 1, mysqlTypeTiny, 0)
+		} else {
+			p = append(p, 0)
+		}
+		p = append(p, value)
+		values, err := exec.preparedValues(p, statement)
+		if err != nil || len(values) != 1 || values[0] != map[byte]string{7: "7", 9: "9"}[value] {
+			t.Fatal("prepared execution lost cached parameter types", err)
+		}
+		query, err := bindPreparedQuery(statement.query, values)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := executeStatement(e, query)
+		if err != nil || len(result.rows) != 1 || result.rows[0][0] != values[0] {
+			t.Fatal("prepared bound execution changed value", err)
+		}
+	}
+	p := []byte{comStmtSendLongData, 0, 0, 0, 0, 0, 0, 'x'}
+	binary.LittleEndian.PutUint32(p[1:5], id)
+	if err := life.sendLongData(p); err != nil {
+		t.Fatal(err)
+	}
+	reset := []byte{comStmtReset, 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(reset[1:], id)
+	if err := life.resetPrepared(reset); err != nil {
+		t.Fatal(err)
+	}
+	if len(statement.types) != 1 || len(statement.longData) != 0 {
+		t.Fatal("prepared reset did not retain types and clear data")
+	}
+	s.database = "changed"
+	s.addDiagnostic("Warning", 1, "warning")
+	if err := life.resetConnection(); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.statements) != 0 || s.server.connections.preparedCount != 0 || len(s.diagnostics) != 0 || s.database != s.initialDB {
+		t.Fatal("connection reset retained prepared or session state")
+	}
+}
+
+type formalHistoryListener struct{ closed chan struct{} }
+
+func (l formalHistoryListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (l formalHistoryListener) Addr() net.Addr            { return nil }
+func (l formalHistoryListener) Close() error              { close(l.closed); return nil }
+func TestFormalHistoryDrain(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	r := &connectionRegistry{connections: map[net.Conn]struct{}{}, pendingMax: 1, sessionMax: 1}
+	if !r.register(a) || !r.admitSession() || !r.beginStatement() {
+		t.Fatal("drain setup failed")
+	}
+	listener := formalHistoryListener{make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- r.closeGracefully(listener) }()
+	<-listener.closed
+	if r.register(b) || r.admitSession() || r.beginStatement() {
+		t.Fatal("draining server accepted new work")
+	}
+	observed := make(chan error, 1)
+	go func() { var p [1]byte; _, err := b.Read(p[:]); observed <- err; r.unregister(a, true) }()
+	select {
+	case <-observed:
+		r.endStatement()
+		<-done
+		t.Fatal("drain closed session before active statement completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	r.endStatement()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("drain did not finish")
+	}
+	if r.pendingCount != 0 || r.sessionCount != 0 || len(r.connections) != 0 {
+		t.Fatal("drain retained connection accounting")
+	}
+}
+func TestFormalHistoryCommand(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	conv := newConversation(&Server{config: normalizedConfig(Config{})}, a)
+	watch := conv.watchStatement()
+	conv.control.setWatch(watch)
+	formalHistoryWrite(t, b, 0, []byte{comPing})
+	select {
+	case <-watch.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("read ahead did not cancel active watch")
+	}
+	taken := conv.control.takeWatch()
+	pending := IdleTimeouts{Session: time.Second}.await(&session{}, &bytes.Buffer{}, taken)
+	if pending == nil || pending.sequence != 1 || !bytes.Equal(pending.payload, []byte{comPing}) {
+		t.Fatal("read ahead lost next command")
+	}
+	e := newPointLookupTestExecutor(t)
+	e.session.beginTransaction(isolationRepeatableRead, false)
+	out := &bytes.Buffer{}
+	timeout := IdleTimeouts{Session: time.Hour, InTransaction: time.Nanosecond}
+	pending = timeout.await(e.session, out, &statementWatch{finished: make(chan *pendingCommand)})
+	if pending != nil || e.session.transaction || out.Len() == 0 {
+		t.Fatal("idle timeout did not roll back open transaction")
+	}
+	conv.session = e.session
+	conv.preparedLifecycle = &preparedLifecycle{e.session}
+	next := &statementWatch{finished: make(chan *pendingCommand, 1)}
+	next.finished <- &pendingCommand{sequence: 1, payload: []byte{comStmtClose, 99, 0, 0, 0}}
+	conv.control.setWatch(next)
+	conv.control.revoked.Store(true)
+	if conv.acceptCommand() {
+		t.Fatal("revoked connection accepted another command")
+	}
+}

@@ -1,0 +1,17 @@
+---
+title: "MutationSequence"
+---
+stateDiagram-v2
+  s0: plan
+  s1: delete conflict
+  s2: insert candidate
+  s3: next
+  s4: validated
+  s5: Last replacement published
+  [*] --> s0
+  s0 --> s1: Plan
+  s1 --> s2: Delete conflicting row
+  s2 --> s3: Insert submitted row
+  s3 --> s1: Process next candidate
+  s3 --> s4: Validate
+  s4 --> s5: Publish

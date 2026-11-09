@@ -1,0 +1,15 @@
+---
+title: "Allocate identifiers up to the column limit"
+---
+stateDiagram-v2
+  s0: Highest recorded 0, next identifier 1
+  s1: Highest recorded 1, next identifier 2
+  s2: Highest recorded 2, next identifier 3
+  s3: Identifier limit reached
+  [*] --> s0
+  s0 --> s1: Allocate next identifier or Record an explicit positive identifier
+  s0 --> s2: Record an explicit positive identifier
+  s0 --> s3: Record an explicit positive identifier
+  s1 --> s2: Allocate next identifier or Record an explicit positive identifier
+  s1 --> s3: Record an explicit positive identifier
+  s2 --> s3: Allocate next identifier or Record an explicit positive identifier

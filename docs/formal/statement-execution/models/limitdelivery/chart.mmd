@@ -1,0 +1,24 @@
+---
+title: "Deliver a bounded row slice"
+---
+stateDiagram-v2
+  s0: Requested row slice complete
+  s1: Rows scanned 0, rows emitted 0
+  s2: Rows scanned 1, rows emitted 1
+  s3: Rows scanned 1, rows emitted 0
+  s4: Rows scanned 2, rows emitted 2
+  s5: Rows scanned 2, rows emitted 1
+  s6: Rows scanned 2, rows emitted 0
+  [*] --> s0
+  [*] --> s1
+  s1 --> s0: Emit next requested row
+  s1 --> s2: Emit next requested row
+  s1 --> s3: Skip offset row
+  s2 --> s0: Emit next requested row
+  s2 --> s4: Emit next requested row
+  s3 --> s0: Emit next requested row
+  s3 --> s5: Emit next requested row
+  s3 --> s6: Skip offset row
+  s4 --> s0: Emit next requested row
+  s5 --> s0: Emit next requested row
+  s6 --> s0: Emit next requested row or Skip offset row

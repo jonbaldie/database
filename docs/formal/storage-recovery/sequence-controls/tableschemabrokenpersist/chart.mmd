@@ -1,0 +1,51 @@
+---
+title: "Create reshape drop and recreate a storage table"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks SchemaSuccessHasDurableImage
+    lg1: Path to the SchemaSuccessHasDurableImage bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Create absent table
+  s1: memory changed
+  s2: Metadata failed#59; memory may differ from disk
+  s3: temporary written
+  s4: temporary synced
+  s5: metadata renamed
+  s6: Success returned without persisted shape
+  s7: Reshape existing table
+  s8: Drop table
+  s9: drop checkpoint
+  s10: Table change persisted
+  s11: Recreate table name
+  s12: Recreated table remains empty
+  [*] --> s0
+  s0 --> s1: Change in-memory table shape
+  s1 --> s2: Metadata step fails
+  s1 --> s3: Write metadata temporary file
+  s3 --> s2: Metadata step fails
+  s3 --> s4: Sync metadata file
+  s4 --> s2: Metadata step fails
+  s4 --> s5: Install metadata file
+  s5 --> s2: Metadata step fails
+  s5 --> s6: Sync metadata directory
+  s6 --> s7: Begin next table change
+  s7 --> s1: Change in-memory table shape
+  s6 --> s8: Begin next table change
+  s8 --> s1: Change in-memory table shape
+  s5 --> s9: Sync metadata directory
+  s9 --> s10: Checkpoint after removing table
+  s10 --> s11: Begin next table change
+  s11 --> s1: Change in-memory table shape
+  s6 --> s12: Restart after recreate
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath
+  class s12 breaks

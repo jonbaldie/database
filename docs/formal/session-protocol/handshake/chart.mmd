@@ -1,0 +1,10 @@
+---
+title: "Client sends handshake capabilities"
+---
+stateDiagram-v2
+  s0: Client sends handshake capabilities
+  s1: Capabilities rejected
+  s2: Capabilities accepted
+  [*] --> s0
+  s0 --> s1: Reject missing capabilities
+  s0 --> s2: Accept response capabilities

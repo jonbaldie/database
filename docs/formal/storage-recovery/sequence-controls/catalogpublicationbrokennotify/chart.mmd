@@ -1,0 +1,27 @@
+---
+title: "Publish one catalog batch"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks OutcomeMatchesPublication
+    lg1: Path to the OutcomeMatchesPublication bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: queued
+  s1: batch collected
+  s2: complete
+  s3: Success announced without durable publication
+  s4: revision published
+  [*] --> s0
+  s0 --> s1: Collect queued requests
+  s1 --> s2: Reject batch with no accepted request
+  s1 --> s3: Apply isolated request changes
+  s3 --> s2: Notify failed waiters
+  s3 --> s4: Publish catalog revision
+  s4 --> s2: Notify successful waiters
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 breaks
+  class s3 bugPath

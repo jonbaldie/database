@@ -1,0 +1,18 @@
+---
+title: "JoinSequence"
+---
+stateDiagram-v2
+  s0: build right, left row 1
+  s1: probe, left row 1
+  s2: emit, left row 1
+  s3: next left, left row 1
+  s4: probe, left row 2
+  s5: emit, left row 2
+  s6: Matched and unmatched rows returned
+  [*] --> s0
+  s0 --> s1: Build
+  s1 --> s2: Probe
+  s2 --> s3: Emit
+  s3 --> s4: Probe next left row
+  s4 --> s5: Probe
+  s5 --> s6: Emit

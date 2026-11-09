@@ -1,0 +1,3 @@
+export const title = "IndexBoundConstruction";
+export const state = v => JSON.stringify([0,1,2].filter(x=>(x>v.lower || (x===v.lower && v.lowerInclusive)) && (x<v.upper || (x===v.upper && v.upperInclusive)))) !== JSON.stringify([...v.expected].sort()) ? "Bounds include wrong values" : `Applied ${v.steps} predicates`;
+export const step = a => ({NextCandidate:"Process next candidate",NextLeft:"Probe next left row",DeleteConflict:"Delete conflicting row",InsertCandidate:"Insert submitted row",ApplyActions:"Apply private schema actions",FailBeforeCommit:"Statement fails before commit"}[a] || a.replace(/([a-z])([A-Z])/g,"$1 $2"));

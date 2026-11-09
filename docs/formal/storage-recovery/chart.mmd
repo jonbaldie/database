@@ -1,0 +1,30 @@
+---
+title: "Commit rows and recover after the process stops"
+---
+stateDiagram-v2
+  s0: private changes
+  s1: begin record
+  s2: restarting
+  s3: operations recorded
+  s4: Prior rows recovered
+  s5: commit recorded
+  s6: log synced
+  s7: New committed rows recovered
+  s8: rows published
+  s9: success returned
+  [*] --> s0
+  s0 --> s1: Record transaction start
+  s0 --> s2: Process stops
+  s1 --> s2: Process stops
+  s1 --> s3: Record row changes
+  s2 --> s4: Discard incomplete transaction
+  s3 --> s5: Record commit
+  s3 --> s2: Process stops
+  s5 --> s6: Sync transaction log
+  s5 --> s2: Process stops
+  s6 --> s2: Process stops
+  s6 --> s8: Publish new rows
+  s2 --> s7: Apply complete committed log
+  s8 --> s2: Process stops
+  s8 --> s9: Client receives success
+  s9 --> s2: Process stops

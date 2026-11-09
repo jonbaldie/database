@@ -1,0 +1,19 @@
+---
+title: "Read a quoted SQL literal"
+---
+stateDiagram-v2
+  s0: Read literal body
+  s1: Check backslash escape
+  s2: Check quote delimiter
+  s3: Input ended inside literal
+  s4: Closing quote found
+  s5: Unterminated literal rejected
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: Read quote delimiter
+  s0 --> s1: Read backslash escape
+  s1 --> s3: Skip escaped quote at end of input
+  s2 --> s0: Skip doubled quote
+  s2 --> s4: Accept closing delimiter
+  s1 --> s2: Skip escaped character and reach next quote
+  s3 --> s5: Reject missing closing delimiter

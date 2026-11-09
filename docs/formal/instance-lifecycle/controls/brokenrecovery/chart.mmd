@@ -1,0 +1,44 @@
+---
+title: "Start the database and stop it safely"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks RecoveryReflectsPriorMarker in some cases
+    lg1: Path to the RecoveryReflectsPriorMarker bug
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  s0: Server stopped
+  s1: Starting server
+  s2: Runtime started
+  s3: Stopped without a clean record
+  s4: Ready for clients
+  s5: Stopping new work
+  s6: Runtime closed
+  s7: Clean stop recorded
+  s8: Stopped cleanly
+  [*] --> s0
+  s0 --> s1: You start the server
+  s1 --> s1: Record the running state
+  s1 --> s2: Open the runtime
+  s1 --> s3: Startup fails or the process stops
+  s2 --> s3: Startup fails or the process stops
+  s2 --> s4: Report ready
+  s4 --> s3: Startup fails or the process stops
+  s4 --> s5: You request shutdown
+  s5 --> s3: Startup fails or the process stops
+  s5 --> s6: Finish shutdown
+  s6 --> s3: Startup fails or the process stops
+  s6 --> s7: Record a clean stop
+  s7 --> s8: Release the data directory
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 mayBreak
+  class s1 bugPath
+  class s2 mayBreak
+  class s3 mayBreak
+  class s4 mayBreak
+  class s5 mayBreak
+  class s6 mayBreak
+  class s7 mayBreak
+  class s8 mayBreak

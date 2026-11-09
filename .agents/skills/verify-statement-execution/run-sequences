@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent
+repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':raise SystemExit('Install pinned TLC 1.7.4 with verify-wal-atomicity')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+models={'UpdateSequence':'AssignmentsSeePriorValues','SetFoldSequence':'IntersectBeforeUnion','SubqueryScopes':'ScopeControlsReuse','MutationSequence':'OrderedCandidates','AlterPublication':'ValidateBeforePublication','IndexBoundConstruction':'BoundsMatchPredicates','ResourceFinalization':'PublishedWorkStaysSuccessful','ScalarSequence':'ScalarCardinality','WindowSequence':'PeerRankAndFrame','JoinSequence':'MatchThenPreserveLeft','MembershipSequence':'NullAwareMembership','SpillLifecycle':'DeliveredAndReleased','SkipLockedSequence':'AvailableOffsetOnly'}
+mutations=[
+ ('update-order','server.go','working[assignment.column] = canonical','_ = canonical','Update','update assignment did not read prior assignment'),
+ ('set-precedence','composed_select.go','if operations[index].kind != setIntersect {','if true {','SetFold','intersection did not precede union'),
+ ('subquery-scope','composed_select.go','if !context.planning && !plan.dependent {','if !context.planning {','SubqueryScopes','dependent membership reused another scope'),
+ ('replace-order','server.go','rows = append(rowsWithoutConflicts(rows, conflicts), candidate)','rows = append(rowsWithoutConflicts(rows, conflicts), candidates[0])','Mutation','ordered replacement did not retain last candidate'),
+ ('alter-validation','ddl.go','if err := applyTableDefinitionAction(&updated, action); err != nil {\n\t\t\treturn catalog.Table{}, err','if err := applyTableDefinitionAction(&updated, action); err != nil {\n updated.Indexes = table.Indexes; updated.Constraints = table.Constraints; return updated, nil','Alter','invalid altered schema was not rejected'),
+ ('lower-tightening','relational_select_source.go','comparison > 0 || comparison == 0 && !inclusive','comparison > 0','Bounds','tightened bounds changed predicate intersection'),
+ ('upper-tightening','relational_select_source.go','comparison < 0 || comparison == 0 && !inclusive','comparison < 0','Bounds','tightened bounds changed predicate intersection'),
+ ('finalization','resources.go','if r.finalized {','if false {','Resources','published work rejected a late signal'),
+ ('scalar-cardinality','composed_select.go','if len(result.rows) > 1 {','if false {','Scalar','scalar accepted a second row'),
+ ('peer-rank','relational_select_window.go','rank = int64(position + 1)','rank = int64(position)','Window','window partition peer rank or frame changed'),
+ ('join-sequence','relational_select_source.go','return run.emit(appendNullRight(row, len(run.join.right.columns)))','return nil','Join','join probe lost matched or unmatched output'),
+ ('membership-null','composed_select.go','if unknown {\n\t\treturn nullValue(), nil','if false {\n\t\treturn nullValue(), nil','Membership','null-aware membership changed'),
+ ('spill-cleanup','relational_spill.go','_ = os.Remove(run.path)','_ = run.path','Spill','spill lifecycle left a run file'),
+ ('restore-selection','relational_select.go','plan.session.server.locks.restore(plan.session, locks)','_ = locks','FailedLockSelection','failed selection retained a newly acquired lock'),
+ ('skip-offset','relational_select.go','if available {\n\t\t\toffset--','if available || true {\n\t\t\toffset--','SkipLocked','skip-locked offset counted an unavailable row'),
+]
+with tempfile.TemporaryDirectory(prefix='database-execution-sequences-') as scratch:
+ root=pathlib.Path(scratch)
+ for name,rule in models.items():
+  for broken in [False,True]:
+   label=name+('Broken' if broken else '')
+   result=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/label),'-config',str(skill/(label+'.cfg')),str(skill/(name+'.tla'))],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   print(label+':\n'+result.stdout,flush=True)
+   if not broken and result.returncode:raise SystemExit('Current sequence model failed '+name)
+   if broken and (result.returncode!=12 or 'Invariant '+rule+' is violated' not in result.stdout):raise SystemExit('Broken sequence model missed '+rule)
+ for variant in [None]+mutations+[None]:
+  label='current' if variant is None else variant[0]
+  overlay={'Replace':{str(repo/'internal/mysql/zz_formal_sequence_test.go'):str(skill/'sequence_test.go.txt')}}
+  pattern='^TestFormalSequence'
+  if variant:
+   _,filename,old,new,test,message=variant
+   source=repo/'internal/mysql'/filename
+   original=source.read_text()
+   if original.count(old)!=1:raise SystemExit('Source changed; inspect '+label)
+   patched=root/(label+'.go');patched.write_text(original.replace(old,new));overlay['Replace'][str(source)]=str(patched)
+   pattern='^TestFormalSequence'+test+'$'
+  path=root/(label+'.json');path.write_text(json.dumps(overlay))
+  result=subprocess.run(['go','test','-count=1','-overlay',str(path),'./internal/mysql','-run',pattern],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(label+':\n'+result.stdout,flush=True)
+  if variant is None and result.returncode:raise SystemExit('Current sequence source failed')
+  if variant and (result.returncode==0 or message not in result.stdout):raise SystemExit('Source mutation missed its assertion '+label)
+print('Thirteen sequence models, fifteen source faults, and restored source checks passed.')

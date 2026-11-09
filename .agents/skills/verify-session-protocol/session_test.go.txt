@@ -1,0 +1,204 @@
+package mysql
+
+import (
+	"encoding/binary"
+	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/queryexplanation"
+	"net"
+	"strconv"
+	"testing"
+)
+
+func TestFormalSessionAdmission(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	c, d := net.Pipe()
+	defer c.Close()
+	defer d.Close()
+	r := connectionRegistry{connections: map[net.Conn]struct{}{}, pendingMax: 1, sessionMax: 1}
+	if !r.register(a) || r.register(c) {
+		t.Fatal("pending capacity was not enforced")
+	}
+	if !r.admitSession() {
+		t.Fatal("first session denied")
+	}
+	if r.pendingCount != 0 || r.sessionCount != 1 {
+		t.Fatal("admission did not transfer accounting")
+	}
+	if !r.register(c) {
+		t.Fatal("pending slot not released")
+	}
+	if r.admitSession() {
+		t.Fatal("session capacity was not enforced")
+	}
+	r.unregister(c, false)
+	r.unregister(a, true)
+	if r.pendingCount != 0 || r.sessionCount != 0 {
+		t.Fatal("disconnect retained admission count")
+	}
+	r.stopping = true
+	if r.register(a) || r.admitSession() || r.beginStatement() {
+		t.Fatal("stopping registry accepted work")
+	}
+}
+func TestFormalSessionHandshake(t *testing.T) {
+	required := []uint32{clientProtocol41, clientSecureConnection, clientPluginAuth}
+	for mask := 0; mask < 8; mask++ {
+		flags := uint32(0)
+		for i, flag := range required {
+			if mask&(1<<i) != 0 {
+				flags |= flag
+			}
+		}
+		payload := make([]byte, 32)
+		binary.LittleEndian.PutUint32(payload, flags)
+		_, err := handshakeCapabilities(payload, false)
+		if (err == nil) != (mask == 7) {
+			t.Fatalf("required handshake flags bypassed mask=%d", mask)
+		}
+	}
+}
+func TestFormalSessionCancellation(t *testing.T) {
+	watch := &statementWatch{cancelled: make(chan struct{})}
+	control := conversationControl{}
+	control.setWatch(watch)
+	defer func() {
+		if recover() != nil {
+			t.Fatal("cancellation closed the same watch twice")
+		}
+	}()
+	control.cancelStatement()
+	control.cancelStatement()
+	select {
+	case <-watch.cancelled:
+	default:
+		t.Fatal("cancellation did not close watch")
+	}
+	if control.takeWatch() != watch || control.takeWatch() != nil {
+		t.Fatal("watch ownership was not transferred")
+	}
+	control.cancelStatement()
+}
+func TestFormalSessionPrepared(t *testing.T) {
+	server := &Server{connections: &connectionRegistry{preparedLimit: 1}}
+	s := &session{server: server, statements: map[uint32]*preparedStatement{1: {parameters: 1, longData: map[uint16][]byte{}}}}
+	life := preparedLifecycle{s}
+	if !server.connections.reservePreparedStatement() || server.connections.reservePreparedStatement() {
+		t.Fatal("prepared capacity was not enforced")
+	}
+	payload := []byte{comStmtSendLongData, 1, 0, 0, 0, 0, 0, 'a', 'b'}
+	if err := life.sendLongData(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := life.resetPrepared([]byte{comStmtReset, 1, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if s.prepared.longDataBytes != 0 || len(s.statements[1].longData) != 0 {
+		t.Fatal("prepared reset retained long data")
+	}
+	if err := life.sendLongData(payload); err != nil {
+		t.Fatal(err)
+	}
+	life.closePrepared(1)
+	life.closePrepared(1)
+	if s.prepared.longDataBytes != 0 || len(s.statements) != 0 || server.connections.preparedCount != 0 {
+		t.Fatal("prepared close retained state")
+	}
+}
+func TestFormalSessionSettings(t *testing.T) {
+	s := &session{}
+	executor := textStatementExecutor{session: s}
+	for initial := int64(1); initial <= 2; initial++ {
+		for input := int64(-1); input <= 3; input++ {
+			value := initial
+			err := executor.setByteLimit("limit", strconv.FormatInt(input, 10), 2, &value)
+			valid := input > 0 && input <= 2
+			if (err == nil) != valid || (!valid && value != initial) {
+				t.Fatal("session byte ceiling was bypassed")
+			}
+		}
+	}
+}
+func TestFormalSessionAccountGrant(t *testing.T) {
+	account := catalog.Account{Name: "worker"}
+	grant := grantChange("DATA_READ", "app", true)
+	revoke := grantChange("DATA_READ", "app", false)
+	if err := grant(&account); err != nil {
+		t.Fatal(err)
+	}
+	if err := grant(&account); err != nil || len(account.Grants) != 1 {
+		t.Fatal("grant was duplicated")
+	}
+	if err := revoke(&account); err != nil {
+		t.Fatal(err)
+	}
+	if accountGrantIndex(account, "DATA_READ", "app") >= 0 {
+		t.Fatal("revoked grant remained active")
+	}
+	if err := revoke(&account); err == nil {
+		t.Fatal("absent grant revocation succeeded")
+	}
+}
+func TestFormalSessionDiagnostics(t *testing.T) {
+	source := []sqlDiagnostic{{level: "Warning", code: 1, message: "original"}}
+	s := &session{}
+	s.replaceDiagnostics(source)
+	source[0].message = "changed"
+	if s.diagnostics[0].message != "original" {
+		t.Fatal("diagnostics retained caller ownership")
+	}
+	s.clearDiagnostics()
+	if s.diagnosticCount() != 0 {
+		t.Fatal("diagnostics were not cleared")
+	}
+}
+func TestFormalSessionExplanation(t *testing.T) {
+	registry := newActiveExplanationRegistry()
+	old := &queryexplanation.Document{Statement: queryexplanation.Statement{SQL: "old"}}
+	newer := &queryexplanation.Document{Statement: queryexplanation.Statement{SQL: "new"}}
+	finishOld := registry.begin(1, old, nil)
+	finishNew := registry.begin(1, newer, nil)
+	finishOld()
+	snapshot, found := registry.snapshot(1)
+	if !found || snapshot.Statement.SQL != "new" {
+		t.Fatal("stale explanation cleanup removed new statement")
+	}
+	finishNew()
+	if _, found := registry.snapshot(1); found {
+		t.Fatal("finished explanation remained visible")
+	}
+}
+func TestFormalSessionExecution(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	config := normalizedConfig(Config{})
+	server := &Server{config: config, connections: &connectionRegistry{}, explanations: newActiveExplanationRegistry(), resources: newResourceManager(config)}
+	c := newConversation(server, a)
+	c.connectionID = 1
+	c.session = newSession(server, authenticationResult{}, 1)
+	if !c.runStatement("select 1", func() error {
+		if !c.control.running.Load() || c.session.statementCancel == nil {
+			t.Fatal("active statement has no cancellation watch")
+		}
+		if _, found := server.explanations.snapshot(1); !found {
+			t.Fatal("active text statement has no explanation")
+		}
+		c.control.cancelStatement()
+		select {
+		case <-c.session.statementCancel:
+		default:
+			t.Fatal("active statement cancellation was not delivered")
+		}
+		return nil
+	}) {
+		t.Fatal("successful statement closed connection")
+	}
+	if c.control.running.Load() || c.session.statementCancel != nil || c.session.resources != nil {
+		t.Fatal("completed statement remained active")
+	}
+	if _, found := server.explanations.snapshot(1); found {
+		t.Fatal("completed statement retained explanation")
+	}
+}

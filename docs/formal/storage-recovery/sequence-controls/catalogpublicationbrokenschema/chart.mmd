@@ -1,0 +1,49 @@
+---
+title: "Publish one catalog batch"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks OutcomeMatchesPublication
+    lg1: Path to the OutcomeMatchesPublication bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: queued
+  s1: batch collected
+  s2: complete
+  s3: isolated changes applied
+  s4: failed
+  s5: validated
+  s6: row transaction staged
+  s7: rows synced
+  s8: row schema checkpointed
+  s9: schema persisted
+  s10: revision published
+  s11: Success announced without durable publication
+  [*] --> s0
+  s0 --> s1: Collect queued requests
+  s1 --> s2: Reject batch with no accepted request
+  s1 --> s3: Apply isolated request changes
+  s3 --> s4: Validation or persistence fails
+  s3 --> s5: Validate proposed catalog
+  s4 --> s2: Notify failed waiters
+  s5 --> s6: Stage changed row image
+  s6 --> s4: Validation or persistence fails
+  s6 --> s7: Commit and sync rows
+  s7 --> s8: Checkpoint changed row schema
+  s8 --> s4: Validation or persistence fails
+  s8 --> s9: Persist catalog schema
+  s9 --> s10: Publish catalog revision
+  s10 --> s11: Notify successful waiters
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 bugPath
+  class s9 bugPath
+  class s10 bugPath
+  class s11 breaks
+  class s11 bugPath

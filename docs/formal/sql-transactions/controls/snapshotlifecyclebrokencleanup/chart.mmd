@@ -1,0 +1,38 @@
+---
+title: "SnapshotLifecycle"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks RejectedPublicationClearsStage
+    lg1: Path to the RejectedPublicationClearsStage bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: idle
+  s1: active
+  s2: read
+  s3: updated outside
+  s4: read again
+  s5: staged
+  s6: committed
+  s7: rejected
+  s8: resource rejected
+  [*] --> s0
+  s0 --> s1: Begin
+  s1 --> s2: FirstRead
+  s2 --> s3: LaterPublish
+  s3 --> s4: ReadAgain
+  s4 --> s5: StageWrite
+  s5 --> s6: Commit
+  s5 --> s7: RejectCommit
+  s5 --> s8: RejectResources
+  s8 --> s5: Retry
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s7 breaks
+  class s7 bugPath

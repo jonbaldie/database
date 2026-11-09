@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent
+repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':raise SystemExit('Use pinned TLC 1.7.4 from verify-wal-atomicity.')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+models={'TableSchema':(['BrokenPersist','BrokenDrop'],'SchemaSuccessHasDurableImage'),'CatalogPublication':(['BrokenRows','BrokenSchema','BrokenNotify','BrokenFailure'],'OutcomeMatchesPublication'),'AllocationLifecycle':(['BrokenDisabled','BrokenScan','BrokenReset'],'AllocationLifecycleSafe')}
+probes={'storage':'schema_sequence_test.go.txt','catalog':'catalog_sequence_test.go.txt','mysql':'allocation_sequence_test.go.txt'}
+notify='\tfor _, req := range successful {\n\t\treq.result <- nil\n\t\tclose(req.result)\n\t}\n'
+mutations=[
+ ('schema-persist','storage','meta.go','return e.persistMetaLocked()','return nil',2,'^TestFormalSchemaSequence$','successful schema change was not persisted'),
+ ('drop-checkpoint','storage','meta.go','return e.checkpointLocked(position)','_ = position; return nil',1,'^TestFormalSchemaDropRecreate$','dropped rows reappeared after table recreation'),
+ ('row-publication','catalog','writer.go','if err := prepared.commit(); err != nil {','_ = prepared; if err := error(nil); err != nil {',1,'^TestFormalCatalogPublication$','catalog batch skipped durable row publication'),
+ ('schema-publication','catalog','writer.go','if err := s.persistLocked(staged); err != nil {','if err := error(nil); err != nil {',1,'^TestFormalCatalogPublication$','catalog schema was not persisted before success'),
+ ('early-notification','catalog','writer.go',None,None,1,'^TestFormalCatalogPublication$','catalog notification preceded row publication'),
+ ('failure-notification','catalog','writer.go','failWriteBatch(successful, err)','for _, req := range successful { req.result <- nil; close(req.result) }',1,'^TestFormalCatalogPublicationFailure$','failed catalog publication returned success'),
+ ('disabled-state','mysql','auto_increment.go','table.AutoIncrement = 0','table.AutoIncrement = 19',1,'^TestFormalAllocationLifecycle$','disabled table retained allocation state'),
+ ('scan-state','mysql','auto_increment.go','\t\t\tstate = advanceAutoIncrement(state, value, limit)','\t\t\tstate = advanceAutoIncrement(state, value-value, limit)',1,'^TestFormalAllocationLifecycle$','initialization did not scan stored identifiers'),
+ ('truncate-reset','mysql','auto_increment.go','setAutoIncrementState(table, autoIncrementState{next: 1})','_ = table',1,'^TestFormalAllocationLifecycle$','truncate did not reset exhausted allocation'),
+]
+with tempfile.TemporaryDirectory(prefix='database-storage-sequences-') as scratch:
+ root=pathlib.Path(scratch)
+ for model,(flags,rule) in models.items():
+  for flag in [None]+flags:
+   config=model if flag is None else model+flag
+   r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/config),'-config',str(skill/(config+'.cfg')),str(skill/(model+'.tla'))],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   print(config+':\n'+r.stdout,flush=True)
+   if flag is None and r.returncode:raise SystemExit('Current sequence model failed: '+model)
+   if flag and (r.returncode!=12 or 'Invariant '+rule+' is violated' not in r.stdout):raise SystemExit('Broken sequence model missed its rule: '+config)
+ def run_source(name,package,mutation=None):
+  overlay={'Replace':{str(repo/'internal'/package/'zz_formal_storage_sequence_test.go'):str(skill/probes[package])}}
+  pattern='^TestFormal'
+  if mutation:
+   _,_,filename,old,new,count,pattern,message=mutation
+   source=repo/'internal'/package/filename;original=source.read_text()
+   if old is None:
+    anchor='\tif err := s.commitWriteBatch(previous, staged); err != nil {'
+    if original.count(notify)!=1 or original.count(anchor)!=1:raise SystemExit('Source changed: notification sequence')
+    patched=original.replace(notify,'').replace(anchor,notify+anchor)
+   else:
+    if original.count(old)!=count:raise SystemExit('Source changed: '+name)
+    patched=original.replace(old,new)
+   path=root/(name+'.go');path.write_text(patched);overlay['Replace'][str(source)]=str(path)
+  path=root/(name+'.json');path.write_text(json.dumps(overlay))
+  r=subprocess.run(['go','test','-count=1','-overlay',str(path),'./internal/'+package,'-run',pattern],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout,flush=True)
+  if mutation is None and r.returncode:raise SystemExit('Current source sequence failed: '+package)
+  if mutation and (r.returncode==0 or message not in r.stdout):raise SystemExit('Broken source sequence missed its assertion: '+name)
+ for package in probes:run_source('current-'+package,package)
+ for mutation in mutations:run_source(mutation[0],mutation[1],mutation)
+ for package in probes:run_source('restored-current-'+package,package)
+print('Three storage sequence models, nine broken models, real-source sequences, nine source faults, and restored-current probes passed.')

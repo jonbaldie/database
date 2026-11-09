@@ -1,0 +1,27 @@
+---
+title: "Keep unmatched rows in a left join"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks PreserveUnmatchedLeft
+    lg1: Path to the PreserveUnmatchedLeft bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Left row 1, match right rows
+  s1: Left row 1, finish left row
+  s2: Left row 2, match right rows
+  s3: Left row 2, finish left row
+  s4: Unmatched left row lost
+  [*] --> s0
+  s0 --> s1: Return matching pair
+  s1 --> s2: Advance to next left row
+  s2 --> s3: No right row matches
+  s3 --> s4: Advance to next left row
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 breaks
+  class s4 bugPath

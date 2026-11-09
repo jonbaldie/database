@@ -1,0 +1,24 @@
+---
+title: "Shutdown request ownership"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks FirstRequestStaysLatched in some cases
+    lg1: Path to the FirstRequestStaysLatched bug
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  s0: Server accepts requests
+  s1: Shutdown requested by a
+  s2: Shutdown requested by b
+  [*] --> s0
+  s0 --> s1: Request shutdown
+  s0 --> s2: Request shutdown
+  s1 --> s2: Request shutdown
+  s2 --> s1: Request shutdown
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 mayBreak
+  class s1 bugPath
+  class s2 mayBreak
+  class s2 bugPath

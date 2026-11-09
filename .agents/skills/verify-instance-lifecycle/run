@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent; repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':raise SystemExit('Use pinned TLC 1.7.4 from verify-wal-atomicity, or set TLA2TOOLS.')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+with tempfile.TemporaryDirectory(prefix='database-lifecycle-formal-') as scratch:
+ root=pathlib.Path(scratch)
+ for name,rule in [('InstanceLifecycle',None),('BrokenMarker','UncleanStopPreservesMarker'),('BrokenReady','DrainingIsNotReady'),('BrokenRuntime','ReadinessRequiresRuntime'),('BrokenClean','CleanStopHasStoppedMarker'),('BrokenRecovery','RecoveryReflectsPriorMarker')]:
+  r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/name),'-config',str(skill/(name+'.cfg')),str(skill/'InstanceLifecycle.tla')],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(r.stdout)
+  if rule is None and r.returncode:raise SystemExit('Current model failed')
+  if rule and (r.returncode!=12 or ('Invariant '+rule+' is violated') not in r.stdout):raise SystemExit('Broken model missed its rule: '+name)
+ source=repo/'internal/lifecycle/server.go';text=source.read_text()
+ variants=[('clean-marker','if clean {','if false {','stop marker did not match clean flag'),('recovery','state.recovered = recovered','state.recovered = false; _ = recovered','recovery did not reflect prior marker'),('runtime-order','runtime, err := startRuntime(s.options, s.health)','s.reportReady(false, runtime{})\n\truntime, err := startRuntime(s.options, s.health)','failed startup reported ready before runtime'),('marker','if clean {','if true {','stop marker did not match clean flag'),('readiness','s.health.set("shutting_down")','s.health.set("ready")','readiness status:'),('exclusivity','syscall.LOCK_EX|syscall.LOCK_NB','syscall.LOCK_SH|syscall.LOCK_NB','second owner acquired directory')]
+ for variant in [None]+variants:
+  name='current' if variant is None else variant[0]
+  overlay={'Replace':{str(repo/'internal/lifecycle/zz_formal_lifecycle_test.go'):str(skill/'lifecycle_test.go.txt')}}
+  if variant:
+   _,old,new,message=variant
+   if text.count(old)!=1:raise SystemExit('Source changed: inspect '+name)
+   patched=root/(name+'.go');patched.write_text(text.replace(old,new));overlay['Replace'][str(source)]=str(patched)
+  config=root/(name+'.json');config.write_text(json.dumps(overlay))
+  r=subprocess.run(['go','test','-count=1','-overlay',str(config),'./internal/lifecycle','-run','^TestFormalLifecycle'],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout)
+  if variant is None and r.returncode:raise SystemExit('Current lifecycle probe failed')
+  if variant and (r.returncode==0 or message not in r.stdout):raise SystemExit('Broken source missed its assertion: '+name)
+ print('Lifecycle model and source checks passed; all five broken models and six source mutations were caught.')
+
+subprocess.run([str(skill/"run-install")],cwd=repo,env=env,check=True)
+
+subprocess.run([str(skill/"run-polling")], cwd=repo, env=env, check=True)
+
+subprocess.run([str(skill/"run-latch")],cwd=repo,env=env,check=True)
