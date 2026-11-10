@@ -3,15 +3,16 @@ package mysql
 import (
 	"strconv"
 	"strings"
+
+	"github.com/jonbaldie/database/internal/queryexplanation"
 )
 
 type sessionSnapshot struct {
-	conversation *conversation
-	id           uint32
-	username     string
-	database     string
-	running      bool
-	query        string
+	id       uint32
+	username string
+	database string
+	running  bool
+	query    string
 }
 
 func (r *connectionRegistry) sessionSnapshots() []sessionSnapshot {
@@ -25,20 +26,53 @@ func (r *connectionRegistry) sessionSnapshots() []sessionSnapshot {
 			if conversation.session != nil {
 				database = conversation.session.database
 			}
-			result = append(result, sessionSnapshot{conversation: conversation, id: conversation.connectionID,
+			result = append(result, sessionSnapshot{id: conversation.connectionID,
 				username: conversation.session.username, database: database, running: conversation.control.running.Load(), query: query})
 		}
 	}
 	return result
 }
 
-func (r *connectionRegistry) sessionByID(id uint32) (sessionSnapshot, bool) {
-	for _, snapshot := range r.sessionSnapshots() {
-		if snapshot.id == id {
-			return snapshot, true
+func (r *connectionRegistry) sessionByID(id uint32) (*conversation, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, sessions := range r.sessions {
+		for conversation := range sessions {
+			if conversation.connectionID == id {
+				return conversation, true
+			}
 		}
 	}
-	return sessionSnapshot{}, false
+	return nil, false
+}
+
+func (r *connectionRegistry) observe(observer *session) []sessionSnapshot {
+	authority := sessionAuthorityFor(observer, "OPERATIONAL_OBSERVATION")
+	snapshots := r.sessionSnapshots()
+	visible := make([]sessionSnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if authority.permits(snapshot.username) {
+			visible = append(visible, snapshot)
+		}
+	}
+	return visible
+}
+
+type sessionView struct {
+	conversation *conversation
+}
+
+func (r *connectionRegistry) observeOne(observer *session, id uint32) (sessionView, bool) {
+	target, found := r.sessionByID(id)
+	if !found || !sessionAuthorityFor(observer, "OPERATIONAL_OBSERVATION").permits(target.session.username) {
+		return sessionView{}, false
+	}
+	return sessionView{conversation: target}, true
+}
+
+func (view sessionView) explanation() (*queryexplanation.Document, bool) {
+	target := view.conversation.session
+	return target.server.explanations.snapshot(target)
 }
 
 func (s *textStatementExecutor) sessionControlStatement(query, lower string) (*queryResult, bool, error) {
@@ -53,10 +87,7 @@ func (s *textStatementExecutor) sessionControlStatement(query, lower string) (*q
 
 func (s *textStatementExecutor) showProcessList() *queryResult {
 	rows := make([][]string, 0)
-	for _, snapshot := range s.server.connections.sessionSnapshots() {
-		if !s.canObserve(snapshot.username) {
-			continue
-		}
+	for _, snapshot := range s.server.connections.observe(s.session) {
 		command, info := "Sleep", ""
 		if snapshot.running {
 			command, info = "Query", snapshot.query
@@ -71,33 +102,54 @@ func (s *textStatementExecutor) killSession(query string) error {
 	if err != nil {
 		return err
 	}
-	target, found := s.server.connections.sessionByID(id)
+	return s.server.connections.terminateSession(s.session, id, kind)
+}
+
+type terminationKind uint8
+
+const (
+	terminateQuery terminationKind = iota
+	terminateConnection
+	terminateAfterStatement
+)
+
+func (r *connectionRegistry) terminateSession(observer *session, id uint32, kind terminationKind) error {
+	target, found := r.sessionByID(id)
 	if !found {
 		return sqlFailure{1094, "HY000", "unknown thread id"}
 	}
-	if !s.canControl(target.username) {
+	if !sessionAuthorityFor(observer, "OPERATIONAL_CONTROL").permits(target.session.username) {
 		return sqlFailure{1094, "HY000", "access denied"}
 	}
-	if kind == "query" {
-		target.conversation.control.cancelStatement()
-		return nil
-	}
-	target.conversation.control.revoked.Store(true)
-	_ = target.conversation.connection.Close()
+	r.terminate(target, kind)
 	return nil
 }
 
-func parseKill(query string) (string, uint32, error) {
+func (r *connectionRegistry) terminate(target *conversation, kind terminationKind) {
+	if kind == terminateQuery {
+		target.control.cancelStatement()
+		return
+	}
+	target.control.revoked.Store(true)
+	if kind != terminateAfterStatement || !target.control.running.Load() {
+		_ = target.connection.Close()
+	}
+}
+
+func parseKill(query string) (terminationKind, uint32, error) {
 	fields := strings.Fields(strings.TrimSpace(query))
 	if len(fields) == 2 {
 		id, err := parseConnectionID(fields[1])
-		return "connection", id, err
+		return terminateConnection, id, err
 	}
 	if len(fields) == 3 && (strings.EqualFold(fields[1], "query") || strings.EqualFold(fields[1], "connection")) {
 		id, err := parseConnectionID(fields[2])
-		return strings.ToLower(fields[1]), id, err
+		if strings.EqualFold(fields[1], "query") {
+			return terminateQuery, id, err
+		}
+		return terminateConnection, id, err
 	}
-	return "", 0, sqlFailure{1064, "42000", "malformed KILL statement"}
+	return terminateConnection, 0, sqlFailure{1064, "42000", "malformed KILL statement"}
 }
 
 func parseConnectionID(value string) (uint32, error) {
@@ -108,21 +160,20 @@ func parseConnectionID(value string) (uint32, error) {
 	return uint32(id), nil
 }
 
-func (s *textStatementExecutor) canObserve(username string) bool {
-	return s.canOperate(username, "OPERATIONAL_OBSERVATION")
+type sessionAuthority struct {
+	username string
+	all      bool
 }
 
-func (s *textStatementExecutor) canControl(username string) bool {
-	return s.canOperate(username, "OPERATIONAL_CONTROL")
+func sessionAuthorityFor(observer *session, privilege string) sessionAuthority {
+	authority := sessionAuthority{username: observer.username, all: observer.username == ""}
+	if !authority.all && observer.server.config.Catalog != nil {
+		account, found := observer.server.config.Catalog.Account(observer.username)
+		authority.all = found && !account.Locked && accountGrantIndex(account, privilege, "") >= 0
+	}
+	return authority
 }
 
-func (s *textStatementExecutor) canOperate(username, privilege string) bool {
-	if s.session.username == "" || username == s.session.username {
-		return true
-	}
-	if s.session.server.config.Catalog == nil {
-		return false
-	}
-	account, found := s.session.server.config.Catalog.Account(s.session.username)
-	return found && !account.Locked && accountGrantIndex(account, privilege, "") >= 0
+func (authority sessionAuthority) permits(username string) bool {
+	return authority.all || authority.username == username
 }
