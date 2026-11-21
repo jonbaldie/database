@@ -9,8 +9,6 @@ import (
 	"github.com/jonbaldie/database/internal/credential"
 )
 
-const accountManagerPrivilege = "ACCOUNT_MANAGER"
-
 func grantCreatedNamespace(definition *catalog.Definition, namespace, username string) error {
 	if username == "" {
 		return nil
@@ -259,7 +257,11 @@ func (s *textStatementExecutor) accountStatement(query, lower string) (*queryRes
 	if err := s.commitAccountBoundary(); err != nil {
 		return nil, true, err
 	}
-	return nil, true, s.applyAccountStatement(query, lower)
+	err := s.applyAccountStatement(query, lower)
+	if errors.Is(err, catalog.ErrLastAccountManager) {
+		err = sqlFailure{1396, "HY000", err.Error()}
+	}
+	return nil, true, err
 }
 
 func accountAdministrationStatement(lower string) bool {
@@ -317,7 +319,7 @@ func (s *textStatementExecutor) createAccount(query string) error {
 }
 
 func (s *textStatementExecutor) alterAccount(query string) error {
-	name, suffix, account, err := s.alterAccountTarget(query)
+	name, suffix, _, err := s.alterAccountTarget(query)
 	if err != nil {
 		return err
 	}
@@ -330,7 +332,7 @@ func (s *textStatementExecutor) alterAccount(query string) error {
 		}
 	}
 	if lock, isLockChange := accountLockChange(suffix); isLockChange {
-		return s.setAccountLock(name, account, lock)
+		return s.setAccountLock(name, lock)
 	}
 	return s.changeAccountPassword(name, suffix)
 }
@@ -367,12 +369,9 @@ func accountLockChange(suffix string) (bool, bool) {
 	}
 }
 
-func (s *textStatementExecutor) setAccountLock(name string, account catalog.Account, lock bool) error {
+func (s *textStatementExecutor) setAccountLock(name string, lock bool) error {
 	if err := s.requireAccountManager(); err != nil {
 		return err
-	}
-	if lock && accountHasGrant(account, accountManagerPrivilege) && s.enabledAccountManagerCount() == 1 {
-		return sqlFailure{1396, "HY000", "last account manager is protected"}
 	}
 	if err := s.session.server.config.Catalog.UpdateAccount(name, func(account *catalog.Account) error { account.Locked = lock; return nil }); err != nil {
 		return err
@@ -408,7 +407,7 @@ func (s *textStatementExecutor) dropAccount(query string) error {
 		rest = strings.TrimSpace(rest[len("IF EXISTS "):])
 	}
 	name := scalar(rest)
-	account, found := s.session.server.config.Catalog.Account(name)
+	_, found := s.session.server.config.Catalog.Account(name)
 	if !found && ifExists {
 		s.session.addDiagnostic("Note", 3162, "Authorization ID '"+name+"' does not exist.")
 		return nil
@@ -416,18 +415,11 @@ func (s *textStatementExecutor) dropAccount(query string) error {
 	if !found {
 		return sqlFailure{1396, "HY000", "unknown account"}
 	}
-	if s.protectLastAccountManager(account) {
-		return sqlFailure{1396, "HY000", "last account manager is protected"}
-	}
 	if err := s.session.server.config.Catalog.DeleteAccount(name); err != nil {
 		return err
 	}
 	s.session.server.connections.revokeAccount(name)
 	return nil
-}
-
-func (s *textStatementExecutor) protectLastAccountManager(account catalog.Account) bool {
-	return accountHasGrant(account, accountManagerPrivilege) && !account.Locked && s.enabledAccountManagerCount() == 1
 }
 
 func (s *textStatementExecutor) changeGrant(query string, grant bool) error {
@@ -463,19 +455,11 @@ func (s *textStatementExecutor) applyGrantChange(change accountGrantChange) erro
 			return err
 		}
 	}
-	account, found := s.session.server.config.Catalog.Account(change.name)
+	_, found := s.session.server.config.Catalog.Account(change.name)
 	if !found {
 		return sqlFailure{1396, "HY000", "unknown account"}
 	}
-	if s.removesLastAccountManager(change, account) {
-		return sqlFailure{1396, "HY000", "last account manager is protected"}
-	}
 	return s.session.server.config.Catalog.UpdateAccount(change.name, grantChange(change.privilege, change.namespace, change.grant))
-}
-
-func (s *textStatementExecutor) removesLastAccountManager(change accountGrantChange, account catalog.Account) bool {
-	return !change.grant && change.privilege == accountManagerPrivilege && change.namespace == "" &&
-		accountHasGrant(account, change.privilege) && !account.Locked && s.enabledAccountManagerCount() == 1
 }
 
 func accountCredentials(rest string) (string, string, bool) {
@@ -540,7 +524,7 @@ func splitKeyword(value, keyword string) (string, string, bool) {
 }
 
 func validGrant(privilege, namespace string) bool {
-	server := map[string]bool{"ACCOUNT_MANAGER": true, "NAMESPACE_MANAGER": true, "OPERATIONAL_OBSERVATION": true, "OPERATIONAL_CONTROL": true}
+	server := map[string]bool{catalog.AccountManagerPrivilege: true, "NAMESPACE_MANAGER": true, "OPERATIONAL_OBSERVATION": true, "OPERATIONAL_CONTROL": true}
 	namespaceGrants := map[string]bool{"DATA_READ": true, "DATA_WRITE": true, "SCHEMA_MANAGEMENT": true}
 	if namespace == "" {
 		return server[privilege]
@@ -573,19 +557,10 @@ func accountGrantIndex(account catalog.Account, privilege, namespace string) int
 	return -1
 }
 func accountHasGrant(account catalog.Account, privilege string) bool {
-	return accountGrantIndex(account, privilege, "") >= 0
+	return account.HasGrant(privilege, "")
 }
 func (s *textStatementExecutor) requireAccountManager() error {
-	return s.requireGrant(accountManagerPrivilege, "")
-}
-func (s *textStatementExecutor) enabledAccountManagerCount() int {
-	count := 0
-	for _, account := range s.session.server.config.Catalog.Snapshot().Accounts {
-		if !account.Locked && accountHasGrant(account, accountManagerPrivilege) {
-			count++
-		}
-	}
-	return count
+	return s.requireGrant(catalog.AccountManagerPrivilege, "")
 }
 func validateAccountInput(name, password string) error {
 	if credential.ValidateAccountName(name) != nil || credential.ValidatePassword(password) != nil {
@@ -647,7 +622,7 @@ func (s *catalogExecutor) authorizeShowGrants(name string) error {
 		return nil
 	}
 	account, found := s.server.config.Catalog.Account(s.username)
-	if !found || account.Locked || !accountHasGrant(account, accountManagerPrivilege) {
+	if !found || account.Locked || !accountHasGrant(account, catalog.AccountManagerPrivilege) {
 		return sqlFailure{1227, "42000", "access denied"}
 	}
 	return nil
