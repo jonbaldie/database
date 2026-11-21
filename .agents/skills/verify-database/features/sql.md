@@ -4,6 +4,7 @@
 
 - Authentication and session state.
 - SQL reads and durable writes.
+- Prepared bind markers across comments, string literals, and quoted identifiers.
 - Sort-spill cleanup after result metadata delivery fails.
 - Index DDL, hints, bounded scans, and uniqueness.
 
@@ -17,7 +18,7 @@ Run from the repository root, in the shell where you completed [Launch](../SKILL
 
 ```sh
 verify_command sql env GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
-	-run '^(TestGoDriverCompatibilityProfile|TestMySQLClientCanAuthenticatePersistAndResetSession|TestMySQLBTreeIndexesUseThePublicWireContract)$' \
+	-run '^(TestGoDriverCompatibilityProfile|TestMySQLClientCanAuthenticatePersistAndResetSession|TestMySQLBTreeIndexesUseThePublicWireContract|TestIssue586PreparedLexicalRules)$' \
 	-count=1 -v
 ```
 
@@ -34,6 +35,10 @@ checks a failed text result after the column-count packet, positive spill
 metrics, no remaining sort files, and a successful new connection. Binary
 metadata and output failures use real spill results in `internal/mysql` tests;
 they are not process-level prepared-execution proofs.
+
+`TestIssue586PreparedLexicalRules` checks the advertised parameter count through
+`database/sql` and exact results from repeated prepared executions. It covers all
+three comment forms, doubled backticks, and a backslash before a closing backtick.
 
 The index test checks literal rows from forward, reverse, and bounded scans. It also checks duplicate-key errors and public index metadata. The client state test checks persisted rows after restart. The Go driver test proves the named driver connection path.
 
