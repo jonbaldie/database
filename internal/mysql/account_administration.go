@@ -193,21 +193,21 @@ func startsStatement(lower string, prefixes []string) bool {
 }
 
 func writeGrant(namespace string) (string, string) {
-	if namespace == "" || strings.EqualFold(namespace, informationSchemaName) {
+	if namespace == "" || catalog.IsInformationSchema(namespace) {
 		return "", ""
 	}
 	return "DATA_WRITE", namespace
 }
 
 func schemaGrant(namespace string) (string, string) {
-	if namespace == "" || strings.EqualFold(namespace, informationSchemaName) {
+	if namespace == "" || catalog.IsInformationSchema(namespace) {
 		return "", ""
 	}
 	return "SCHEMA_MANAGEMENT", namespace
 }
 
 func readGrant(namespace string) (string, string) {
-	if namespace == "" || strings.EqualFold(namespace, informationSchemaName) {
+	if namespace == "" || catalog.IsInformationSchema(namespace) {
 		return "", ""
 	}
 	return "DATA_READ", namespace
