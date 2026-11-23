@@ -80,8 +80,8 @@ func (w *StreamWriter) writeRawPacket(payload []byte) error {
 }
 
 // WriteOK encodes an OK packet with affected row count and warning count.
-func (w *StreamWriter) WriteOK(affected uint64, warnings uint16) error {
-	return w.WritePacket(okPacketWithWarnings(affected, warnings))
+func (w *StreamWriter) WriteOK(affected uint64, warnings uint16, lastInsertID ...uint64) error {
+	return w.WritePacket(okPacketWithWarnings(affected, warnings, lastInsertID...))
 }
 
 // WriteError encodes an error packet from an error or sqlFailure.
@@ -412,10 +412,15 @@ func okPacket(affected ...uint64) []byte {
 	return okPacketWithWarnings(count, 0)
 }
 
-func okPacketWithWarnings(affected uint64, warnings uint16) []byte {
+func okPacketWithWarnings(affected uint64, warnings uint16, lastInsertID ...uint64) []byte {
 	payload := []byte{0x00}
 	payload = append(payload, lengthEncodedUint(affected)...)
-	payload = append(payload, 0x00, 0x02, 0x00, byte(warnings), byte(warnings>>8))
+	id := uint64(0)
+	if len(lastInsertID) > 0 {
+		id = lastInsertID[0]
+	}
+	payload = append(payload, lengthEncodedUint(id)...)
+	payload = append(payload, 0x02, 0x00, byte(warnings), byte(warnings>>8))
 	return payload
 }
 
