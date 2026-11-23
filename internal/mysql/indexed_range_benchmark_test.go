@@ -23,8 +23,11 @@ func BenchmarkMySQLIndexedRangePage(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = store.Rows().Close() })
+	if err := store.CreateAccount(catalog.InitialAccount("admin", credential.PasswordHash("range-benchmark"))); err != nil {
+		b.Fatal(err)
+	}
 	server, err := NewWithConfig("127.0.0.1:0", Config{
-		Catalog: store, Username: "admin", PasswordHash: credential.PasswordHash("range-benchmark"),
+		Catalog: store,
 	})
 	if err != nil {
 		b.Fatal(err)

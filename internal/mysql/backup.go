@@ -57,13 +57,14 @@ func (s *textStatementExecutor) captureInstanceMetadata() ([]byte, error) {
 	if metadata.Schema == "" {
 		metadata = instance.Metadata{
 			Schema: "database.instance/v1", InstanceID: "unknown", State: "stopped",
-			AdminAccount: s.session.server.config.Username, PasswordHash: s.session.server.config.PasswordHash,
+			AdminAccount: "unknown",
 		}
 	}
 	if metadata.DataVersion == "" {
 		metadata.DataVersion = instance.CurrentDataVersion
 	}
 	metadata.State = "stopped"
+	metadata.PasswordHash = ""
 	instanceBytes, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return nil, sqlFailure{1684, "HY000", "backup capture failed"}

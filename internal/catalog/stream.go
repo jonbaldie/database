@@ -14,6 +14,11 @@ func Write(writer io.Writer, definition Definition) error {
 	if err := writeCatalogNamespaces(writer, definition.Namespaces); err != nil {
 		return err
 	}
+	if definition.BootstrapComplete {
+		if _, err := io.WriteString(writer, `,"bootstrap_complete":true`); err != nil {
+			return err
+		}
+	}
 	if len(definition.Accounts) > 0 {
 		if _, err := io.WriteString(writer, `,"accounts":`); err != nil {
 			return err

@@ -322,6 +322,15 @@ func openServerData(directory string) (instance.Metadata, *catalog.Store, error)
 	if err != nil {
 		return instance.Metadata{}, nil, fmt.Errorf("open catalog: %w", err)
 	}
+	if err := store.BootstrapLegacy(metadata.AdminAccount, metadata.PasswordHash); err != nil {
+		_ = store.Rows().Close()
+		return instance.Metadata{}, nil, fmt.Errorf("bootstrap legacy catalog: %w", err)
+	}
+	metadata, err = instance.RemoveLegacyCredential(directory, metadata)
+	if err != nil {
+		_ = store.Rows().Close()
+		return instance.Metadata{}, nil, err
+	}
 	return metadata, store, nil
 }
 
@@ -354,7 +363,7 @@ func startMySQL(opts Options, metadata instance.Metadata, store *catalog.Store) 
 		return nil, nil
 	}
 	config := mysql.Config{
-		Catalog: store, Username: metadata.AdminAccount, PasswordHash: metadata.PasswordHash,
+		Catalog:  store,
 		Instance: metadata, TLSCertFile: opts.TLSCertFile, TLSKeyFile: opts.TLSKeyFile,
 		MaxConnections: opts.MaxConnections, MaxPreparedStmtCount: opts.MaxPreparedStmtCount,
 		MaxAllowedPacket: opts.MaxAllowedPacket,

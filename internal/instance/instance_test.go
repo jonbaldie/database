@@ -73,7 +73,7 @@ func TestFailedInstallRemovesPartialCatalogAndClaim(t *testing.T) {
 		t.Fatalf("claim initialization: %v", err)
 	}
 	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
-	if err := paths.writeStaged([]byte("metadata")); err != nil {
+	if err := paths.writeStaged([]byte("metadata"), []byte("catalog")); err != nil {
 		t.Fatalf("stage instance files: %v", err)
 	}
 	if err := os.Remove(paths.metadataTemporary()); err != nil {
@@ -101,7 +101,7 @@ func TestInstallDoesNotOverwriteConcurrentCatalog(t *testing.T) {
 		t.Fatalf("claim initialization: %v", err)
 	}
 	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
-	if err := paths.writeStaged([]byte("metadata")); err != nil {
+	if err := paths.writeStaged([]byte("metadata"), []byte("catalog")); err != nil {
 		t.Fatalf("stage instance files: %v", err)
 	}
 	if err := os.WriteFile(paths.catalog(), []byte("existing"), 0o600); err != nil {

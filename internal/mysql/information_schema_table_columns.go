@@ -49,9 +49,8 @@ func informationSchemaColumnPrivileges(s *session, definition catalog.Definition
 	account := catalog.Account{}
 	unrestricted := s == nil || s.username == ""
 	if s != nil && s.username != "" {
-		var found bool
-		account, found = definition.Accounts[s.username]
-		unrestricted = !found && s.unconfiguredAccountPermitted()
+		account = definition.Accounts[s.username]
+		unrestricted = false
 	}
 	for _, grant := range []struct{ name, spelling string }{
 		{"DATA_READ", "select"}, {"DATA_WRITE", "insert,update"}, {"SCHEMA_MANAGEMENT", "references"},

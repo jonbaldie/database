@@ -15,12 +15,15 @@ func backupExecutor(t *testing.T, username string, grants []catalog.Grant) *text
 	if err != nil {
 		t.Fatalf("open catalog: %v", err)
 	}
+	if err := store.CreateAccount(catalog.InitialAccount("admin", "hash")); err != nil {
+		t.Fatal(err)
+	}
 	metadata := instance.Metadata{
 		Schema: "database.instance/v1", InstanceID: "source-live", State: "stopped",
 		AdminAccount: "admin", PasswordHash: "hash", DataVersion: instance.CurrentDataVersion,
 	}
 	server, err := NewWithConfig("127.0.0.1:0", Config{
-		Catalog: store, Username: "admin", PasswordHash: "hash", Instance: metadata, Version: "0.1.0",
+		Catalog: store, Instance: metadata, Version: "0.1.0",
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
