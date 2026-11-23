@@ -689,3 +689,36 @@ func TestStreamWriterPreparedMetadata(t *testing.T) {
 		t.Fatalf("writer sequence = %d, want 7", writer.Sequence())
 	}
 }
+
+func TestPacketContinuationRoundTrip(t *testing.T) {
+	for _, start := range []byte{0, 254, 255} {
+		for _, size := range []int{maximumPacketFrame - 1, maximumPacketFrame, maximumPacketFrame + 1} {
+			payload := bytes.Repeat([]byte{42}, size)
+			var wire bytes.Buffer
+			writer := NewStreamWriter(&wire, start, 0)
+			if err := writer.WritePacket(payload); err != nil {
+				t.Fatal(err)
+			}
+			sequence, got, err := readPacket(&wire, int64(size))
+			wantSequence := start
+			if size >= maximumPacketFrame {
+				wantSequence++
+			}
+			if err != nil || sequence != wantSequence || !bytes.Equal(got, payload) {
+				t.Errorf("start=%d size=%d: sequence=%d, error=%v", start, size, sequence, err)
+			}
+		}
+	}
+}
+
+func TestReadPacketRejectsIncorrectContinuationSequence(t *testing.T) {
+	var wire bytes.Buffer
+	if err := NewStreamWriter(&wire, 255, 0).WritePacket(make([]byte, maximumPacketFrame)); err != nil {
+		t.Fatal(err)
+	}
+	wire.Bytes()[4+maximumPacketFrame+3] = 1
+	_, _, err := readPacket(&wire, int64(maximumPacketFrame))
+	if err == nil || err.Error() != "packet continuation sequence mismatch" {
+		t.Fatalf("readPacket error = %v, want continuation sequence mismatch", err)
+	}
+}

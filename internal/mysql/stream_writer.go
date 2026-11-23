@@ -355,7 +355,7 @@ func readPacket(r io.Reader, maximum int64) (byte, []byte, error) {
 			return 0, nil, err
 		}
 		if frame == 0 {
-			sequence, expected = header[3], header[3]+1
+			expected = header[3]
 		} else if header[3] != expected {
 			return 0, nil, errors.New("packet continuation sequence mismatch")
 		}
