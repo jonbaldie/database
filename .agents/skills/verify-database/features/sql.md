@@ -37,6 +37,13 @@ they are not process-level prepared-execution proofs.
 
 The index test checks literal rows from forward, reverse, and bounded scans. It also checks duplicate-key errors and public index metadata. The client state test checks persisted rows after restart. The Go driver test proves the named driver connection path.
 
+For unnamed unique-key names and collisions, run:
+
+```sh
+verify_command unnamed-unique env GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
+	-run '^TestIssue484UnnamedUniqueKeysUseMySQLNamesThroughMySQL$' -count=1 -v
+```
+
 ## Gotchas
 
 Use the supported subset in `docs/mysql-sql-behaviour.md`. Driver coverage is finite. Read `docs/compatibility-evidence.md` before claiming another driver's behavior. An in-process executor test alone does not prove authentication or wire encoding.

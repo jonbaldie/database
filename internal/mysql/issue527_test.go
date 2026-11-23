@@ -15,7 +15,7 @@ func TestIssue527AlterIndexChangesUniqueKeyVisibility(t *testing.T) {
 		index string
 	}{
 		{"user-named", []string{"CREATE TABLE p (id INT PRIMARY KEY, code INT, CONSTRAINT uq_code UNIQUE (code))"}, "uq_code"},
-		{"inline column UNIQUE", []string{"CREATE TABLE p (id INT PRIMARY KEY, code INT UNIQUE)"}, "p_code_unique"},
+		{"inline column UNIQUE", []string{"CREATE TABLE p (id INT PRIMARY KEY, code INT UNIQUE)"}, "code"},
 		{"added constraint", []string{"CREATE TABLE p (id INT PRIMARY KEY, code INT)", "ALTER TABLE p ADD CONSTRAINT uq_code UNIQUE (code)"}, "uq_code"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
