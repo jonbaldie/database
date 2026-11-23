@@ -641,7 +641,7 @@ func recordScalarSelect(context *composedQueryContext, termKey string, result *q
 	if context == nil || context.executor == nil || context.executor.session == nil || result == nil {
 		return
 	}
-	metrics := context.executor.session.runtimeMetrics
+	metrics := context.executor.recorder
 	metrics.RecordOperator(metrics.OperatorID(queryexplanation.RuntimeOperatorKey(termKey, "values", 0)), 0, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
 }
 
@@ -657,7 +657,7 @@ func recordDependentSubquery(context *composedQueryContext, key string, result *
 	if context == nil || context.executor == nil || context.executor.session == nil || result == nil {
 		return
 	}
-	metrics := context.executor.session.runtimeMetrics
+	metrics := context.executor.recorder
 	metrics.RecordOperator(metrics.OperatorID(key), 1, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
 }
 
@@ -770,7 +770,7 @@ func recordExistsSubquery(context *composedQueryContext, query string, dependent
 	if found {
 		outputRows = 1
 	}
-	metrics := context.executor.session.runtimeMetrics
+	metrics := context.executor.recorder
 	key := scalarSubqueryRuntimeKey(query, dependent, []string{context.runtimePrefix})
 	metrics.RecordOperator(metrics.OperatorID(key), inputRows, outputRows, 0, 0, 0, 0, elapsed)
 }
@@ -1169,7 +1169,7 @@ func recordMaterializedResult(context *composedQueryContext, key string, result 
 	if context == nil || context.executor == nil || context.executor.session == nil || result == nil {
 		return
 	}
-	metrics := context.executor.session.runtimeMetrics
+	metrics := context.executor.recorder
 	metrics.RecordOperator(metrics.OperatorID(key), 0, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
 }
 
@@ -1489,7 +1489,7 @@ func recordSetStage(context *composedQueryContext, key, kind string, inputRows, 
 	if kind != "" {
 		key = queryexplanation.RuntimeOperatorKey(key, kind, 0)
 	}
-	metrics := context.executor.session.runtimeMetrics
+	metrics := context.executor.recorder
 	metrics.RecordOperator(metrics.OperatorID(key), inputRows, outputRows, 0, 0, 0, memory, elapsed)
 }
 
