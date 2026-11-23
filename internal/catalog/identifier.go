@@ -30,6 +30,16 @@ func Key(name string) string {
 	return norm.NFD.String(folded)
 }
 
+// SameIdentifier reports whether two SQL names have the same identity.
+func SameIdentifier(a, b string) bool {
+	return Key(a) == Key(b)
+}
+
+// IsInformationSchema reports whether name identifies the catalog namespace.
+func IsInformationSchema(name string) bool {
+	return SameIdentifier(name, "information_schema")
+}
+
 // IdentifierLength counts the Unicode scalar values in a declared identifier
 // spelling, the unit the length ceiling is measured in.
 func IdentifierLength(name string) int {
