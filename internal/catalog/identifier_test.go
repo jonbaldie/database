@@ -22,7 +22,7 @@ func TestKeyFoldsCaseAndCanonicalEquivalents(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Key(c.left) == Key(c.right)
+			got := SameIdentifier(c.left, c.right)
 			if got != c.same {
 				t.Fatalf("Key(%q)==Key(%q) = %v, want %v (%q vs %q)", c.left, c.right, got, c.same, Key(c.left), Key(c.right))
 			}
@@ -84,6 +84,20 @@ func TestTableRefIdentifiesEquivalentSpellings(t *testing.T) {
 	for _, other := range [][2]string{{"other", "café"}, {"app", "cafe"}, {"app", "ｃafé"}} {
 		if got := NewTableRef(other[0], other[1]); got == want || got.Compare(want) == 0 {
 			t.Fatalf("NewTableRef(%q, %q) matched a distinct table", other[0], other[1])
+		}
+	}
+}
+
+func TestIsInformationSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"information_schema", true}, {"INFORMATION_SCHEMA", true},
+		{"information_schemA", true}, {"information_schem", false}, {"ｉnformation_schema", false},
+	} {
+		if got := IsInformationSchema(tc.name); got != tc.want {
+			t.Errorf("IsInformationSchema(%q) = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
