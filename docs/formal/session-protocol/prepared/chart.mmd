@@ -1,0 +1,10 @@
+---
+title: "Prepared statement has no long data"
+---
+stateDiagram-v2
+  s0: Prepared statement has no long data
+  s1: Long data buffered
+  s2: Long data reset
+  [*] --> s0
+  s0 --> s1: Append a parameter chunk
+  s1 --> s2: Reset releases parameter bytes

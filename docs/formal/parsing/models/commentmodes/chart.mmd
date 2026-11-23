@@ -1,0 +1,18 @@
+---
+title: "CommentModes"
+---
+stateDiagram-v2
+  s0: Scan position 1 in sql
+  s1: Scan position 2 in sql
+  s2: Scan position 3 in sql
+  s3: Scan position 4 in block comment
+  s4: Scan position 5 in block comment
+  s5: Scan position 6 in sql
+  s6: Scan position 7 in sql
+  [*] --> s0
+  s0 --> s1: Text
+  s1 --> s2: Quoted
+  s2 --> s3: OpenComment
+  s3 --> s4: CommentText
+  s4 --> s5: CloseComment
+  s5 --> s6: Text

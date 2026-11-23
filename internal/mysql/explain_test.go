@@ -3,35 +3,17 @@ package mysql
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
-
-	"github.com/jonbaldie/database/internal/catalog"
 )
 
 func explainExecutor(t *testing.T) *textStatementExecutor {
 	t.Helper()
-	store, err := catalog.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("open catalog: %v", err)
-	}
-	if err := store.CreateNamespace("app"); err != nil {
-		t.Fatalf("create namespace: %v", err)
-	}
-	columns := []string{"id", "customer_id", "total"}
-	types := []string{"BIGINT", "BIGINT", "INT"}
-	if err := store.CreateTableWithTypes("app", "orders", columns, types); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	if err := store.Insert("app", "orders", []string{"1", "7", "50"}); err != nil {
-		t.Fatalf("seed row: %v", err)
-	}
-	server, err := NewWithConfig("127.0.0.1:0", Config{Catalog: store, Version: "0.1.0"})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-	t.Cleanup(func() { _ = server.Listener.Close() })
-	session := &session{server: server, database: "app", initialDB: "app", timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{}}
-	return &textStatementExecutor{session: session}
+	return newSeededExecutor(t,
+		"CREATE TABLE orders (id BIGINT, customer_id BIGINT, total INT)",
+		"INSERT INTO orders VALUES (1, 7, 50)",
+	)
 }
 
 func TestExplainTraditionalProjection(t *testing.T) {
@@ -166,11 +148,7 @@ func TestExplainOrderingDirectionIsLowerCase(t *testing.T) {
 
 func TestExplainAnalyzeReportsSpillEvidence(t *testing.T) {
 	executor := explainExecutor(t)
-	for _, values := range [][]string{{"2", "8", "20"}, {"3", "9", "30"}, {"4", "10", "40"}, {"5", "11", "60"}} {
-		if err := executor.server.config.Catalog.Insert("app", "orders", values); err != nil {
-			t.Fatalf("seed order: %v", err)
-		}
-	}
+	seedSQL(t, executor, "INSERT INTO orders VALUES (2, 8, 20), (3, 9, 30), (4, 10, 40), (5, 11, 60)")
 	config := Config{ResourceLimits: ResourceLimits{
 		ExecutionMemoryLimitBytes: 50, AggregateExecutionMemoryLimitBytes: 50,
 		TemporaryStorageLimitBytes: 1024, AggregateTemporaryStorageLimitBytes: 1024,
@@ -234,6 +212,8 @@ func TestExplainAnalyzeAssignsEvidenceToEveryExecutedRelationalOperator(t *testi
 	}
 	for name, query := range queries {
 		t.Run(name, func(t *testing.T) {
+			// The analysis must stream even when its caller does not.
+			executor.streamRows = false
 			result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON "+query)
 			if err != nil {
 				t.Fatalf("analyze: %v", err)
@@ -433,5 +413,108 @@ func assertOperatorNoNullArrays(t *testing.T, operator map[string]any) {
 				assertOperatorNoNullArrays(t, childMap)
 			}
 		}
+	}
+}
+
+func TestExplainAnalyzeStreamsRowsLikeTheSelectItAnalyzes(t *testing.T) {
+	executor := explainExecutor(t)
+	values := make([]string, 0, 299)
+	for id := 2; id <= 300; id++ {
+		value := strconv.Itoa(id)
+		values = append(values, "("+value+", "+value+", 50)")
+	}
+	seedSQL(t, executor, "INSERT INTO orders VALUES "+strings.Join(values, ", "))
+	config := Config{ResourceLimits: ResourceLimits{
+		ExecutionMemoryLimitBytes: 20000, AggregateExecutionMemoryLimitBytes: 20000,
+		TemporaryStorageLimitBytes: 1024, AggregateTemporaryStorageLimitBytes: 1024,
+	}}
+	resources := newStatementResources(newResourceManager(config), config, nil)
+	executor.session.resources = resources
+	defer func() {
+		closeStatementResources(resources)
+		executor.session.resources = nil
+	}()
+	executor.streamRows = true
+
+	query := "SELECT a.id, b.id FROM orders a CROSS JOIN orders b WHERE a.id < 50"
+	selected, err := executeStatement(executor, query)
+	if err != nil {
+		t.Fatalf("streamed select: %v", err)
+	}
+	streamed, _, err := discardResultRows(selected)
+	if err != nil {
+		t.Fatalf("consume streamed select: %v", err)
+	}
+	if streamed != 49*300 {
+		t.Fatalf("streamed rows = %d, want %d", streamed, 49*300)
+	}
+
+	// The analysis must stream even when its caller does not.
+	executor.streamRows = false
+	result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON "+query)
+	if err != nil {
+		t.Fatalf("analyze streamed select: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode analysis: %v", err)
+	}
+	actual := document["plan"].(map[string]any)["actual"].(map[string]any)
+	if actual["output_rows"] != float64(streamed) {
+		t.Fatalf("analyzed rows = %#v, want %d", actual["output_rows"], streamed)
+	}
+	if peak, _ := actual["peak_memory_bytes"].(float64); peak <= 0 || peak > 20000 {
+		t.Fatalf("analyzed peak memory = %#v, want a streamed peak within the 20000-byte limit", actual["peak_memory_bytes"])
+	}
+
+	// A LIMIT puts the project operator below the root, so its own evidence shows.
+	result, err = executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON "+query+" LIMIT 20000")
+	if err != nil {
+		t.Fatalf("analyze limited streamed select: %v", err)
+	}
+	document = map[string]any{}
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode limited analysis: %v", err)
+	}
+	project := findExplainOperator(document["plan"].(map[string]any), "project")
+	if project == nil || document["plan"].(map[string]any)["kind"] == "project" {
+		t.Fatalf("limited analysis has no project operator below the root: %#v", document["plan"])
+	}
+	// One projected row is two BIGINT ids, so its peak is far below the sum of all rows.
+	if peak, _ := project["actual"].(map[string]any)["peak_memory_bytes"].(float64); peak <= 0 || peak > 100 {
+		t.Fatalf("project peak memory = %#v, want the largest streamed row", project["actual"])
+	}
+}
+
+func findExplainOperator(operator map[string]any, kind string) map[string]any {
+	if operator["kind"] == kind {
+		return operator
+	}
+	children, _ := operator["children"].([]any)
+	for _, child := range children {
+		if found := findExplainOperator(child.(map[string]any), kind); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func TestDiscardResultRowsReportsTheLargestStreamedRow(t *testing.T) {
+	streamed := [][]string{{"a", "bb"}, {"cccccccccc", "d"}, {"e", "f"}}
+	result := &queryResult{stream: func(yield func([]string, []bool) error) error {
+		for _, row := range streamed {
+			if err := yield(row, []bool{false, false}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+	rows, memory, err := discardResultRows(result)
+	if err != nil {
+		t.Fatalf("discard streamed rows: %v", err)
+	}
+	// The largest row holds 11 value bytes and 2 null flags.
+	if rows != 3 || memory != 13 {
+		t.Fatalf("discardResultRows = %d rows, %d bytes; want 3 rows, 13 bytes", rows, memory)
 	}
 }

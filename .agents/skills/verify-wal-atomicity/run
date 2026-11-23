@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+skill_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$skill_dir/../../.." && pwd)
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/database-wal-check.XXXXXX")
+trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+
+expected=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+jar=${TLA2TOOLS:-${XDG_CACHE_HOME:-$HOME/.cache}/database-formal/tla2tools-1.7.4.jar}
+if [ ! -f "$jar" ]; then
+    if [ -n "${TLA2TOOLS:-}" ]; then
+        echo "TLA2TOOLS does not name a file: $jar" >&2
+        exit 2
+    fi
+    curl -fsSL --retry 2 -o "$temporary/tla2tools.jar" \
+        https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+    downloaded=$(shasum -a 256 "$temporary/tla2tools.jar" | awk '{print $1}')
+    if [ "$downloaded" != "$expected" ]; then
+        echo "TLC download did not match the pinned SHA-256" >&2
+        exit 2
+    fi
+    mkdir -p "$(dirname -- "$jar")"
+    mv "$temporary/tla2tools.jar" "$jar"
+fi
+actual=$(shasum -a 256 "$jar" | awk '{print $1}')
+if [ "$actual" != "$expected" ]; then
+    echo "TLC jar does not match version 1.7.4: $jar" >&2
+    exit 2
+fi
+
+echo 'Checking the transaction recovery model with TLC 1.7.4'
+if (cd "$skill_dir" && "${JAVA:-java}" -XX:ActiveProcessorCount=2 -cp "$jar" \
+    tlc2.TLC -workers 1 -metadir "$temporary/tlc" -config WALAtomicity.cfg WALAtomicity.tla); then
+    model_status=0
+else
+    model_status=$?
+fi
+
+python3 - "$temporary/overlay.json" "$repo_dir/internal/storage/zz_formal_wal_recovery_test.go" \
+    "$skill_dir/recovery_test.go.txt" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump({"Replace": {sys.argv[2]: sys.argv[3]}}, output)
+PY
+
+echo 'Checking real storage commits and recovery'
+if (cd "$repo_dir" && GOMAXPROCS=2 GOFLAGS='-p=2' go test -count=1 \
+    -overlay "$temporary/overlay.json" ./internal/storage \
+    -run '^Test(FormalWALRecovery|WALRecovery)' -v); then
+    code_status=0
+else
+    code_status=$?
+fi
+
+printf 'Model exit: %s; real-code check exit: %s\n' "$model_status" "$code_status"
+if [ "$model_status" -ne 0 ] || [ "$code_status" -ne 0 ]; then
+    exit 1
+fi

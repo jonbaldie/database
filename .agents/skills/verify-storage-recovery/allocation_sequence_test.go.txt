@@ -1,0 +1,55 @@
+package mysql
+
+import (
+	"github.com/jonbaldie/database/internal/catalog"
+	"testing"
+)
+
+func TestFormalAllocationLifecycle(t *testing.T) {
+	disabled := catalog.Table{Columns: []string{"id"}, AutoIncrement: 19, AutoIncrementExhausted: true}
+	if err := initializeAutoIncrementState(&disabled); err != nil {
+		t.Fatal(err)
+	}
+	if disabled.AutoIncrement != 0 || disabled.AutoIncrementExhausted {
+		t.Fatal("disabled table retained allocation state")
+	}
+	for _, rows := range [][][]string{nil, {{"2"}, {"7"}, {"-1"}, {"invalid"}}, {{"255"}}} {
+		table := catalog.Table{Columns: []string{"id"}, ColumnTypes: []string{"TINYINT UNSIGNED"}, ColumnAttributes: []catalog.ColumnAttribute{{AutoIncrement: true}}, Indexes: []catalog.Index{{Name: "id", Parts: []catalog.IndexPart{{Column: "id"}}}}, Rows: rows}
+		if err := initializeAutoIncrementState(&table); err != nil {
+			t.Fatal(err)
+		}
+		want := uint64(1)
+		exhaust := false
+		if len(rows) == 4 {
+			want = 8
+		}
+		if len(rows) == 1 {
+			want = 255
+			exhaust = true
+		}
+		if table.AutoIncrement != want || table.AutoIncrementExhausted != exhaust {
+			t.Fatal("initialization did not scan stored identifiers", table.AutoIncrement, table.AutoIncrementExhausted)
+		}
+		before := table
+		table.Rows = [][]string{{"200"}}
+		if err := initializeAutoIncrementState(&table); err != nil {
+			t.Fatal(err)
+		}
+		if table.AutoIncrement != before.AutoIncrement || table.AutoIncrementExhausted != before.AutoIncrementExhausted {
+			t.Fatal("initialized allocation unexpectedly rescanned rows")
+		}
+	}
+	executor := ddlExecutorForTest(t)
+	for _, query := range []string{"CREATE TABLE allocated (id TINYINT UNSIGNED PRIMARY KEY AUTO_INCREMENT)", "INSERT INTO allocated VALUES (255)", "TRUNCATE TABLE allocated"} {
+		if _, err := executeStatement(executor, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := executeStatement(executor, "INSERT INTO allocated VALUES (DEFAULT)"); err != nil {
+		t.Fatal("truncate did not reset exhausted allocation", err)
+	}
+	result, err := executeStatement(executor, "SELECT id FROM allocated")
+	if err != nil || len(result.rows) != 1 || result.rows[0][0] != "1" {
+		t.Fatal("truncate did not reset exhausted allocation", result, err)
+	}
+}

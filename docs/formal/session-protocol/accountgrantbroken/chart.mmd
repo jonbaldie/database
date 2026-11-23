@@ -1,0 +1,24 @@
+---
+title: "No read grant"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks RevokeRemovesGrant
+    lg1: Path to the RevokeRemovesGrant bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: No read grant
+  s1: Read grant active
+  s2: Repeated grant unchanged
+  s3: Revoked grant remains active
+  [*] --> s0
+  s0 --> s1: Grant read access
+  s1 --> s2: Grant the same access again
+  s2 --> s3: Revoke read access
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath

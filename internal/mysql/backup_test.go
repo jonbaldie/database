@@ -15,9 +15,6 @@ func backupExecutor(t *testing.T, username string, grants []catalog.Grant) *text
 	if err != nil {
 		t.Fatalf("open catalog: %v", err)
 	}
-	if err := store.CreateNamespace("app"); err != nil {
-		t.Fatalf("create namespace: %v", err)
-	}
 	metadata := instance.Metadata{
 		Schema: "database.instance/v1", InstanceID: "source-live", State: "stopped",
 		AdminAccount: "admin", PasswordHash: "hash", DataVersion: instance.CurrentDataVersion,
@@ -29,25 +26,18 @@ func backupExecutor(t *testing.T, username string, grants []catalog.Grant) *text
 		t.Fatalf("new server: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Listener.Close() })
+	seedSQL(t, &textStatementExecutor{session: newTestSession(server, testSessionOptions{account: "admin"})}, "CREATE DATABASE app")
 	if username != "admin" {
 		if err := store.CreateAccount(catalog.Account{Name: username, PasswordHash: "hash", Grants: grants}); err != nil {
 			t.Fatalf("create account: %v", err)
 		}
 	}
-	return &textStatementExecutor{session: &session{
-		server: server, username: username, database: "app", initialDB: "app",
-		timeZone: "UTC", initialTimeZone: "UTC", statements: map[uint32]*preparedStatement{},
-	}}
+	return &textStatementExecutor{session: newTestSession(server, testSessionOptions{account: username, database: "app"})}
 }
 
 func TestBackupInstanceCapturesCommittedCatalogSnapshot(t *testing.T) {
 	executor := backupExecutor(t, "admin", nil)
-	if err := executor.server.config.Catalog.CreateTableWithTypes("app", "items", []string{"id"}, []string{"INT"}); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	if err := executor.server.config.Catalog.ReplaceRows("app", "items", [][]string{{"7"}}); err != nil {
-		t.Fatalf("replace rows: %v", err)
-	}
+	seedSQL(t, executor, "CREATE TABLE items (id INT)", "INSERT INTO items VALUES (7)")
 	result, err := executeStatement(executor, "BACKUP INSTANCE")
 	if err != nil {
 		t.Fatalf("backup instance: %v", err)
@@ -88,13 +78,8 @@ func TestBackupInstanceRequiresOperationalControl(t *testing.T) {
 func TestBackupInstanceStreamsCatalogInBoundedChunks(t *testing.T) {
 	executor := backupExecutor(t, "admin", nil)
 	executor.streamRows = true
-	if err := executor.server.config.Catalog.CreateTableWithTypes("app", "items", []string{"value"}, []string{"TEXT"}); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
 	payload := strings.Repeat("x", instanceBackupChunkSize*2)
-	if err := executor.server.config.Catalog.ReplaceRows("app", "items", [][]string{{payload}}); err != nil {
-		t.Fatalf("replace rows: %v", err)
-	}
+	seedSQL(t, executor, "CREATE TABLE items (value TEXT)", "INSERT INTO items VALUES ('"+payload+"')")
 	result, err := executeStatement(executor, "BACKUP INSTANCE")
 	if err != nil {
 		t.Fatalf("backup instance: %v", err)

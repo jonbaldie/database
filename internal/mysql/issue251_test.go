@@ -8,15 +8,7 @@ import (
 
 func TestIssue251OrderUsesAliasWithinExpression(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	if err := store.CreateTableWithTypes("app", "issue251", []string{"id", "a", "b"}, []string{"INT", "INT", "INT"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range [][]string{{"1", "10", "3"}, {"2", "20", "1"}} {
-		if err := store.Insert("app", "issue251", row); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedSQL(t, executor, "CREATE TABLE issue251 (id INT, a INT, b INT)", "INSERT INTO issue251 VALUES (1, 10, 3), (2, 20, 1)")
 
 	result, err := executeStatement(executor, "SELECT id FROM issue251 ORDER BY a + b")
 	if err != nil {
@@ -53,15 +45,7 @@ func TestIssue251OrderUsesAliasWithinExpression(t *testing.T) {
 
 func TestIssue251OrderResolvesAliasesAcrossProjectionKinds(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	if err := store.CreateTableWithTypes("app", "issue251_kinds", []string{"id", "a", "b"}, []string{"INT", "INT", "INT"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range [][]string{{"1", "10", "3"}, {"2", "20", "1"}, {"3", "30", "2"}} {
-		if err := store.Insert("app", "issue251_kinds", row); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedSQL(t, executor, "CREATE TABLE issue251_kinds (id INT, a INT, b INT)", "INSERT INTO issue251_kinds VALUES (1, 10, 3), (2, 20, 1), (3, 30, 2)")
 
 	result, err := executeStatement(executor, "SELECT b, SUM(a) AS s FROM issue251_kinds GROUP BY b ORDER BY s + 1 DESC")
 	if err != nil {
@@ -106,13 +90,7 @@ func TestIssue251OrderResolvesAliasesAcrossProjectionKinds(t *testing.T) {
 
 func TestIssue251UnknownIdentifierInOrderExpressionStillRejected(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	if err := store.CreateTableWithTypes("app", "issue251_unknown", []string{"id", "a"}, []string{"INT", "INT"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Insert("app", "issue251_unknown", []string{"1", "10"}); err != nil {
-		t.Fatal(err)
-	}
+	seedSQL(t, executor, "CREATE TABLE issue251_unknown (id INT, a INT)", "INSERT INTO issue251_unknown VALUES (1, 10)")
 
 	_, err := executeStatement(executor, "SELECT a AS x FROM issue251_unknown ORDER BY x + unknown_col")
 	if err == nil || !strings.Contains(err.Error(), "Unknown column 'x + unknown_col' in 'order clause'") {

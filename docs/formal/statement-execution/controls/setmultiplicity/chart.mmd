@@ -1,0 +1,54 @@
+---
+title: "Intersect duplicate rows"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks IntersectionCount
+    lg1: Path to the IntersectionCount bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Intersection complete
+  s1: Left rows read 0, duplicates remaining 0
+  s2: Left rows read 0, duplicates remaining 1
+  s3: Left rows read 0, duplicates remaining 2
+  s4: Left rows read 0, duplicates remaining 3
+  s5: Left rows read 1, duplicates remaining 0
+  s6: Left rows read 1, duplicates remaining 1
+  s7: Left rows read 1, duplicates remaining 2
+  s8: Left rows read 1, duplicates remaining 3
+  s9: Left rows read 2, duplicates remaining 0
+  s10: Too many duplicate rows returned
+  s11: Left rows read 2, duplicates remaining 1
+  s12: Left rows read 2, duplicates remaining 2
+  s13: Left rows read 2, duplicates remaining 3
+  [*] --> s0
+  [*] --> s1
+  [*] --> s2
+  [*] --> s3
+  [*] --> s4
+  s1 --> s0: Discard unmatched occurrence
+  s1 --> s5: Discard unmatched occurrence
+  s2 --> s0: Return one matched occurrence
+  s2 --> s6: Return one matched occurrence
+  s3 --> s0: Return one matched occurrence
+  s3 --> s7: Return one matched occurrence
+  s4 --> s0: Return one matched occurrence
+  s4 --> s8: Return one matched occurrence
+  s5 --> s0: Discard unmatched occurrence
+  s5 --> s9: Discard unmatched occurrence
+  s6 --> s10: Return one matched occurrence
+  s6 --> s11: Return one matched occurrence
+  s7 --> s0: Return one matched occurrence
+  s7 --> s12: Return one matched occurrence
+  s8 --> s0: Return one matched occurrence
+  s8 --> s13: Return one matched occurrence
+  s9 --> s0: Discard unmatched occurrence
+  s11 --> s10: Return one matched occurrence
+  s12 --> s10: Return one matched occurrence
+  s13 --> s0: Return one matched occurrence
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s2 bugPath
+  class s6 bugPath
+  class s10 breaks
+  class s10 bugPath

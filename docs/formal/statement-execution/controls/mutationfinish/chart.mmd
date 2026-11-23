@@ -1,0 +1,18 @@
+---
+title: "Reject an autocommit mutation"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks RejectedAutocommitClearsStage
+    lg1: Path to the RejectedAutocommitClearsStage bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: mutation staged
+  s1: Failed statement retained changes
+  [*] --> s0
+  s0 --> s1: Reject autocommit statement
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath

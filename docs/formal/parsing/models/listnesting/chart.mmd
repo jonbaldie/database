@@ -1,0 +1,20 @@
+---
+title: "ListNesting"
+---
+stateDiagram-v2
+  s0: Scan position 1, depth 0, parts 1
+  s1: Scan position 2, depth 1, parts 1
+  s2: Scan position 3, depth 1, parts 1
+  s3: Scan position 4, depth 1, parts 1
+  s4: Scan position 5, depth 1, parts 1
+  s5: Scan position 6, depth 0, parts 1
+  s6: Scan position 7, depth 0, parts 2
+  s7: Scan position 8, depth 0, parts 2
+  [*] --> s0
+  s0 --> s1: Open
+  s1 --> s2: Text
+  s2 --> s3: Comma
+  s3 --> s4: Text
+  s4 --> s5: Close
+  s5 --> s6: Comma
+  s6 --> s7: Text

@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+import hashlib, json, os, pathlib, subprocess, tempfile
+
+skill = pathlib.Path(__file__).resolve().parent
+repo = skill.parents[2]
+jar = pathlib.Path(os.environ.get('TLA2TOOLS', pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest() != '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':
+    raise SystemExit('Install the pinned TLC 1.7.4 jar with verify-wal-atomicity, or set TLA2TOOLS.')
+env = dict(os.environ, GOMAXPROCS='2', GOFLAGS='-p=2')
+models = [('CommentModes',[('Broken','QuotedCommentSurvives')]),('ListNesting',[('Broken','OnlyOuterCommaSplits')]),('QuotedSQL', [('BrokenEscape','ClosingBoundary'),('BrokenDoubled','ClosingBoundary')]), ('DepthGuard', [('BrokenBound','BoundedCallback'),('BrokenUnwind','DepthRestored')]), ('CommandFlags', [('BrokenDuplicate','NoDuplicateSetting'),('BrokenEmpty','NoEmptyValue')])]
+mutations = [
+ ('escape', 'internal/mysql/string_literal.go', 'if escapedSQLCharacter(value, index, quote) {', 'if false && escapedSQLCharacter(value, index, quote) {', './internal/mysql', '^TestFormalSQLQuotedBounds$', 'quoted boundary mismatch'),
+ ('doubled', 'internal/mysql/string_literal.go', 'if doubledSQLQuote(value, index, quote) {', 'if false && doubledSQLQuote(value, index, quote) {', './internal/mysql', '^TestFormalSQLQuotedBounds$', 'quoted boundary mismatch'),
+ ('comment', 'internal/mysql/sql_comment.go', 'if next, ok := consumeSQLQuoted(query, index); ok {', 'if next, ok := consumeSQLQuoted(query, index); ok && false {', './internal/mysql', '^TestFormalSQLQuotedCommentsAndCSV$', 'quoted comment changed'),
+ ('csv-depth', 'internal/mysql/server.go', "case ',':\n\t\t\tif depth == 0 {", "case ',':\n\t\t\tif true {", './internal/mysql', '^TestFormalSQLQuotedCommentsAndCSV$', 'quoted comma split'),
+ ('depth-bound', 'internal/mysql/expression_parse.go', 'if p.depth > maxExpressionDepth {', 'if false {', './internal/mysql', '^TestFormalExpressionDepthGuard$', 'expression depth guard accepted over-bound call'),
+ ('depth-unwind', 'internal/mysql/expression_parse.go', 'defer func() { p.depth-- }()', '', './internal/mysql', '^TestFormalExpressionDepthGuard$', 'expression depth was not restored'),
+ ('duplicate-flag', 'cmd/database/config.go', 'func (parser *configurationFlagParser) add(name, value string) error {\n\tif parser.seen[name] {', 'func (parser *configurationFlagParser) add(name, value string) error {\n\tif false {', './cmd/database', '^TestFormalCommandFlagBounds$', 'duplicate command flag accepted'),
+ ('duplicate-config', 'cmd/database/config.go', 'if parser.pathSeen {', 'if false {', './cmd/database', '^TestFormalCommandFlagBounds$', 'duplicate command flag accepted'),
+ ('empty-flag', 'cmd/database/config.go', 'func checkedConfigurationFlagValue(name, value string, next int) (string, string, int, error) {\n\tif value == "" {', 'func checkedConfigurationFlagValue(name, value string, next int) (string, string, int, error) {\n\tif false {', './cmd/database', '^TestFormalCommandFlagBounds$', 'empty command flag accepted'),
+]
+with tempfile.TemporaryDirectory(prefix='database-parsing-formal-') as scratch:
+    root = pathlib.Path(scratch)
+    for model, variants in models:
+        for suffix, rule in [('',None)] + variants:
+            config = model+suffix
+            result = subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/config),'-config',str(skill/(config+'.cfg')),str(skill/(model+'.tla'))],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+            print(config+':\n'+result.stdout, flush=True)
+            if rule is None and result.returncode:
+                raise SystemExit('Current model failed: '+model)
+            if rule and (result.returncode != 12 or 'Invariant '+rule+' is violated' not in result.stdout):
+                raise SystemExit('Broken model did not fail expected rule: '+config)
+    base = {str(repo/'internal/mysql/zz_formal_parsing_test.go'):str(skill/'sql_test.go.txt'), str(repo/'cmd/database/zz_formal_parsing_test.go'):str(skill/'command_test.go.txt')}
+    for variant in [None] + mutations:
+        name = 'current' if variant is None else variant[0]
+        overlay = {'Replace':dict(base)}
+        packages = ['./internal/mysql','./cmd/database']
+        pattern = '^TestFormal(SQL|Expression|Command)'
+        if variant:
+            _, filename, old, new, package, pattern, message = variant
+            source = repo/filename
+            original = source.read_text()
+            if original.count(old) != 1:
+                raise SystemExit('Source changed; inspect '+name+' ('+str(original.count(old))+' matches)')
+            patched = root/(name+'.go')
+            patched.write_text(original.replace(old,new))
+            overlay['Replace'][str(source)] = str(patched)
+            packages = [package]
+        path = root/(name+'.json')
+        path.write_text(json.dumps(overlay))
+        result = subprocess.run(['go','test','-count=1','-overlay',str(path),*packages,'-run',pattern],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        print(name+':\n'+result.stdout,flush=True)
+        if variant is None and result.returncode:
+            raise SystemExit('Current parsing source probe failed')
+        if variant and (result.returncode == 0 or message not in result.stdout):
+            raise SystemExit('Mutation did not fail expected assertion: '+name)
+print('Five current models, eight broken models, current probes, and nine broken-source overlays passed their expected checks.')

@@ -1,0 +1,11 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/jonbaldie/database/internal/mysql
+cpu: Apple M3
+BenchmarkMySQLIndexedRangePage-2   	   10000	    459070 ns/op	    193632 byte_ns/op	        20.00 rows/op	   77479 B/op	    1567 allocs/op
+BenchmarkMySQLIndexedRangePage-2   	   10000	    473435 ns/op	    198589 byte_ns/op	        20.00 rows/op	   77479 B/op	    1567 allocs/op
+BenchmarkMySQLIndexedRangePage-2   	   10000	    448991 ns/op	    192822 byte_ns/op	        20.00 rows/op	   77478 B/op	    1567 allocs/op
+BenchmarkMySQLIndexedRangePage-2   	   10000	    551726 ns/op	    251472 byte_ns/op	        20.00 rows/op	   77476 B/op	    1567 allocs/op
+BenchmarkMySQLIndexedRangePage-2   	   10000	    503501 ns/op	    216501 byte_ns/op	        20.00 rows/op	   77478 B/op	    1567 allocs/op
+PASS
+ok  	github.com/jonbaldie/database/internal/mysql	50.109s

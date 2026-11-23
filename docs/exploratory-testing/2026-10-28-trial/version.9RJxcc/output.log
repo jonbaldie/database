@@ -1,0 +1,1 @@
+{"schema":"database.version/v1","product_version":"0.2.19","build_identity":"local","platform":"linux/amd64","go_version":"go1.26.10","data_compatibility":"0.1.x","backup_compatibility":"0.1.x","mysql_application_compatibility_profile":"0.1"}

@@ -1,7 +1,6 @@
 package blackbox_test
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -16,16 +15,12 @@ func TestDiagnosticsHTTPContractIsObservableEndToEnd(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
 	initializeServer(t, runner, directory, "diagnostics-secret")
-	diagnostics := freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", freeAddress(t), "--diagnostics-listen-address", diagnostics, "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Diagnostics: true})
+	process, diagnostics := instance.Process, instance.DiagnosticsAddress
 	defer func() {
 		_ = process.Stop()
 		_ = process.Wait()
 	}()
-	nextReadyEvent(t, process)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	for _, path := range []string{"/live", "/ready", "/metrics"} {

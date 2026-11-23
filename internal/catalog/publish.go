@@ -1,27 +1,5 @@
 package catalog
 
-import "fmt"
-
-func (s *Store) replaceLocked(definition Definition) error {
-	staged := cloneDefinition(definition)
-	refreshOrderedIndexCaches(s.definition, &staged)
-	if err := validateDefinition(staged); err != nil {
-		return fmt.Errorf("invalid catalog: %w", err)
-	}
-	schemaChanged := !sameSchema(s.definition, staged)
-	if err := s.syncRowsLocked(s.definition, staged); err != nil {
-		return err
-	}
-	if schemaChanged {
-		if err := s.persistLocked(staged); err != nil {
-			return err
-		}
-	}
-	s.definition = staged
-	s.revision++
-	return nil
-}
-
 type preparedRowSync struct {
 	store         *Store
 	txns          []rowTxn

@@ -1,0 +1,27 @@
+package mysql
+
+import (
+	"bytes"
+	"testing"
+)
+
+func TestFormalPacketContinuation(t *testing.T) {
+	for _, start := range []byte{0, 254, 255} {
+		for _, size := range []int{maximumPacketFrame - 1, maximumPacketFrame, maximumPacketFrame + 1} {
+			payload := bytes.Repeat([]byte{42}, size)
+			var wire bytes.Buffer
+			writer := NewStreamWriter(&wire, start, 0)
+			if err := writer.WritePacket(payload); err != nil {
+				t.Fatal(err)
+			}
+			last, got, err := readPacket(&wire, int64(size))
+			if err != nil {
+				t.Errorf("start=%d size=%d: %v", start, size, err)
+				continue
+			}
+			if !bytes.Equal(got, payload) || last+1 != writer.Sequence() {
+				t.Error("payload or sequence changed")
+			}
+		}
+	}
+}

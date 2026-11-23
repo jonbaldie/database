@@ -1,0 +1,3 @@
+/home/ubuntu/Code/pstack/jonbaldie/database-explore/bin/database
+version
+--format=json

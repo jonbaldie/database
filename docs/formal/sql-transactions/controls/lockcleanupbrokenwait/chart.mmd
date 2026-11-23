@@ -1,0 +1,34 @@
+---
+title: "LockCleanup"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks WaitExitClearsEdge
+    lg1: Path to the WaitExitClearsEdge bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: held
+  s1: waiting for upgrade
+  s2: upgraded
+  s3: cancelled
+  s4: timed out
+  s5: released
+  s6: extra row locked
+  s7: read failed
+  [*] --> s0
+  s0 --> s1: UpgradeWait
+  s1 --> s2: GrantUpgrade
+  s1 --> s3: WaitExit
+  s1 --> s4: WaitExit
+  s2 --> s6: LockNextRow
+  s3 --> s5: Release
+  s4 --> s5: Release
+  s6 --> s7: ReadFails
+  s7 --> s5: Release
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 breaks
+  class s3 bugPath
+  class s4 breaks

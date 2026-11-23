@@ -9,20 +9,12 @@ import (
 func TestIssue429HiddenNamespaceUsesOneVisibilityRule(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	store := executor.server.config.Catalog
-	if err := store.CreateNamespace("hidden"); err != nil {
-		t.Fatalf("create hidden namespace: %v", err)
-	}
-	if _, err := executeStatement(executor, "CREATE TABLE hidden.items (id INT)"); err != nil {
-		t.Fatalf("create hidden table: %v", err)
-	}
+	seedSQL(t, executor, "CREATE DATABASE hidden", "CREATE TABLE hidden.items (id INT)")
 	if err := store.CreateAccount(catalog.Account{Name: "reader", PasswordHash: "hash"}); err != nil {
 		t.Fatalf("create reader: %v", err)
 	}
 
-	reader := &textStatementExecutor{session: &session{
-		server: executor.server, username: "reader", timeZone: "UTC", initialTimeZone: "UTC",
-		statements: map[uint32]*preparedStatement{},
-	}}
+	reader := &textStatementExecutor{session: newTestSession(executor.server, testSessionOptions{account: "reader"})}
 
 	for _, test := range []struct {
 		name  string
@@ -51,12 +43,7 @@ func TestIssue429HiddenNamespaceUsesOneVisibilityRule(t *testing.T) {
 func TestIssue429NamespaceManagerSeesNamesOnly(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	store := executor.server.config.Catalog
-	if err := store.CreateNamespace("hidden"); err != nil {
-		t.Fatalf("create hidden namespace: %v", err)
-	}
-	if _, err := executeStatement(executor, "CREATE TABLE hidden.items (id INT)"); err != nil {
-		t.Fatalf("create hidden table: %v", err)
-	}
+	seedSQL(t, executor, "CREATE DATABASE hidden", "CREATE TABLE hidden.items (id INT)")
 	if err := store.CreateAccount(catalog.Account{
 		Name:         "manager",
 		PasswordHash: "hash",
@@ -64,10 +51,7 @@ func TestIssue429NamespaceManagerSeesNamesOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create manager: %v", err)
 	}
-	manager := &textStatementExecutor{session: &session{
-		server: executor.server, username: "manager", timeZone: "UTC", initialTimeZone: "UTC",
-		statements: map[uint32]*preparedStatement{},
-	}}
+	manager := &textStatementExecutor{session: newTestSession(executor.server, testSessionOptions{account: "manager"})}
 
 	databases, err := executeStatement(manager, "SHOW DATABASES")
 	if err != nil {
@@ -107,12 +91,7 @@ func TestIssue429NamespaceManagerSeesNamesOnly(t *testing.T) {
 func TestIssue429GrantAndDropResolveNamespaceVisibility(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	store := executor.server.config.Catalog
-	if err := store.CreateNamespace("hidden"); err != nil {
-		t.Fatalf("create hidden namespace: %v", err)
-	}
-	if err := store.CreateNamespace("to_drop"); err != nil {
-		t.Fatalf("create to_drop namespace: %v", err)
-	}
+	seedSQL(t, executor, "CREATE DATABASE hidden", "CREATE DATABASE to_drop")
 	if err := store.CreateAccount(catalog.Account{Name: "reader", PasswordHash: "hash"}); err != nil {
 		t.Fatalf("create reader: %v", err)
 	}
@@ -126,10 +105,7 @@ func TestIssue429GrantAndDropResolveNamespaceVisibility(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create manager: %v", err)
 	}
-	manager := &textStatementExecutor{session: &session{
-		server: executor.server, username: "manager", timeZone: "UTC", initialTimeZone: "UTC",
-		statements: map[uint32]*preparedStatement{},
-	}}
+	manager := &textStatementExecutor{session: newTestSession(executor.server, testSessionOptions{account: "manager"})}
 	if _, err := executeStatement(manager, "GRANT DATA_READ ON hidden.* TO 'reader'"); err != nil {
 		t.Fatalf("grant hidden: %v", err)
 	}
@@ -146,10 +122,7 @@ func TestIssue429GrantAndDropResolveNamespaceVisibility(t *testing.T) {
 		t.Fatalf("drop missing if exists: %v", err)
 	}
 
-	reader := &textStatementExecutor{session: &session{
-		server: executor.server, username: "reader", timeZone: "UTC", initialTimeZone: "UTC",
-		statements: map[uint32]*preparedStatement{},
-	}}
+	reader := &textStatementExecutor{session: newTestSession(executor.server, testSessionOptions{account: "reader"})}
 	if _, err := executeStatement(reader, "USE hidden"); err != nil {
 		t.Fatalf("reader USE hidden after grant: %v", err)
 	}
@@ -158,9 +131,7 @@ func TestIssue429GrantAndDropResolveNamespaceVisibility(t *testing.T) {
 func TestIssue429AuthenticatorUsesAccountVisibility(t *testing.T) {
 	executor := ddlExecutorForTest(t)
 	store := executor.server.config.Catalog
-	if err := store.CreateNamespace("hidden"); err != nil {
-		t.Fatalf("create hidden namespace: %v", err)
-	}
+	seedSQL(t, executor, "CREATE DATABASE hidden")
 	if err := store.CreateAccount(catalog.Account{Name: "reader", PasswordHash: "hash"}); err != nil {
 		t.Fatalf("create reader: %v", err)
 	}

@@ -1,0 +1,16 @@
+---
+title: "MembershipSequence"
+---
+stateDiagram-v2
+  s0: Inspect member 1
+  s1: Inspect member 2
+  s2: Inspect member 3
+  s3: Membership false#59; inputs other, other
+  s4: Membership null#59; inputs null, other
+  s5: Membership true#59; inputs null, match
+  [*] --> s0
+  s0 --> s1: Read
+  s1 --> s2: Read
+  s2 --> s3: Finish
+  s2 --> s5: Finish
+  s2 --> s4: Finish

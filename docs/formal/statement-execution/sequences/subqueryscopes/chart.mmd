@@ -1,0 +1,21 @@
+---
+title: "Subquery scope and reuse"
+---
+stateDiagram-v2
+  s0: compile, shared
+  s1: compile, dependent
+  s2: evaluate, dependent
+  s3: evaluate, shared
+  s4: next scope, dependent
+  s5: next scope, shared
+  s6: Completed query evaluations
+  [*] --> s0
+  [*] --> s1
+  s0 --> s3: Classify correlation and cache independent result
+  s1 --> s2: Classify correlation and cache independent result
+  s2 --> s4: Evaluate for outer row
+  s3 --> s5: Evaluate for outer row
+  s4 --> s2: Advance outer row
+  s5 --> s3: Advance outer row
+  s2 --> s6: Evaluate for outer row
+  s3 --> s6: Evaluate for outer row

@@ -106,6 +106,7 @@ func (w *StreamWriter) WritePreparedMetadata(id uint32, parameters int, metadata
 
 // WriteResultSet streams a complete query result set in text or binary mode, validating column types first.
 func (w *StreamWriter) WriteResultSet(result *queryResult, mode ResultMode) error {
+	defer result.close()
 	definitions := resultColumnDefinitions(result.columns, result.metadata)
 	if err := validateResultSet(result, definitions, mode); err != nil {
 		return err

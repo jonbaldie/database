@@ -1,0 +1,4 @@
+USE trial => <nil>
+SELECT id, title, priority FROM tasks ORDER BY id => [id title priority]
+1 | read the plan | 1 |
+2 | test query behaviour | 2 |

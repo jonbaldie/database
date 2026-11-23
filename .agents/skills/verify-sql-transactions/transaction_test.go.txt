@@ -1,0 +1,65 @@
+package mysql
+
+import (
+	"github.com/jonbaldie/database/internal/catalog"
+	"testing"
+)
+
+func TestFormalSQLTransactionControl(t *testing.T) {
+	s := &session{server: &Server{}}
+	s.nextReadOnly = true
+	s.nextIsolation = isolationReadCommitted
+	x := &transactionExecutor{s}
+	if err := x.begin("BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.transactionReadOnly || s.transactionIsolation != isolationReadCommitted || s.nextReadOnly || s.nextIsolation != s.isolation {
+		t.Fatal("one-shot settings were not consumed")
+	}
+	s.finishTransaction()
+	if err := x.begin("BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	noop := func(*catalog.Definition) error { return nil }
+	for n := 0; n <= 2; n++ {
+		s.transactionMutations = make([]func(*catalog.Definition) error, n)
+		for i := range s.transactionMutations {
+			s.transactionMutations[i] = noop
+		}
+		s.transactionDirty = n > 0
+		s.transactionReadSet = n > 0
+		s.transactionStateSet = true
+		if err := x.save("keep"); err != nil {
+			t.Fatal(err)
+		}
+		s.transactionMutations = append(s.transactionMutations, noop)
+		s.transactionDirty = true
+		if err := x.save("later"); err != nil {
+			t.Fatal(err)
+		}
+		if err := x.rollbackTo("keep"); err != nil {
+			t.Fatal(err)
+		}
+		if len(s.transactionMutations) != n || len(s.savepoints) != 1 || s.transactionDirty != (n > 0) || s.transactionReadSet != (n > 0) {
+			t.Fatal("savepoint prefix was not restored")
+		}
+		if err := x.release("keep"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := x.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if s.transaction || s.transactionDirty || s.transactionStateSet || s.transactionReadSet || len(s.savepoints) != 0 || len(s.transactionMutations) != 0 {
+		t.Fatal("finished transaction retained state")
+	}
+	if err := x.begin("BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.commit(); err != nil {
+		t.Fatal(err)
+	}
+	if s.transaction {
+		t.Fatal("commit did not finish transaction")
+	}
+}

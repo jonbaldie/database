@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent
+repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':raise SystemExit('Use pinned TLC 1.7.4 from verify-wal-atomicity.')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+mutations=[
+ ('database-selection','server.go','s.database = name','s.database = s.database','SetPrefix','selected database did not persist across SET'),
+ ('rsa-request','authentication.go','if len(response) != 1 || response[0] != 0x02 {','if (len(response) != 1 || response[0] != 0x02) && false {','Authentication','plaintext response entered RSA key exchange'),
+ ('initial-token','authentication.go','!found || !validPasswordToken(response.token, nonce, passwordHash)','!found || (!validPasswordToken(response.token, nonce, passwordHash) && false)','Authentication','invalid initial token entered full password exchange'),
+ ('reset-warnings','server.go','s.clearDiagnostics()','_ = s.diagnostics','Prepared','connection reset retained prepared or session state'),
+ ('full-password','authentication.go','if !validPlainPassword(password, passwordHash) {','if !validPlainPassword(password, passwordHash) && false {','Authentication','authentication accepted wrong full password'),
+ ('drain-wait','server.go','r.statementW.Wait()','_ = r.statementW','Drain','drain closed session before active statement completed'),
+ ('read-ahead','connection.go','watch.finished <- pending','watch.finished <- func() *pendingCommand { _ = pending; return nil }()','Command','read ahead lost next command'),
+ ('idle-rollback','idle_timeout.go','_ = rollbackTransaction(s)','_ = s','Command','idle timeout did not roll back open transaction'),
+ ('revoke-dispatch','connection.go','if c.control.revoked.Load() {','if false && c.control.revoked.Load() {','Command','revoked connection accepted another command'),
+ ('type-cache','server.go','statement.types = types','statement.types = nil','Prepared','prepared execution lost cached parameter types'),
+ ('connection-reset','server.go','s.closeAllPrepared()','_ = s.statements','Prepared','connection reset retained prepared or session state'),
+ ('locked-auth','authentication.go','found && !account.Locked','found','Accounts','locked account can authenticate'),
+ ('revoke-account','server.go','conversation.control.revoked.Store(true)','conversation.control.revoked.Store(false)','Accounts','account lock did not revoke existing session'),
+ ('show-warnings','statement_policy.go','if !isShowDiagnosticsStatement(lower) {','if true {','Warnings','SHOW WARNINGS did not retain prior warning'),
+ ('clear-warnings','statement_policy.go','if !isShowDiagnosticsStatement(lower) {','if false {','Warnings','ordinary statement retained prior warnings'),
+ ('set-prefix','session_settings.go','if err := s.applySessionVariable(strings.TrimSpace(lhs), strings.TrimSpace(rawValue)); err != nil {\n\t\t\treturn err','if err := s.applySessionVariable(strings.TrimSpace(lhs), strings.TrimSpace(rawValue)); err != nil {\n\t\t\tcontinue','SetPrefix','SET did not retain exactly the successful assignment prefix'),
+]
+with tempfile.TemporaryDirectory(prefix='database-session-histories-') as scratch:
+ root=pathlib.Path(scratch)
+ for model,controls in json.loads((skill/'history-model-index.json').read_text()).items():
+  for suffix,fault,rule in [('',None,None)]+controls:
+   config=model+(suffix+'Broken' if suffix else '')
+   r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/config),'-config',str(skill/(config+'.cfg')),str(skill/(model+'.tla'))],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   print(config+':\n'+r.stdout,flush=True)
+   if rule is None and r.returncode:raise SystemExit('Current history model failed: '+model)
+   if rule and (r.returncode!=12 or 'Invariant '+rule+' is violated' not in r.stdout):raise SystemExit('Broken history model missed its rule: '+config)
+ for index,variant in enumerate([None]+mutations+[None]):
+  name=('current' if index==0 else 'restored-current') if variant is None else variant[0]
+  overlay={'Replace':{str(repo/'internal/mysql/zz_formal_history_test.go'):str(skill/'history_test.go.txt')}}
+  pattern='^TestFormalHistory'
+  if variant:
+   _,filename,old,new,test,message=variant;source=repo/'internal/mysql'/filename;original=source.read_text()
+   if original.count(old)!=1:raise SystemExit('Source changed; inspect '+name)
+   changed=root/(name+'.go');changed.write_text(original.replace(old,new));overlay['Replace'][str(source)]=str(changed);pattern+=''+test+'$'
+  path=root/(name+'.json');path.write_text(json.dumps(overlay))
+  r=subprocess.run(['go','test','-count=1','-timeout','20s','-overlay',str(path),'./internal/mysql','-run',pattern],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout,flush=True)
+  if variant is None and r.returncode:raise SystemExit('Current session history probe failed')
+  if variant and (r.returncode==0 or message not in r.stdout):raise SystemExit('Source fault missed its assertion: '+name)
+print('Seven session history models, fifteen controls, current probes, and sixteen source faults passed.')

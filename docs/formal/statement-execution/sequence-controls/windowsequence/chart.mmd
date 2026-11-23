@@ -1,0 +1,33 @@
+---
+title: "WindowSequence"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks PeerRankAndFrame
+    lg1: Path to the PeerRankAndFrame bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: partition sorted, row 1
+  s1: frame ready, row 1
+  s2: partition sorted, row 2
+  s3: frame ready, row 2
+  s4: partition sorted, row 3
+  s5: frame ready, row 3
+  s6: Wrong rank after peers
+  [*] --> s0
+  s0 --> s1: Advance
+  s1 --> s2: Emit
+  s2 --> s3: Advance
+  s3 --> s4: Emit
+  s4 --> s5: Advance
+  s5 --> s6: Emit
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath

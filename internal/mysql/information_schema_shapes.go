@@ -1,0 +1,52 @@
+package mysql
+
+// These shapes follow the public MySQL 8.4.11 order. Unsupported physical
+// facts remain nullable fields rather than disappearing from the view.
+var informationSchemaTableColumns = []informationSchemaColumn{
+	{name: "TABLE_CATALOG", typeName: "VARCHAR(64)"},
+	{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
+	{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
+	{name: "TABLE_TYPE", typeName: "ENUM('BASE TABLE','VIEW','SYSTEM VIEW')", notNull: true},
+	{name: "ENGINE", typeName: "VARCHAR(64)"},
+	{name: "VERSION", typeName: "INT"},
+	{name: "ROW_FORMAT", typeName: "ENUM('Fixed','Dynamic','Compressed','Redundant','Compact','Paged')"},
+	{name: "TABLE_ROWS", typeName: "BIGINT UNSIGNED"},
+	{name: "AVG_ROW_LENGTH", typeName: "BIGINT UNSIGNED"},
+	{name: "DATA_LENGTH", typeName: "BIGINT UNSIGNED"},
+	{name: "MAX_DATA_LENGTH", typeName: "BIGINT UNSIGNED"},
+	{name: "INDEX_LENGTH", typeName: "BIGINT UNSIGNED"},
+	{name: "DATA_FREE", typeName: "BIGINT UNSIGNED"},
+	{name: "AUTO_INCREMENT", typeName: "BIGINT UNSIGNED"},
+	{name: "CREATE_TIME", typeName: "TIMESTAMP"},
+	{name: "UPDATE_TIME", typeName: "DATETIME"},
+	{name: "CHECK_TIME", typeName: "DATETIME"},
+	{name: "TABLE_COLLATION", typeName: "VARCHAR(64)"},
+	{name: "CHECKSUM", typeName: "BIGINT"},
+	{name: "CREATE_OPTIONS", typeName: "VARCHAR(256)"},
+	{name: "TABLE_COMMENT", typeName: "TEXT"},
+}
+
+var informationSchemaColumnColumns = []informationSchemaColumn{
+	{name: "TABLE_CATALOG", typeName: "VARCHAR(64)"},
+	{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
+	{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
+	{name: "COLUMN_NAME", typeName: "VARCHAR(64)"},
+	{name: "ORDINAL_POSITION", typeName: "INT UNSIGNED", notNull: true},
+	{name: "COLUMN_DEFAULT", typeName: "TEXT"},
+	{name: "IS_NULLABLE", typeName: "VARCHAR(3)", notNull: true},
+	{name: "DATA_TYPE", typeName: "LONGTEXT"},
+	{name: "CHARACTER_MAXIMUM_LENGTH", typeName: "BIGINT"},
+	{name: "CHARACTER_OCTET_LENGTH", typeName: "BIGINT"},
+	{name: "NUMERIC_PRECISION", typeName: "BIGINT UNSIGNED"},
+	{name: "NUMERIC_SCALE", typeName: "BIGINT UNSIGNED"},
+	{name: "DATETIME_PRECISION", typeName: "INT UNSIGNED"},
+	{name: "CHARACTER_SET_NAME", typeName: "VARCHAR(64)"},
+	{name: "COLLATION_NAME", typeName: "VARCHAR(64)"},
+	{name: "COLUMN_TYPE", typeName: "MEDIUMTEXT", notNull: true},
+	{name: "COLUMN_KEY", typeName: "ENUM('','PRI','UNI','MUL')", notNull: true},
+	{name: "EXTRA", typeName: "VARCHAR(256)"},
+	{name: "PRIVILEGES", typeName: "VARCHAR(154)"},
+	{name: "COLUMN_COMMENT", typeName: "TEXT", notNull: true},
+	{name: "GENERATION_EXPRESSION", typeName: "LONGTEXT", notNull: true},
+	{name: "SRS_ID", typeName: "INT UNSIGNED"},
+}

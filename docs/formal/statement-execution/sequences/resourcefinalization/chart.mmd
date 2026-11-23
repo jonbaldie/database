@@ -1,0 +1,19 @@
+---
+title: "ResourceFinalization"
+---
+stateDiagram-v2
+  s0: admitted
+  s1: working
+  s2: failed
+  s3: finalized
+  s4: closed
+  s5: late signal
+  s6: checked
+  [*] --> s0
+  s0 --> s1: Reserve
+  s1 --> s2: Statement fails before commit
+  s1 --> s3: Publish
+  s2 --> s4: Close
+  s3 --> s5: Deadline or Cancel
+  s5 --> s6: Check
+  s6 --> s4: Close

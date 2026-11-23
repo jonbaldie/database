@@ -1,0 +1,3 @@
+export const title = "Send a query result or a terminal error";
+export const state = v => v.phase === "complete" ? (v.failed && v.terminal === "EOF" ? "Error hidden by success terminator" : v.terminal === "EOF" ? "Successful result complete" : v.terminal === "error" ? "Error response complete" : "Transport aborted") : ({validate:"Validate stored result",metadata:"Send column metadata",rows:"Send result rows"})[v.phase];
+export const step = a => ({Valid:"Stored result is valid or rows stream lazily",Invalid:"Validation fails before metadata",Columns:"Send column count, definitions, and metadata terminator",RowsDone:"Rows finish; send success terminator",StreamFails:"Row stream returns SQL error",TransportFails:"Transport fails; abort response",Done:"Complete"})[a];

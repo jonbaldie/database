@@ -1,0 +1,14 @@
+---
+title: "No active explanation"
+---
+stateDiagram-v2
+  s0: No active explanation
+  s1: First statement registered
+  s2: Next statement registered
+  s3: Old statement cleanup completes
+  s4: Next statement cleanup completes
+  [*] --> s0
+  s0 --> s1: Start the first statement
+  s1 --> s2: Start the next statement
+  s2 --> s3: Finish cleanup for the first statement
+  s3 --> s4: Finish the next statement

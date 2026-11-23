@@ -1,0 +1,37 @@
+---
+title: "Restore a backup into a new or empty directory"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks RestoredHasBothEntries in some cases
+    lg1: Path to the RestoredHasBothEntries bug
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  s0: archive available
+  s1: staged
+  s2: rejected
+  s3: validated
+  s4: install failed
+  s5: partly installed
+  s6: restored
+  s7: entries installed
+  [*] --> s0
+  s0 --> s1: Extract into staging
+  s1 --> s2: Staged validation fails
+  s1 --> s3: Staged validation succeeds
+  s3 --> s4: Installation fails
+  s3 --> s6: Install the new directory
+  s3 --> s5: Move first entry into existing empty directory
+  s5 --> s7: Move second entry
+  s5 --> s4: Installation fails
+  s7 --> s4: Installation fails
+  s7 --> s6: Remove staging directory
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s5 bugPath
+  class s6 mayBreak
+  class s6 bugPath
+  class s7 bugPath

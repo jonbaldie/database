@@ -1,0 +1,14 @@
+---
+title: "One handshake awaits admission"
+---
+stateDiagram-v2
+  s0: One handshake awaits admission
+  s1: First session active
+  s2: Second handshake awaits admission
+  s3: Second session rejected
+  s4: All connections closed
+  [*] --> s0
+  s0 --> s1: Authenticate and admit first session
+  s1 --> s2: Accept second transport
+  s2 --> s3: Reject full session capacity
+  s3 --> s4: Close both connections

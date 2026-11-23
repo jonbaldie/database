@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+import hashlib, json, os, pathlib, subprocess, tempfile
+
+skill = pathlib.Path(__file__).resolve().parent
+repo = skill.parents[2]
+jar = pathlib.Path(os.environ.get('TLA2TOOLS', pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest() != '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':
+    raise SystemExit('Run verify-wal-atomicity once to install pinned TLC 1.7.4, or set TLA2TOOLS.')
+env = dict(os.environ, GOMAXPROCS='2', GOFLAGS='-p=2')
+with tempfile.TemporaryDirectory(prefix='database-storage-formal-') as scratch:
+    root = pathlib.Path(scratch)
+    for name, rule in [('CommitRecovery', None), ('CommitRecoveryBroken', 'AcknowledgedRowsSurviveRestart'), ('CommitRecoveryReplayBroken', 'UncommittedRowsStayHidden')]:
+        result = subprocess.run(['java', '-XX:ActiveProcessorCount=2', '-cp', str(jar), 'tlc2.TLC', '-workers', '1', '-metadir', str(root/name), '-config', str(skill/(name+'.cfg')), str(skill/'CommitRecovery.tla')], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        print(result.stdout, flush=True)
+        if rule is None and result.returncode:
+            raise SystemExit('Current commit model failed')
+        if rule and (result.returncode != 12 or 'Invariant '+rule+' is violated' not in result.stdout):
+            raise SystemExit('Broken model did not fail the expected rule')
+    source = repo/'internal/storage/txn.go'
+    original = source.read_text()
+    mutations = [
+        ('commit-marker', 'txn.go', 'return writeWALRecord(file, walCommit, "", "", nil)', 'return writeWALRecord(file, walBegin, "", "", nil)', '^TestFormalStorageCommitRestart$', 'acknowledged row was lost on restart'),
+        ('closed-engine', 'txn.go', 'if engine.closed || engine.wal == nil {', 'if false {', '^TestFormalStorageClosed$', 'closed engine accepted empty commit'),
+        ('eager-replay', 'wal.go', 'if pending == nil {\n\t\treturn engine.applyWALOperation(operation)', 'if true {\n\t\treturn engine.applyWALOperation(operation)', '^TestFormalStorageIncomplete$', 'incomplete transaction published a row'),
+    ]
+    for variant in [None] + mutations:
+        name = 'current' if variant is None else variant[0]
+        overlay = {'Replace': {str(repo/'internal/storage/zz_formal_storage_test.go'): str(skill/'storage_test.go.txt')}}
+        pattern = '^TestFormalStorage'
+        if variant:
+            _, filename, old, new, pattern, message = variant
+            source = repo/'internal/storage'/filename
+            original = source.read_text()
+            if original.count(old) != 1:
+                raise SystemExit('Source changed; inspect '+name)
+            patched = root/(name+'.go')
+            patched.write_text(original.replace(old, new))
+            overlay['Replace'][str(source)] = str(patched)
+        path = root/(name+'.json')
+        path.write_text(json.dumps(overlay))
+        result = subprocess.run(['go', 'test', '-count=1', '-overlay', str(path), './internal/storage', '-run', pattern], cwd=repo, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        print(name+':\n'+result.stdout, flush=True)
+        if variant is None and result.returncode:
+            raise SystemExit('Current storage probe failed')
+        if variant and (result.returncode == 0 or message not in result.stdout):
+            raise SystemExit('Source mutation was not caught at the expected assertion: '+name)
+    subprocess.run([str(repo/'.agents/skills/verify-wal-atomicity/run')], cwd=repo, env=env, check=True)
+print('Storage commit model, source probes, three source mutations, and delegated WAL checks passed.')
+
+subprocess.run([str(skill/"run-details")], cwd=repo, env=env, check=True)
+
+subprocess.run([str(skill/"run-sequences")], cwd=repo, env=env, check=True)
+
+subprocess.run([str(skill/"run-engine")],cwd=repo,env=env,check=True)

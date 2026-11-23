@@ -1,0 +1,21 @@
+---
+title: "Caller owns a warning"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks OwnsDiagnostics
+    lg1: Path to the OwnsDiagnostics bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Caller owns a warning
+  s1: Session stores the warning
+  s2: Caller change altered session diagnostic
+  [*] --> s0
+  s0 --> s1: Replace session diagnostics
+  s1 --> s2: Change the caller diagnostic
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath

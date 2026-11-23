@@ -1,0 +1,32 @@
+---
+title: "ScalarSequence"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ScalarCardinality
+    lg1: Path to the ScalarCardinality bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: open subquery, read 0 rows
+  s1: finish, read 0 rows
+  s2: open subquery, read 1 rows
+  s3: Read 0 rows, returned null
+  s4: finish, read 1 rows
+  s5: finish, read 2 rows
+  s6: Read 1 rows, returned value
+  s7: Read 2 rows, returned value
+  [*] --> s0
+  s0 --> s1: End
+  s0 --> s2: Read
+  s1 --> s3: Finish
+  s2 --> s4: End
+  s2 --> s5: Read
+  s4 --> s6: Finish
+  s5 --> s7: Finish
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s2 bugPath
+  class s5 bugPath
+  class s7 breaks
+  class s7 bugPath

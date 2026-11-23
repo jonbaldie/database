@@ -1,10 +1,12 @@
-VERSION ?= 0.2.18
+VERSION ?= 0.2.22
 BUILD_IDENTITY ?= local
 GO ?= go
 LDFLAGS = -s -w -X github.com/jonbaldie/database/internal/buildinfo.ProductVersion=$(VERSION) -X github.com/jonbaldie/database/internal/buildinfo.BuildIdentity=$(BUILD_IDENTITY)
 MESSGO_VERSION := v0.2.0
 MESSGO_MODULE := github.com/quality-gates/messgo/cmd/messgo
 MESSGO_RULESET := config/messgo.xml
+MUTAGO_VERSION := v2.10.24
+MUTAGO_MODULE := github.com/quality-gates/mutago/v2/cmd/mutago
 GOVULNCHECK_VERSION := v1.1.4
 GOVULNCHECK_MODULE := golang.org/x/vuln/cmd/govulncheck
 GOCYCLO_VERSION := v0.6.0
@@ -45,7 +47,11 @@ goreportcard:
 	GOREPORTCARD_GOCYCLO="$$tool_directory/gocyclo" GOREPORTCARD_INEFFASSIGN="$$tool_directory/ineffassign" python3 scripts/goreportcard.py
 
 mutation:
-	./scripts/test-mutation-threshold.sh
+	@tool_directory="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tool_directory"' EXIT; \
+	GOBIN="$$tool_directory" $(GO) install $(MUTAGO_MODULE)@$(MUTAGO_VERSION) && \
+	export PATH="$$tool_directory:$$PATH" MUTAGO_VERSION=$(MUTAGO_VERSION) && \
+	./scripts/test-mutation-threshold.sh && \
 	./scripts/mutation-threshold.sh
 
 performance:

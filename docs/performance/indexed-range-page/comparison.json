@@ -1,0 +1,104 @@
+{
+  "schema": "database.indexed-range-comparison/v1",
+  "environment": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "runtime_processors": 2,
+  "sessions": 1,
+  "table_rows": 100000,
+  "rows_per_request": 20,
+  "profiled": false,
+  "runs": {
+    "before": [
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 486755.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    486755 ns/op\t        20.00 rows/op\t   77479 B/op\t    1567 allocs/op\nPASS\n"
+      },
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 459581.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    459581 ns/op\t        20.00 rows/op\t   77479 B/op\t    1567 allocs/op\nPASS\n"
+      },
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 435300.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    435300 ns/op\t        20.00 rows/op\t   77479 B/op\t    1567 allocs/op\nPASS\n"
+      },
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 450535.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    450535 ns/op\t        20.00 rows/op\t   77479 B/op\t    1567 allocs/op\nPASS\n"
+      },
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 441441.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    441441 ns/op\t        20.00 rows/op\t   77478 B/op\t    1567 allocs/op\nPASS\n"
+      }
+    ],
+    "after": [
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 188614.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    188614 ns/op\t        20.00 rows/op\t   77477 B/op\t    1567 allocs/op\nPASS\n"
+      },
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 185597.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    185597 ns/op\t        20.00 rows/op\t   77477 B/op\t    1567 allocs/op\nPASS\n"
+      },
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 184459.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    184459 ns/op\t        20.00 rows/op\t   77478 B/op\t    1567 allocs/op\nPASS\n"
+      },
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 179019.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    179019 ns/op\t        20.00 rows/op\t   77477 B/op\t    1567 allocs/op\nPASS\n"
+      },
+      {
+        "operations": 10000,
+        "verified_rows": 200000,
+        "ns_per_op": 195980.0,
+        "errors": 0,
+        "output": "goos: darwin\ngoarch: arm64\npkg: github.com/jonbaldie/database/internal/mysql\ncpu: Apple M3\nBenchmarkMySQLIndexedRangePage-2   \t   10000\t    195980 ns/op\t        20.00 rows/op\t   77477 B/op\t    1567 allocs/op\nPASS\n"
+      }
+    ]
+  },
+  "summary": {
+    "before": {
+      "median_ns_per_op": 450535.0,
+      "min_ns_per_op": 435300.0,
+      "max_ns_per_op": 486755.0,
+      "requests_per_second": 2219.583384198786
+    },
+    "after": {
+      "median_ns_per_op": 185597.0,
+      "min_ns_per_op": 179019.0,
+      "max_ns_per_op": 195980.0,
+      "requests_per_second": 5388.018125292973
+    }
+  },
+  "throughput_ratio": 2.42749074607887,
+  "throughput_increase_percent": 142.749074607887,
+  "latency_reduction_percent": 58.8051982642858,
+  "ranges_separated": true,
+  "target_met": true
+}

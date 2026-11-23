@@ -1,0 +1,47 @@
+---
+title: "AuthenticationHistory"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks AcceptedPasswordVerified
+    lg1: Path to the AcceptedPasswordVerified bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: greeting
+  s1: response
+  s2: tls request
+  s3: validate token
+  s4: rejected
+  s5: request password
+  s6: RSA request
+  s7: encrypted password
+  s8: plain password
+  s9: verify password
+  s10: Accepted invalid credentials
+  s11: accepted
+  [*] --> s0
+  s0 --> s1: Server sends greeting
+  s0 --> s2: Server sends greeting
+  s1 --> s3: Client sends authentication response
+  s2 --> s1: Client upgrades connection to TLS
+  s3 --> s4: Initial token is invalid
+  s3 --> s5: Initial token is valid
+  s5 --> s6: Server requests full password
+  s6 --> s4: Client sends invalid RSA request#59; server rejects it
+  s6 --> s7: Client requests RSA key#59; server sends it
+  s5 --> s8: Server requests full password
+  s7 --> s9: Client sends full password
+  s8 --> s9: Client sends full password
+  s9 --> s10: Full password is accepted
+  s9 --> s11: Full password is accepted
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s9 bugPath
+  class s10 breaks
+  class s10 bugPath

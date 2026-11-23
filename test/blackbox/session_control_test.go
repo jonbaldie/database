@@ -119,6 +119,24 @@ func waitForProcessListQuery(t *testing.T, client *wireClient, connectionID uint
 	}
 }
 
+// waitForLiveLockWait polls the live explanation of an active statement until
+// it reports a positive lock wait. A statement is visible as active before it
+// reaches the lock manager, so an immediate snapshot can report zero.
+func waitForLiveLockWait(t *testing.T, client *wireClient, connectionID uint32) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snapshot := liveQueryExplanation(t, client, connectionID)
+		if snapshot["plan"].(map[string]any)["actual"].(map[string]any)["wait"].(map[string]any)["lock_ms"].(float64) > 0 {
+			return snapshot
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("live Query explanation reported no lock wait: %#v", snapshot)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func waitForProcessListGone(t *testing.T, client *wireClient, connectionID uint32) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

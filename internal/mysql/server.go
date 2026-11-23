@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonbaldie/database/internal/buildinfo"
 	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/credential"
 	"github.com/jonbaldie/database/internal/instance"
@@ -175,7 +176,7 @@ type connectionRegistry struct {
 // New retains a small unauthenticated protocol probe seam for callers that do
 // not attach an initialized instance. A serving database uses NewWithConfig.
 func New(address string) (*Server, error) {
-	return NewWithConfig(address, Config{Version: "0.2.0-dev"})
+	return NewWithConfig(address, Config{})
 }
 
 func NewWithConfig(address string, config Config) (*Server, error) {
@@ -218,7 +219,7 @@ func NewWithConfig(address string, config Config) (*Server, error) {
 
 func normalizedConfig(config Config) Config {
 	if config.Version == "" {
-		config.Version = "0.2.0-dev"
+		config.Version = buildinfo.ProductVersion
 	}
 	if config.MaxPreparedStmtCount == 0 {
 		config.MaxPreparedStmtCount = 4096
@@ -464,7 +465,6 @@ type session struct {
 	database        string
 	initialDB       string
 	timeZone        string
-	initialTimeZone string
 	settings        sessionSettings
 	statements      map[uint32]*preparedStatement
 	prepared        preparedCounters
@@ -706,6 +706,8 @@ type queryResult struct {
 	affected uint64
 	warnings uint16
 	stream   queryRowStream
+	// release owns resources allocated before row delivery starts.
+	release func()
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
 	// empty string. Metadata uses this for facts that the catalog does not
 	// retain, rather than inventing compatibility values.
@@ -713,6 +715,16 @@ type queryResult struct {
 	// filterTypes mirrors columns with the SQL types that SHOW ... WHERE
 	// compares. An empty entry, or a missing slice, compares as VARCHAR.
 	filterTypes []string
+}
+
+// close releases result resources even when delivery never starts. Consumers
+// must close results on both success and failure. Repeated closure is safe.
+func (r *queryResult) close() {
+	if r != nil && r.release != nil {
+		release := r.release
+		r.release = nil
+		release()
+	}
 }
 
 // columnMetadata is the complete ColumnDefinition41 contract for one result
@@ -732,6 +744,7 @@ const informationSchemaName = "information_schema"
 type informationSchemaColumn struct {
 	name     string
 	typeName string
+	notNull  bool
 }
 
 type informationSchemaView struct {
@@ -739,35 +752,15 @@ type informationSchemaView struct {
 	columns []informationSchemaColumn
 }
 
-// This is the deliberately small, read-only metadata subset. It exposes only
-// facts owned by the current catalog; unsupported MySQL physical attributes
-// are not represented.
+// This is the closed, read-only metadata surface. Unsupported physical facts
+// in contracted views are SQL NULL.
 var informationSchemaViews = []informationSchemaView{
 	{
 		name:    "schemata",
 		columns: []informationSchemaColumn{{name: "SCHEMA_NAME", typeName: "VARCHAR(64)"}},
 	},
-	{
-		name: "tables",
-		columns: []informationSchemaColumn{
-			{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
-			{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
-			{name: "TABLE_TYPE", typeName: "VARCHAR(64)"},
-			{name: "AUTO_INCREMENT", typeName: "BIGINT"},
-		},
-	},
-	{
-		name: "columns",
-		columns: []informationSchemaColumn{
-			{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
-			{name: "TABLE_NAME", typeName: "VARCHAR(64)"},
-			{name: "COLUMN_NAME", typeName: "VARCHAR(64)"},
-			{name: "ORDINAL_POSITION", typeName: "INT"},
-			{name: "DATA_TYPE", typeName: "VARCHAR(64)"},
-			{name: "COLUMN_TYPE", typeName: "VARCHAR(255)"},
-			{name: "EXTRA", typeName: "VARCHAR(30)"},
-		},
-	},
+	{name: "tables", columns: informationSchemaTableColumns},
+	{name: "columns", columns: informationSchemaColumnColumns},
 	{name: "statistics", columns: []informationSchemaColumn{
 		{name: "TABLE_CATALOG", typeName: "VARCHAR(64)"},
 		{name: "TABLE_SCHEMA", typeName: "VARCHAR(64)"},
@@ -930,30 +923,6 @@ func (s *textStatementExecutor) statementHandlers() []statementHandler {
 		s.relationStatement,
 		s.operationStatement,
 	}
-}
-
-func (s *textStatementExecutor) setTimeZone(query string) (bool, error) {
-	assignment := strings.TrimSpace(query[len("SET "):])
-	lhs, value, found := strings.Cut(assignment, "=")
-	if !found {
-		return false, nil
-	}
-	switch strings.ToLower(strings.TrimSpace(lhs)) {
-	case "time_zone", "session.time_zone", "session time_zone", "@@time_zone", "@@session.time_zone", "@@session time_zone":
-	default:
-		return false, nil
-	}
-	value = strings.TrimSpace(value)
-	if strings.EqualFold(value, "default") {
-		s.timeZone = s.initialTimeZone
-		return true, nil
-	}
-	offset, err := parseFixedOffset(scalar(value))
-	if err != nil {
-		return true, err
-	}
-	s.timeZone = formatFixedOffset(offset)
-	return true, nil
 }
 
 func (s *textStatementExecutor) builtinStatement(query, lower string) (*queryResult, bool, error) {
@@ -1862,7 +1831,11 @@ func canonicalConstraintDefinition(constraint catalog.Constraint) string {
 	case catalog.ConstraintTypePrimary:
 		return "PRIMARY KEY " + columns
 	case catalog.ConstraintTypeUnique:
-		return "CONSTRAINT " + quoteIdentifier(constraint.Name) + " UNIQUE " + columns
+		definition := "CONSTRAINT " + quoteIdentifier(constraint.Name) + " UNIQUE " + columns
+		if constraint.Invisible {
+			definition += " INVISIBLE"
+		}
+		return definition
 	case catalog.ConstraintTypeForeignKey:
 		target := quoteIdentifier(constraint.ReferencedTable)
 		if constraint.ReferencedNamespace != "" {
@@ -4186,7 +4159,26 @@ func projectInformationSchemaRows(view informationSchemaView, projection []int, 
 			resultNulls[rowIndex][resultIndex] = row[sourceIndex].null
 		}
 	}
-	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls}
+	return &queryResult{columns: columns, rows: resultRows, nulls: resultNulls, metadata: informationSchemaMetadata(view, projection)}
+}
+
+// informationSchemaMetadata advertises each view column's declared type, so a
+// relational query compares, orders, and encodes an INT column as a number.
+func informationSchemaMetadata(view informationSchemaView, projection []int) []columnMetadata {
+	table := catalog.Table{Columns: make([]string, len(view.columns)), ColumnTypes: make([]string, len(view.columns)), ColumnAttributes: make([]catalog.ColumnAttribute, len(view.columns))}
+	for index, column := range view.columns {
+		table.Columns[index], table.ColumnTypes[index] = column.name, column.typeName
+		table.ColumnAttributes[index].Nullable = !column.notNull
+	}
+	metadata := tableMetadata("", "", table, projection)
+	for resultIndex, sourceIndex := range projection {
+		if length := informationSchemaEnumLength(view.columns[sourceIndex].typeName); length > 0 {
+			metadata[resultIndex].typ = mysqlTypeString
+			metadata[resultIndex].length = uint32(length * 4)
+			metadata[resultIndex].flags |= informationSchemaEnumFlag
+		}
+	}
+	return metadata
 }
 
 type metadataValue struct {
@@ -4237,7 +4229,7 @@ func informationSchemaTableRows(definition catalog.Definition) [][]metadataValue
 func informationSchemaVirtualTableRows() [][]metadataValue {
 	rows := make([][]metadataValue, len(informationSchemaViews))
 	for index, view := range informationSchemaViews {
-		rows[index] = []metadataValue{{value: informationSchemaName}, {value: view.name}, {value: "SYSTEM VIEW"}, {null: true}}
+		rows[index] = informationSchemaTableRow(informationSchemaName, catalog.Table{Name: view.name}, true)
 	}
 	return rows
 }
@@ -4246,15 +4238,16 @@ func informationSchemaNamespaceTableRows(namespace catalog.Namespace) [][]metada
 	tables := sortedTables(namespace)
 	rows := make([][]metadataValue, len(tables))
 	for index, table := range tables {
-		rows[index] = []metadataValue{{value: namespace.Name}, {value: table.Name}, {value: "BASE TABLE"}, informationSchemaAutoIncrement(table)}
+		rows[index] = informationSchemaTableRow(namespace.Name, table, false)
 	}
 	return rows
 }
 
-func informationSchemaColumnRows(definition catalog.Definition) [][]metadataValue {
+func informationSchemaColumnRows(s *session, definition catalog.Definition) [][]metadataValue {
 	rows := informationSchemaVirtualColumnRows()
 	for _, namespace := range sortedNamespaces(definition) {
-		rows = append(rows, informationSchemaNamespaceColumnRows(namespace)...)
+		privileges := informationSchemaColumnPrivileges(s, definition, namespace.Name)
+		rows = append(rows, informationSchemaNamespaceColumnRows(namespace, privileges)...)
 	}
 	return rows
 }
@@ -4262,28 +4255,27 @@ func informationSchemaColumnRows(definition catalog.Definition) [][]metadataValu
 func informationSchemaVirtualColumnRows() [][]metadataValue {
 	rows := make([][]metadataValue, 0)
 	for _, view := range informationSchemaViews {
-		for index, column := range view.columns {
-			rows = append(rows, informationSchemaColumnRow(informationSchemaName, view.name, column.name, index, metadataValue{value: baseType(column.typeName)}, metadataValue{value: column.typeName}, metadataValue{value: ""}))
+		table := catalog.Table{Name: view.name}
+		for _, column := range view.columns {
+			table.Columns = append(table.Columns, column.name)
+			table.ColumnTypes = append(table.ColumnTypes, column.typeName)
+			table.ColumnAttributes = append(table.ColumnAttributes, catalog.ColumnAttribute{Nullable: !column.notNull})
+		}
+		for index := range table.Columns {
+			rows = append(rows, informationSchemaColumnRow(informationSchemaName, table, index, "select"))
 		}
 	}
 	return rows
 }
 
-func informationSchemaNamespaceColumnRows(namespace catalog.Namespace) [][]metadataValue {
+func informationSchemaNamespaceColumnRows(namespace catalog.Namespace, privileges string) [][]metadataValue {
 	rows := make([][]metadataValue, 0)
 	for _, table := range sortedTables(namespace) {
-		for index, column := range table.Columns {
-			dataType, columnType := informationSchemaType(table, index)
-			rows = append(rows, informationSchemaColumnRow(namespace.Name, table.Name, column, index, dataType, columnType, informationSchemaColumnExtra(table, index)))
+		for index := range table.Columns {
+			rows = append(rows, informationSchemaColumnRow(namespace.Name, table, index, privileges))
 		}
 	}
 	return rows
-}
-
-func informationSchemaColumnRow(namespace, table, column string, index int, dataType, columnType, extra metadataValue) []metadataValue {
-	return []metadataValue{
-		{value: namespace}, {value: table}, {value: column}, {value: strconv.Itoa(index + 1)}, dataType, columnType, extra,
-	}
 }
 
 func informationSchemaAutoIncrement(table catalog.Table) metadataValue {
@@ -4317,7 +4309,11 @@ func baseType(typeName string) string {
 	if open := strings.IndexByte(base, '('); open >= 0 {
 		base = base[:open]
 	}
-	return strings.ToLower(strings.TrimSpace(base))
+	fields := strings.Fields(base)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.ToLower(fields[0])
 }
 
 func sortedNamespaces(definition catalog.Definition) []catalog.Namespace {
@@ -4943,13 +4939,7 @@ func (s *preparedLifecycle) resetConnection() error {
 	if err := rollbackTransaction(s.session); err != nil {
 		return err
 	}
-	s.autocommitOff = false
-	s.isolation = isolationRepeatableRead
-	s.readOnly = false
-	s.nextIsolation = isolationRepeatableRead
-	s.nextReadOnly = false
 	s.database = s.initialDB
-	s.timeZone = s.initialTimeZone
 	s.resetSessionSettings()
 	s.closeAllPrepared()
 	s.prepared.longDataBytes = 0

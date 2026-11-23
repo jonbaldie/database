@@ -45,7 +45,7 @@ func TestGoDriverCompatibilityProfile(t *testing.T) {
 		t.Fatalf("select compatibility schema: %v", err)
 	}
 
-	assertSingleValue(t, db, ctx, "SELECT VERSION()", "8.4.11-database-0.2.0-dev")
+	assertSingleValue(t, db, ctx, "SELECT VERSION()", "8.4.11-database-"+executableProductVersion(t))
 	assertSingleValue(t, db, ctx, "SELECT @@time_zone", "+00:00")
 	if _, err := db.ExecContext(ctx, "SET time_zone = '+05:30'"); err != nil {
 		t.Fatalf("set session variable: %v", err)
@@ -127,12 +127,8 @@ func TestExternalDriverCompatibilityProfile(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := initializedInstance(t, runner)
 	certificate, key := testTLSCertificate(t)
-	address := freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", address, "--tls-certificate-file", certificate, "--tls-private-key-file", key, "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	nextReadyEvent(t, process)
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Arguments: []string{"--tls-certificate-file", certificate, "--tls-private-key-file", key}})
+	process, address := instance.Process, instance.MySQLAddress
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
 	host, port, err := splitAddress(address)
 	if err != nil {
@@ -145,6 +141,7 @@ func TestExternalDriverCompatibilityProfile(t *testing.T) {
 		"DATABASE_COMPAT_USER=admin",
 		"DATABASE_COMPAT_PASSWORD=lifecycle-secret",
 		"DATABASE_COMPAT_TLS=1",
+		"DATABASE_COMPAT_VERSION=8.4.11-database-"+executableProductVersion(t),
 	)
 
 	run := func(name, command string, args ...string) {

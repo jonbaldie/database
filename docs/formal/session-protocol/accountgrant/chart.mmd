@@ -1,0 +1,12 @@
+---
+title: "No read grant"
+---
+stateDiagram-v2
+  s0: No read grant
+  s1: Read grant active
+  s2: Repeated grant unchanged
+  s3: Read grant revoked
+  [*] --> s0
+  s0 --> s1: Grant read access
+  s1 --> s2: Grant the same access again
+  s2 --> s3: Revoke read access

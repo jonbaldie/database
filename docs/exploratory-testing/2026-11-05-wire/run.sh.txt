@@ -1,0 +1,40 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/../../.."
+root="$PWD"
+evidence="$root/docs/exploratory-testing/2026-11-05-wire"
+scratch="$root/.explore-20261105"
+mkdir -p "$scratch" "$evidence"
+export GOMODCACHE="$scratch/mod" GOCACHE="$scratch/cache" TMPDIR="$scratch/tmp" GOTOOLCHAIN=auto GOMAXPROCS=2 GOFLAGS='-p=2 -mod=readonly'
+mkdir -p "$TMPDIR"
+pid=''
+cleanup() { if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; echo "cleanup stopped $pid"; pid=''; fi; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+verify_command() ( label="$1"; shift; dir="$(mktemp -d "$evidence/$label.XXXXXX")"; printf '%s\n' "$@" > "$dir/command.txt"; set +e; "$@" > "$dir/output.log" 2>&1; status=$?; echo "$status" > "$dir/exit-status.txt"; echo "$label exit=$status evidence=$dir"; exit "$status" )
+verify_command dependencies go mod download
+verify_command build make build
+verify_command version "$root/bin/database" version --format=json
+verify_command sha256 sha256sum "$root/bin/database"
+printf 'change-me-now!!' > "$scratch/password"; chmod 600 "$scratch/password"
+cp "$evidence/client.go.txt" "$scratch/client.go"
+verify_command init "$root/bin/database" init --data-directory "$scratch/data" --initial-account admin --initial-password-file "$scratch/password"
+start() { local data="$1" label="$2"; "$root/bin/database" serve --data-directory "$data" --mysql-listen-address=127.0.0.1:43459 --diagnostics-listen-address=127.0.0.1:43460 > "$evidence/server-$label.log" 2>&1 & pid=$!; echo "registered pid=$pid mysql=43459 diagnostics=43460"; for i in $(seq 1 100); do if curl -fsS http://127.0.0.1:43460/ready >/dev/null 2>&1; then return; fi; kill -0 "$pid"; sleep .2; done; return 1; }
+stop() { kill -TERM "$pid"; wait "$pid"; echo "stopped pid=$pid"; pid=''; }
+start "$scratch/data" first
+verify_command ready curl -i -sS http://127.0.0.1:43460/ready
+verify_command client-create go run "$scratch/client.go" create
+verify_command backup "$root/bin/database" backup create --address 127.0.0.1:43459 --account admin --password-file "$scratch/password" --output "$scratch/backup.tar"
+verify_command inspect "$root/bin/database" backup inspect --backup "$scratch/backup.tar"
+stop
+start "$scratch/data" restart
+verify_command client-restart go run "$scratch/client.go" reopen
+stop
+verify_command restore "$root/bin/database" restore --backup "$scratch/backup.tar" --data-directory "$scratch/restored"
+start "$scratch/restored" restore
+verify_command client-restore go run "$scratch/client.go" reopen
+stop
+verify_command lifecycle env -u DATABASE_BLACKBOX_EXECUTABLE go test ./test/blackbox -run '^(TestExecutableVersionAndLifecycleArePublic|TestDiagnosticsHTTPContractIsObservableEndToEnd)$' -count=1 -v
+verify_command sql env -u DATABASE_BLACKBOX_EXECUTABLE go test ./test/blackbox -run '^(TestGoDriverCompatibilityProfile|TestMySQLClientCanAuthenticatePersistAndResetSession|TestMySQLBTreeIndexesUseThePublicWireContract)$' -count=1 -v
+verify_command explanation env -u DATABASE_BLACKBOX_EXECUTABLE go test ./test/blackbox -run '^(TestMySQLPlannedExplanationUsesTheWireContract|TestMySQLAnalyzeAndLiveExplanationUseTheWireContract)$' -count=1 -v

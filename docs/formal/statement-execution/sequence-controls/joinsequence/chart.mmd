@@ -1,0 +1,33 @@
+---
+title: "JoinSequence"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks MatchThenPreserveLeft
+    lg1: Path to the MatchThenPreserveLeft bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: build right, left row 1
+  s1: probe, left row 1
+  s2: emit, left row 1
+  s3: next left, left row 1
+  s4: probe, left row 2
+  s5: emit, left row 2
+  s6: Unmatched left row lost
+  [*] --> s0
+  s0 --> s1: Build
+  s1 --> s2: Probe
+  s2 --> s3: Emit
+  s3 --> s4: Probe next left row
+  s4 --> s5: Probe
+  s5 --> s6: Emit
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath

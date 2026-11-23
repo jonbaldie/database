@@ -1,0 +1,18 @@
+---
+title: "PreparedHistory"
+---
+stateDiagram-v2
+  s0: absent
+  s1: allocated
+  s2: first execution
+  s3: second execution
+  s4: long data
+  s5: reset
+  s6: closed
+  [*] --> s0
+  s0 --> s1: Prepare statement and reserve slot
+  s1 --> s2: Execute with supplied types
+  s2 --> s3: Execute with cached types
+  s3 --> s4: Append parameter bytes
+  s4 --> s5: Reset statement#59; release parameter bytes
+  s5 --> s6: Reset connection

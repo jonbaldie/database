@@ -1,0 +1,49 @@
+---
+title: "Initialize an empty data directory"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks CrashRetainsClaim
+    lg1: Path to the CrashRetainsClaim bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: empty
+  s1: claimed
+  s2: crashed
+  s3: catalog staged
+  s4: both staged
+  s5: catalog linked
+  s6: catalog installed
+  s7: install failed
+  s8: metadata linked
+  s9: cleaned
+  s10: both installed
+  s11: failed
+  s12: initialized
+  [*] --> s0
+  s0 --> s1: Claim the empty directory
+  s1 --> s2: Process stops
+  s1 --> s3: Write staged catalog
+  s3 --> s2: Process stops
+  s3 --> s4: Write staged metadata
+  s4 --> s2: Process stops
+  s4 --> s5: Install catalog link
+  s5 --> s2: Process stops
+  s5 --> s6: Remove staged catalog
+  s6 --> s2: Process stops
+  s6 --> s7: Metadata destination already exists
+  s6 --> s8: Install metadata link
+  s7 --> s2: Process stops
+  s7 --> s9: Remove this attempt's catalog
+  s8 --> s2: Process stops
+  s8 --> s10: Remove staged metadata
+  s9 --> s2: Process stops
+  s9 --> s11: Discard initialization claim
+  s10 --> s2: Process stops
+  s10 --> s12: Release initialization claim
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath

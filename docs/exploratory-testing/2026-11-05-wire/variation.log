@@ -1,0 +1,4 @@
+restore-nonempty exit=3 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/restore-nonempty.gQdCff
+registered pid=1773038 mysql=43459 diagnostics=43460
+client-after-rejected-restore exit=0 evidence=/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/docs/exploratory-testing/2026-11-05-wire/client-after-rejected-restore.aWhiJ7
+stopped pid=1773038

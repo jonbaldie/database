@@ -1,0 +1,3 @@
+export const title = "Checkpoint committed rows and replace the log";
+export const state = v => v.phase === "recovered" ? (v.rows === "new" ? "Committed rows recovered" : "Committed rows lost") : v.phase === "directory sync failed" ? (v.closed ? "Directory sync failed; writer stopped" : "Directory sync failed; writer still open") : v.phase === "start" ? "Committed rows in original log" : v.phase;
+export const step = (a,from,to) => ({WriteSnapshot:"Write and sync snapshot",PublishSnapshot:"Publish snapshot and sync directory",PrepareLog:"Write and sync replacement log",ReplaceLog:"Replace original log",Finish:"Sync directory and finish",DirectorySyncFails:"Directory sync fails",Stop:"Process stops",Recover:"Recover committed rows",Done:"Complete"})[a];

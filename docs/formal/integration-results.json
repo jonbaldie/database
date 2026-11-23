@@ -1,0 +1,63 @@
+{
+  "source_baseline": "fc78c5417c39374ec22f9c2f4c3ea1452f7d16e1",
+  "scope": "Finite histories and named source faults. Not arbitrary inputs, concurrency, or power-loss proof.",
+  "subsystems": [
+    {
+      "subsystem": "instance-lifecycle",
+      "exit": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "subsystem": "backup-restore",
+      "exit": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "subsystem": "storage-recovery",
+      "exit": 0,
+      "expected": 0,
+      "pass": true,
+      "includes_engine_lifecycle": true
+    },
+    {
+      "subsystem": "session-protocol",
+      "exit": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "subsystem": "sql-transactions",
+      "exit": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "subsystem": "statement-execution",
+      "exit": 0,
+      "expected": 0,
+      "pass": true
+    },
+    {
+      "subsystem": "packet-protocol",
+      "exit": 1,
+      "expected": 1,
+      "pass": true,
+      "outcomes": {
+        "PacketProtocol": 12,
+        "Repaired": 0,
+        "broken": 1,
+        "current": 1,
+        "repaired": 0
+      }
+    },
+    {
+      "subsystem": "parsing",
+      "exit": 0,
+      "expected": 0,
+      "pass": true
+    }
+  ],
+  "packet_issue": "https://github.com/jonbaldie/database/issues/608"
+}

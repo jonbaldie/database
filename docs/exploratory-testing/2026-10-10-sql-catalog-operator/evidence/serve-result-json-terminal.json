@@ -1,0 +1,25 @@
+{
+  "warnings": [
+    {
+      "code": "UNSAFE_NON_TLS_LISTENER",
+      "severity": "warning",
+      "summary": "MySQL listener is reachable beyond loopback without TLS",
+      "context": {
+        "address": "0.0.0.0:13309",
+        "tls": "disabled"
+      }
+    }
+  ],
+  "details_warnings": [
+    {
+      "code": "UNSAFE_NON_TLS_LISTENER",
+      "severity": "warning",
+      "summary": "MySQL listener is reachable beyond loopback without TLS",
+      "context": {
+        "address": "0.0.0.0:13309",
+        "tls": "disabled"
+      }
+    }
+  ],
+  "exit_class": "success"
+}

@@ -18,12 +18,27 @@ func (s *session) resourceLimits() ResourceLimits {
 	}
 }
 
+type sessionDefaults struct {
+	transactionSettings transactionSettings
+	timeZone            string
+	settings            sessionSettings
+}
+
+func defaultSessionSettings(config Config) sessionDefaults {
+	return sessionDefaults{
+		transactionSettings: transactionSettings{isolation: isolationRepeatableRead, nextIsolation: isolationRepeatableRead},
+		timeZone:            config.TimeZone,
+		settings: sessionSettings{collationConnection: collation0900AICI, statementTimeout: config.ResourceLimits.StatementTimeout,
+			lockWaitTimeout: config.LockWaitTimeout, executionMemoryLimit: config.ResourceLimits.ExecutionMemoryLimitBytes,
+			temporaryStorageLimit: config.ResourceLimits.TemporaryStorageLimitBytes},
+	}
+}
+
 func (s *session) resetSessionSettings() {
-	s.settings.collationConnection = collation0900AICI
-	s.settings.statementTimeout = s.server.config.ResourceLimits.StatementTimeout
-	s.settings.lockWaitTimeout = s.server.config.LockWaitTimeout
-	s.settings.executionMemoryLimit = s.server.config.ResourceLimits.ExecutionMemoryLimitBytes
-	s.settings.temporaryStorageLimit = s.server.config.ResourceLimits.TemporaryStorageLimitBytes
+	defaults := defaultSessionSettings(s.server.config)
+	s.transactionSettings = defaults.transactionSettings
+	s.timeZone = defaults.timeZone
+	s.settings = defaults.settings
 }
 
 func (s *textStatementExecutor) planningSettings() map[string]string {
@@ -164,10 +179,6 @@ func (s *session) sessionVariable(name string) (string, error) {
 	scope, name := sessionVariableName(name)
 	if scope == "global" {
 		defaults := *s
-		defaults.autocommitOff = false
-		defaults.isolation, defaults.nextIsolation = isolationRepeatableRead, isolationRepeatableRead
-		defaults.readOnly, defaults.nextReadOnly = false, false
-		defaults.timeZone = defaults.initialTimeZone
 		defaults.resetSessionSettings()
 		return defaults.sessionVariable(name)
 	}
@@ -264,11 +275,12 @@ func (s *textStatementExecutor) applySessionVariable(rawName, rawValue string) e
 		}
 		return nil
 	}
+	value := sessionAssignment{text: scalar(rawValue)}
 	if strings.EqualFold(rawValue, "default") {
-		return s.resetSessionVariable(name)
+		defaults := defaultSessionSettings(s.session.server.config)
+		value.defaults = &defaults
 	}
-	writer := sessionVariableWriters[name]
-	return writer(s, scalar(rawValue))
+	return sessionVariableWriters[name](s, value)
 }
 
 func readOnlySessionAssignmentAllowed(name, value string) bool {
@@ -281,7 +293,12 @@ func readOnlySessionAssignmentAllowed(name, value string) bool {
 	return false
 }
 
-type sessionVariableWriter func(*textStatementExecutor, string) error
+type sessionAssignment struct {
+	text     string
+	defaults *sessionDefaults
+}
+
+type sessionVariableWriter func(*textStatementExecutor, sessionAssignment) error
 
 var sessionVariableWriters = map[string]sessionVariableWriter{
 	"autocommit": applyAutocommitValue, "transaction_isolation": applyIsolationValue,
@@ -291,12 +308,15 @@ var sessionVariableWriters = map[string]sessionVariableWriter{
 	"temporary_storage_limit_bytes": applyTemporaryLimitValue,
 }
 
-func applyAutocommitValue(s *textStatementExecutor, value string) error {
-	off, found := map[string]bool{"0": true, "off": true, "false": true, "1": false, "on": false, "true": false}[strings.ToLower(value)]
+func applyAutocommitValue(s *textStatementExecutor, value sessionAssignment) error {
+	off, found := map[string]bool{"0": true, "off": true, "false": true, "1": false, "on": false, "true": false}[strings.ToLower(value.text)]
+	if value.defaults != nil {
+		off, found = value.defaults.transactionSettings.autocommitOff, true
+	}
 	if !found {
 		return sqlFailure{1231, "42000", "autocommit has an invalid value"}
 	}
-	if !off && s.session.transaction {
+	if !off && s.session.autocommitOff && s.session.transaction {
 		if err := (&transactionExecutor{s.session}).commit(); err != nil {
 			return err
 		}
@@ -305,11 +325,17 @@ func applyAutocommitValue(s *textStatementExecutor, value string) error {
 	return nil
 }
 
-func applyIsolationValue(s *textStatementExecutor, value string) error {
+func applyIsolationValue(s *textStatementExecutor, value sessionAssignment) error {
 	if err := sessionCharacteristicChangeAllowed(s.session); err != nil {
 		return err
 	}
-	level, err := parseIsolationLevel(strings.ReplaceAll(value, "-", " "))
+	var level isolationLevel
+	var err error
+	if value.defaults != nil {
+		level = value.defaults.transactionSettings.isolation
+	} else {
+		level, err = parseIsolationLevel(strings.ReplaceAll(value.text, "-", " "))
+	}
 	if err != nil {
 		return err
 	}
@@ -317,11 +343,14 @@ func applyIsolationValue(s *textStatementExecutor, value string) error {
 	return nil
 }
 
-func applyReadOnlyValue(s *textStatementExecutor, value string) error {
+func applyReadOnlyValue(s *textStatementExecutor, value sessionAssignment) error {
 	if err := sessionCharacteristicChangeAllowed(s.session); err != nil {
 		return err
 	}
-	readOnly, found := map[string]bool{"1": true, "on": true, "true": true, "0": false, "off": false, "false": false}[strings.ToLower(value)]
+	readOnly, found := map[string]bool{"1": true, "on": true, "true": true, "0": false, "off": false, "false": false}[strings.ToLower(value.text)]
+	if value.defaults != nil {
+		readOnly, found = value.defaults.transactionSettings.readOnly, true
+	}
 	if !found {
 		return sqlFailure{1231, "42000", "transaction_read_only has an invalid value"}
 	}
@@ -336,54 +365,57 @@ func sessionCharacteristicChangeAllowed(s *session) error {
 	return nil
 }
 
-func applyTimeZoneValue(s *textStatementExecutor, value string) error {
-	offset, err := parseFixedOffset(value)
+func applyTimeZoneValue(s *textStatementExecutor, value sessionAssignment) error {
+	if value.defaults != nil {
+		s.session.timeZone = value.defaults.timeZone
+		return nil
+	}
+	offset, err := parseFixedOffset(value.text)
 	if err == nil {
 		s.session.timeZone = formatFixedOffset(offset)
 	}
 	return err
 }
 
-func applyCollationValue(s *textStatementExecutor, value string) error {
-	kind, err := resolveCollation(characterText, value)
+func applyCollationValue(s *textStatementExecutor, value sessionAssignment) error {
+	if value.defaults != nil {
+		s.session.settings.collationConnection = value.defaults.settings.collationConnection
+		return nil
+	}
+	kind, err := resolveCollation(characterText, value.text)
 	if err == nil {
 		s.session.settings.collationConnection = kind
 	}
 	return err
 }
 
-func applyStatementTimeoutValue(s *textStatementExecutor, value string) error {
-	return s.setDurationLimit("statement_timeout_ms", value, s.session.server.config.ResourceLimits.StatementTimeout, &s.session.settings.statementTimeout)
+func applyStatementTimeoutValue(s *textStatementExecutor, value sessionAssignment) error {
+	if value.defaults != nil {
+		s.session.settings.statementTimeout = value.defaults.settings.statementTimeout
+		return nil
+	}
+	return s.setDurationLimit("statement_timeout_ms", value.text, s.session.server.config.ResourceLimits.StatementTimeout, &s.session.settings.statementTimeout)
 }
-func applyLockWaitTimeoutValue(s *textStatementExecutor, value string) error {
-	return s.setDurationLimit("lock_wait_timeout_ms", value, s.session.server.config.LockWaitTimeout, &s.session.settings.lockWaitTimeout)
+func applyLockWaitTimeoutValue(s *textStatementExecutor, value sessionAssignment) error {
+	if value.defaults != nil {
+		s.session.settings.lockWaitTimeout = value.defaults.settings.lockWaitTimeout
+		return nil
+	}
+	return s.setDurationLimit("lock_wait_timeout_ms", value.text, s.session.server.config.LockWaitTimeout, &s.session.settings.lockWaitTimeout)
 }
-func applyMemoryLimitValue(s *textStatementExecutor, value string) error {
-	return s.setByteLimit("execution_memory_limit_bytes", value, s.session.server.config.ResourceLimits.ExecutionMemoryLimitBytes, &s.session.settings.executionMemoryLimit)
+func applyMemoryLimitValue(s *textStatementExecutor, value sessionAssignment) error {
+	if value.defaults != nil {
+		s.session.settings.executionMemoryLimit = value.defaults.settings.executionMemoryLimit
+		return nil
+	}
+	return s.setByteLimit("execution_memory_limit_bytes", value.text, s.session.server.config.ResourceLimits.ExecutionMemoryLimitBytes, &s.session.settings.executionMemoryLimit)
 }
-func applyTemporaryLimitValue(s *textStatementExecutor, value string) error {
-	return s.setByteLimit("temporary_storage_limit_bytes", value, s.session.server.config.ResourceLimits.TemporaryStorageLimitBytes, &s.session.settings.temporaryStorageLimit)
-}
-
-func (s *textStatementExecutor) resetSessionVariable(name string) error {
-	sessionVariableResetters[name](s.session)
-	return nil
-}
-
-var sessionVariableResetters = map[string]func(*session){
-	"autocommit":            func(s *session) { s.autocommitOff = false },
-	"transaction_isolation": func(s *session) { s.isolation, s.nextIsolation = isolationRepeatableRead, isolationRepeatableRead },
-	"transaction_read_only": func(s *session) { s.readOnly, s.nextReadOnly = false, false },
-	"time_zone":             func(s *session) { s.timeZone = s.initialTimeZone },
-	"collation_connection":  func(s *session) { s.settings.collationConnection = collation0900AICI },
-	"statement_timeout_ms":  func(s *session) { s.settings.statementTimeout = s.server.config.ResourceLimits.StatementTimeout },
-	"lock_wait_timeout_ms":  func(s *session) { s.settings.lockWaitTimeout = s.server.config.LockWaitTimeout },
-	"execution_memory_limit_bytes": func(s *session) {
-		s.settings.executionMemoryLimit = s.server.config.ResourceLimits.ExecutionMemoryLimitBytes
-	},
-	"temporary_storage_limit_bytes": func(s *session) {
-		s.settings.temporaryStorageLimit = s.server.config.ResourceLimits.TemporaryStorageLimitBytes
-	},
+func applyTemporaryLimitValue(s *textStatementExecutor, value sessionAssignment) error {
+	if value.defaults != nil {
+		s.session.settings.temporaryStorageLimit = value.defaults.settings.temporaryStorageLimit
+		return nil
+	}
+	return s.setByteLimit("temporary_storage_limit_bytes", value.text, s.session.server.config.ResourceLimits.TemporaryStorageLimitBytes, &s.session.settings.temporaryStorageLimit)
 }
 
 func (s *textStatementExecutor) setDurationLimit(name, value string, ceiling time.Duration, target *time.Duration) error {

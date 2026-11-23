@@ -1,0 +1,18 @@
+---
+title: "Send a query result or a terminal error"
+---
+stateDiagram-v2
+  s0: Validate stored result
+  s1: Error response complete
+  s2: Send column metadata
+  s3: Transport aborted
+  s4: Send result rows
+  s5: Successful result complete
+  [*] --> s0
+  s0 --> s1: Validation fails before metadata
+  s0 --> s2: Stored result is valid or rows stream lazily
+  s2 --> s3: Transport fails#59; abort response
+  s2 --> s4: Send column count, definitions, and metadata terminator
+  s4 --> s1: Row stream returns SQL error
+  s4 --> s3: Transport fails#59; abort response
+  s4 --> s5: Rows finish#59; send success terminator

@@ -2,6 +2,7 @@ package queryexplanation
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -62,6 +63,45 @@ func TestAllColumnsSelectOmitsProjection(t *testing.T) {
 	collectKinds(decode(t, document)["plan"].(map[string]any), &kinds)
 	if !slices.Equal(kinds, []string{"scan"}) {
 		t.Fatalf("all-column select kinds = %q", kinds)
+	}
+}
+
+func TestIndexScanExplanation(t *testing.T) {
+	for _, covering := range []bool{false, true} {
+		name := "non-covering"
+		if covering {
+			name = "covering"
+		}
+		t.Run(name, func(t *testing.T) {
+			table := ordersTable()
+			table.Access = &IndexAccess{Name: "customer_idx", Covering: covering}
+			scan := PlanSelect("0.1.0", "SELECT * FROM orders", "app", Select{Table: table, AllColumns: true}).Plan
+			wantOpportunities := []Opportunity{{
+				Code: "INDEX_COVERAGE", Summary: "A covering index can reduce table-row reads.",
+				Evidence: []string{"The selected index is classified as non-covering for the projection."},
+			}}
+			wantStrategy := "btree_index_scan"
+			if covering {
+				wantOpportunities = nil
+				wantStrategy = "btree_covering_index_scan"
+			}
+			if !reflect.DeepEqual(scan.Opportunities, wantOpportunities) {
+				t.Errorf("opportunities = %#v, want %#v", scan.Opportunities, wantOpportunities)
+			}
+			if scan.Strategy == nil || scan.Strategy.Name != wantStrategy {
+				t.Errorf("strategy = %#v, want %s", scan.Strategy, wantStrategy)
+			}
+			if want := (Estimates{Rows: 3, RowWidthBytes: 48, Cost: 5, PeakMemoryBytes: 0}); scan.Estimates != want {
+				t.Errorf("estimates = %#v, want %#v", scan.Estimates, want)
+			}
+			wantOutput := Output{Columns: []string{"orders.id", "orders.customer_id", "orders.total"}, Ordering: []OrderingTerm{}, UniqueKeys: [][]string{}}
+			if !reflect.DeepEqual(scan.Output, wantOutput) {
+				t.Errorf("output = %#v, want %#v", scan.Output, wantOutput)
+			}
+			if scan.Warnings == nil || len(scan.Warnings) != 0 || scan.Children == nil || len(scan.Children) != 0 {
+				t.Errorf("warnings = %#v, children = %#v; want empty lists", scan.Warnings, scan.Children)
+			}
+		})
 	}
 }
 

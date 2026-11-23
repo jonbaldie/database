@@ -1,0 +1,12 @@
+---
+title: "Rebuild an index when the row image changes"
+---
+stateDiagram-v2
+  s0: Original rows
+  s1: Original index cached
+  s2: New row image published
+  s3: Index matches new rows
+  [*] --> s0
+  s0 --> s1: Build original index
+  s1 --> s2: Publish different rows
+  s2 --> s3: Build index for new rows

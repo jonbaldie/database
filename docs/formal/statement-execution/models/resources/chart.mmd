@@ -1,0 +1,15 @@
+---
+title: "Statement resource reservations"
+---
+stateDiagram-v2
+  s0: Statements hold 0 units, manager holds 0
+  s1: Statements hold 1 units, manager holds 1
+  s2: Statements hold 2 units, manager holds 2
+  s3: Both statements released
+  [*] --> s0
+  s0 --> s1: Reserve one unit
+  s1 --> s0: Close one statement
+  s1 --> s2: Reserve one unit
+  s0 --> s3: Close one statement
+  s2 --> s1: Close one statement
+  s1 --> s3: Close one statement

@@ -1,0 +1,45 @@
+---
+title: "Connect and execute one statement"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks CompletionHidesState or RunningHasWatch
+    lg1: Path to the CompletionHidesState or RunningHasWatch bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Connect
+  s1: Greeting sent
+  s2: Credentials accepted
+  s3: Rejected
+  s4: Ready
+  s5: Statement starting
+  s6: Cancellation available
+  s7: Statement active
+  s8: Statement complete
+  s9: Cancellation requested
+  s10: Closed
+  [*] --> s0
+  s0 --> s1: Server sends greeting
+  s1 --> s2: Password exchange succeeds
+  s1 --> s3: Authentication fails
+  s2 --> s3: Session capacity is full
+  s2 --> s4: Session slot available
+  s4 --> s5: Client submits a supported text statement
+  s5 --> s6: Install cancellation watch
+  s6 --> s7: Publish active statement
+  s7 --> s8: Statement returns
+  s7 --> s9: Client requests cancellation
+  s8 --> s10: Client disconnects
+  s9 --> s8: Statement returns
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 breaks
+  class s8 bugPath
+  class s10 breaks

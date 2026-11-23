@@ -1,0 +1,73 @@
+package main
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+var formalBackupSynced bool
+
+func formalSkipBackupSync(*os.File) error { return nil }
+func formalBackupRename(source, target string) error {
+	if !formalBackupSynced {
+		return errors.New("rename before archive sync")
+	}
+	return os.Rename(source, target)
+}
+func TestFormalArchivePublication(t *testing.T) {
+	formalBackupSynced = false
+	output := filepath.Join(t.TempDir(), "output")
+	if err := os.WriteFile(output, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := writeTemporaryBackupArchive(output, func(f *os.File) error {
+		prior, err := os.ReadFile(output)
+		if err != nil || string(prior) != "old" {
+			t.Fatal("output replaced before archive completed")
+		}
+		_, err = f.WriteString("new")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil || string(data) != "new" {
+		t.Fatal("published bytes differ")
+	}
+}
+func TestFormalOnlineBackupWriter(t *testing.T) {
+	capture := onlineBackupCapture{directory: t.TempDir()}
+	writers := map[string]*os.File{}
+	defer closeOnlineBackupWriters(writers)
+	for _, row := range [][2]string{{"instance.json", "meta"}, {"catalog.json", "first"}, {"catalog.json", "second"}} {
+		if err := capture.writeRow(writers, row[0], row[1]); err != nil {
+			t.Fatal("chunk append failed", err)
+		}
+	}
+	if err := capture.writeRow(writers, "../unexpected", "bad"); err == nil {
+		t.Fatal("unexpected path accepted")
+	}
+	if err := finishOnlineBackupWriters(writers); err != nil {
+		t.Fatal(err)
+	}
+	if len(writers) != 0 {
+		t.Fatal("finished writers retained handles")
+	}
+	data, err := os.ReadFile(filepath.Join(capture.directory, "catalog.json"))
+	if err != nil || string(data) != "firstsecond" {
+		t.Fatal("chunk append changed contents")
+	}
+	missing := map[string]*os.File{}
+	f, err := os.Create(filepath.Join(t.TempDir(), "metadata"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing["instance.json"] = f
+	defer closeOnlineBackupWriters(missing)
+	if err := finishOnlineBackupWriters(missing); err == nil {
+		t.Fatal("missing catalog accepted")
+	}
+}

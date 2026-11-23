@@ -1,0 +1,13 @@
+---
+title: "Move a one-row window forward"
+---
+stateDiagram-v2
+  s0: Window ready at row 1
+  s1: Old row removed
+  s2: Window ready at row 2
+  s3: Window ready at row 3
+  [*] --> s0
+  s0 --> s1: Remove prior frame row
+  s1 --> s2: Add next frame row
+  s2 --> s1: Remove prior frame row
+  s1 --> s3: Add next frame row

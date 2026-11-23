@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+
+	"github.com/jonbaldie/database/internal/storage"
 )
 
 type Definition struct {
@@ -92,11 +95,20 @@ type Constraint struct {
 	ReferencedNamespace string   `json:"referenced_namespace,omitempty"`
 	ReferencedTable     string   `json:"referenced_table,omitempty"`
 	ReferencedColumns   []string `json:"referenced_columns,omitempty"`
+	// Invisible applies only to a unique constraint, which SHOW INDEX lists
+	// as a unique index.
+	Invisible bool `json:"invisible,omitempty"`
 }
 
 // ErrRevisionConflict reports that a concurrent catalog commit superseded the
 // snapshot a caller tried to publish.
 var ErrRevisionConflict = errors.New("catalog changed concurrently")
+
+// ErrCorrupt indicates that catalog data or persistent storage is corrupted.
+var ErrCorrupt = errors.New("catalog corrupted")
+
+// ErrDuplicateKey indicates that a row mutation violates a primary or unique key constraint.
+var ErrDuplicateKey = storage.ErrDuplicateKey
 
 // ColumnType reports the recorded logical type without inventing a fallback
 // for catalog entries written before column types were persisted.
@@ -165,16 +177,16 @@ func Open(directory string) (*Store, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal(b, &s.definition); err != nil {
-		return nil, fmt.Errorf("decode catalog: %w", err)
+		return nil, fmt.Errorf("%w: decode catalog: %w", ErrCorrupt, err)
 	}
 	if s.definition.Namespaces == nil {
-		return nil, errors.New("catalog namespaces are missing")
+		return nil, fmt.Errorf("%w: catalog namespaces are missing", ErrCorrupt)
 	}
 	if s.definition.Accounts == nil {
 		s.definition.Accounts = map[string]Account{}
 	}
 	if err := validateDefinition(s.definition); err != nil {
-		return nil, fmt.Errorf("invalid catalog: %w", err)
+		return nil, fmt.Errorf("%w: invalid catalog: %w", ErrCorrupt, err)
 	}
 	return openWithRows(s, directory)
 }
@@ -247,95 +259,6 @@ func validateTableRows(tableName string, table Table) error {
 	return nil
 }
 
-func (s *Store) CreateNamespace(name string) error {
-	return s.mutate(func(definition *Definition) error {
-		key := Key(name)
-		if _, ok := definition.Namespaces[key]; ok {
-			return errors.New("namespace already exists")
-		}
-		definition.Namespaces[key] = Namespace{Name: name, Tables: map[string]Table{}}
-		return nil
-	})
-}
-func (s *Store) CreateTable(namespace, name string, columns []string) error {
-	return s.CreateTableWithTypes(namespace, name, columns, nil)
-}
-
-// CreateTableWithTypes records the logical column types needed to reproduce a
-// public schema definition. A nil type list preserves compatibility with the
-// original catalog format, whose columns were names only.
-func (s *Store) CreateTableWithTypes(namespace, name string, columns, columnTypes []string) error {
-	return s.mutate(func(definition *Definition) error {
-		key := Key(namespace)
-		ns, ok := definition.Namespaces[key]
-		if !ok {
-			return errors.New("namespace does not exist")
-		}
-		table := Key(name)
-		if _, ok := ns.Tables[table]; ok {
-			return errors.New("table already exists")
-		}
-		tableDefinition := Table{Name: name, Columns: append([]string(nil), columns...)}
-		if len(columnTypes) > 0 {
-			if len(columnTypes) != len(columns) {
-				return errors.New("column type count does not match column count")
-			}
-			tableDefinition.ColumnTypes = append([]string(nil), columnTypes...)
-		}
-		ns.Tables[table] = tableDefinition
-		definition.Namespaces[key] = ns
-		return nil
-	})
-}
-
-func (s *Store) Insert(namespace, table string, row []string) error {
-	return s.mutate(func(definition *Definition) error {
-		ns, ok := definition.Namespaces[Key(namespace)]
-		if !ok {
-			return errors.New("namespace does not exist")
-		}
-		key := Key(table)
-		tableDefinition, ok := ns.Tables[key]
-		if !ok {
-			return errors.New("table does not exist")
-		}
-		if len(row) != len(tableDefinition.Columns) {
-			return errors.New("column count does not match value count")
-		}
-		tableDefinition.Rows = append(tableDefinition.Rows, append([]string(nil), row...))
-		ns.Tables[key] = tableDefinition
-		definition.Namespaces[Key(namespace)] = ns
-		return nil
-	})
-}
-
-// ReplaceRows commits a complete, validated table-row image as one durable
-// catalog mutation. Callers construct that image before this operation, so a
-// malformed statement never exposes a partially changed table.
-func (s *Store) ReplaceRows(namespace, table string, rows [][]string) error {
-	return s.mutate(func(definition *Definition) error {
-		key := Key(namespace)
-		ns, ok := definition.Namespaces[key]
-		if !ok {
-			return errors.New("namespace does not exist")
-		}
-		tableKey := Key(table)
-		current, ok := ns.Tables[tableKey]
-		if !ok {
-			return errors.New("table does not exist")
-		}
-		for index, row := range rows {
-			if len(row) != len(current.Columns) {
-				return fmt.Errorf("row %d column count does not match table", index)
-			}
-		}
-		current.Rows = cloneRows(rows)
-		ns.Tables[tableKey] = current
-		definition.Namespaces[key] = ns
-		return nil
-	})
-}
-
 func (s *Store) Snapshot() Definition {
 	definition, _ := s.SnapshotWithRevision()
 	return definition
@@ -348,24 +271,6 @@ func (s *Store) SnapshotWithRevision() (Definition, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneDefinition(s.definition), s.revision
-}
-
-// Replace atomically restores a previously captured catalog snapshot.
-func (s *Store) Replace(definition Definition) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.replaceLocked(definition)
-}
-
-// ReplaceIfRevision publishes definition only if expected is still current.
-// It is the commit gate for session-local transaction snapshots.
-func (s *Store) ReplaceIfRevision(expected uint64, definition Definition) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.revision != expected {
-		return ErrRevisionConflict
-	}
-	return s.replaceLocked(definition)
 }
 
 // Apply validates an isolated catalog transformation without publishing it.
@@ -433,14 +338,6 @@ func CloneIndexes(indexes []Index) []Index {
 	return copy
 }
 
-func cloneRows(rows [][]string) [][]string {
-	copy := make([][]string, len(rows))
-	for index, row := range rows {
-		copy[index] = append([]string(nil), row...)
-	}
-	return copy
-}
-
 func sharedRowImage(rows [][]string) [][]string {
 	if rows == nil {
 		return nil
@@ -492,8 +389,8 @@ func sameSchema(left, right Definition) bool {
 func sameSchemaTable(left, right Table) bool {
 	return sameCatalogStrings(left.Columns, right.Columns) &&
 		sameCatalogStrings(left.ColumnTypes, right.ColumnTypes) &&
-		len(left.Constraints) == len(right.Constraints) &&
-		len(left.Indexes) == len(right.Indexes) &&
+		reflect.DeepEqual(left.Constraints, right.Constraints) &&
+		reflect.DeepEqual(left.Indexes, right.Indexes) &&
 		sameColumnAttributes(left.ColumnAttributes, right.ColumnAttributes) &&
 		left.AutoIncrement == right.AutoIncrement &&
 		left.AutoIncrementExhausted == right.AutoIncrementExhausted

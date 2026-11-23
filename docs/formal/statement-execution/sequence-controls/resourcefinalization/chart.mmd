@@ -1,0 +1,31 @@
+---
+title: "ResourceFinalization"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks PublishedWorkStaysSuccessful
+    lg1: Path to the PublishedWorkStaysSuccessful bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: admitted
+  s1: working
+  s2: failed
+  s3: finalized
+  s4: closed
+  s5: late signal
+  s6: Published work rejected
+  [*] --> s0
+  s0 --> s1: Reserve
+  s1 --> s2: Statement fails before commit
+  s1 --> s3: Publish
+  s2 --> s4: Close
+  s3 --> s5: Deadline or Cancel
+  s5 --> s6: Check
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath

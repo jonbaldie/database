@@ -1,0 +1,14 @@
+---
+title: "Savepoint rollback retains locks"
+---
+stateDiagram-v2
+  s0: active
+  s1: saved
+  s2: changed
+  s3: restored
+  s4: finished
+  [*] --> s0
+  s0 --> s1: Save
+  s1 --> s2: WriteAndLock
+  s2 --> s3: RollbackTo
+  s3 --> s4: Finish

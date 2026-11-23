@@ -1,0 +1,86 @@
+package instance
+
+import (
+	"os"
+	"testing"
+)
+
+func TestFormalInitialization(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		dir := t.TempDir()
+		claim, err := claimInitialization(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if other, err := claimInitialization(dir); err == nil {
+			_ = other.discard()
+			t.Fatal("second initialization acquired claim")
+		}
+		paths := initializationPaths{directory: dir, staging: claim.staging}
+		if err := paths.writeStaged([]byte("new metadata")); err != nil {
+			t.Fatal(err)
+		}
+		if conflict {
+			if err := os.WriteFile(paths.metadata(), []byte("existing metadata"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err = paths.commit()
+		if conflict {
+			if err == nil {
+				t.Fatal("metadata conflict was accepted")
+			}
+			if _, err := os.Stat(paths.catalog()); !os.IsNotExist(err) {
+				t.Fatal("failed initialization retained owned catalog")
+			}
+			data, err := os.ReadFile(paths.metadata())
+			if err != nil || string(data) != "existing metadata" {
+				t.Fatal("existing metadata changed")
+			}
+			if err := claim.discard(); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(paths.metadata()); err == nil {
+				if _, err := os.Stat(paths.catalog()); err != nil {
+					t.Fatal("metadata installed without catalog")
+				}
+			}
+			for _, path := range []string{paths.catalog(), paths.metadata()} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatal("successful initialization lost file", err)
+				}
+			}
+			if err := claim.release(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(claim.staging); !os.IsNotExist(err) {
+				t.Fatal("successful initialization retained claim")
+			}
+		}
+	}
+}
+
+func TestFormalInitializationInterrupted(t *testing.T) {
+	dir := t.TempDir()
+	claim, err := claimInitialization(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := initializationPaths{directory: dir, staging: claim.staging}
+	if err := paths.writeStaged([]byte("metadata")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(claim.staging); err != nil {
+		t.Fatal("interrupted initialization lost claim")
+	}
+	if _, err := os.Stat(paths.metadata()); !os.IsNotExist(err) {
+		t.Fatal("staging installed metadata early")
+	}
+	if err := claim.discard(); err != nil {
+		t.Fatal(err)
+	}
+}

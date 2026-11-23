@@ -1,0 +1,6 @@
+=== RUN   TestMySQLPlannedExplanationUsesTheWireContract
+--- PASS: TestMySQLPlannedExplanationUsesTheWireContract (0.36s)
+=== RUN   TestMySQLAnalyzeAndLiveExplanationUseTheWireContract
+--- PASS: TestMySQLAnalyzeAndLiveExplanationUseTheWireContract (0.37s)
+PASS
+ok  	github.com/jonbaldie/database/test/blackbox	2.069s

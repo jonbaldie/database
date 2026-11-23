@@ -1,0 +1,54 @@
+package main
+
+import (
+	"strconv"
+	"testing"
+)
+
+func TestFormalCommandFlagBounds(t *testing.T) {
+	names := []string{"--data-directory", "--max-connections", "--config"}
+	for _, name := range names {
+		for _, value := range []string{"alpha", "9", "a=b"} {
+			for _, joined := range []bool{false, true} {
+				args := []string{name, value}
+				if joined {
+					args = []string{name + "=" + value}
+				}
+				path, values, err := parseConfigurationFlags(args)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if name == "--config" {
+					if path != value {
+						t.Fatal("configuration path mismatch")
+					}
+				} else {
+					canonical := configurationFlagNames[name]
+					if values[canonical] != value {
+						t.Fatal("configuration value mismatch")
+					}
+				}
+				for _, joinedAgain := range []bool{false, true} {
+					second := []string{name, "other"}
+					if joinedAgain {
+						second = []string{name + "=other"}
+					}
+					if _, _, err := parseConfigurationFlags(append(append([]string{}, args...), second...)); err == nil {
+						t.Fatalf("duplicate command flag accepted %q", name)
+					}
+				}
+			}
+		}
+		for _, args := range [][]string{{name}, {name, ""}, {name + "="}, {name, "--max-connections=2"}} {
+			if _, _, err := parseConfigurationFlags(args); err == nil {
+				t.Fatalf("empty command flag accepted %#v", args)
+			}
+		}
+	}
+	for length := 0; length <= 5; length++ {
+		name := "--unknown" + strconv.Itoa(length)
+		if _, _, err := parseConfigurationFlags([]string{name + "=x"}); err == nil {
+			t.Fatal("unknown command flag accepted")
+		}
+	}
+}

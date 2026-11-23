@@ -1,0 +1,196 @@
+package mysql
+
+import (
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/jonbaldie/database/internal/catalog"
+)
+
+func TestFormalLockManagerPoliciesAndCleanup(t *testing.T) {
+	manager := newLockManager(time.Second)
+	first, second, third := &session{}, &session{}, &session{}
+	row1 := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "1"}
+	row2 := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "2"}
+
+	formalAcquire(t, manager, first, []rowLockResource{row1}, lockShared, lockNoWait)
+	formalAcquire(t, manager, second, []rowLockResource{row1}, lockShared, lockNoWait)
+	formalAssertIndexes(t, manager)
+
+	acquired, err := manager.acquire(third, []rowLockResource{row1}, lockExclusive, lockNoWait)
+	if acquired || formalFailureCode(err) != 3572 {
+		t.Fatalf("NOWAIT conflict: acquired=%v err=%v; expected error 3572", acquired, err)
+	}
+	acquired, err = manager.acquire(third, []rowLockResource{row1}, lockExclusive, lockSkip)
+	if acquired || err != nil {
+		t.Fatalf("SKIP LOCKED conflict: acquired=%v err=%v; expected skip", acquired, err)
+	}
+	if len(manager.held[third]) != 0 || len(manager.waiting[third]) != 0 {
+		t.Fatal("NOWAIT or SKIP LOCKED left a partial grant or wait edge")
+	}
+	formalAssertIndexes(t, manager)
+
+	manager.release(first)
+	manager.release(second)
+
+	formalAcquire(t, manager, first, []rowLockResource{row1}, lockExclusive, lockNoWait)
+	formalAcquire(t, manager, second, []rowLockResource{row2}, lockExclusive, lockNoWait)
+
+	acquired, err = manager.acquire(third, []rowLockResource{row1, row2}, lockExclusive, lockNoWait)
+	if acquired || formalFailureCode(err) != 3572 {
+		t.Fatalf("multi-row NOWAIT conflict: acquired=%v err=%v; expected error 3572", acquired, err)
+	}
+	acquired, err = manager.acquire(third, []rowLockResource{row1, row2}, lockExclusive, lockSkip)
+	if acquired || err != nil {
+		t.Fatalf("multi-row SKIP LOCKED conflict: acquired=%v err=%v; expected skip", acquired, err)
+	}
+	if len(manager.held[third]) != 0 {
+		t.Fatal("a conflicting multi-row request granted only part of its rows")
+	}
+
+	_, acquired, err = manager.waitAttempt(third, []rowLockResource{row1, row2}, lockExclusive)
+	if acquired || err != nil || len(manager.waiting[third]) != 2 {
+		t.Fatalf("multi-row wait: acquired=%v err=%v owners=%d", acquired, err, len(manager.waiting[third]))
+	}
+	if len(manager.held[third]) != 0 {
+		t.Fatal("a blocked multi-row request granted a row before all rows were available")
+	}
+	formalAssertIndexes(t, manager)
+
+	manager.release(first)
+	manager.release(second)
+	_, acquired, err = manager.waitAttempt(third, []rowLockResource{row1, row2}, lockExclusive)
+	if !acquired || err != nil || len(manager.waiting[third]) != 0 {
+		t.Fatalf("retry after releases: acquired=%v err=%v", acquired, err)
+	}
+	if manager.held[third][row1] != lockExclusive || manager.held[third][row2] != lockExclusive {
+		t.Fatal("retry did not grant every requested row")
+	}
+	formalAssertIndexes(t, manager)
+	manager.release(third)
+	formalAssertIndexes(t, manager)
+	if len(manager.granted) != 0 || len(manager.held) != 0 || len(manager.waiting) != 0 {
+		t.Fatal("release left lock or wait state behind")
+	}
+
+	formalAcquire(t, manager, first, []rowLockResource{row1}, lockShared, lockNoWait)
+	snapshot := manager.snapshot(first)
+	formalAcquire(t, manager, first, []rowLockResource{row2}, lockExclusive, lockNoWait)
+	manager.restore(first, snapshot)
+	if manager.held[first][row1] != lockShared {
+		t.Fatal("restore dropped a lock held in the snapshot")
+	}
+	if _, found := manager.held[first][row2]; found {
+		t.Fatal("restore kept a lock acquired after the snapshot")
+	}
+	formalAcquire(t, manager, second, []rowLockResource{row2}, lockExclusive, lockNoWait)
+	formalAssertIndexes(t, manager)
+	manager.release(first)
+	manager.release(second)
+	formalAssertIndexes(t, manager)
+}
+
+func TestFormalLockManagerRejectsWaitCycle(t *testing.T) {
+	manager := newLockManager(time.Second)
+	first, second := &session{}, &session{}
+	row := rowLockResource{table: catalog.NewTableRef("app", "items"), key: "1"}
+	formalAcquire(t, manager, first, []rowLockResource{row}, lockShared, lockNoWait)
+	formalAcquire(t, manager, second, []rowLockResource{row}, lockShared, lockNoWait)
+
+	_, acquired, err := manager.waitAttempt(first, []rowLockResource{row}, lockExclusive)
+	if acquired || err != nil || len(manager.waiting[first]) != 1 {
+		t.Fatalf("first upgrade wait: acquired=%v err=%v owners=%d", acquired, err, len(manager.waiting[first]))
+	}
+
+	_, acquired, err = manager.waitAttempt(second, []rowLockResource{row}, lockExclusive)
+	if acquired || !isDeadlock(err) {
+		t.Fatalf("cycle request: expected deadlock error 1213, got acquired=%v err=%v", acquired, err)
+	}
+	if len(manager.waiting[second]) != 0 {
+		t.Fatal("deadlock response left a wait edge behind")
+	}
+	if formalWaitGraphHasCycle(manager) {
+		t.Fatal("wait graph contains a cycle after rejecting the request")
+	}
+	formalAssertIndexes(t, manager)
+
+	manager.release(first)
+	if len(manager.waiting[first]) != 0 {
+		t.Fatal("release left the first session in the wait graph")
+	}
+	formalAcquire(t, manager, second, []rowLockResource{row}, lockExclusive, lockNoWait)
+	manager.release(second)
+	formalAssertIndexes(t, manager)
+}
+
+func formalAcquire(t *testing.T, manager *lockManager, owner *session, resources []rowLockResource, mode lockMode, policy lockPolicy) {
+	t.Helper()
+	acquired, err := manager.acquire(owner, resources, mode, policy)
+	if !acquired || err != nil {
+		t.Fatalf("acquire %v: acquired=%v err=%v", resources, acquired, err)
+	}
+}
+
+func formalFailureCode(err error) uint16 {
+	var failure sqlFailure
+	if errors.As(err, &failure) {
+		return failure.code
+	}
+	return 0
+}
+
+func formalAssertIndexes(t *testing.T, manager *lockManager) {
+	t.Helper()
+	for resource, holders := range manager.granted {
+		for owner, mode := range holders {
+			if manager.held[owner][resource] != mode {
+				t.Fatalf("granted and held maps disagree for %v", resource)
+			}
+			for other, otherMode := range holders {
+				if owner != other && (mode == lockExclusive || otherMode == lockExclusive) {
+					t.Fatalf("conflicting grants coexist for %v", resource)
+				}
+			}
+		}
+	}
+	for owner, held := range manager.held {
+		for resource, mode := range held {
+			if manager.granted[resource][owner] != mode {
+				t.Fatalf("held and granted maps disagree for %v", resource)
+			}
+		}
+	}
+	if formalWaitGraphHasCycle(manager) {
+		t.Fatal("wait graph contains a cycle")
+	}
+}
+
+func formalWaitGraphHasCycle(manager *lockManager) bool {
+	visited := make(map[*session]bool)
+	active := make(map[*session]bool)
+	var visit func(*session) bool
+	visit = func(owner *session) bool {
+		if active[owner] {
+			return true
+		}
+		if visited[owner] {
+			return false
+		}
+		visited[owner] = true
+		active[owner] = true
+		for next := range manager.waiting[owner] {
+			if visit(next) {
+				return true
+			}
+		}
+		delete(active, owner)
+		return false
+	}
+	for owner := range manager.waiting {
+		if visit(owner) {
+			return true
+		}
+	}
+	return false
+}

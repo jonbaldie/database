@@ -1,0 +1,44 @@
+---
+title: "Start the database and stop it safely"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks DrainingIsNotReady
+    lg1: Path to the DrainingIsNotReady bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Server stopped
+  s1: Starting server
+  s2: Recovering after an unclean stop
+  s3: Runtime started
+  s4: Stopped without a clean record
+  s5: Ready for clients
+  s6: Stopping new work
+  s7: Runtime closed
+  s8: Clean stop recorded
+  s9: Stopped cleanly
+  [*] --> s0
+  s0 --> s1: You start the server
+  s1 --> s1: Record the running state
+  s1 --> s2: Record the running state
+  s1 --> s3: Open the runtime
+  s1 --> s4: Startup fails or the process stops
+  s2 --> s3: Open the runtime
+  s2 --> s4: Startup fails or the process stops
+  s3 --> s4: Startup fails or the process stops
+  s3 --> s5: Report ready
+  s5 --> s4: Startup fails or the process stops
+  s5 --> s6: You request shutdown
+  s6 --> s4: Startup fails or the process stops
+  s6 --> s7: Finish shutdown
+  s7 --> s4: Startup fails or the process stops
+  s7 --> s8: Record a clean stop
+  s8 --> s9: Release the data directory
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s3 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath

@@ -1,0 +1,24 @@
+---
+title: "Merge sorted spill runs"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks SortedRows
+    lg1: Path to the SortedRows bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Rows merged 0
+  s1: Rows merged 1
+  s2: Rows merged 2
+  s3: Rows returned out of order
+  [*] --> s0
+  s0 --> s1: Return next row from second run
+  s1 --> s2: Return next row from first run
+  s2 --> s3: Return next row from first run
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath

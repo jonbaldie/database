@@ -24,9 +24,7 @@ var informationSchemaRowBuilders = map[string]informationSchemaRowBuilder{
 	"tables": func(_ *session, definition catalog.Definition) [][]metadataValue {
 		return informationSchemaTableRows(definition)
 	},
-	"columns": func(_ *session, definition catalog.Definition) [][]metadataValue {
-		return informationSchemaColumnRows(definition)
-	},
+	"columns": informationSchemaColumnRows,
 	"statistics": func(_ *session, definition catalog.Definition) [][]metadataValue {
 		return informationSchemaStatisticsRows(definition)
 	},

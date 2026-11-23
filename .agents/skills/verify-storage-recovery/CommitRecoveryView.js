@@ -1,0 +1,3 @@
+export const title = "Commit rows and recover after the process stops";
+export const state = v => v.phase === "recovered" ? (v.rows === "new" ? "New committed rows recovered" : "Prior rows recovered") : v.phase;
+export const step = (a, from, to) => a === "Recover" ? (to.rows === "new" ? "Apply complete committed log" : "Discard incomplete transaction") : ({WriteBegin:"Record transaction start",WriteOperations:"Record row changes",WriteCommit:"Record commit",Sync:"Sync transaction log",Publish:"Publish new rows",ReturnSuccess:"Client receives success",StopProcess:"Process stops",Done:"Complete"})[a];

@@ -22,19 +22,18 @@ import (
 
 func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 	directory := initializedDirectory(t)
-	address := freeLocalAddress(t)
 	ctx := context.Background()
 	events := make(chan Event, 4)
 	done := make(chan error, 1)
 	go func() {
 		done <- Serve(ctx, Options{
 			DataDirectory: directory,
-			MySQLAddress:  address,
+			MySQLAddress:  "127.0.0.1:0",
 			MySQLEnabled:  true,
 			OperationID:   "op-serve",
 		}, func(event Event) { events <- event })
 	}()
-	receiveEvent(t, events, "ready")
+	address := receiveEvent(t, events, "ready").MySQLAddress
 
 	db, err := sql.Open("mysql", "admin:test-password@tcp("+address+")/")
 	if err != nil {
@@ -51,21 +50,28 @@ func TestServeStopsWhenMySQLShutdownIsRequested(t *testing.T) {
 		t.Fatalf("Serve after SHUTDOWN: %v", err)
 	}
 	stopping := receiveEvent(t, events, "stopping")
-	if stopping.OperationID != "op-remote-shutdown" {
-		t.Fatalf("stopping operation_id = %q, want op-remote-shutdown", stopping.OperationID)
+	if stopping.OperationID != "op-remote-shutdown" || stopping.ShutdownReason != "shutdown_request" {
+		t.Fatalf("stopping event = %#v, want operation_id op-remote-shutdown and shutdown_reason shutdown_request", stopping)
 	}
 	receiveEvent(t, events, "stopped")
 }
 
-func freeLocalAddress(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+func TestListenersConflictOnlyForTheSameFixedAddress(t *testing.T) {
+	for _, test := range []struct {
+		mysql, diagnostics string
+		want               bool
+	}{
+		{"127.0.0.1:3306", "", false},
+		{"", "", false},
+		{"127.0.0.1:3306", "127.0.0.1:9090", false},
+		{"127.0.0.1:3306", "127.0.0.1:3306", true},
+		{"127.0.0.1:0", "127.0.0.1:0", false},
+		{"no-port", "no-port", true},
+	} {
+		if got := ListenersConflict(test.mysql, test.diagnostics); got != test.want {
+			t.Fatalf("ListenersConflict(%q, %q) = %v, want %v", test.mysql, test.diagnostics, got, test.want)
+		}
 	}
-	address := listener.Addr().String()
-	_ = listener.Close()
-	return address
 }
 
 func TestServeRejectsDamagedInitializedDirectory(t *testing.T) {
@@ -259,8 +265,12 @@ func TestLifecycleEventsHaveStableCodesAndOperationIdentity(t *testing.T) {
 	go func() {
 		done <- Serve(ctx, Options{DataDirectory: directory, OperationID: "op-test"}, func(event Event) { events <- event })
 	}()
+	metadata, err := instance.Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ready := receiveEvent(t, events, "ready")
-	if ready.EventCode != "server.ready" || ready.Severity != "info" || ready.OperationID != "op-test" {
+	if ready.EventCode != "server.ready" || ready.Severity != "info" || ready.OperationID != "op-test" || ready.InstanceID == "" || ready.InstanceID != metadata.InstanceID {
 		stop()
 		<-done
 		t.Fatalf("ready event = %#v", ready)
@@ -271,7 +281,7 @@ func TestLifecycleEventsHaveStableCodesAndOperationIdentity(t *testing.T) {
 	}
 	stopping := receiveEvent(t, events, "stopping")
 	stopped := receiveEvent(t, events, "stopped")
-	if stopping.EventCode != "server.stopping" || stopped.EventCode != "server.stopped" || stopping.OperationID != "op-test" || stopped.OperationID != "op-test" {
+	if stopping.EventCode != "server.stopping" || stopped.EventCode != "server.stopped" || stopping.OperationID != "op-test" || stopped.OperationID != "op-test" || stopping.ShutdownReason != "signal" {
 		t.Fatalf("shutdown events = %#v / %#v", stopping, stopped)
 	}
 }

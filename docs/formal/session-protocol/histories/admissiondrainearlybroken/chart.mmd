@@ -1,0 +1,31 @@
+---
+title: "AdmissionDrain"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks DrainWaitsForStatement
+    lg1: Path to the DrainWaitsForStatement bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: pending
+  s1: admitted
+  s2: executing
+  s3: draining
+  s4: finished
+  s5: Session closed while statement runs
+  s6: closed
+  [*] --> s0
+  s0 --> s1: Authentication completes#59; admit session
+  s1 --> s2: Client starts statement
+  s2 --> s3: Operator requests drain#59; reject new work
+  s3 --> s4: Active statement completes
+  s3 --> s5: Server closes session while statement still runs
+  s4 --> s6: Close sessions after active work
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s5 breaks
+  class s5 bugPath

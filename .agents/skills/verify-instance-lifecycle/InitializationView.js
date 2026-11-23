@@ -1,0 +1,3 @@
+export const title = "Initialize an empty data directory";
+export const state = v => v.phase;
+export const step = a => ({Claim:"Claim the empty directory",StageCatalog:"Write staged catalog",StageMetadata:"Write staged metadata",LinkCatalog:"Install catalog link",UnlinkCatalogStage:"Remove staged catalog",LinkMetadata:"Install metadata link",UnlinkMetadataStage:"Remove staged metadata",Release:"Release initialization claim",MetadataConflict:"Metadata destination already exists",RemoveOwnedCatalog:"Remove this attempt's catalog",DiscardClaim:"Discard initialization claim",Crash:"Process stops",Done:"Complete"})[a];

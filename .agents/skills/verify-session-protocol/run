@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+import hashlib,json,os,pathlib,subprocess,tempfile
+skill=pathlib.Path(__file__).resolve().parent
+repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':
+ raise SystemExit('Install the pinned TLC 1.7.4 jar with verify-wal-atomicity or set TLA2TOOLS.')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+mutations=[
+ ('execution-watch','connection.go','c.session.statementCancel = watch.cancelled','c.session.statementCancel = nil','Execution','active statement has no cancellation watch'),
+ ('execution-finish','connection.go','defer c.control.running.Store(false)','defer c.control.running.Store(true)','Execution','completed statement remained active'),
+ ('admission','server.go','r.sessionCount >= r.sessionMax','false','Admission','session capacity was not enforced'),
+ ('handshake','authentication.go','capabilities&clientProtocol41 == 0 || capabilities&clientSecureConnection == 0','capabilities&clientSecureConnection == 0','Handshake','required handshake flags bypassed'),
+ ('cancel','connection.go','if watch != nil {\n\t\twatch.cancelOnce.Do(func() { close(watch.cancelled) })','if watch != nil {\n\t\tclose(watch.cancelled)','Cancellation','cancellation closed the same watch twice'),
+ ('prepared','server.go','session.prepared.longDataBytes -= len(value)','session.prepared.longDataBytes -= 0 * len(value)','Prepared','prepared reset retained long data'),
+ ('settings','session_settings.go',' || parsed > ceiling','','Settings','session byte ceiling was bypassed'),
+ ('grant','account_administration.go','if !grant {\n\t\t\taccount.Grants = append','if false {\n\t\t\taccount.Grants = append','AccountGrant','revoked grant remained active'),
+ ('diagnostics','warnings.go','append([]sqlDiagnostic(nil), diagnostics...)','diagnostics','Diagnostics','diagnostics retained caller ownership'),
+ ('explanation','live_explanation.go','if r.active[connectionID] == entry {','if true {','Explanation','stale explanation cleanup removed new statement'),
+]
+with tempfile.TemporaryDirectory(prefix='database-session-formal-') as scratch:
+ root=pathlib.Path(scratch)
+ for config,rule in [('ConnectExecute',None),('ConnectExecuteWatchBroken','RunningHasWatch'),('ConnectExecuteFinishBroken','CompletionHidesState')]:
+  r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/config),'-config',str(skill/(config+'.cfg')),str(skill/'ConnectExecute.tla')],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(config+':\n'+r.stdout,flush=True)
+  if rule is None and r.returncode:raise SystemExit('Current connect model failed')
+  if rule and (r.returncode!=12 or 'Invariant '+rule+' is violated' not in r.stdout):raise SystemExit('Broken connect model did not fail expected rule')
+ for model,rule in json.loads((skill/'model-index.json').read_text()).items():
+  for broken in [False,True]:
+   config=model+('Broken' if broken else '')
+   r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/config),'-config',str(skill/(config+'.cfg')),str(skill/(model+'.tla'))],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   print(config+':\n'+r.stdout,flush=True)
+   if not broken and r.returncode:raise SystemExit('Current model failed: '+model)
+   if broken and (r.returncode!=12 or 'Invariant '+rule+' is violated' not in r.stdout):raise SystemExit('Broken model did not fail expected rule: '+model)
+ for index,variant in enumerate([None]+mutations+[None]):
+  name=('current' if index==0 else 'restored-current') if variant is None else variant[0]
+  overlay={'Replace':{str(repo/'internal/mysql/zz_formal_session_test.go'):str(skill/'session_test.go.txt')}}
+  pattern='^TestFormalSession'
+  if variant:
+   _,filename,old,new,test,message=variant
+   source=repo/'internal/mysql'/filename;original=source.read_text()
+   if original.count(old)!=1:raise SystemExit('Source changed; inspect '+name)
+   changed=root/(name+'.go');changed.write_text(original.replace(old,new))
+   overlay['Replace'][str(source)]=str(changed)
+   pattern='^TestFormalSession'+test+'$'
+  path=root/(name+'.json');path.write_text(json.dumps(overlay))
+  r=subprocess.run(['go','test','-count=1','-overlay',str(path),'./internal/mysql','-run',pattern],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout,flush=True)
+  if variant is None and r.returncode:raise SystemExit('Current session probe failed')
+  if variant and (r.returncode==0 or message not in r.stdout):raise SystemExit('Source mutation was not caught at expected assertion: '+name)
+print('Nine bounded session models, ten broken models, current probes, and ten broken-source probes passed.')
+subprocess.run([str(skill/'run-histories')],cwd=repo,env=env,check=True)

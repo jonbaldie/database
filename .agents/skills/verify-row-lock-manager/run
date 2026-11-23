@@ -1,0 +1,85 @@
+#!/bin/sh
+set -eu
+
+skill_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$skill_dir/../../.." && pwd)
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/database-lock-manager-check.XXXXXX")
+trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+
+expected=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+jar=${TLA2TOOLS:-${XDG_CACHE_HOME:-$HOME/.cache}/database-formal/tla2tools-1.7.4.jar}
+if [ ! -f "$jar" ]; then
+    if [ -n "${TLA2TOOLS:-}" ]; then
+        echo "TLA2TOOLS does not name a file: $jar" >&2
+        exit 2
+    fi
+    curl -fsSL --retry 2 -o "$temporary/tla2tools.jar" \
+        https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+    downloaded=$(shasum -a 256 "$temporary/tla2tools.jar" | awk '{print $1}')
+    if [ "$downloaded" != "$expected" ]; then
+        echo "TLC download did not match the pinned SHA-256" >&2
+        exit 2
+    fi
+    mkdir -p "$(dirname -- "$jar")"
+    mv "$temporary/tla2tools.jar" "$jar"
+fi
+actual=$(shasum -a 256 "$jar" | awk '{print $1}')
+if [ "$actual" != "$expected" ]; then
+    echo "TLC jar does not match version 1.7.4: $jar" >&2
+    exit 2
+fi
+
+echo 'Checking the row-lock manager model with TLC 1.7.4'
+(cd "$skill_dir" && "${JAVA:-java}" -XX:ActiveProcessorCount=2 -cp "$jar" \
+    tlc2.TLC -workers 1 -metadir "$temporary/tlc" -config RowLockManager.cfg RowLockManager.tla)
+
+python3 - "$temporary/valid-overlay.json" \
+    "$repo_dir/internal/mysql/zz_formal_lock_manager_test.go" \
+    "$skill_dir/lock_manager_test.go.txt" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump({"Replace": {sys.argv[2]: sys.argv[3]}}, output)
+PY
+
+echo 'Checking the real Go lock manager'
+(cd "$repo_dir" && GOMAXPROCS=2 GOFLAGS='-p=2' go test -count=1 \
+    -overlay "$temporary/valid-overlay.json" ./internal/mysql -run '^TestFormalLockManager' -v)
+
+python3 - "$repo_dir/internal/mysql/locking.go" \
+    "$temporary/locking-broken.go" \
+    "$temporary/mutant-overlay.json" \
+    "$repo_dir/internal/mysql/zz_formal_lock_manager_test.go" \
+    "$skill_dir/lock_manager_test.go.txt" <<'PY'
+import json
+import sys
+
+source_path, broken_path, overlay_path, test_path, test_source = sys.argv[1:]
+with open(source_path, encoding="utf-8") as source_file:
+    source = source_file.read()
+start = source.index("func (m *lockManager) waitGraphReaches(")
+body = source.index("\n\tfor owner := range owners {", start)
+end = source.index("\n}\n\nfunc (m *lockManager) grant", body) + 2
+broken = source[:body] + "\n\treturn false\n}" + source[end:]
+with open(broken_path, "w", encoding="utf-8") as broken_file:
+    broken_file.write(broken)
+with open(overlay_path, "w", encoding="utf-8") as overlay_file:
+    json.dump({"Replace": {source_path: broken_path, test_path: test_source}}, overlay_file)
+PY
+
+echo 'Checking that the probe catches a broken wait-graph check'
+if (cd "$repo_dir" && GOMAXPROCS=2 GOFLAGS='-p=2' go test -count=1 \
+    -overlay "$temporary/mutant-overlay.json" ./internal/mysql \
+    -run '^TestFormalLockManagerRejectsWaitCycle$' -v >"$temporary/mutant.log" 2>&1); then
+    cat "$temporary/mutant.log"
+    echo 'The broken wait-graph check escaped the probe' >&2
+    exit 1
+fi
+if ! grep -F 'cycle request: expected deadlock error 1213' "$temporary/mutant.log" >/dev/null; then
+    cat "$temporary/mutant.log"
+    echo 'The broken variant failed for a reason other than the missed deadlock' >&2
+    exit 1
+fi
+cat "$temporary/mutant.log"
+echo 'The broken wait-graph check was caught.'

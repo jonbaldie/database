@@ -1,7 +1,6 @@
 package blackbox_test
 
 import (
-	"context"
 	"reflect"
 	"testing"
 
@@ -12,13 +11,9 @@ func TestMySQLSessionSettingsUseTheWireContract(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := t.TempDir()
 	initializeServer(t, runner, directory, "settings-secret")
-	mysqlAddress := freeAddress(t)
-	process, err := runner.Start(context.Background(), "serve", "--data-directory", directory, "--mysql-listen-address", mysqlAddress, "--format=json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory})
+	process, mysqlAddress := instance.Process, instance.MySQLAddress
 	defer func() { _ = process.Stop(); _ = process.Wait() }()
-	nextReadyEvent(t, process)
 	client := newWireClient(t, mysqlAddress, "admin", "settings-secret")
 	defer client.close()
 
@@ -32,6 +27,7 @@ func TestMySQLSessionSettingsUseTheWireContract(t *testing.T) {
 	} {
 		mustQuery(t, client, query)
 	}
+	productVersion := executableProductVersion(t)
 	for query, want := range map[string]string{
 		"SELECT @@transaction_isolation":         "READ-COMMITTED",
 		"SELECT @@transaction_read_only":         "ON",
@@ -40,8 +36,8 @@ func TestMySQLSessionSettingsUseTheWireContract(t *testing.T) {
 		"SELECT @@statement_timeout_ms":          "1000",
 		"SELECT @@execution_memory_limit_bytes":  "1024",
 		"SELECT @@temporary_storage_limit_bytes": "1024",
-		"SELECT @@version":                       "8.4.11-database-0.2.0-dev",
-		"SELECT VERSION()":                       "8.4.11-database-0.2.0-dev",
+		"SELECT @@version":                       "8.4.11-database-" + productVersion,
+		"SELECT VERSION()":                       "8.4.11-database-" + productVersion,
 	} {
 		result := client.query(query)
 		if result.err != "" || !reflect.DeepEqual(result.rows, [][]string{{want}}) {

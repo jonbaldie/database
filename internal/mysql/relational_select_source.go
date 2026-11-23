@@ -496,7 +496,7 @@ func resolveHintIndex(table catalog.Table, name string) (string, error) {
 		return "", sqlFailure{1176, "42000", "key '" + name + "' doesn't exist in table '" + table.Name + "'"}
 	}
 	if matches[0].Invisible {
-		return "", sqlFailure{3522, "HY000", "an invisible index cannot be used in a hint"}
+		return "", sqlFailure{1176, "42000", "Key '" + name + "' doesn't exist in table '" + table.Name + "'"}
 	}
 	return matches[0].Name, nil
 }
@@ -707,9 +707,11 @@ func tableRowIterator(table relationalTableSource, runtime *selectRuntimeBinding
 		if err != nil {
 			return err
 		}
-		elapsed := time.Since(started)
-		bytes := sourceRowBytes(table.table.Rows)
-		runtime.recordSourceScan(scanIndex, table, len(rows), bytes, elapsed)
+		if runtime != nil {
+			elapsed := time.Since(started)
+			bytes := sourceRowBytes(table.table.Rows)
+			runtime.recordSourceScan(scanIndex, table, len(rows), bytes, elapsed)
+		}
 		for _, row := range rows {
 			if err := yield(relationRow{values: append([]string(nil), row.values...), lockKeys: []string{rowLockKey(row.values)}}); err != nil {
 				return err

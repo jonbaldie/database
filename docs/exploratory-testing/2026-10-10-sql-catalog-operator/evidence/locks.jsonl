@@ -1,0 +1,6 @@
+{"name":"other-read","ok":true,"rows":[[1,10]]}
+{"name":"other-nowait","ok":false,"errno":3572,"sqlstate":"HY000","err":"Error 3572 (HY000): Do not wait for lock"}
+{"name":"other-skip","ok":true}
+{"name":"other-wait","ok":false,"errno":1205,"sqlstate":"HY000","err":"Error 1205 (HY000): Lock wait timeout exceeded; try restarting transaction"}
+{"name":"after-rollback","ok":true,"rows":[[1,10]]}
+{"name":"after-commit","ok":true,"rows":[[1,99]]}

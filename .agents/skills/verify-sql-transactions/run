@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+import hashlib, json, os, pathlib, subprocess, tempfile
+skill=pathlib.Path(__file__).resolve().parent
+repo=skill.parents[2]
+jar=pathlib.Path(os.environ.get('TLA2TOOLS',pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest()!='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88':
+ raise SystemExit('Use the pinned TLC 1.7.4 jar from verify-wal-atomicity, or set TLA2TOOLS.')
+env=dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+with tempfile.TemporaryDirectory(prefix='database-sql-formal-') as scratch:
+ root=pathlib.Path(scratch)
+ for name in ['SQLTransactions','Broken']:
+  r=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/name),'-config',str(skill/(name+'.cfg')),str(skill/'SQLTransactions.tla')],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(r.stdout)
+  if name=='SQLTransactions' and r.returncode: raise SystemExit('Current model failed')
+  if name=='Broken' and (r.returncode!=12 or 'Invariant SavepointRestoresPrefix is violated' not in r.stdout): raise SystemExit('Broken model did not fail the prefix rule')
+ source=repo/'internal/mysql/transaction.go'; text=source.read_text()
+ mutations=[('prefix','s.transactionMutations = append([]func(*catalog.Definition) error(nil), s.transactionMutations[:savepoint.mutationCount]...)','s.transactionMutations = s.transactionMutations','savepoint prefix was not restored'),('cleanup','s.transaction = false','s.transaction = true','finished transaction retained state'),('one-shot','s.nextIsolation, s.nextReadOnly = s.isolation, s.readOnly','s.nextIsolation, s.nextReadOnly = s.nextIsolation, s.nextReadOnly','one-shot settings were not consumed')]
+ for variant in [None]+mutations:
+  name='current' if variant is None else variant[0]
+  overlay={'Replace':{str(repo/'internal/mysql/zz_formal_transaction_test.go'):str(skill/'transaction_test.go.txt')}}
+  if variant:
+   _,old,new,message=variant
+   if text.count(old)!=1: raise SystemExit('Source changed: inspect '+name)
+   patched=root/(name+'.go'); patched.write_text(text.replace(old,new))
+   overlay['Replace'][str(source)]=str(patched)
+  path=root/(name+'.json');path.write_text(json.dumps(overlay))
+  r=subprocess.run(['go','test','-count=1','-overlay',str(path),'./internal/mysql','-run','^TestFormalSQLTransactionControl$'],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(name+':\n'+r.stdout)
+  if variant is None and r.returncode: raise SystemExit('Current source probe failed')
+  if variant and (r.returncode==0 or message not in r.stdout): raise SystemExit('Mutation was not caught for the expected reason: '+name)
+ subprocess.run([str(repo/'.agents/skills/verify-row-lock-manager/run')],cwd=repo,env=env,check=True)
+ print('SQL transaction model, source probe, three source mutations, and delegated lock checks passed.')
+
+subprocess.run([str(skill/"run-sequences")],cwd=repo,env=env,check=True)

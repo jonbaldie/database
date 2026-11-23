@@ -126,7 +126,7 @@ func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*query
 	}
 	started := time.Now()
 	runner := *s
-	runner.streamRows = false
+	runner.streamRows = true
 	metrics := queryexplanation.NewRuntimeMetrics(document)
 	runner.session.runtimeMetrics = metrics
 	defer func() { runner.session.runtimeMetrics = nil }()
@@ -149,17 +149,20 @@ func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*query
 }
 
 func discardResultRows(result *queryResult) (int, int, error) {
+	defer result.close()
 	if result == nil {
 		return 0, 0, nil
 	}
 	if result.stream == nil {
 		return len(result.rows), queryResultMemory(result.rows, result.nulls), nil
 	}
+	// A streamed result holds one delivered row at a time, so its peak is the
+	// largest row, not the sum of all rows.
 	rows := 0
 	memory := 0
 	err := result.stream(func(values []string, nulls []bool) error {
 		rows++
-		memory += queryResultMemory([][]string{values}, [][]bool{nulls})
+		memory = max(memory, queryResultMemory([][]string{values}, [][]bool{nulls}))
 		return nil
 	})
 	return rows, memory, err

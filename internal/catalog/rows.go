@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/jonbaldie/database/internal/storage"
@@ -17,12 +18,12 @@ type storageTxn struct {
 func openWithRows(store *Store, directory string) (*Store, error) {
 	engine, err := storage.Open(directory)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: open storage: %v", ErrCorrupt, err)
 	}
 	store.rows = storageRows{engine: engine}
 	if err := store.hydrateRowsFromEngine(); err != nil {
 		_ = engine.Close()
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
 	}
 	refreshOrderedIndexCaches(Definition{}, &store.definition)
 	return store, nil

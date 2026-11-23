@@ -1,0 +1,17 @@
+---
+title: "Reject excessive expression recursion and restore caller depth"
+---
+stateDiagram-v2
+  s0: Enter expression parser
+  s1: Within recursion limit
+  s2: Recursion limit exceeded
+  s3: Evaluate nested expression
+  s4: Reject nested expression
+  s5: Caller depth restored
+  [*] --> s0
+  s0 --> s1: Increase depth within limit
+  s0 --> s2: Increase depth beyond limit
+  s1 --> s3: Evaluate while within limit
+  s2 --> s4: Return depth error
+  s3 --> s5: Restore caller depth
+  s4 --> s5: Restore caller depth

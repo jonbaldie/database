@@ -1,0 +1,3 @@
+export const title = "One handshake awaits admission";
+export const state = v => { if (v.sessions > 1) return "Session capacity exceeded"; return ["One handshake awaits admission", "First session active", "Second handshake awaits admission", "Second session rejected", "All connections closed"][v.phase]; };
+export const step = (a, from, to) => { if (a === "TryAdmitFull") return to.sessions > 1 ? "Admit despite full capacity" : "Reject full session capacity"; return ({"Admit": "Authenticate and admit first session", "RegisterNext": "Accept second transport", "TryAdmitFull": "Reject full session capacity", "Disconnect": "Close both connections"})[a] || "Complete"; };

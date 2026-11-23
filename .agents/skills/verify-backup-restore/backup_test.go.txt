@@ -1,0 +1,139 @@
+package main
+
+import (
+	"archive/tar"
+	"bytes"
+	"errors"
+	"github.com/jonbaldie/database/internal/instance"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func formalArchive(t *testing.T, names []string) *tar.Reader {
+	t.Helper()
+	var b bytes.Buffer
+	w := tar.NewWriter(&b)
+	for _, name := range names {
+		content := "{}"
+		if err := w.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(content))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return tar.NewReader(&b)
+}
+func TestFormalBackupValidation(t *testing.T) {
+	if _, _, err := readBackupEntries(formalArchive(t, nil), t.TempDir()); err == nil {
+		t.Fatal("missing manifest accepted")
+	}
+	for _, names := range [][]string{{backupManifestPath, backupManifestPath}, {"catalog.json", "catalog.json"}, {"../outside"}} {
+		if _, _, err := readBackupEntries(formalArchive(t, names), t.TempDir()); err == nil {
+			t.Fatal("invalid entry accepted")
+		}
+	}
+	if _, err := validateBackupFileEntries([]backupFile{{Path: "catalog.json", Size: 1, SHA256: "expected"}}, map[string]storedBackupFile{"catalog.json": {size: 1, sha256: "changed"}}); err == nil {
+		t.Fatal("hash mismatch accepted")
+	}
+	for depth := 0; depth <= 130; depth++ {
+		input := `{"namespaces":{},"x":` + strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth) + "}"
+		err := validateBackupCatalogReader(strings.NewReader(input))
+		if depth <= 128 && err != nil {
+			t.Fatalf("depth %d rejected: %v", depth, err)
+		}
+		if depth > 128 && err == nil {
+			t.Fatal("excess JSON depth accepted")
+		}
+	}
+	if err := validateBackupCatalogReader(strings.NewReader(`{"namespaces":{}} {}`)); err == nil {
+		t.Fatal("trailing JSON accepted")
+	}
+}
+func TestFormalBackupRestore(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	original, err := instance.Initialize(source, "admin", "formal-password-12345")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(root, "backup.tar")
+	if err := createBackup(source, archive); err != nil {
+		t.Fatal(err)
+	}
+	for _, existing := range []bool{false, true} {
+		dest := filepath.Join(t.TempDir(), "restored")
+		if existing {
+			if err := os.Mkdir(dest, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := restoreBackup(archive, dest); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dest, "catalog.json")); err != nil {
+			t.Fatal("restored destination missing entry")
+		}
+		restored, err := instance.Load(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if restored.InstanceID == original.InstanceID || restored.SourceInstanceID != original.InstanceID || restored.State != "stopped" {
+			t.Fatal("restored identity invalid")
+		}
+	}
+	dest := filepath.Join(t.TempDir(), "invalid")
+	if err := applyRestoreStaging(dest, map[string]storedBackupFile{}, []byte("invalid")); err == nil {
+		t.Fatal("invalid stage installed")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatal("invalid stage changed target")
+	}
+	output := filepath.Join(t.TempDir(), "output")
+	if err := os.WriteFile(output, []byte("prior"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	expected := errors.New("injected write failure")
+	if err := writeTemporaryBackupArchive(output, func(f *os.File) error { _, _ = f.WriteString("partial"); return expected }); !errors.Is(err, expected) {
+		t.Fatal("write failure lost")
+	}
+	contents, err := os.ReadFile(output)
+	if err != nil || string(contents) != "prior" {
+		t.Fatal("failed backup replaced output")
+	}
+	entries, err := os.ReadDir(filepath.Dir(output))
+	if err != nil || len(entries) != 1 {
+		t.Fatal("failed backup left temporary file")
+	}
+}
+
+func TestFormalBackupInstallWhole(t *testing.T) {
+	root := t.TempDir()
+	staging := filepath.Join(root, "staging")
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(staging, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"catalog.json", "instance.json"} {
+		if err := os.WriteFile(filepath.Join(staging, name), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := installRestoreStaging(staging, target, false)
+	if err != nil {
+		if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+			t.Fatal("new destination install became partial")
+		}
+		return
+	}
+	for _, name := range []string{"catalog.json", "instance.json"} {
+		if _, err := os.Stat(filepath.Join(target, name)); err != nil {
+			t.Fatal("new destination missing entry")
+		}
+	}
+}

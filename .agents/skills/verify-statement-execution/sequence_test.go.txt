@@ -1,0 +1,284 @@
+package mysql
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"reflect"
+	"testing"
+	"time"
+)
+
+func formalSequenceRows(t *testing.T, executor *textStatementExecutor, query string, want [][]string, message string) {
+	t.Helper()
+	result, err := executeStatement(executor, query)
+	if err != nil {
+		t.Fatal(message, err)
+	}
+	defer result.close()
+	if !reflect.DeepEqual(result.rows, want) {
+		t.Fatal(message, result.rows, want)
+	}
+}
+
+func TestFormalSequenceMutation(t *testing.T) {
+	e := newSeededExecutor(t, "CREATE TABLE items (id INT PRIMARY KEY, value INT)", "INSERT INTO items VALUES (1,0)")
+	if _, err := executeStatement(e, "REPLACE INTO items VALUES (1,1),(1,2)"); err != nil {
+		t.Fatal(err)
+	}
+	formalSequenceRows(t, e, "SELECT id,value FROM items", [][]string{{"1", "2"}}, "ordered replacement did not retain last candidate")
+	if _, err := executeStatement(e, "UPDATE items SET value=3 WHERE id=1"); err != nil {
+		t.Fatal(err)
+	}
+	formalSequenceRows(t, e, "SELECT id,value FROM items", [][]string{{"1", "3"}}, "ordered update failed publication")
+}
+
+func TestFormalSequenceAlter(t *testing.T) {
+	e := newSeededExecutor(t, "CREATE TABLE items (id INT PRIMARY KEY, value INT)", "INSERT INTO items VALUES (1,7),(2,7)")
+	before := e.server.config.Catalog.Snapshot()
+	_, err := executeStatement(e, "ALTER TABLE items ADD COLUMN extra INT, ADD COLUMN extra INT")
+	if err == nil {
+		t.Fatal("invalid altered schema was not rejected", err)
+	}
+	after := e.server.config.Catalog.Snapshot()
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("rejected ALTER published a private action")
+	}
+	if _, err := executeStatement(e, "ALTER TABLE items RENAME COLUMN value TO renamed, ADD COLUMN extra INT"); err != nil {
+		t.Fatal(err)
+	}
+	formalSequenceRows(t, e, "SELECT renamed,extra FROM items ORDER BY id", [][]string{{"7", "NULL"}, {"7", "NULL"}}, "valid ALTER did not publish ordered actions")
+}
+
+func TestFormalSequenceBounds(t *testing.T) {
+	column := relationColumn{name: "id", typeName: "INT", index: 0}
+	for _, firstOp := range []string{"<", "<=", ">", ">=", "="} {
+		for _, secondOp := range []string{"<", "<=", ">", ">=", "="} {
+			for first := 0; first <= 2; first++ {
+				for second := 0; second <= 2; second++ {
+					bounds := &relationalIndexBounds{}
+					applyRelationIndexBound(bounds, firstOp, intValue(int64(first)), column)
+					applyRelationIndexBound(bounds, secondOp, intValue(int64(second)), column)
+					for v := 0; v <= 2; v++ {
+						satisfies := func(op string, b int) bool {
+							switch op {
+							case "<":
+								return v < b
+							case "<=":
+								return v <= b
+							case ">":
+								return v > b
+							case ">=":
+								return v >= b
+							default:
+								return v == b
+							}
+						}
+						want := satisfies(firstOp, first) && satisfies(secondOp, second)
+						keep := true
+						if bounds.lower.present {
+							c := compareOrderedIndexValues(intValue(int64(v)), bounds.lower.value, &column)
+							keep = keep && (c > 0 || c == 0 && bounds.lower.inclusive)
+						}
+						if bounds.upper.present {
+							c := compareOrderedIndexValues(intValue(int64(v)), bounds.upper.value, &column)
+							keep = keep && (c < 0 || c == 0 && bounds.upper.inclusive)
+						}
+						if keep != want {
+							t.Fatal("tightened bounds changed predicate intersection", firstOp, first, secondOp, second, v)
+						}
+					}
+				}
+			}
+		}
+	}
+	e := newSeededExecutor(t, "CREATE TABLE ranged (id INT PRIMARY KEY)", "INSERT INTO ranged VALUES (0),(1),(2)")
+	formalSequenceRows(t, e, "SELECT id FROM ranged WHERE id >= 0 AND id > 1 AND 2 >= id ORDER BY id", [][]string{{"2"}}, "constructed SQL range changed")
+}
+
+func TestFormalSequenceResources(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		cancel := make(chan struct{})
+		config := Config{}
+		manager := newResourceManager(config)
+		r := newStatementResources(manager, config, cancel)
+		if err := reserveStatementMemory(r, 1); err != nil {
+			t.Fatal(err)
+		}
+		finalizeStatementResources(r)
+		if deadline {
+			r.deadline = time.Now().Add(-time.Second)
+		} else {
+			close(cancel)
+		}
+		if err := r.check(); err != nil {
+			t.Fatal("published work rejected a late signal", err)
+		}
+		closeStatementResources(r)
+		if manager.usage().ExecutionMemoryBytes != 0 {
+			t.Fatal("finalized statement retained memory")
+		}
+	}
+	cancel := make(chan struct{})
+	close(cancel)
+	r := newStatementResources(newResourceManager(Config{}), Config{}, cancel)
+	if r.check() == nil {
+		t.Fatal("unpublished cancellation was ignored")
+	}
+}
+
+func TestFormalSequenceScalar(t *testing.T) {
+	for _, streamed := range []bool{false, true} {
+		for count := 0; count <= 2; count++ {
+			rows := [][]string{}
+			for n := 0; n < count; n++ {
+				rows = append(rows, []string{fmt.Sprint(n + 1)})
+			}
+			released := 0
+			r := &queryResult{columns: []string{"v"}, metadata: []columnMetadata{{name: "v", typ: mysqlTypeLongLong}}, release: func() { released++ }}
+			if streamed {
+				r.stream = func(yield func([]string, []bool) error) error {
+					for _, row := range rows {
+						if err := yield(row, nil); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
+			} else {
+				r.rows = rows
+			}
+			value, _, err := scalarSubqueryValue(r)
+			if count == 2 {
+				if !isFailureCode(err, 1242) {
+					t.Fatal("scalar accepted a second row", err)
+				}
+			} else if err != nil || (count == 0 && !value.isNull()) || (count == 1 && value.isNull()) {
+				t.Fatal("scalar cardinality changed", count, value, err)
+			}
+			if released != 1 {
+				t.Fatal("scalar did not release its result")
+			}
+		}
+	}
+	e := relationalSelectExecutor(t)
+	formalSequenceRows(t, e, "SELECT a.id,(SELECT l.label FROM author_labels l WHERE l.id=a.id) FROM authors a ORDER BY a.id", [][]string{{"1", "A"}, {"2", "G"}, {"3", "NULL"}}, "dependent scalar reused another scope")
+}
+
+func TestFormalSequenceWindow(t *testing.T) {
+	e := newSeededExecutor(t, "CREATE TABLE ranked (id INT, grp INT, v INT)", "INSERT INTO ranked VALUES (1,1,1),(2,1,1),(3,1,2),(4,2,9)")
+	formalSequenceRows(t, e, "SELECT id,RANK() OVER (PARTITION BY grp ORDER BY v),DENSE_RANK() OVER (PARTITION BY grp ORDER BY v),SUM(id) OVER (PARTITION BY grp ORDER BY id ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM ranked ORDER BY id", [][]string{{"1", "1", "1", "1"}, {"2", "1", "1", "2"}, {"3", "3", "2", "3"}, {"4", "1", "1", "4"}}, "window partition peer rank or frame changed")
+}
+
+func TestFormalSequenceJoin(t *testing.T) {
+	e := relationalSelectExecutor(t)
+	formalSequenceRows(t, e, "SELECT a.id,l.label FROM authors a LEFT JOIN author_labels l ON a.id=l.id ORDER BY a.id", [][]string{{"1", "A"}, {"2", "G"}, {"3", "NULL"}}, "join probe lost matched or unmatched output")
+}
+
+func TestFormalSequenceMembership(t *testing.T) {
+	e := newSeededExecutor(t, "CREATE TABLE members (v INT)", "INSERT INTO members VALUES (NULL),(1)")
+	result := &queryResult{columns: []string{"v"}, metadata: []columnMetadata{{name: "v", typ: mysqlTypeLongLong}}, rows: [][]string{{"NULL"}, {"1"}}, nulls: [][]bool{{true}, {false}}}
+	for _, negate := range []bool{false, true} {
+		value, err := evaluateInMembership(intValue(2), result, negate, relationOperand{})
+		if err != nil || !value.isNull() {
+			t.Fatal("null-aware membership changed", value, err)
+		}
+	}
+	formalSequenceRows(t, e, "SELECT v FROM members WHERE v IN (SELECT v FROM members)", [][]string{{"1"}}, "null-aware membership changed")
+	formalSequenceRows(t, e, "SELECT v FROM members INTERSECT SELECT 1 UNION SELECT 2", [][]string{{"1"}, {"2"}}, "set operator fold changed")
+}
+
+func TestFormalSequenceSpill(t *testing.T) {
+	for _, early := range []bool{false, true} {
+		result, manager, files, _ := spillResultForCleanup(t)
+		stop := errors.New("stop output")
+		got := []string{}
+		err := result.stream(func(row []string, _ []bool) error {
+			got = append(got, row[0])
+			if early {
+				return stop
+			}
+			return nil
+		})
+		if early {
+			if !errors.Is(err, stop) {
+				t.Fatal(err)
+			}
+		} else if err != nil || !reflect.DeepEqual(got, []string{"Linus", "Grace", "Ada"}) {
+			t.Fatal("spill lifecycle delivery changed", got, err)
+		}
+		result.close()
+		for _, path := range files {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("spill lifecycle left a run file", path, err)
+			}
+		}
+		if manager.usage().TemporaryStorageBytes != 0 {
+			t.Fatal("spill lifecycle retained disk budget")
+		}
+	}
+}
+
+func TestFormalSequenceSkipLocked(t *testing.T) {
+	e := newSeededExecutor(t, "CREATE TABLE locked_rows (id INT PRIMARY KEY)", "INSERT INTO locked_rows VALUES (1),(2),(3)")
+	other := &textStatementExecutor{session: newTestSession(e.server, testSessionOptions{database: "app"})}
+	for _, executor := range []*textStatementExecutor{e, other} {
+		if _, err := executeStatement(executor, "BEGIN"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { executeStatement(e, "ROLLBACK"); executeStatement(other, "ROLLBACK") })
+	if _, err := executeStatement(e, "SELECT id FROM locked_rows WHERE id=1 FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	formalSequenceRows(t, other, "SELECT id FROM locked_rows ORDER BY id LIMIT 1,1 FOR UPDATE SKIP LOCKED", [][]string{{"3"}}, "skip-locked offset counted an unavailable row")
+}
+
+func TestFormalSequenceFailedLockSelection(t *testing.T) {
+	e := newSeededExecutor(t, "CREATE TABLE lock_restore (id INT PRIMARY KEY)", "INSERT INTO lock_restore VALUES (1),(2),(3)")
+	owner := &textStatementExecutor{session: newTestSession(e.server, testSessionOptions{database: "app"})}
+	observer := &textStatementExecutor{session: newTestSession(e.server, testSessionOptions{database: "app"})}
+	for _, executor := range []*textStatementExecutor{e, owner, observer} {
+		if _, err := executeStatement(executor, "BEGIN"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, executor := range []*textStatementExecutor{e, owner, observer} {
+			executeStatement(executor, "ROLLBACK")
+		}
+	})
+	if _, err := executeStatement(e, "SELECT id FROM lock_restore WHERE id=1 FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executeStatement(owner, "SELECT id FROM lock_restore WHERE id=3 FOR UPDATE"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executeStatement(e, "SELECT id FROM lock_restore WHERE id>=2 ORDER BY id FOR UPDATE NOWAIT"); err == nil {
+		t.Fatal("selection unexpectedly acquired conflicting row")
+	}
+	if _, err := executeStatement(observer, "SELECT id FROM lock_restore WHERE id=2 FOR UPDATE NOWAIT"); err != nil {
+		t.Fatal("failed selection retained a newly acquired lock", err)
+	}
+	if _, err := executeStatement(observer, "SELECT id FROM lock_restore WHERE id=1 FOR UPDATE NOWAIT"); err == nil {
+		t.Fatal("failed selection released an earlier lock")
+	}
+}
+
+func TestFormalSequenceSubqueryScopes(t *testing.T) {
+	e := relationalSelectExecutor(t)
+	formalSequenceRows(t, e, "SELECT a.id FROM authors a WHERE a.id IN (SELECT l.id FROM author_labels l WHERE l.id=a.id) ORDER BY a.id", [][]string{{"1"}, {"2"}}, "dependent membership reused another scope")
+	formalSequenceRows(t, e, "SELECT id FROM authors WHERE id IN (SELECT id FROM author_labels) ORDER BY id", [][]string{{"1"}, {"2"}}, "independent membership changed")
+}
+
+func TestFormalSequenceUpdate(t *testing.T) {
+	e := newSeededExecutor(t, "CREATE TABLE assignment_order (id INT PRIMARY KEY,a INT,b INT)", "INSERT INTO assignment_order VALUES (1,0,0)")
+	if _, err := executeStatement(e, "UPDATE assignment_order SET a=1,b=a WHERE id=1"); err != nil {
+		t.Fatal(err)
+	}
+	formalSequenceRows(t, e, "SELECT a,b FROM assignment_order", [][]string{{"1", "1"}}, "update assignment did not read prior assignment")
+}
+func TestFormalSequenceSetFold(t *testing.T) {
+	e := relationalSelectExecutor(t)
+	formalSequenceRows(t, e, "SELECT 1 UNION SELECT 2 INTERSECT SELECT 2", [][]string{{"1"}, {"2"}}, "intersection did not precede union")
+}

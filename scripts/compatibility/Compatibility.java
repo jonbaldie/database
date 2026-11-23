@@ -15,7 +15,7 @@ public final class Compatibility {
     try (Connection connection = DriverManager.getConnection(url, user, password)) {
       try (Statement statement = connection.createStatement(); ResultSet result = statement.executeQuery("SELECT VERSION()")) {
         result.next();
-        if (!"8.4.11-database-0.2.0-dev".equals(result.getString(1))) {
+        if (!result.getString(1).equals(System.getenv("DATABASE_COMPAT_VERSION"))) {
           throw new SQLException("unexpected version " + result.getString(1));
         }
       }

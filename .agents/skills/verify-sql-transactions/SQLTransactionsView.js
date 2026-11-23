@@ -1,0 +1,3 @@
+export const title = "Begin, change rows, and finish a transaction";
+export const state = v => v.phase === "idle" ? "Ready to begin" : v.phase === "finished" ? (v.outcome === "committed" ? "Transaction committed" : "Transaction rolled back") : v.saved >= 0 ? "Transaction with savepoint" : "Transaction active";
+export const step = (a, from, to) => a === "Finish" ? (to.outcome === "committed" ? "You commit" : "You roll back") : ({Begin:"You begin a transaction",Read:"You read rows",Write:"You change rows",Savepoint:"You set a savepoint",RollbackTo:"You roll back to the savepoint",Release:"You release the savepoint",Commit:"You commit",Rollback:"You roll back",Done:"Complete"})[a];

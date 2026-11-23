@@ -1,0 +1,3 @@
+export const title = "Read a backup archive";
+export const state = v => v.phase === "reading" ? (v.manifestFound ? "Reading files after manifest" : "Reading files before manifest") : v.phase;
+export const step = (a, from, to) => a === "Finish" ? (to.phase === "rejected" ? "Manifest is missing at end of archive" : "Reach end of archive with manifest") : a === "ReadFile" ? (to.phase === "rejected" ? "Duplicate file is rejected" : "Read a file") : a === "ReadManifest" ? (to.phase === "rejected" ? "Duplicate manifest is rejected" : "Read manifest") : ({UnsafeEntry:"Reject unsafe path",Done:"Complete"})[a];

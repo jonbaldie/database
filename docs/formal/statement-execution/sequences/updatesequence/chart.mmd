@@ -1,0 +1,16 @@
+---
+title: "UpdateSequence"
+---
+stateDiagram-v2
+  s0: select
+  s1: first assignment
+  s2: second assignment
+  s3: validate
+  s4: publish
+  s5: Expected values published
+  [*] --> s0
+  s0 --> s1: Select
+  s1 --> s2: Assign First
+  s2 --> s3: Assign Second
+  s3 --> s4: Validate
+  s4 --> s5: Publish

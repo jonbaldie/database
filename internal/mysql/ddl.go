@@ -41,6 +41,8 @@ type ddlAction struct {
 
 const maxTableColumns = 1024
 
+var errTableDoesNotExist = sqlFailure{1146, "42S02", "table does not exist"}
+
 type ddlExecutor struct{ *session }
 
 func (s *textStatementExecutor) ddlStatement(query, lower string) (*queryResult, bool, error) {
@@ -156,7 +158,7 @@ func addIndexToDefinition(definition *catalog.Definition, namespaceName, tableNa
 	}
 	table, found := namespace.Tables[catalog.Key(tableName)]
 	if !found {
-		return errors.New("table does not exist")
+		return errTableDoesNotExist
 	}
 	indexes, err := namedTableIndexes(table.Name, append(catalog.CloneIndexes(table.Indexes), index), table.Constraints)
 	if err != nil {
@@ -175,7 +177,7 @@ func dropIndexFromDefinition(definition *catalog.Definition, namespaceName, tabl
 	}
 	table, found := namespace.Tables[catalog.Key(tableName)]
 	if !found {
-		return errors.New("table does not exist")
+		return errTableDoesNotExist
 	}
 	if err := dropTableIndex(&table, name); err != nil {
 		return err
@@ -409,7 +411,7 @@ func truncateTable(s *session, query string) error {
 		}
 		table, found := namespaceDefinition.Tables[catalog.Key(name)]
 		if !found {
-			return errors.New("table does not exist")
+			return errTableDoesNotExist
 		}
 		if err := checkTableNotReferencedByForeignKeyForTruncate(definition, catalog.Key(namespace), catalog.Key(name)); err != nil {
 			return err
@@ -459,7 +461,7 @@ func renameTableInDefinition(definition *catalog.Definition, namespaceName, oldN
 	namespace := definition.Namespaces[catalog.Key(namespaceName)]
 	table, found := namespace.Tables[catalog.Key(oldName)]
 	if !found {
-		return errors.New("table does not exist")
+		return errTableDoesNotExist
 	}
 	if _, found := namespace.Tables[catalog.Key(newName)]; found {
 		return errors.New("table already exists")
@@ -493,7 +495,7 @@ func (s *ddlExecutor) alterTable(query string) error {
 		}
 		table, found := namespaceDefinition.Tables[catalog.Key(name)]
 		if !found {
-			return errors.New("table does not exist")
+			return errTableDoesNotExist
 		}
 		updated, err := applyTableDefinitionActions(table, actions)
 		if err != nil {
@@ -925,7 +927,7 @@ func dropTableIndex(table *catalog.Table, name string) error {
 		table.Constraints = constraints
 		return nil
 	}
-	return errors.New("can't drop index; check that it exists")
+	return sqlFailure{1091, "42000", "Can't DROP '" + name + "'; check that column/key exists"}
 }
 
 func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]catalog.Constraint, bool) {
@@ -938,6 +940,9 @@ func withoutUniqueConstraint(constraints []catalog.Constraint, name string) ([]c
 	return constraints, false
 }
 
+// alterTableIndexVisibility sets the visibility of the named index. SHOW INDEX
+// lists a UNIQUE key from a table definition as an index, so ALTER INDEX
+// changes it too.
 func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool) error {
 	for number := range table.Indexes {
 		if catalog.Key(table.Indexes[number].Name) != catalog.Key(name) {
@@ -946,13 +951,20 @@ func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool
 		table.Indexes[number].Invisible = invisible
 		return nil
 	}
+	for number := range table.Constraints {
+		if table.Constraints[number].Type != catalog.ConstraintTypeUnique || catalog.Key(table.Constraints[number].Name) != catalog.Key(name) {
+			continue
+		}
+		table.Constraints[number].Invisible = invisible
+		return nil
+	}
 	if catalog.Key(name) == catalog.Key("PRIMARY") {
 		if invisible {
 			return sqlFailure{3522, "HY000", "a primary key index cannot be invisible"}
 		}
 		return errors.New("can't alter primary index visibility")
 	}
-	return errors.New("can't alter index; check that it exists")
+	return sqlFailure{1176, "42000", "Key '" + name + "' doesn't exist in table '" + table.Name + "'"}
 }
 
 func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) error {
@@ -1009,7 +1021,7 @@ func dropTableColumn(table *catalog.Table, action ddlAction) error {
 		if action.ifExists {
 			return nil
 		}
-		return errors.New("unknown column")
+		return sqlFailure{1091, "42000", "Can't DROP '" + action.name + "'; check that column/key exists"}
 	}
 	if len(table.Columns) == 1 {
 		return errors.New("a table must retain one column")

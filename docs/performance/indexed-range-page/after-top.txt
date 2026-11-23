@@ -1,0 +1,23 @@
+File: database-range-after.test
+Type: cpu
+Time: 2026-10-12 14:14:30 BST
+Duration: 2.50s, Total samples = 2.93s (117.07%)
+Showing nodes accounting for 2.82s, 96.25% of 2.93s total
+Dropped 72 nodes (cum <= 0.01s)
+Showing top 15 nodes out of 108
+      flat  flat%   sum%        cum   cum%
+     2.28s 77.82% 77.82%      2.28s 77.82%  syscall.rawsyscalln
+     0.42s 14.33% 92.15%      0.42s 14.33%  runtime.kevent
+     0.05s  1.71% 93.86%      0.05s  1.71%  runtime.tryDeferToSpanScan
+     0.02s  0.68% 94.54%      0.02s  0.68%  runtime.pthread_cond_wait
+     0.02s  0.68% 95.22%      0.02s  0.68%  runtime.usleep
+     0.01s  0.34% 95.56%      0.03s  1.02%  runtime.(*mheap).freeSpanLocked
+     0.01s  0.34% 95.90%      0.04s  1.37%  runtime.(*sweepLocked).sweep
+     0.01s  0.34% 96.25%      0.05s  1.71%  runtime.scanObject
+         0     0% 96.25%      0.08s  2.73%  database/sql.(*DB).retry
+         0     0% 96.25%      0.51s 17.41%  database/sql.(*Rows).Next
+         0     0% 96.25%      0.51s 17.41%  database/sql.(*Rows).Next.func1
+         0     0% 96.25%      0.51s 17.41%  database/sql.(*Rows).nextLocked
+         0     0% 96.25%      0.08s  2.73%  database/sql.(*Stmt).QueryContext
+         0     0% 96.25%      0.08s  2.73%  database/sql.(*Stmt).QueryContext.func1
+         0     0% 96.25%      0.07s  2.39%  database/sql.ctxDriverStmtQuery

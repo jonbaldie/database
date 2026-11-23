@@ -1,0 +1,109 @@
+package storage
+
+import (
+	"errors"
+	"os"
+	"testing"
+)
+
+func TestFormalStorageCommitRestart(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if err := engine.EnsureTable("app", "items", []string{"id"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := txn.Insert("app", "items", []string{"new"}); err != nil {
+		t.Fatal(err)
+	}
+	if engine.RowCount("app", "items") != 0 {
+		t.Fatal("private insert was published early")
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if engine.RowCount("app", "items") != 1 {
+		t.Fatal("successful commit did not publish row")
+	}
+	if err := txn.Commit(); !errors.Is(err, errFinishedTxn) {
+		t.Fatal("finished transaction committed twice")
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.RowCount("app", "items") != 1 {
+		t.Fatal("acknowledged row was lost on restart")
+	}
+}
+func TestFormalStorageClosed(t *testing.T) {
+	engine, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Begin(); !errors.Is(err, errClosed) {
+		t.Fatal("closed engine began transaction")
+	}
+	if err := txn.Commit(); !errors.Is(err, errClosed) {
+		t.Fatal("closed engine accepted empty commit")
+	}
+	if txn.finished {
+		t.Fatal("failed commit finished transaction")
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal("repeat close failed", err)
+	}
+}
+
+func TestFormalStorageIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.EnsureTable("app", "items", []string{"id"}, []string{"id"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(rowsWalPath(dir), os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWALRecord(file, walBegin, "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeWALRecord(file, walInsert, "app", "items", []string{"new"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.RowCount("app", "items") != 0 {
+		t.Fatal("incomplete transaction published a row")
+	}
+}

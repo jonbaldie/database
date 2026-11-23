@@ -1,0 +1,15 @@
+---
+title: "Accept command flags only with nonempty, distinct settings"
+---
+stateDiagram-v2
+  s0: Read first setting
+  s1: Invalid flags rejected
+  s2: Read next setting
+  s3: All settings read
+  s4: Command flags accepted
+  [*] --> s0
+  s0 --> s1: Reject empty value
+  s0 --> s2: Store setting value
+  s2 --> s1: Reject empty value or Reject repeated setting
+  s2 --> s3: Store setting value
+  s3 --> s4: Return parsed flags

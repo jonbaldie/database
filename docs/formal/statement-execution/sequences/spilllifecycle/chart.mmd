@@ -1,0 +1,14 @@
+---
+title: "SpillLifecycle"
+---
+stateDiagram-v2
+  s0: buffer rows
+  s1: runs on disk
+  s2: merge ready
+  s3: delivered
+  s4: Delivered rows and removed runs
+  [*] --> s0
+  s0 --> s1: Spill
+  s1 --> s2: Merge
+  s2 --> s3: Deliver
+  s3 --> s4: Close

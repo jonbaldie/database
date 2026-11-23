@@ -13,6 +13,17 @@ var walFileMagic = []byte("DBWAL001")
 
 const walHeaderSize = int64(16)
 
+type walOperation struct {
+	kind      byte
+	namespace string
+	table     string
+	row       []string
+}
+
+type pendingWALTransaction struct {
+	operations []walOperation
+}
+
 func (e *Engine) replayWAL() error {
 	if e.closed {
 		return errClosed
@@ -75,6 +86,7 @@ func (e *Engine) walReplayStart(generation uint64, headerSize int64) (int64, err
 }
 
 func (e *Engine) replayWALRecords(file *os.File) error {
+	var pending *pendingWALTransaction
 	for {
 		record, done, err := readWALRecord(file)
 		if done {
@@ -83,10 +95,46 @@ func (e *Engine) replayWALRecords(file *os.File) error {
 		if err != nil {
 			return err
 		}
-		if err := e.applyWALPayload(record); err != nil {
+		kind, namespace, name, row, err := decodePayload(record)
+		if err != nil {
+			return err
+		}
+		switch kind {
+		case walBegin:
+			pending = &pendingWALTransaction{}
+		case walCommit:
+			err = pending.commit(e)
+			pending = nil
+		case walInsert, walUpdate, walClear, walDelete:
+			operation := walOperation{kind: kind, namespace: namespace, table: name, row: row}
+			err = pending.replayOperation(e, operation)
+		default:
+			return fmt.Errorf("unknown WAL record kind %d", kind)
+		}
+		if err != nil {
 			return err
 		}
 	}
+}
+
+func (pending *pendingWALTransaction) commit(engine *Engine) error {
+	if pending == nil {
+		return fmt.Errorf("WAL commit has no pending transaction")
+	}
+	for _, operation := range pending.operations {
+		if err := engine.applyWALOperation(operation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (pending *pendingWALTransaction) replayOperation(engine *Engine, operation walOperation) error {
+	if pending == nil {
+		return engine.applyWALOperation(operation)
+	}
+	pending.operations = append(pending.operations, operation)
+	return nil
 }
 
 func inspectWALHeader(file *os.File) (uint64, int64, error) {
@@ -145,28 +193,24 @@ func readWALRecord(file *os.File) ([]byte, bool, error) {
 	return payload, false, nil
 }
 
-func (e *Engine) applyWALPayload(payload []byte) error {
-	kind, namespace, name, row, err := decodePayload(payload)
-	if err != nil {
-		return err
-	}
-	current, ok := e.tables[tableKey(namespace, name)]
+func (e *Engine) applyWALOperation(operation walOperation) error {
+	current, ok := e.tables[tableKey(operation.namespace, operation.table)]
 	if !ok {
 		return errMissingTable
 	}
-	switch kind {
+	switch operation.kind {
 	case walInsert:
-		return current.appendRow(row)
+		return current.appendRow(operation.row)
 	case walUpdate:
-		return applyWALUpdate(current, row)
+		return applyWALUpdate(current, operation.row)
 	case walClear:
 		clearTable(current)
 		return nil
 	case walDelete:
-		if len(row) == 0 {
+		if len(operation.row) == 0 {
 			return io.ErrUnexpectedEOF
 		}
-		return current.deletePrimary(row[0])
+		return current.deletePrimary(operation.row[0])
 	default:
 		return io.ErrUnexpectedEOF
 	}

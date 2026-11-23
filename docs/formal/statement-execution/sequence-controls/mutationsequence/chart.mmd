@@ -1,0 +1,31 @@
+---
+title: "MutationSequence"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks OrderedCandidates
+    lg1: Path to the OrderedCandidates bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: plan
+  s1: delete conflict
+  s2: insert candidate
+  s3: next
+  s4: validated
+  s5: Wrong replacement published
+  [*] --> s0
+  s0 --> s1: Plan
+  s1 --> s2: Delete conflicting row
+  s2 --> s3: Insert submitted row
+  s3 --> s1: Process next candidate
+  s3 --> s4: Validate
+  s4 --> s5: Publish
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 breaks
+  class s5 bugPath

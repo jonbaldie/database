@@ -1,0 +1,91 @@
+{
+  "AuthenticationHistory": [
+    [
+      "Password",
+      "password",
+      "AcceptedPasswordVerified"
+    ],
+    [
+      "Key",
+      "key",
+      "RSAKeyRequiresRequest"
+    ]
+  ],
+  "AdmissionDrain": [
+    [
+      "Early",
+      "early",
+      "DrainWaitsForStatement"
+    ]
+  ],
+  "CommandHistory": [
+    [
+      "Read",
+      "read",
+      "ReadAheadPreservesCommand"
+    ],
+    [
+      "Timeout",
+      "timeout",
+      "IdleExpiryRollsBack"
+    ],
+    [
+      "Revoke",
+      "revoke",
+      "RevocationStopsDispatch"
+    ]
+  ],
+  "PreparedHistory": [
+    [
+      "Types",
+      "types",
+      "CachedTypesAvailable"
+    ],
+    [
+      "Close",
+      "close",
+      "ConnectionResetReleasesPrepared"
+    ]
+  ],
+  "AccountHistory": [
+    [
+      "Auth",
+      "auth",
+      "DisabledAccountCannotAuthenticate"
+    ],
+    [
+      "Revoke",
+      "revoke",
+      "DisableRevokesSession"
+    ]
+  ],
+  "WarningHistory": [
+    [
+      "Show",
+      "show",
+      "ShowRetainsWarnings"
+    ],
+    [
+      "Clear",
+      "clear",
+      "OrdinaryClearsWarnings"
+    ],
+    [
+      "Reset",
+      "reset",
+      "ResetClearsWarnings"
+    ]
+  ],
+  "SetAssignmentHistory": [
+    [
+      "Continue",
+      "continue",
+      "OnlySuccessfulPrefixApplied"
+    ],
+    [
+      "Database",
+      "database",
+      "SelectedDatabasePersists"
+    ]
+  ]
+}

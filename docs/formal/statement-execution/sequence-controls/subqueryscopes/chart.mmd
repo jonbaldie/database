@@ -1,0 +1,34 @@
+---
+title: "Subquery scope and reuse"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ScopeControlsReuse
+    lg1: Path to the ScopeControlsReuse bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: compile, shared
+  s1: compile, dependent
+  s2: evaluate, shared
+  s3: evaluate, dependent
+  s4: next scope, shared
+  s5: next scope, dependent
+  s6: Completed query evaluations
+  s7: Dependent query reused wrong scope
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: Classify correlation and cache independent result
+  s1 --> s3: Classify correlation and cache independent result
+  s2 --> s4: Evaluate for outer row
+  s3 --> s5: Evaluate for outer row
+  s4 --> s2: Advance outer row
+  s5 --> s3: Advance outer row
+  s2 --> s6: Evaluate for outer row
+  s3 --> s7: Evaluate for outer row
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s1 bugPath
+  class s3 bugPath
+  class s5 bugPath
+  class s7 breaks
+  class s7 bugPath

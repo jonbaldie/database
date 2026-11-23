@@ -1,0 +1,2 @@
+{"name":"s1","sql":"SELECT id, code FROM p ORDER BY id","ok":true,"rows":[[1,99],[2,20]],"cols":["id","code"]}
+{"name":"s2","sql":"SELECT VERSION()","ok":true,"rows":[["8.4.11-database-0.2.0-dev"]],"cols":["VERSION()"]}

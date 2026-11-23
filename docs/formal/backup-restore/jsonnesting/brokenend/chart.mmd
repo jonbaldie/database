@@ -1,0 +1,33 @@
+---
+title: "Validate nested archive JSON"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks AcceptedComplete
+    lg1: Path to the AcceptedComplete bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Read value with 0 open containers
+  s1: Read value with 1 open containers
+  s2: value complete
+  s3: Read value with 2 open containers
+  s4: rejected
+  s5: accepted
+  s6: Incomplete value accepted
+  [*] --> s0
+  s0 --> s1: Enter nested container
+  s0 --> s2: Read scalar
+  s1 --> s3: Enter nested container
+  s1 --> s2: Consume matching container end
+  s1 --> s1: Read scalar
+  s2 --> s4: Reject trailing value
+  s2 --> s5: Finish complete input
+  s3 --> s4: Reject nesting above limit
+  s1 --> s6: Accept unfinished input
+  s3 --> s1: Consume matching container end
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s6 breaks
+  class s6 bugPath

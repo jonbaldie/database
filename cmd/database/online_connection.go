@@ -14,6 +14,7 @@ import (
 	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"github.com/jonbaldie/database/internal/instance"
+	"github.com/jonbaldie/database/internal/lifecycle"
 )
 
 const defaultOnlineAddress = "127.0.0.1:3306"
@@ -241,12 +242,7 @@ func onlineTLSServerName(request onlineConnectionRequest) (string, error) {
 }
 
 func onlineNonLoopbackWarning(address string) map[string]string {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip != nil && ip.IsLoopback() || host == "localhost" {
+	if lifecycle.IsLoopback(address) {
 		return nil
 	}
 	return map[string]string{"address": address, "tls": "disabled"}

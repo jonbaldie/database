@@ -1,0 +1,26 @@
+---
+title: "No active explanation"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks CleanupOwnsEntry
+    lg1: Path to the CleanupOwnsEntry bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: No active explanation
+  s1: First statement registered
+  s2: Next statement registered
+  s3: Old cleanup removed the next statement
+  s4: Next statement cleanup completes
+  [*] --> s0
+  s0 --> s1: Start the first statement
+  s1 --> s2: Start the next statement
+  s2 --> s3: Finish cleanup for the first statement
+  s3 --> s4: Finish the next statement
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 breaks
+  class s3 bugPath

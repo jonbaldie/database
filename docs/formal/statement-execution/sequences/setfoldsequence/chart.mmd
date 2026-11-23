@@ -1,0 +1,10 @@
+---
+title: "SetFoldSequence"
+---
+stateDiagram-v2
+  s0: terms evaluated
+  s1: fold union
+  s2: Expected values published
+  [*] --> s0
+  s0 --> s1: Intersect
+  s1 --> s2: Union

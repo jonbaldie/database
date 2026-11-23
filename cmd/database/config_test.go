@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -267,6 +268,38 @@ func TestResolveConfigurationRejectsEquivalentIPv6Listeners(t *testing.T) {
 		"--diagnostics-listen-address=[::1]:3306",
 	}, nil); err == nil {
 		t.Fatal("expected equivalent listener addresses to be rejected")
+	}
+}
+
+func TestResolveConfigurationAcceptsKernelChosenPortsForBothListeners(t *testing.T) {
+	config, err := resolveConfiguration([]string{
+		"--data-directory=/tmp/database-instance",
+		"--mysql-listen-address=127.0.0.1:0",
+		"--diagnostics-listen-address=127.0.0.1:0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.options.MySQLAddress != "127.0.0.1:0" || config.options.DiagnosticsAddress != "127.0.0.1:0" {
+		t.Fatalf("addresses = %q and %q", config.options.MySQLAddress, config.options.DiagnosticsAddress)
+	}
+}
+
+func TestResolveConfigurationAcceptsTheHighestTCPPort(t *testing.T) {
+	config, err := resolveConfiguration([]string{"--data-directory=/tmp/database-instance", "--mysql-listen-address=127.0.0.1:65535"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.options.MySQLAddress != "127.0.0.1:65535" {
+		t.Fatalf("MySQL address = %q", config.options.MySQLAddress)
+	}
+}
+
+func TestResolveConfigurationRejectsListenerPortsOutsideTheTCPRange(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:-1", "127.0.0.1:65536", "127.0.0.1:mysql"} {
+		if _, err := resolveConfiguration([]string{"--data-directory=/tmp/database-instance", "--mysql-listen-address=" + address}, nil); err == nil || !strings.Contains(err.Error(), "between 0 and 65535") {
+			t.Fatalf("address %q: error = %v, want the port range", address, err)
+		}
 	}
 }
 

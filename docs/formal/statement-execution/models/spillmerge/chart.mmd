@@ -1,0 +1,12 @@
+---
+title: "Merge sorted spill runs"
+---
+stateDiagram-v2
+  s0: Rows merged 0
+  s1: Rows merged 1
+  s2: Rows merged 2
+  s3: Sorted rows ready
+  [*] --> s0
+  s0 --> s1: Return next row from first run
+  s1 --> s2: Return next row from second run
+  s2 --> s3: Return next row from first run

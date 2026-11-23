@@ -1,0 +1,23 @@
+File: database-range-before.test
+Type: cpu
+Time: 2026-10-12 14:14:19 BST
+Duration: 5.11s, Total samples = 5.49s (107.48%)
+Showing nodes accounting for 5.32s, 96.90% of 5.49s total
+Dropped 83 nodes (cum <= 0.03s)
+Showing top 15 nodes out of 94
+      flat  flat%   sum%        cum   cum%
+     4.43s 80.69% 80.69%      4.43s 80.69%  syscall.rawsyscalln
+     0.71s 12.93% 93.62%      0.71s 12.93%  runtime.kevent
+     0.13s  2.37% 95.99%      0.13s  2.37%  github.com/jonbaldie/database/internal/mysql.sourceRowBytes
+     0.05s  0.91% 96.90%      0.05s  0.91%  runtime.pthread_cond_wait
+         0     0% 96.90%      0.08s  1.46%  database/sql.(*DB).retry
+         0     0% 96.90%      0.53s  9.65%  database/sql.(*Rows).Next
+         0     0% 96.90%      0.53s  9.65%  database/sql.(*Rows).Next.func1
+         0     0% 96.90%      0.53s  9.65%  database/sql.(*Rows).nextLocked
+         0     0% 96.90%      0.08s  1.46%  database/sql.(*Stmt).QueryContext
+         0     0% 96.90%      0.08s  1.46%  database/sql.(*Stmt).QueryContext.func1
+         0     0% 96.90%      0.07s  1.28%  database/sql.ctxDriverStmtQuery
+         0     0% 96.90%      0.07s  1.28%  database/sql.rowsiFromStatement
+         0     0% 96.90%      0.53s  9.65%  database/sql.withLock
+         0     0% 96.90%      0.53s  9.65%  github.com/go-sql-driver/mysql.(*binaryRows).Next
+         0     0% 96.90%      0.53s  9.65%  github.com/go-sql-driver/mysql.(*binaryRows).readRow

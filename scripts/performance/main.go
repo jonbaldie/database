@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,10 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/jonbaldie/database/test/blackbox"
 )
 
 const (
@@ -30,6 +30,8 @@ const (
 	insertBase      = int64(1 << 61)
 	warmupBase      = int64(1 << 60)
 	maxPayloadBytes = 16384
+	// readyTimeout allows a restart with the full corpus to recover.
+	readyTimeout = 30 * time.Second
 )
 
 type config struct {
@@ -172,10 +174,8 @@ type evidence struct {
 }
 
 type runningServer struct {
-	command  *exec.Cmd
+	instance *blackbox.Instance
 	address  string
-	stderr   strings.Builder
-	readDone sync.WaitGroup
 }
 
 type workerSession struct {
@@ -595,43 +595,21 @@ func versionInfo(executable string) string {
 }
 
 func initialize(executable, directory string) error {
-	command := exec.Command(executable, "init", directory, "--password-stdin", "--format=json")
-	command.Stdin = strings.NewReader(password + "\n")
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("initialize instance: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
+	return blackbox.Initialize(context.Background(), blackbox.Runner{Executable: executable}, directory, password)
 }
 
+// startServer waits for the server's ready event and then pings it once
+// through an authenticated driver session. The MySQL address comes from the
+// ready event, because serve binds port 0. The duration runs from the command
+// invocation to that ping, as the clean-start gate defines it.
 func startServer(executable, directory string) (*runningServer, *sql.DB, time.Duration, error) {
-	address, err := freeAddress()
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	command := exec.Command(executable, "serve", "--data-directory", directory, "--mysql-listen-address", address, "--format=json")
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	stderr, err := command.StderrPipe()
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	if err := command.Start(); err != nil {
-		return nil, nil, 0, fmt.Errorf("start server: %w", err)
-	}
 	started := time.Now()
-	server := &runningServer{command: command, address: address}
-	server.readDone.Add(2)
-	go func() {
-		defer server.readDone.Done()
-		_, _ = ioCopyDiscard(stdout)
-	}()
-	go func() {
-		defer server.readDone.Done()
-		_, _ = ioCopyBuilder(&server.stderr, stderr)
-	}()
+	instance, err := blackbox.StartInstance(context.Background(), blackbox.Runner{Executable: executable}, blackbox.InstanceOptions{DataDirectory: directory, ReadyTimeout: readyTimeout})
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	address := instance.MySQLAddress
+	server := &runningServer{instance: instance, address: address}
 	db, err := openRootDB(address)
 	if err != nil {
 		_ = server.stop()
@@ -639,77 +617,21 @@ func startServer(executable, directory string) (*runningServer, *sql.DB, time.Du
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for {
-		if err := db.PingContext(ctx); err == nil {
-			return server, db, time.Since(started), nil
-		}
-		if ctx.Err() != nil {
-			_ = db.Close()
-			serverErr := server.stop()
-			return nil, nil, 0, fmt.Errorf("server did not become ready: %w (server stop: %v)", ctx.Err(), serverErr)
-		}
-		time.Sleep(25 * time.Millisecond)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, nil, 0, fmt.Errorf("ping ready server: %w (server stop: %v)", err, server.stop())
 	}
+	return server, db, time.Since(started), nil
 }
 
 func (server *runningServer) stop() error {
-	if server == nil || server.command == nil || server.command.Process == nil {
+	if server == nil || server.instance == nil {
 		return nil
 	}
-	if err := server.command.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("stop server: %w", err)
-	}
-	err := server.command.Wait()
-	server.readDone.Wait()
-	if err != nil {
-		return fmt.Errorf("wait for server: %w; stderr=%s", err, strings.TrimSpace(server.stderr.String()))
+	if result := server.instance.Stop(); result.ExitCode != 0 {
+		return fmt.Errorf("wait for server: exit %d: %v; stderr=%s", result.ExitCode, result.Err, strings.TrimSpace(result.Stderr))
 	}
 	return nil
-}
-
-func ioCopyDiscard(reader interface{ Read([]byte) (int, error) }) (int64, error) {
-	buffer := make([]byte, 4096)
-	var total int64
-	for {
-		count, err := reader.Read(buffer)
-		total += int64(count)
-		if err != nil {
-			if errors.Is(err, os.ErrClosed) {
-				return total, nil
-			}
-			return total, err
-		}
-	}
-}
-
-func ioCopyBuilder(builder *strings.Builder, reader interface{ Read([]byte) (int, error) }) (int64, error) {
-	buffer := make([]byte, 4096)
-	var total int64
-	for {
-		count, err := reader.Read(buffer)
-		if count > 0 {
-			builder.Write(buffer[:count])
-			total += int64(count)
-		}
-		if err != nil {
-			if errors.Is(err, os.ErrClosed) {
-				return total, nil
-			}
-			return total, err
-		}
-	}
-}
-
-func freeAddress() (string, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return "", fmt.Errorf("allocate listener: %w", err)
-	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		return "", err
-	}
-	return address, nil
 }
 
 func dsn(address, database string) string {

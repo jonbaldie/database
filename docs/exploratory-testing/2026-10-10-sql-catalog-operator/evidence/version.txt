@@ -1,0 +1,7 @@
+database 0.2.18
+build: local
+platform: darwin/arm64
+go: go1.26.9
+data compatibility: 0.1.x
+backup compatibility: 0.1.x
+MySQL profile: 0.1

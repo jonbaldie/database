@@ -8,15 +8,7 @@ import (
 
 func TestIssue250NegativeIntegerLiteralsAreConstantExpressions(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	if err := store.CreateTableWithTypes("app", "issue250", []string{"id", "a", "b"}, []string{"INT", "INT", "INT"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range [][]string{{"1", "10", "3"}, {"2", "20", "1"}, {"3", "10", "3"}} {
-		if err := store.Insert("app", "issue250", row); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedSQL(t, executor, "CREATE TABLE issue250 (id INT, a INT, b INT)", "INSERT INTO issue250 VALUES (1, 10, 3), (2, 20, 1), (3, 10, 3)")
 
 	result, err := executeStatement(executor, "SELECT id FROM issue250 ORDER BY -1")
 	if err != nil {
@@ -37,13 +29,7 @@ func TestIssue250NegativeIntegerLiteralsAreConstantExpressions(t *testing.T) {
 
 func TestIssue250InvalidOrdinalsStillRejected(t *testing.T) {
 	executor := relationalSelectExecutor(t)
-	store := executor.server.config.Catalog
-	if err := store.CreateTableWithTypes("app", "issue250_ordinal", []string{"id", "a"}, []string{"INT", "INT"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Insert("app", "issue250_ordinal", []string{"1", "10"}); err != nil {
-		t.Fatal(err)
-	}
+	seedSQL(t, executor, "CREATE TABLE issue250_ordinal (id INT, a INT)", "INSERT INTO issue250_ordinal VALUES (1, 10)")
 
 	_, err := executeStatement(executor, "SELECT id, a FROM issue250_ordinal ORDER BY 3")
 	if err == nil || !strings.Contains(err.Error(), "Unknown column '3' in 'order clause'") {

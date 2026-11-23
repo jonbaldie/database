@@ -1,0 +1,3 @@
+export const title = "Reject excessive expression recursion and restore caller depth";
+export const state = v => ({call:"Enter expression parser",check:v.depth > 2 ? "Recursion limit exceeded" : "Within recursion limit",callback:"Evaluate nested expression",rejected:"Reject nested expression",returned:"Caller depth restored"})[v.phase];
+export const step = (action, from, to) => action === "Enter" ? (to.depth > 2 ? "Increase depth beyond limit" : "Increase depth within limit") : ({Callback:"Evaluate while within limit",Reject:"Return depth error",Return:"Restore caller depth",Done:"Complete"})[action];

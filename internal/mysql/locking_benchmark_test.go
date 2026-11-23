@@ -11,10 +11,11 @@ import (
 func BenchmarkLockManagerUncontendedRows(b *testing.B) {
 	for _, rows := range []int{100, 400, 800} {
 		b.Run("rows="+strconv.Itoa(rows), func(b *testing.B) {
+			owner := newTestSession(newTestServer(b, Config{}), testSessionOptions{})
 			b.ReportAllocs()
+			b.ResetTimer()
 			for range b.N {
 				manager := newLockManager(time.Second)
-				owner := &session{}
 				table := catalog.NewTableRef("app", "items")
 				for row := range rows {
 					resource := rowLockResource{table: table, key: strconv.Itoa(row)}

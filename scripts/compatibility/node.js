@@ -13,7 +13,7 @@ async function main() {
   });
   try {
     const [version] = await connection.query('SELECT VERSION()');
-    if (version[0]['VERSION()'] !== '8.4.11-database-0.2.0-dev') {
+    if (version[0]['VERSION()'] !== process.env.DATABASE_COMPAT_VERSION) {
       throw new Error(`unexpected version ${version[0]['VERSION()']}`);
     }
     await connection.query('CREATE DATABASE IF NOT EXISTS compatibility');

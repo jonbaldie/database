@@ -1,0 +1,17 @@
+---
+title: "Begin, change rows, and finish a transaction"
+---
+stateDiagram-v2
+  s0: Ready to begin
+  s1: Transaction active
+  s2: Transaction with savepoint
+  s3: Transaction committed
+  s4: Transaction rolled back
+  [*] --> s0
+  s0 --> s1: You begin a transaction
+  s1 --> s2: You set a savepoint
+  s1 --> s3: You commit
+  s1 --> s4: You roll back
+  s2 --> s1: You release the savepoint
+  s2 --> s3: You commit
+  s2 --> s4: You roll back

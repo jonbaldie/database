@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Run the bounded model and source overlay; retain current failures."""
+import hashlib, json, os, pathlib, subprocess, tempfile
+skill = pathlib.Path(__file__).resolve().parent
+repo = skill.parents[2]
+jar = pathlib.Path(os.environ.get('TLA2TOOLS', pathlib.Path.home()/'.cache/database-formal/tla2tools-1.7.4.jar'))
+expected = '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88'
+if not jar.is_file() or hashlib.sha256(jar.read_bytes()).hexdigest() != expected:
+ raise SystemExit('Install TLC 1.7.4 with the verify-wal-atomicity skill, or set TLA2TOOLS to its checksum-pinned jar.')
+env = dict(os.environ,GOMAXPROCS='2',GOFLAGS='-p=2')
+subprocess.run([str(skill/'run-stream')],cwd=repo,env=env,check=True)
+with tempfile.TemporaryDirectory(prefix='database-packet-formal-') as scratch:
+ root=pathlib.Path(scratch)
+ outcomes={}
+ for config in ('PacketProtocol','Repaired'):
+  result=subprocess.run(['java','-XX:ActiveProcessorCount=2','-cp',str(jar),'tlc2.TLC','-workers','1','-metadir',str(root/config),'-config',str(skill/(config+'.cfg')),str(skill/'PacketProtocol.tla')],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(result.stdout)
+  outcomes[config]=result.returncode
+  if config=='PacketProtocol' and (result.returncode!=12 or 'Invariant ValidMessageAccepted is violated' not in result.stdout):
+   raise SystemExit('Expected packet acceptance finding changed; inspect the current model.')
+ source=repo/'internal/mysql/stream_writer.go'
+ original=source.read_text()
+ needle='sequence, expected = header[3], header[3]+1'
+ if original.count(needle)!=1:
+  raise SystemExit('Source changed: inspect and update the model and repair overlay.')
+ for variant in ('current','repaired','broken'):
+  overlay={'Replace':{str(repo/'internal/mysql/zz_formal_packet_test.go'):str(skill/'packet_test.go.txt')}}
+  if variant!='current':
+   text=original.replace(needle,'sequence, expected = header[3], header[3]')
+   if variant=='broken': text=text.replace('sequence, expected = header[3], header[3]',needle)
+   patched=root/(variant+'.go'); patched.write_text(text)
+   overlay['Replace'][str(source)]=str(patched)
+  config=root/(variant+'.json'); config.write_text(json.dumps(overlay))
+  result=subprocess.run(['go','test','-overlay',str(config),'./internal/mysql','-run','^TestFormalPacketContinuation$','-count=1'],cwd=repo,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+  print(variant+':\n'+result.stdout)
+  outcomes[variant]=result.returncode
+  if variant in ('current','broken') and (result.returncode==0 or 'packet continuation sequence mismatch' not in result.stdout):
+   raise SystemExit('Packet acceptance finding was not reproduced at the expected assertion.')
+ print(json.dumps(outcomes,sort_keys=True))
+ if outcomes['Repaired'] or outcomes['repaired'] or not outcomes['broken']:
+  raise SystemExit('Verification self-check failed; inspect output.')
+ raise SystemExit(1 if outcomes['PacketProtocol'] or outcomes['current'] else 0)

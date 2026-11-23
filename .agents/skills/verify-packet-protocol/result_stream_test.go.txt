@@ -1,0 +1,59 @@
+package mysql
+
+import (
+	"bytes"
+	"errors"
+	"testing"
+)
+
+func formalResultPackets(t *testing.T, buffer *bytes.Buffer) [][]byte {
+	t.Helper()
+	var packets [][]byte
+	for buffer.Len() > 0 {
+		_, payload, err := readPacket(buffer, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		packets = append(packets, payload)
+	}
+	return packets
+}
+func TestFormalResultStream(t *testing.T) {
+	for _, mode := range []ResultMode{ResultModeText, ResultModeBinary} {
+		buffer := &bytes.Buffer{}
+		result := &queryResult{columns: []string{"value"}, metadata: []columnMetadata{{catalog: "def", name: "value", typ: mysqlTypeVarString}}, stream: func(yield func([]string, []bool) error) error {
+			if err := yield([]string{"one"}, nil); err != nil {
+				return err
+			}
+			return sqlFailure{code: 1105, state: "HY000", message: "formal row stream failure"}
+		}}
+		if err := NewStreamWriter(buffer, 1, 0).WriteResultSet(result, mode); err != nil {
+			t.Fatal(err)
+		}
+		packets := formalResultPackets(t, buffer)
+		if len(packets) != 5 || packets[len(packets)-1][0] != 0xff {
+			t.Fatal("failed stream ended with a success terminator", len(packets))
+		}
+	}
+}
+func TestFormalResultPreflight(t *testing.T) {
+	buffer := &bytes.Buffer{}
+	result := &queryResult{columns: []string{"value"}, metadata: []columnMetadata{{catalog: "def", name: "value", typ: mysqlTypeBit, length: 1}}, rows: [][]string{{"not a bit"}}}
+	if err := writeResult(buffer, 1, result, 0); err != nil {
+		t.Fatal(err)
+	}
+	packets := formalResultPackets(t, buffer)
+	if len(packets) != 1 || packets[0][0] != 0xff {
+		t.Fatal("invalid stored result emitted partial metadata", len(packets))
+	}
+	stop := errors.New("formal transport stop")
+	buffer.Reset()
+	stream := &queryResult{columns: []string{"value"}, stream: func(func([]string, []bool) error) error { return stop }}
+	if err := NewStreamWriter(buffer, 1, 0).WriteResultSet(stream, ResultModeText); !errors.Is(err, stop) {
+		t.Fatal("non-SQL stream error did not abort response", err)
+	}
+	packets = formalResultPackets(t, buffer)
+	if len(packets) != 3 || packets[2][0] != 0xfe {
+		t.Fatal("non-SQL stream error wrote an extra terminal packet", len(packets))
+	}
+}

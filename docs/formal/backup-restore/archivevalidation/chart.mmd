@@ -1,0 +1,13 @@
+---
+title: "Read a backup archive"
+---
+stateDiagram-v2
+  s0: Reading files before manifest
+  s1: rejected
+  s2: Reading files after manifest
+  s3: entries read
+  [*] --> s0
+  s0 --> s1: Manifest is missing at end of archive or Reject unsafe path or Duplicate file is rejected
+  s0 --> s2: Read manifest
+  s2 --> s3: Reach end of archive with manifest
+  s2 --> s1: Duplicate manifest is rejected or Reject unsafe path or Duplicate file is rejected

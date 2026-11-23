@@ -1,0 +1,287 @@
+package storage
+
+import (
+	"encoding/binary"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+type walRecoveryFixture struct {
+	metadata []byte
+	wal      []byte
+	start    int
+	ends     []int
+}
+
+func makeWALRecoveryFixture(t *testing.T) walRecoveryFixture {
+	t.Helper()
+	dir := t.TempDir()
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	for _, table := range []string{"audit", "items"} {
+		if err := engine.EnsureTable("app", table, []string{"id"}, []string{"id"}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initial, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"audit", "items"} {
+		for _, id := range []string{"a", "b"} {
+			if err := initial.Insert("app", table, []string{id}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := initial.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(rowsWalPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"audit", "items"} {
+		if err := replacement.Clear("app", table); err != nil {
+			t.Fatal(err)
+		}
+		if err := replacement.Insert("app", table, []string{"b"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := replacement.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := os.ReadFile(rowsMetaPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wal, err := os.ReadFile(rowsWalPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := walRecoveryFixture{metadata: metadata, wal: wal, start: int(before.Size())}
+	f.ends = []int{f.start}
+	for start := f.start; start < len(wal); {
+		if len(wal)-start < 8 {
+			t.Fatal("writer left an incomplete frame header")
+		}
+		start += 8 + int(binary.LittleEndian.Uint32(wal[start:start+4]))
+		if start > len(wal) {
+			t.Fatal("writer left an incomplete frame payload")
+		}
+		f.ends = append(f.ends, start)
+	}
+	if len(f.ends) != 7 {
+		t.Fatalf("replacement has %d records; want begin, four operations, commit", len(f.ends)-1)
+	}
+	return f
+}
+
+func (f walRecoveryFixture) write(t *testing.T, dir string, end int) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "rows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rowsMetaPath(dir), f.metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rowsWalPath(dir), f.wal[:end], 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func formalWALRows(engine *Engine) string {
+	var rows string
+	for _, table := range []string{"audit", "items"} {
+		_, hasA := engine.LookupPrimary("app", table, "a")
+		_, hasB := engine.LookupPrimary("app", table, "b")
+		_, hasC := engine.LookupPrimary("app", table, "c")
+		rows += fmt.Sprintf("%s a=%t b=%t c=%t count=%d;", table, hasA, hasB, hasC, engine.RowCount("app", table))
+	}
+	return rows
+}
+
+func formalExpectedRows(a, c bool) string {
+	count := 1
+	if a {
+		count++
+	}
+	if c {
+		count++
+	}
+	return fmt.Sprintf("audit a=%t b=true c=%t count=%d;items a=%t b=true c=%t count=%d;", a, c, count, a, c, count)
+}
+
+func requireFormalWALRows(t *testing.T, engine *Engine, a, c bool) {
+	t.Helper()
+	if rows, want := formalWALRows(engine), formalExpectedRows(a, c); rows != want {
+		t.Fatalf("recovered %s; want %s", rows, want)
+	}
+}
+
+func TestFormalWALRecoveryCompletedCommit(t *testing.T) {
+	f := makeWALRecoveryFixture(t)
+	dir := t.TempDir()
+	f.write(t, dir, len(f.wal))
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after Commit returned success: %v", err)
+	}
+	defer engine.Close()
+	requireFormalWALRows(t, engine, false, false)
+}
+
+func TestFormalWALRecoveryAllLogPrefixes(t *testing.T) {
+	f := makeWALRecoveryFixture(t)
+	dir := t.TempDir()
+	boundaries := map[int]bool{}
+	for _, end := range f.ends {
+		boundaries[end] = true
+	}
+	opened, rejected := 0, 0
+	for end := f.start; end <= len(f.wal); end++ {
+		f.write(t, dir, end)
+		engine, err := Open(dir)
+		if err != nil {
+			if boundaries[end] {
+				t.Fatalf("reopen at complete-record boundary %d: %v", end-f.start, err)
+			}
+			rejected++
+			continue
+		}
+		opened++
+		rows := formalWALRows(engine)
+		if err := engine.Close(); err != nil {
+			t.Fatal(err)
+		}
+		want := formalExpectedRows(end < len(f.wal), false)
+		if rows != want {
+			t.Errorf("WAL prefix %d/%d bytes: recovered %s; want %s", end-f.start, len(f.wal)-f.start, rows, want)
+		}
+	}
+	t.Logf("checked %d prefixes across two tables: %d opened, %d refused torn records", len(f.wal)-f.start+1, opened, rejected)
+}
+
+func TestFormalWALRecoveryAppendAfterAbandonedTail(t *testing.T) {
+	f := makeWALRecoveryFixture(t)
+	for _, end := range f.ends[1 : len(f.ends)-1] {
+		t.Run(fmt.Sprintf("prefix-%d", end-f.start), func(t *testing.T) {
+			dir := t.TempDir()
+			f.write(t, dir, end)
+			engine, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireFormalWALRows(t, engine, true, false)
+			appendFormalWALRows(t, engine)
+			if err := engine.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			requireFormalWALRows(t, reopened, true, true)
+		})
+	}
+}
+
+func appendFormalWALRows(t *testing.T, engine *Engine) {
+	t.Helper()
+	txn, err := engine.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"audit", "items"} {
+		if err := txn.Insert("app", table, []string{"c"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := txn.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFormalWALRecoveryCheckpointAfterAbandonedTail(t *testing.T) {
+	f := makeWALRecoveryFixture(t)
+	for _, phase := range []checkpointPhase{"", checkpointPublished, checkpointWALRotated} {
+		t.Run(string(phase), func(t *testing.T) {
+			dir := t.TempDir()
+			f.write(t, dir, f.ends[2])
+			engine, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stopped := false
+			engine.checkpointHook = func(current checkpointPhase) error {
+				if phase != "" && current == phase {
+					stopped = true
+					return errString("simulated process stop")
+				}
+				return nil
+			}
+			err = engine.Checkpoint()
+			if phase == "" && err != nil || phase != "" && !stopped {
+				t.Fatalf("checkpoint phase %q: stopped=%t error=%v", phase, stopped, err)
+			}
+			if err := engine.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireFormalWALRows(t, reopened, true, false)
+			appendFormalWALRows(t, reopened)
+			if err := reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			final, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer final.Close()
+			requireFormalWALRows(t, final, true, true)
+		})
+	}
+}
+
+func TestFormalWALRecoveryLegacyThenMarkedTransaction(t *testing.T) {
+	f := makeWALRecoveryFixture(t)
+	dir := t.TempDir()
+	f.write(t, dir, 0)
+	for _, table := range []string{"audit", "items"} {
+		legacy := append([]byte{walInsert}, []byte("app\x00"+table+"\x00a")...)
+		appendWALTestPayload(t, dir, legacy)
+		appendWALTestPayload(t, dir, encodePayload(walInsert, "app", table, []string{"b"}))
+	}
+	engine, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireFormalWALRows(t, engine, true, false)
+	appendFormalWALRows(t, engine)
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	requireFormalWALRows(t, reopened, true, true)
+}

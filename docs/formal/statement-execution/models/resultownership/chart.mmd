@@ -1,0 +1,14 @@
+---
+title: "Close a result on success or failure"
+---
+stateDiagram-v2
+  s0: result allocated
+  s1: result closed
+  s2: delivery failed
+  s3: rows delivered
+  [*] --> s0
+  s0 --> s1: Release owned resources
+  s0 --> s2: Row delivery fails
+  s0 --> s3: Finish row delivery
+  s2 --> s1: Release owned resources
+  s3 --> s1: Release owned resources

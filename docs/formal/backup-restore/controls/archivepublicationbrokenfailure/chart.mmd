@@ -1,0 +1,29 @@
+---
+title: "Write and publish a backup archive"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks FailurePreservesOldOutput
+    lg1: Path to the FailurePreservesOldOutput bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: temporary open
+  s1: failed
+  s2: written
+  s3: sync returned
+  s4: closed
+  s5: published
+  [*] --> s0
+  s0 --> s1: Operation fails
+  s0 --> s2: Write archive contents
+  s2 --> s1: Operation fails
+  s2 --> s3: Sync archive file
+  s3 --> s1: Operation fails
+  s3 --> s4: Close archive file
+  s4 --> s1: Operation fails
+  s4 --> s5: Install archive at output path
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 breaks
+  class s1 bugPath

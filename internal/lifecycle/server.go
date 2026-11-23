@@ -82,7 +82,10 @@ type Event struct {
 	Severity           string    `json:"severity,omitempty"`
 	Message            string    `json:"message,omitempty"`
 	OperationID        string    `json:"operation_id,omitempty"`
+	MySQLAddress       string    `json:"mysql_address,omitempty"`
 	DiagnosticsAddress string    `json:"diagnostics_address,omitempty"`
+	InstanceID         string    `json:"instance_id,omitempty"`
+	ShutdownReason     string    `json:"shutdown_reason,omitempty"`
 	Recovered          bool      `json:"recovered,omitempty"`
 	Warnings           []Warning `json:"warnings,omitempty"`
 }
@@ -132,7 +135,7 @@ func validateOptions(opts *Options) error {
 	if (opts.TLSCertFile == "") != (opts.TLSKeyFile == "") {
 		return errors.New("TLS certificate and private key must be provided together")
 	}
-	if opts.DiagnosticsAddress != "" && opts.DiagnosticsAddress == opts.MySQLAddress {
+	if ListenersConflict(opts.MySQLAddress, opts.DiagnosticsAddress) {
 		return errors.New("MySQL and diagnostics listeners must use different addresses")
 	}
 	if opts.DataDirectory != "" {
@@ -141,6 +144,17 @@ func validateOptions(opts *Options) error {
 		}
 	}
 	return nil
+}
+
+// ListenersConflict reports whether the MySQL and diagnostics listeners would
+// select the same address. Port 0 asks the kernel for a free port for each
+// listener, so two port-0 addresses on one host do not conflict.
+func ListenersConflict(mysqlAddress, diagnosticsAddress string) bool {
+	if diagnosticsAddress == "" || diagnosticsAddress != mysqlAddress {
+		return false
+	}
+	_, port, err := net.SplitHostPort(diagnosticsAddress)
+	return err != nil || port != "0"
 }
 
 func (s *server) serve(ctx context.Context) error {
@@ -167,7 +181,7 @@ func (s *server) serve(ctx context.Context) error {
 	stopSignals := make(chan os.Signal, 1)
 	signal.Notify(stopSignals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(stopSignals)
-	s.reportReady(state.recovered, runtime.diagnosticsAddress)
+	s.reportReady(state.recovered, runtime)
 	s.awaitStop(ctx, runtime.mysql, stopSignals)
 	if err := runtime.closeGracefully(); err != nil {
 		s.emit(s.lifecycleEvent("failed", "server.stop_failed", "error", "database shutdown failed"))
@@ -178,10 +192,12 @@ func (s *server) serve(ctx context.Context) error {
 	return nil
 }
 
-func (s *server) reportReady(recovered bool, diagnosticsAddress string) {
+func (s *server) reportReady(recovered bool, runtime runtime) {
 	s.health.set("ready")
 	event := s.lifecycleEvent("ready", "server.ready", "info", "database ready")
-	event.DiagnosticsAddress = diagnosticsAddress
+	event.MySQLAddress = runtime.mysqlAddress()
+	event.DiagnosticsAddress = runtime.diagnosticsAddress
+	event.InstanceID = runtime.instanceID
 	event.Recovered = recovered
 	if warning, found := unsafeListenerWarning(s.options); found {
 		event.Warnings = []Warning{warning}
@@ -194,14 +210,14 @@ func (s *server) lifecycleEvent(state, code, severity, message string) Event {
 }
 
 func startFailureReason(err error) string {
-	if strings.Contains(err.Error(), "recover catalog") || strings.Contains(err.Error(), "damaged") || strings.Contains(err.Error(), "corruption") {
+	if errors.Is(err, catalog.ErrCorrupt) {
 		return "corruption"
 	}
 	return "starting"
 }
 
 func startFailureCode(err error) string {
-	if startFailureReason(err) == "corruption" {
+	if errors.Is(err, catalog.ErrCorrupt) {
 		return "corruption.detected"
 	}
 	return "server.start_failed"
@@ -211,7 +227,7 @@ func unsafeListenerWarning(opts Options) (Warning, bool) {
 	if !opts.MySQLEnabled || opts.MySQLAddress == "" || opts.TLSCertFile != "" || opts.TLSKeyFile != "" {
 		return Warning{}, false
 	}
-	if listenerIsLoopback(opts.MySQLAddress) {
+	if IsLoopback(opts.MySQLAddress) {
 		return Warning{}, false
 	}
 	return Warning{
@@ -222,13 +238,17 @@ func unsafeListenerWarning(opts Options) (Warning, bool) {
 	}, true
 }
 
-func listenerIsLoopback(address string) bool {
+// IsLoopback reports whether the host portion of address is a loopback address.
+// It treats "localhost" and IPv4 and IPv6 loopback literals as loopback.
+func IsLoopback(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return false
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsLoopback() || ip.To4() != nil && ip.To4().IsLoopback())
+	if host == "localhost" {
+		return true
+	}
+	return net.ParseIP(host).IsLoopback()
 }
 
 func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server, signals <-chan os.Signal) {
@@ -236,10 +256,12 @@ func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server, signa
 	if mysqlServer != nil {
 		requested = mysqlServer.ShutdownRequested()
 	}
+	reason := "signal"
 	select {
 	case <-ctx.Done():
 	case <-signals:
 	case <-requested:
+		reason = "shutdown_request"
 		if mysqlServer != nil {
 			if operationID := mysqlServer.ShutdownOperationID(); operationID != "" {
 				s.options.OperationID = operationID
@@ -247,13 +269,25 @@ func (s *server) awaitStop(ctx context.Context, mysqlServer *mysql.Server, signa
 		}
 	}
 	s.health.set("shutting_down")
-	s.emit(s.lifecycleEvent("stopping", "server.stopping", "info", "database shutdown started"))
+	event := s.lifecycleEvent("stopping", "server.stopping", "info", "database shutdown started")
+	event.ShutdownReason = reason
+	s.emit(event)
 }
 
 type runtime struct {
 	diagnostics        diagnosticsServer
 	diagnosticsAddress string
+	instanceID         string
 	mysql              *mysql.Server
+}
+
+// mysqlAddress is the bound MySQL listener address, which differs from the
+// configured address when the configured port is 0.
+func (r runtime) mysqlAddress() string {
+	if r.mysql == nil {
+		return ""
+	}
+	return r.mysql.Listener.Addr().String()
 }
 
 func startRuntime(opts Options, health *health) (runtime, error) {
@@ -270,7 +304,7 @@ func startRuntime(opts Options, health *health) (runtime, error) {
 		_ = closeMySQL(mysqlServer)
 		return runtime{}, err
 	}
-	return runtime{diagnostics: diagnostics, diagnosticsAddress: diagnosticsAddress, mysql: mysqlServer}, nil
+	return runtime{diagnostics: diagnostics, diagnosticsAddress: diagnosticsAddress, instanceID: metadata.InstanceID, mysql: mysqlServer}, nil
 }
 
 func openServerData(directory string) (instance.Metadata, *catalog.Store, error) {
@@ -499,7 +533,7 @@ func validateInstanceCatalog(directory string) error {
 		return errors.New("data directory has missing or invalid catalog")
 	}
 	if _, err := catalog.Open(directory); err != nil {
-		return errors.New("data directory has damaged catalog")
+		return fmt.Errorf("data directory has damaged catalog: %w", err)
 	}
 	return nil
 }

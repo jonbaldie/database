@@ -1,0 +1,21 @@
+---
+title: "Move a one-row window forward"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks FrameCount in some cases
+    lg1: Path to the FrameCount bug
+  }
+  class lg0 mayBreak
+  class lg1 bugPath
+  s0: Window ready at row 1
+  s1: Old row removed
+  s2: Window contains an old row
+  [*] --> s0
+  s0 --> s1: Remove prior frame row
+  s1 --> s2: Add next frame row
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 bugPath
+  class s1 bugPath
+  class s2 mayBreak
+  class s2 bugPath

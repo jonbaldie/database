@@ -115,10 +115,14 @@ func isImmediateStatement(lower string) bool {
 
 func (s *textStatementExecutor) dispatchAndCheckResources(query, lower string) (*queryResult, error) {
 	result, err := s.dispatchStatement(query, lower)
-	if err != nil {
-		return result, err
+	if err == nil {
+		err = s.session.checkStatementResources()
 	}
-	return result, s.session.checkStatementResources()
+	if err != nil {
+		result.close()
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *textStatementExecutor) beginStatementTransaction(lower string) (statementTransaction, error) {
@@ -188,7 +192,13 @@ func (s *textStatementExecutor) beginAutocommitOrTransaction(dataDefinition, mut
 	return autocommit
 }
 
-func (e statementTransaction) finish(s *session, result *queryResult, err error) (*queryResult, error) {
+func (e statementTransaction) finish(s *session, result *queryResult, err error) (finished *queryResult, failure error) {
+	// Keep the allocated result even when abort or commit returns a nil result.
+	defer func() {
+		if failure != nil {
+			result.close()
+		}
+	}()
 	if err != nil {
 		return e.abort(s, err)
 	}
@@ -290,36 +300,6 @@ func (s *textStatementExecutor) applySetting(query string, lower string) error {
 		return sqlFailure{1231, "42000", "unsupported transaction setting"}
 	}
 	return s.applySessionAssignments(query)
-}
-
-func (s *session) applyAutocommitSetting(normalized string) (bool, error) {
-	compact := strings.ReplaceAll(normalized, " ", "")
-	compact = strings.ReplaceAll(compact, "@@", "")
-	prefix := autocommitSettingPrefix(compact)
-	if prefix == "" {
-		return false, nil
-	}
-	value := compact[len(prefix):]
-	off, valid := map[string]bool{"0": true, "off": true, "false": true, "1": false, "on": false, "true": false}[value]
-	if !valid {
-		return true, sqlFailure{1231, "42000", "autocommit has an invalid value"}
-	}
-	if !off && s.transaction {
-		if err := (&transactionExecutor{s}).commit(); err != nil {
-			return true, err
-		}
-	}
-	s.autocommitOff = off
-	return true, nil
-}
-
-func autocommitSettingPrefix(compact string) string {
-	for _, prefix := range []string{"setautocommit=", "setsessionautocommit="} {
-		if strings.HasPrefix(compact, prefix) {
-			return prefix
-		}
-	}
-	return ""
 }
 
 func (s *session) applyIsolationSetting(normalized string) (bool, error) {
@@ -602,7 +582,7 @@ func catalogMutationFailure(err error, fallback sqlFailure) error {
 	if errors.As(err, &failure) {
 		return err
 	}
-	if strings.Contains(err.Error(), "duplicate key") {
+	if errors.Is(err, catalog.ErrDuplicateKey) {
 		return sqlFailure{1062, "23000", "Duplicate entry for key 'PRIMARY'"}
 	}
 	fallback.message = err.Error()

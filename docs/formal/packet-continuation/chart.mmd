@@ -1,0 +1,21 @@
+---
+title: "Send a message across two frames"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks ValidMessageAccepted
+    lg1: Path to the ValidMessageAccepted bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Reading first frame
+  s1: Waiting for next frame
+  s2: Valid message rejected
+  [*] --> s0
+  s0 --> s1: First frame arrives
+  s1 --> s2: Next consecutive frame arrives
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 breaks
+  class s2 bugPath

@@ -9,6 +9,10 @@ if ! command -v mutago >/dev/null 2>&1; then
 	echo "mutation threshold test: install mutago before running this test" >&2
 	exit 1
 fi
+if [[ -z "${MUTAGO_VERSION:-}" ]]; then
+	echo "mutation threshold test: MUTAGO_VERSION is not set; run make mutation" >&2
+	exit 1
+fi
 
 temporary_directory="$(mktemp -d)"
 trap 'rm -rf "$temporary_directory"' EXIT
@@ -31,6 +35,22 @@ git commit -qm "add changed production code"
 
 expected_source="$temporary_directory/positive.go.expected"
 cp positive.go "$expected_source"
+
+fake_tool_directory="$temporary_directory/fake-mutago"
+mkdir -p "$fake_tool_directory"
+printf '#!/bin/sh\necho "fake mutago: the covered-code mutation score is 100.00%%"\n' > "$fake_tool_directory/mutago"
+chmod +x "$fake_tool_directory/mutago"
+if PATH="$fake_tool_directory:$PATH" GITHUB_BASE_SHA="$base" "$gate_script" > "$temporary_directory/fake-mutago.log" 2>&1; then
+	cat "$temporary_directory/fake-mutago.log"
+	echo "mutation threshold regression: an unpinned mutago passed the gate" >&2
+	exit 1
+fi
+if ! grep -Fq "is not github.com/quality-gates/mutago/v2 $MUTAGO_VERSION" "$temporary_directory/fake-mutago.log"; then
+	cat "$temporary_directory/fake-mutago.log"
+	echo "mutation threshold regression: an unpinned mutago was not reported" >&2
+	exit 1
+fi
+echo "mutation threshold regression: an unpinned mutago was rejected"
 printf 'existing report\n' > report.json
 cp report.json "$temporary_directory/report.expected"
 no_tests_output="$temporary_directory/no-tests.log"

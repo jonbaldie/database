@@ -1,0 +1,22 @@
+---
+title: "LockCleanup"
+---
+stateDiagram-v2
+  s0: held
+  s1: waiting for upgrade
+  s2: cancelled
+  s3: timed out
+  s4: upgraded
+  s5: released
+  s6: extra row locked
+  s7: read failed
+  [*] --> s0
+  s0 --> s1: UpgradeWait
+  s1 --> s2: WaitExit
+  s1 --> s3: WaitExit
+  s1 --> s4: GrantUpgrade
+  s2 --> s5: Release
+  s3 --> s5: Release
+  s4 --> s6: LockNextRow
+  s6 --> s7: ReadFails
+  s7 --> s5: Release

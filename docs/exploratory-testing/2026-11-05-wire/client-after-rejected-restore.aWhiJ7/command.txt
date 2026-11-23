@@ -1,0 +1,4 @@
+go
+run
+/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/.explore-20261105/client.go
+reopen

@@ -1,0 +1,6 @@
+/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/bin/database
+restore
+--backup
+/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/.explore-20261105/backup.tar
+--data-directory
+/home/ubuntu/Code/pstack/jonbaldie/database-explore-20261105/.explore-20261105/restored

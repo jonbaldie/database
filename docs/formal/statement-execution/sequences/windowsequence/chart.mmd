@@ -1,0 +1,18 @@
+---
+title: "WindowSequence"
+---
+stateDiagram-v2
+  s0: partition sorted, row 1
+  s1: frame ready, row 1
+  s2: partition sorted, row 2
+  s3: frame ready, row 2
+  s4: partition sorted, row 3
+  s5: frame ready, row 3
+  s6: Peer ranks and frames complete
+  [*] --> s0
+  s0 --> s1: Advance
+  s1 --> s2: Emit
+  s2 --> s3: Advance
+  s3 --> s4: Emit
+  s4 --> s5: Advance
+  s5 --> s6: Emit
