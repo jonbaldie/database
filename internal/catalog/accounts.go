@@ -2,17 +2,27 @@ package catalog
 
 import "errors"
 
-// EnsureAccount creates the initial account once. It never changes an account
-// that already exists, so an ordinary restart preserves later administration.
-func (s *Store) EnsureAccount(name, passwordHash string, grants []Grant) error {
-	if name == "" || passwordHash == "" {
+// InitialAccount constructs the initial administrator with the standard grants.
+func InitialAccount(name, passwordHash string) Account {
+	return Account{Name: name, PasswordHash: passwordHash, Grants: []Grant{{Privilege: "ACCOUNT_MANAGER"}, {Privilege: "NAMESPACE_MANAGER"}, {Privilege: "OPERATIONAL_OBSERVATION"}, {Privilege: "OPERATIONAL_CONTROL"}}}
+}
+
+// BootstrapLegacy marks old catalogs and initializes only a previously empty one.
+func (s *Store) BootstrapLegacy(name, passwordHash string) error {
+	if s.Snapshot().BootstrapComplete {
 		return nil
 	}
 	return s.mutate(func(definition *Definition) error {
-		if _, found := definition.Accounts[name]; found {
+		if definition.BootstrapComplete {
 			return nil
 		}
-		definition.Accounts[name] = Account{Name: name, PasswordHash: passwordHash, Grants: append([]Grant(nil), grants...)}
+		if len(definition.Accounts) == 0 {
+			if name == "" || passwordHash == "" {
+				return errors.New("legacy catalog has no bootstrap credential")
+			}
+			definition.Accounts[name] = InitialAccount(name, passwordHash)
+		}
+		definition.BootstrapComplete = true
 		return nil
 	})
 }

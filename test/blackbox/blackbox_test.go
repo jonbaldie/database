@@ -148,7 +148,7 @@ func TestInitializeCreatesStoppedInspectableInstance(t *testing.T) {
 	if err := json.Unmarshal(metadata, &instance); err != nil {
 		t.Fatalf("decode instance metadata %q: %v", metadata, err)
 	}
-	if instance.Schema != "database.instance/v1" || instance.InstanceID != output.InstanceID || instance.State != "stopped" || instance.AdminAccount != "admin" || instance.PasswordHash == "" {
+	if instance.Schema != "database.instance/v1" || instance.InstanceID != output.InstanceID || instance.State != "stopped" || instance.AdminAccount != "admin" || instance.PasswordHash != "" {
 		t.Fatalf("instance metadata = %#v", instance)
 	}
 

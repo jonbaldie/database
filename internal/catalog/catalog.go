@@ -15,8 +15,9 @@ import (
 )
 
 type Definition struct {
-	Namespaces map[string]Namespace `json:"namespaces"`
-	Accounts   map[string]Account   `json:"accounts,omitempty"`
+	BootstrapComplete bool                 `json:"bootstrap_complete,omitempty"`
+	Namespaces        map[string]Namespace `json:"namespaces"`
+	Accounts          map[string]Account   `json:"accounts,omitempty"`
 }
 
 // Account is durable authentication and authorization state. PasswordHash is
@@ -288,7 +289,7 @@ func Apply(definition Definition, action func(*Definition) error) (Definition, e
 }
 
 func cloneDefinition(source Definition) Definition {
-	copy := Definition{Namespaces: make(map[string]Namespace, len(source.Namespaces)), Accounts: make(map[string]Account, len(source.Accounts))}
+	copy := Definition{BootstrapComplete: source.BootstrapComplete, Namespaces: make(map[string]Namespace, len(source.Namespaces)), Accounts: make(map[string]Account, len(source.Accounts))}
 	for namespace, value := range source.Namespaces {
 		cloned := Namespace{Name: value.Name, Tables: make(map[string]Table, len(value.Tables))}
 		for table, definition := range value.Tables {

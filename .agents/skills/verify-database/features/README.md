@@ -5,6 +5,7 @@ Read the files for every affected public entry point.
 | Feature | Driver | Proof |
 | --- | --- | --- |
 | [Lifecycle and diagnostics](lifecycle.md) | Operator CLI and HTTP process tests | Version, readiness, stop, and diagnostics responses |
+| [Account initialization and administration](accounts.md) | Operator CLI and MySQL wire process tests | Initial catalog, account changes, and legacy migration across restart |
 | [SQL and indexes](sql.md) | MySQL wire process tests | Exact rows, index behavior, and durable client state |
 | [Query explanation](explanation.md) | MySQL wire process tests | Planned, analyzed, and active query evidence |
 

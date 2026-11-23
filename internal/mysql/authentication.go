@@ -181,10 +181,7 @@ func (a authenticator) accountPasswordHash(name string) (string, bool) {
 		account, found := a.config.Catalog.Account(name)
 		return account.PasswordHash, found && !account.Locked
 	}
-	if a.config.Username != "" && name != a.config.Username {
-		return "", false
-	}
-	return a.config.PasswordHash, a.config.PasswordHash != ""
+	return "", false
 }
 
 func (e *authenticationExchange) fullPassword(nonce []byte) ([]byte, error) {

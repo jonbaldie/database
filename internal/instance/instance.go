@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonbaldie/database/internal/catalog"
 	"github.com/jonbaldie/database/internal/credential"
 )
 
@@ -22,7 +23,7 @@ type Metadata struct {
 	DataVersion      string `json:"data_version,omitempty"`
 	State            string `json:"state"`
 	AdminAccount     string `json:"admin_account"`
-	PasswordHash     string `json:"password_hash"`
+	PasswordHash     string `json:"password_hash,omitempty"`
 }
 
 const (
@@ -39,8 +40,37 @@ func Load(directory string) (Metadata, error) {
 	if err := json.Unmarshal(contents, &metadata); err != nil {
 		return Metadata{}, fmt.Errorf("decode instance metadata: %w", err)
 	}
-	if metadata.Schema != "database.instance/v1" || metadata.InstanceID == "" || metadata.AdminAccount == "" || metadata.PasswordHash == "" {
+	if metadata.Schema != "database.instance/v1" || metadata.InstanceID == "" || metadata.AdminAccount == "" {
 		return Metadata{}, errors.New("invalid instance metadata")
+	}
+	return metadata, nil
+}
+
+// RemoveLegacyCredential removes the old bootstrap verifier after the catalog
+// has durably recorded bootstrap completion. The rename keeps retries safe.
+func RemoveLegacyCredential(directory string, metadata Metadata) (Metadata, error) {
+	if metadata.PasswordHash == "" {
+		return metadata, nil
+	}
+	metadata.PasswordHash = ""
+	contents, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return Metadata{}, err
+	}
+	file, err := os.CreateTemp(directory, ".instance-migration-*")
+	if err != nil {
+		return Metadata{}, err
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if err := file.Close(); err != nil {
+		return Metadata{}, err
+	}
+	if err := writeDurable(name, append(contents, '\n')); err != nil {
+		return Metadata{}, fmt.Errorf("write legacy credential migration: %w", err)
+	}
+	if err := os.Rename(name, filepath.Join(directory, "instance.json")); err != nil {
+		return Metadata{}, fmt.Errorf("remove legacy credential: %w", err)
 	}
 	return metadata, nil
 }
@@ -49,7 +79,7 @@ func Load(directory string) (Metadata, error) {
 // the source identity as durable provenance. Credentials and the administrator
 // account remain unchanged, and a restored instance is always stopped.
 func NewRestoredMetadata(source Metadata) (Metadata, error) {
-	if source.Schema != "database.instance/v1" || source.InstanceID == "" || source.AdminAccount == "" || source.PasswordHash == "" {
+	if source.Schema != "database.instance/v1" || source.InstanceID == "" || source.AdminAccount == "" {
 		return Metadata{}, errors.New("invalid source instance metadata")
 	}
 	var idBytes [16]byte
@@ -75,11 +105,11 @@ func Initialize(directory, account, password string) (Metadata, error) {
 	if err != nil {
 		return Metadata{}, err
 	}
-	metadata, err := newMetadata(account, password)
+	metadata, err := newMetadata(account)
 	if err != nil {
 		return Metadata{}, joinInitializationErrors(err, claim.discard())
 	}
-	if err := persistInitializedInstance(claim, metadata); err != nil {
+	if err := persistInitializedInstance(claim, metadata, credential.PasswordHash(password)); err != nil {
 		return Metadata{}, joinInitializationErrors(err, claim.discard())
 	}
 	if err := claim.release(); err != nil {
@@ -211,7 +241,7 @@ func removeDirectory(path string) error {
 	return nil
 }
 
-func newMetadata(account, password string) (Metadata, error) {
+func newMetadata(account string) (Metadata, error) {
 	var idBytes [16]byte
 	if _, err := rand.Read(idBytes[:]); err != nil {
 		return Metadata{}, fmt.Errorf("generate instance identity: %w", err)
@@ -222,18 +252,23 @@ func newMetadata(account, password string) (Metadata, error) {
 		DataVersion:  CurrentDataVersion,
 		State:        "stopped",
 		AdminAccount: account,
-		PasswordHash: credential.PasswordHash(password),
 	}, nil
 }
 
-func persistInitializedInstance(claim initializationClaim, metadata Metadata) error {
+func persistInitializedInstance(claim initializationClaim, metadata Metadata, passwordHash string) error {
 	metadataContents, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode instance metadata: %w", err)
 	}
 	metadataContents = append(metadataContents, '\n')
 	paths := initializationPaths{directory: claim.directory, staging: claim.staging}
-	if err := paths.writeStaged(metadataContents); err != nil {
+	definition := catalog.Definition{BootstrapComplete: true, Namespaces: map[string]catalog.Namespace{}, Accounts: map[string]catalog.Account{metadata.AdminAccount: catalog.InitialAccount(metadata.AdminAccount, passwordHash)}}
+	catalogContents, err := json.MarshalIndent(definition, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode catalog: %w", err)
+	}
+	catalogContents = append(catalogContents, '\n')
+	if err := paths.writeStaged(metadataContents, catalogContents); err != nil {
 		return err
 	}
 	return paths.commit()
@@ -244,8 +279,8 @@ type initializationPaths struct {
 	staging   string
 }
 
-func (paths initializationPaths) writeStaged(metadata []byte) error {
-	if err := writeDurable(paths.catalogTemporary(), []byte("{\n  \"namespaces\": {}\n}\n")); err != nil {
+func (paths initializationPaths) writeStaged(metadata, catalogContents []byte) error {
+	if err := writeDurable(paths.catalogTemporary(), catalogContents); err != nil {
 		return fmt.Errorf("write catalog: %w", err)
 	}
 	if err := writeDurable(paths.metadataTemporary(), metadata); err != nil {

@@ -788,7 +788,7 @@ func validateBackupFileEntries(entries []backupFile, files map[string]storedBack
 
 func validateDurableBackupFiles(sourceID, dataVersion string, files map[string]storedBackupFile) error {
 	metadata, err := decodeBackupMetadataFile(files["instance.json"].path)
-	if err != nil || metadata.Schema != "database.instance/v1" || metadata.InstanceID != sourceID || metadata.AdminAccount == "" || metadata.PasswordHash == "" {
+	if err != nil || metadata.Schema != "database.instance/v1" || metadata.InstanceID != sourceID || metadata.AdminAccount == "" {
 		return errors.New("backup instance identity is invalid")
 	}
 	if dataVersion != "" && effectiveDataVersion(metadata) != dataVersion {
