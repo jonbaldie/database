@@ -2,19 +2,36 @@ package catalog
 
 import "errors"
 
-// EnsureAccount creates the initial account once. It never changes an account
-// that already exists, so an ordinary restart preserves later administration.
-func (s *Store) EnsureAccount(name, passwordHash string, grants []Grant) error {
-	if name == "" || passwordHash == "" {
-		return nil
+// InitialAdministrator returns the account and grants created by database init.
+func InitialAdministrator(name, passwordHash string) Account {
+	return Account{
+		Name:         name,
+		PasswordHash: passwordHash,
+		Grants: []Grant{
+			{Privilege: "ACCOUNT_MANAGER"},
+			{Privilege: "NAMESPACE_MANAGER"},
+			{Privilege: "OPERATIONAL_OBSERVATION"},
+			{Privilege: "OPERATIONAL_CONTROL"},
+		},
 	}
-	return s.mutate(func(definition *Definition) error {
-		if _, found := definition.Accounts[name]; found {
+}
+
+// MigrateInitialAdministrator imports a legacy init credential only when the
+// catalog has no accounts. It never restores an account beside existing ones.
+func (s *Store) MigrateInitialAdministrator(name, passwordHash string) (bool, error) {
+	if name == "" || passwordHash == "" {
+		return false, errors.New("legacy initial administrator is incomplete")
+	}
+	migrated := false
+	err := s.mutate(func(definition *Definition) error {
+		if len(definition.Accounts) != 0 {
 			return nil
 		}
-		definition.Accounts[name] = Account{Name: name, PasswordHash: passwordHash, Grants: append([]Grant(nil), grants...)}
+		definition.Accounts[name] = InitialAdministrator(name, passwordHash)
+		migrated = true
 		return nil
 	})
+	return migrated, err
 }
 
 func (s *Store) Account(name string) (Account, bool) {
