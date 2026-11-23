@@ -3,6 +3,7 @@
 ## Sub-features
 
 - Authentication and session state.
+- Multi-frame MySQL commands.
 - SQL reads and durable writes.
 - Sort-spill cleanup after result metadata delivery fails.
 - Index DDL, hints, bounded scans, and uniqueness.
@@ -17,7 +18,7 @@ Run from the repository root, in the shell where you completed [Launch](../SKILL
 
 ```sh
 verify_command sql env GOMAXPROCS=2 GOFLAGS='-p=2' go test ./test/blackbox \
-	-run '^(TestGoDriverCompatibilityProfile|TestMySQLClientCanAuthenticatePersistAndResetSession|TestMySQLBTreeIndexesUseThePublicWireContract)$' \
+	-run '^(TestGoDriverCompatibilityProfile|TestMySQLAcceptsMultiFrameCommand|TestMySQLClientCanAuthenticatePersistAndResetSession|TestMySQLBTreeIndexesUseThePublicWireContract)$' \
 	-count=1 -v
 ```
 

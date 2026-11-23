@@ -326,6 +326,25 @@ func TestCommandFailureIsObservable(t *testing.T) {
 	}
 }
 
+func TestMySQLAcceptsMultiFrameCommand(t *testing.T) {
+	runner := blackbox.Runner{Executable: executable}
+	directory := filepath.Join(t.TempDir(), "instance")
+	initializeServer(t, runner, directory, "secret-password")
+	instance := startInstance(t, runner, blackbox.InstanceOptions{DataDirectory: directory, Diagnostics: true})
+	defer func() { _ = instance.Process.Stop(); _ = instance.Process.Wait() }()
+	client := newWireClient(t, instance.MySQLAddress, "admin", "secret-password")
+	defer client.close()
+	const frameSize = (1 << 24) - 1
+	for _, size := range []int{frameSize, frameSize + 1} {
+		prefix, suffix := "SELECT 1 /*", "*/"
+		query := prefix + strings.Repeat("x", size-1-len(prefix)-len(suffix)) + suffix
+		result := client.query(query)
+		if result.err != "" || len(result.rows) != 1 || len(result.rows[0]) != 1 || result.rows[0][0] != "1" {
+			t.Fatalf("command size %d: error=%q rows=%v", size, result.err, result.rows)
+		}
+	}
+}
+
 func TestMySQLClientCanAuthenticatePersistAndResetSession(t *testing.T) {
 	runner := blackbox.Runner{Executable: executable}
 	directory := filepath.Join(t.TempDir(), "instance")
