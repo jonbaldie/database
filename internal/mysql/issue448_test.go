@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -216,5 +217,236 @@ func readLenencUint(payload []byte, offset int) (uint64, int) {
 		return binary.LittleEndian.Uint64(payload[offset+1:]), offset + 9
 	default:
 		return uint64(payload[offset]), offset + 1
+	}
+}
+
+func issue448AutoTable() catalog.Table {
+	return catalog.Table{
+		Name:             "ids",
+		Columns:          []string{"id", "code"},
+		ColumnTypes:      []string{"INT", "VARCHAR(8)"},
+		ColumnAttributes: []catalog.ColumnAttribute{{AutoIncrement: true}, {}},
+	}
+}
+
+func issue448PlainTable() catalog.Table {
+	return catalog.Table{
+		Name:        "plain",
+		Columns:     []string{"id", "code"},
+		ColumnTypes: []string{"INT", "VARCHAR(8)"},
+	}
+}
+
+func TestAutoIncrementProtocolID(t *testing.T) {
+	var neg5 int64 = -5
+	var min64 int64 = -9223372036854775808
+	negative := uint64(neg5)
+	minInt64 := uint64(min64)
+	for _, tc := range []struct {
+		in   string
+		want uint64
+		ok   bool
+	}{
+		{"", 0, false},
+		{storedSQLNullValue, 0, false},
+		{"0", 0, true},
+		{"7", 7, true},
+		{"18446744073709551615", 18446744073709551615, true},
+		{"-5", negative, true},
+		{"-9223372036854775808", minInt64, true},
+		{"abc", 0, false},
+		{"9223372036854775808", 9223372036854775808, true},
+		{"18446744073709551616", 0, false},
+		{"-9223372036854775809", 0, false},
+	} {
+		got, ok := autoIncrementProtocolID(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Fatalf("autoIncrementProtocolID(%q) = (%d,%v), want (%d,%v)", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestAutoIncrementAdvancedAndFarther(t *testing.T) {
+	for _, tc := range []struct {
+		before, after autoIncrementState
+		want          bool
+	}{
+		{autoIncrementState{next: 5}, autoIncrementState{next: 5}, false},
+		{autoIncrementState{next: 5}, autoIncrementState{next: 6}, true},
+		{autoIncrementState{next: 5}, autoIncrementState{next: 4}, false},
+		{autoIncrementState{next: 5}, autoIncrementState{next: 5, exhausted: true}, true},
+		{autoIncrementState{next: 5, exhausted: true}, autoIncrementState{next: 5}, false},
+		{autoIncrementState{next: 5, exhausted: true}, autoIncrementState{next: 9, exhausted: true}, true},
+		{autoIncrementState{next: 5, exhausted: true}, autoIncrementState{next: 4, exhausted: true}, false},
+		{autoIncrementState{next: 5, exhausted: true}, autoIncrementState{next: 5, exhausted: true}, false},
+	} {
+		if got := autoIncrementAdvanced(tc.before, tc.after); got != tc.want {
+			t.Fatalf("autoIncrementAdvanced(%+v,%+v) = %v, want %v", tc.before, tc.after, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		current, allocated autoIncrementState
+		want               autoIncrementState
+	}{
+		{autoIncrementState{next: 5}, autoIncrementState{next: 6}, autoIncrementState{next: 6}},
+		{autoIncrementState{next: 6}, autoIncrementState{next: 6}, autoIncrementState{next: 6}},
+		{autoIncrementState{next: 7}, autoIncrementState{next: 6}, autoIncrementState{next: 7}},
+		{autoIncrementState{next: 5}, autoIncrementState{next: 5, exhausted: true}, autoIncrementState{next: 5, exhausted: true}},
+		{autoIncrementState{next: 5, exhausted: true}, autoIncrementState{next: 5}, autoIncrementState{next: 5, exhausted: true}},
+		{autoIncrementState{next: 5, exhausted: true}, autoIncrementState{next: 9, exhausted: true}, autoIncrementState{next: 5, exhausted: true}},
+		{autoIncrementState{next: 9, exhausted: true}, autoIncrementState{next: 5, exhausted: true}, autoIncrementState{next: 9, exhausted: true}},
+	} {
+		if got := fartherAutoIncrementState(tc.current, tc.allocated); got != tc.want {
+			t.Fatalf("fartherAutoIncrementState(%+v,%+v) = %+v, want %+v", tc.current, tc.allocated, got, tc.want)
+		}
+	}
+}
+
+func TestStatementInsertIDRecordAndValue(t *testing.T) {
+	var id statementInsertID
+	if id.value() != 0 {
+		t.Fatalf("empty value = %d, want 0", id.value())
+	}
+	id.record(issue448PlainTable(), []string{"9", "x"}, true)
+	if id.value() != 0 {
+		t.Fatalf("plain-table value = %d, want 0", id.value())
+	}
+	id.record(issue448AutoTable(), []string{}, false)
+	id.record(issue448AutoTable(), []string{"bad", "x"}, true)
+	id.record(issue448AutoTable(), []string{""}, true)
+	if id.value() != 0 {
+		t.Fatalf("non-numeric value = %d, want 0", id.value())
+	}
+	id.record(issue448AutoTable(), []string{"7", "x"}, false)
+	if id.value() != 7 {
+		t.Fatalf("stored value = %d, want 7", id.value())
+	}
+	id.record(issue448AutoTable(), []string{"9", "x"}, false)
+	if id.value() != 9 {
+		t.Fatalf("last stored value = %d, want 9", id.value())
+	}
+	id.record(issue448AutoTable(), []string{"3", "x"}, true)
+	if id.value() != 3 {
+		t.Fatalf("first generated value = %d, want 3", id.value())
+	}
+	id.record(issue448AutoTable(), []string{"4", "x"}, true)
+	if id.value() != 3 {
+		t.Fatalf("second generated changed value = %d, want 3", id.value())
+	}
+}
+
+func TestAdvanceAutoIncrement(t *testing.T) {
+	limit := uint64(2147483647)
+	for _, tc := range []struct {
+		state autoIncrementState
+		value uint64
+		want  autoIncrementState
+	}{
+		{autoIncrementState{next: 5}, 3, autoIncrementState{next: 5}},
+		{autoIncrementState{next: 5}, 5, autoIncrementState{next: 6}},
+		{autoIncrementState{next: 5}, 2147483646, autoIncrementState{next: 2147483647}},
+		{autoIncrementState{next: 5}, 2147483647, autoIncrementState{next: limit, exhausted: true}},
+		{autoIncrementState{next: 5}, 2147483648, autoIncrementState{next: limit, exhausted: true}},
+		{autoIncrementState{next: 5, exhausted: true}, 10, autoIncrementState{next: 5, exhausted: true}},
+	} {
+		if got := advanceAutoIncrement(tc.state, tc.value, limit); got != tc.want {
+			t.Fatalf("advanceAutoIncrement(%+v,%d) = %+v, want %+v", tc.state, tc.value, got, tc.want)
+		}
+	}
+}
+
+func TestFillAutoIncrementValue(t *testing.T) {
+	limit := uint64(2147483647)
+	row := []string{storedSQLNullValue, "x"}
+	next, generated, err := fillAutoIncrementValue(issue448AutoTable(), row, autoIncrementState{next: 1}, 1)
+	if err != nil || !generated || next != (autoIncrementState{next: 2}) || row[0] != "1" {
+		t.Fatalf("generated = (%+v,%v,%v) row=%q", next, generated, err, row)
+	}
+	row = []string{storedSQLNullValue, "x"}
+	next, generated, err = fillAutoIncrementValue(issue448AutoTable(), row, autoIncrementState{next: limit}, 2)
+	if err != nil || !generated || next != (autoIncrementState{next: limit, exhausted: true}) || row[0] != "2147483647" {
+		t.Fatalf("at limit = (%+v,%v,%v) row=%q", next, generated, err, row)
+	}
+	for _, bad := range []autoIncrementState{{next: limit + 1}, {next: 0}, {next: 1, exhausted: true}} {
+		row = []string{storedSQLNullValue, "x"}
+		_, _, err = fillAutoIncrementValue(issue448AutoTable(), row, bad, 3)
+		if err == nil || !strings.Contains(err.Error(), "row 3") {
+			t.Fatalf("overflow state %+v err = %v", bad, err)
+		}
+	}
+	row = []string{"10", "x"}
+	next, generated, err = fillAutoIncrementValue(issue448AutoTable(), row, autoIncrementState{next: 1}, 1)
+	if err != nil || generated || next != (autoIncrementState{next: 11}) {
+		t.Fatalf("explicit = (%+v,%v,%v)", next, generated, err)
+	}
+	row = []string{"3", "x"}
+	next, generated, err = fillAutoIncrementValue(issue448AutoTable(), row, autoIncrementState{next: 10}, 1)
+	if err != nil || generated || next != (autoIncrementState{next: 10}) {
+		t.Fatalf("below = (%+v,%v,%v)", next, generated, err)
+	}
+	for _, keep := range []string{"0", "-5", "", "bad"} {
+		row = []string{keep, "x"}
+		next, generated, err = fillAutoIncrementValue(issue448AutoTable(), row, autoIncrementState{next: 4}, 1)
+		if err != nil || generated || next != (autoIncrementState{next: 4}) {
+			t.Fatalf("keep %q = (%+v,%v,%v)", keep, next, generated, err)
+		}
+	}
+	plainRow := []string{storedSQLNullValue, "x"}
+	state := autoIncrementState{next: 9}
+	next, generated, err = fillAutoIncrementValue(issue448PlainTable(), plainRow, state, 1)
+	if err != nil || generated || next != state {
+		t.Fatalf("plain = (%+v,%v,%v)", next, generated, err)
+	}
+}
+
+func TestIssue448UpsertInsertNewReportsID(t *testing.T) {
+	executor := newIssue448Executor(t)
+	assertIssue448OK(t, executor, "CREATE TABLE ids (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(8) UNIQUE, n INT)", 0, 0)
+	assertIssue448OK(t, executor, "INSERT INTO ids (code, n) VALUES ('new', 1) ON DUPLICATE KEY UPDATE n = VALUES(n)", 1, 1)
+	assertIssue448OK(t, executor, "INSERT INTO ids (id, code) VALUES (60, 'fresh') ON DUPLICATE KEY UPDATE n = VALUES(n)", 1, 60)
+	assertIssue448OK(t, executor, "INSERT INTO ids (code, n) VALUES ('new2', 2), ('fresh', 3) ON DUPLICATE KEY UPDATE n = 3", 3, 61)
+	assertIssue448OK(t, executor, "INSERT INTO ids (id, code) VALUES (70, 'third') ON DUPLICATE KEY UPDATE code = 'x'", 1, 70)
+}
+
+func TestIssue448FailedStatementsPreserveCounter(t *testing.T) {
+	upsert := newIssue448Executor(t)
+	assertIssue448OK(t, upsert, "CREATE TABLE ids (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(8) UNIQUE, n INT)", 0, 0)
+	assertIssue448OK(t, upsert, "INSERT INTO ids (code, n) VALUES ('a', 1)", 1, 1)
+	if _, _, err := issue448OK(upsert, "INSERT INTO ids (code, n) VALUES ('b', 'bad') ON DUPLICATE KEY UPDATE n = 2"); err == nil {
+		t.Fatal("bad upsert type returned an OK packet")
+	}
+	assertIssue448OK(t, upsert, "INSERT INTO ids (code, n) VALUES ('c', 1)", 1, 2)
+	replace := newIssue448Executor(t)
+	assertIssue448OK(t, replace, "CREATE TABLE ids (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(8) UNIQUE)", 0, 0)
+	assertIssue448OK(t, replace, "INSERT INTO ids (code) VALUES ('a')", 1, 1)
+	if _, _, err := issue448OK(replace, "REPLACE INTO ids (id, code) VALUES (2, 'x'), ('bad', 'y')"); err == nil {
+		t.Fatal("bad replace type returned an OK packet")
+	}
+	assertIssue448OK(t, replace, "INSERT INTO ids (code) VALUES ('z')", 1, 2)
+}
+
+func TestIssue448BadPlansReturnErrors(t *testing.T) {
+	executor := newIssue448Executor(t)
+	assertIssue448OK(t, executor, "CREATE TABLE ids (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(8) UNIQUE, n INT)", 0, 0)
+	for _, statement := range []string{
+		"INSERT INTO missing (id) VALUES (1)",
+		"INSERT INTO ids (missing) VALUES ('x')",
+		"INSERT INTO ids (code) VALUES ('x') ON DUPLICATE KEY UPDATE missing = 1",
+		"INSERT INTO ids (code) VALUES ('x') ON DUPLICATE KEY UPDATE n =",
+		"REPLACE INTO missing (id) VALUES (1)",
+		"INSERT INTO ids (code) VALUES (1, 2)",
+	} {
+		if _, _, err := issue448OK(executor, statement); err == nil {
+			t.Fatalf("%s returned an OK packet", statement)
+		}
+	}
+}
+
+func TestIssue448AutoIncrementOverflow(t *testing.T) {
+	executor := newIssue448Executor(t)
+	assertIssue448OK(t, executor, "CREATE TABLE tiny (id TINYINT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(8))", 0, 0)
+	assertIssue448OK(t, executor, "INSERT INTO tiny (id, code) VALUES (127, 'max')", 1, 127)
+	if _, _, err := issue448OK(executor, "INSERT INTO tiny (code) VALUES ('over')"); err == nil {
+		t.Fatal("overflow insert returned an OK packet")
 	}
 }
