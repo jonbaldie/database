@@ -511,6 +511,9 @@ func constraintChecks(write Write, child *Operator) *Operator {
 
 func tableScan(table Table) *Operator {
 	if table.Access != nil {
+		if table.Access.PointLookup {
+			return pointLookup(table)
+		}
 		return btreeIndexScan(table)
 	}
 	rows := float64(table.RowCount)
@@ -563,6 +566,31 @@ func btreeIndexScan(table Table) *Operator {
 		Opportunities: opportunities,
 
 		Estimates: Estimates{Rows: rows, RowWidthBytes: rowWidth(len(table.Columns)), Cost: rows + 2, PeakMemoryBytes: 0},
+		Output:    columnOutput(table, table.Columns),
+		Warnings:  []Warning{},
+		Children:  []*Operator{},
+	}
+}
+
+func pointLookup(table Table) *Operator {
+	rows := float64(table.RowCount)
+	access := table.Access
+	objects := []ObjectReference{tableObject(table), {Type: "index", Database: table.Database, Table: table.Name, Name: access.Name}}
+	return &Operator{
+		Kind:      "lookup",
+		Summary:   "Look up at most one row through the unique key.",
+		Operation: lookupOperation{LookupType: "point", Unique: true},
+		Strategy:  &Strategy{Name: "point_lookup", Summary: "Look up at most one row by primary or unique key."},
+		Objects:   objects,
+		Choice: &Choice{Selected: access.Name, Reason: CodeSummary{Code: "INDEX_SUPPORTS_QUERY", Summary: "The unique key supports a direct point lookup."}, Alternatives: []Alternative{{
+			Name: "full_table_scan", EstimatedCost: rows + 1,
+			Reason: CodeSummary{Code: "INDEX_NOT_SELECTED", Summary: "The alternative reads rows in stored table order."},
+		}}},
+		Statistics: []Statistic{{
+			Object: tableObject(table), Kind: "catalog_row_count", CollectedAt: access.CollectedAt,
+			ObservedRows: table.RowCount, Stale: false, Limitations: []string{"The statistic records the current catalog snapshot only."},
+		}},
+		Estimates: Estimates{Rows: 1, RowWidthBytes: rowWidth(len(table.Columns)), Cost: 1, PeakMemoryBytes: 0},
 		Output:    columnOutput(table, table.Columns),
 		Warnings:  []Warning{},
 		Children:  []*Operator{},

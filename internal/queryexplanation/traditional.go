@@ -185,6 +185,9 @@ func accessTypeCell(operator *Operator) cell {
 	if operator.Kind == "scan" {
 		return text("ALL")
 	}
+	if operator.Kind == "lookup" {
+		return text("const")
+	}
 	return nullCell()
 }
 

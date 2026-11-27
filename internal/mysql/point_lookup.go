@@ -2,23 +2,90 @@ package mysql
 
 import (
 	"strings"
+	"time"
 
 	"github.com/jonbaldie/database/internal/catalog"
+	"github.com/jonbaldie/database/internal/queryexplanation"
 )
 
-func tryPointLookup(plan *relationalSelectPlan) ([]relationalResultRow, bool) {
+func tryPointLookup(plan *relationalSelectPlan) ([]relationalResultRow, int, bool) {
 	if !pointLookupEligible(plan) {
-		return nil, false
+		return nil, 0, false
 	}
 	column, value, ok := parseSimpleEqualityWhere(plan.whereText)
 	if !ok {
-		return nil, false
+		return nil, 0, false
 	}
 	row, ok := lookupStatementRow(plan, column, value)
 	if !ok {
-		return nil, false
+		return nil, 0, false
 	}
-	return projectPointLookup(plan, row)
+	projected, ok := projectPointLookup(plan, row)
+	if !ok {
+		return nil, 0, false
+	}
+	return projected, sourceRowBytes([][]string{row}), true
+}
+
+func applyPointLookupExplanation(p *relationalSelectPlan, read *queryexplanation.Select) {
+	if !usesPointLookup(p) || len(read.Tables) == 0 {
+		return
+	}
+	if read.Tables[0].Access == nil {
+		read.Tables[0].Access = &queryexplanation.IndexAccess{
+			Name:        pointLookupIndexName(p.source.tables[0].table, p.whereText),
+			Unique:      true,
+			CollectedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+	}
+	read.Tables[0].Access.PointLookup = true
+}
+
+func usesPointLookup(p *relationalSelectPlan) bool {
+	if !pointLookupEligible(p) {
+		return false
+	}
+	column, _, ok := parseSimpleEqualityWhere(p.whereText)
+	if !ok {
+		return false
+	}
+	table := p.source.tables[0].table
+	return primaryColumn(table) == column || uniqueColumn(table) == column
+}
+
+func pointLookupIndexName(table catalog.Table, where string) string {
+	column, _, ok := parseSimpleEqualityWhere(where)
+	if !ok || primaryColumn(table) == column {
+		return "PRIMARY"
+	}
+	if name := uniqueConstraintIndexName(table.Constraints, column); name != "" {
+		return name
+	}
+	if name := uniqueTableIndexName(table.Indexes, column); name != "" {
+		return name
+	}
+	return column
+}
+
+func uniqueConstraintIndexName(constraints []catalog.Constraint, column string) string {
+	for _, constraint := range constraints {
+		if constraint.Type == catalog.ConstraintTypeUnique && len(constraint.Columns) == 1 && constraint.Columns[0] == column {
+			if constraint.Name != "" {
+				return constraint.Name
+			}
+			return column
+		}
+	}
+	return ""
+}
+
+func uniqueTableIndexName(indexes []catalog.Index, column string) string {
+	for _, index := range indexes {
+		if index.Unique && len(index.Parts) == 1 && index.Parts[0].Column == column {
+			return index.Name
+		}
+	}
+	return ""
 }
 
 func pointLookupEligible(plan *relationalSelectPlan) bool {

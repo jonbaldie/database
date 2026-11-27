@@ -125,11 +125,10 @@ func (s *textStatementExecutor) analyzeExplanation(format, inner string) (*query
 		return nil, sqlFailure{1235, "42000", "EXPLAIN ANALYZE supports only non-locking SELECT statements"}
 	}
 	started := time.Now()
+	metrics := queryexplanation.NewRuntimeMetrics(document)
 	runner := *s
 	runner.streamRows = true
-	metrics := queryexplanation.NewRuntimeMetrics(document)
-	runner.session.runtimeMetrics = metrics
-	defer func() { runner.session.runtimeMetrics = nil }()
+	runner.recorder = metrics
 	statement, err := normalizeStatement(inner)
 	if err != nil {
 		return nil, err

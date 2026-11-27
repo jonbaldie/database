@@ -5,6 +5,25 @@ import (
 	"time"
 )
 
+// OperatorRecorder records operator-level runtime evidence during execution.
+type OperatorRecorder interface {
+	OperatorID(key string) int
+	RecordOperator(id, inputRows, outputRows, filteredRows, logicalReads, bytesRead, peakMemoryBytes int, elapsed time.Duration)
+	RecordSpill(id, spillCount, spillBytes, temporaryStorageBytes int)
+}
+
+// NoopOperatorRecorder is the default OperatorRecorder when no explanation is active.
+type NoopOperatorRecorder struct{}
+
+// OperatorID returns 0 because no explanation operators are tracked.
+func (NoopOperatorRecorder) OperatorID(string) int { return 0 }
+
+// RecordOperator discards operator-level runtime metrics.
+func (NoopOperatorRecorder) RecordOperator(int, int, int, int, int, int, int, time.Duration) {}
+
+// RecordSpill discards spill-level runtime metrics.
+func (NoopOperatorRecorder) RecordSpill(int, int, int, int) {}
+
 // RuntimeMetrics stores counters observed by the executor. It is safe to read
 // while a statement is running, so it is also the source for a live snapshot.
 // Each record names the physical operator that produced the evidence.

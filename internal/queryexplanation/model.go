@@ -222,6 +222,12 @@ type scanOperation struct {
 	Direction string `json:"direction"`
 }
 
+// lookupOperation records a point or range key lookup.
+type lookupOperation struct {
+	LookupType string `json:"lookup_type"`
+	Unique     bool   `json:"unique"`
+}
+
 // filterOperation records which clause a filter enforces.
 type filterOperation struct {
 	Role string `json:"role"`
@@ -304,6 +310,7 @@ type IndexAccess struct {
 	Unique      bool
 	Forced      bool
 	Covering    bool
+	PointLookup bool
 	CollectedAt string
 }
 
