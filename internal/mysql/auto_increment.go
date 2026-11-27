@@ -8,8 +8,9 @@ import (
 )
 
 type autoIncrementState struct {
-	next      uint64
-	exhausted bool
+	next           uint64
+	firstGenerated uint64
+	exhausted      bool
 }
 
 func autoIncrementColumns(table catalog.Table) []int {
@@ -165,22 +166,34 @@ func fillAutoIncrementValue(table catalog.Table, row []string, state autoIncreme
 		return state, err
 	}
 	if row[column] == storedSQLNullValue {
-		if state.exhausted || state.next == 0 || state.next > limit {
-			return state, autoIncrementOverflow(table.Columns[column], rowNumber)
+		generated, nextState, err := allocateAutoIncrementValue(table.Columns[column], state, limit, rowNumber)
+		if err != nil {
+			return state, err
 		}
-		row[column] = strconv.FormatUint(state.next, 10)
-		if state.next == limit {
-			state.exhausted = true
-		} else {
-			state.next++
-		}
-		return state, nil
+		row[column] = generated
+		return nextState, nil
 	}
 	value, positive := autoIncrementPositiveValue(row[column])
 	if positive {
 		state = advanceAutoIncrement(state, value, limit)
 	}
 	return state, nil
+}
+
+func allocateAutoIncrementValue(column string, state autoIncrementState, limit uint64, rowNumber int) (string, autoIncrementState, error) {
+	if state.exhausted || state.next == 0 || state.next > limit {
+		return "", state, autoIncrementOverflow(column, rowNumber)
+	}
+	if state.firstGenerated == 0 {
+		state.firstGenerated = state.next
+	}
+	generated := strconv.FormatUint(state.next, 10)
+	if state.next == limit {
+		state.exhausted = true
+	} else {
+		state.next++
+	}
+	return generated, state, nil
 }
 
 func advanceAutoIncrement(state autoIncrementState, value, limit uint64) autoIncrementState {
