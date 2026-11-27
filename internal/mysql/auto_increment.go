@@ -223,9 +223,8 @@ func (id statementInsertID) value() uint64 {
 }
 
 func autoIncrementProtocolID(value string) (uint64, bool) {
-	if value == "" || value == storedSQLNullValue {
-		return 0, false
-	}
+	// Empty strings, the NULL sentinel, and non-numeric values all fail
+	// both parses below.
 	if parsed, err := strconv.ParseUint(value, 10, 64); err == nil {
 		return parsed, true
 	}
