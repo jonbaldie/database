@@ -2110,10 +2110,11 @@ func applyUpsertPlan(plan upsertPlan) (rowWrite, error) {
 		if err != nil {
 			return rowWrite{}, err
 		}
+		// MySQL sets the per-row insert id to 0 when ON DUPLICATE KEY
+		// UPDATE changes a row: the update does not affect the OK
+		// packet insert id. Only actually inserted rows record.
 		if changed == 1 {
 			id.record(plan.insert.table, stored, generated[number])
-		} else if changed != 0 {
-			id.record(plan.insert.table, stored, false)
 		}
 		affected += changed
 	}

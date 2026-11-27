@@ -42,7 +42,7 @@ func TestIssue448OKPacketReportsMySQLInsertID(t *testing.T) {
 		{"INSERT INTO ids (id, code) SELECT id, code FROM explicit_source ORDER BY id", 2, 51},
 		{"REPLACE INTO ids (id, code) VALUES (1, 'a2')", 2, 1},
 		{"REPLACE INTO ids (code) VALUES ('rep')", 1, 52},
-		{"INSERT INTO ids (code, n) VALUES ('b', 5) ON DUPLICATE KEY UPDATE n = 5", 2, 2},
+		{"INSERT INTO ids (code, n) VALUES ('b', 5) ON DUPLICATE KEY UPDATE n = 5", 2, 0},
 		{"INSERT INTO ids (code, n) VALUES ('b', 5) ON DUPLICATE KEY UPDATE n = 5", 0, 0},
 		{"UPDATE ids SET n = 7 WHERE id = 1", 1, 0},
 		{"DELETE FROM ids WHERE code = 'rep'", 1, 0},
@@ -55,7 +55,7 @@ func TestIssue448OKPacketReportsMySQLInsertID(t *testing.T) {
 	conflict := newIssue448Executor(t)
 	assertIssue448OK(t, conflict, "CREATE TABLE ids (id INT PRIMARY KEY AUTO_INCREMENT, code VARCHAR(8) UNIQUE, n INT)", 0, 0)
 	assertIssue448OK(t, conflict, "INSERT INTO ids (code, n) VALUES ('b', 1)", 1, 1)
-	assertIssue448OK(t, conflict, "INSERT INTO ids (code, n) VALUES ('b', 2) ON DUPLICATE KEY UPDATE n = 2", 2, 1)
+	assertIssue448OK(t, conflict, "INSERT INTO ids (code, n) VALUES ('b', 2) ON DUPLICATE KEY UPDATE n = 2", 2, 0)
 	assertIssue448OK(t, conflict, "INSERT INTO ids (code) VALUES ('next')", 1, 3)
 
 	failed := newIssue448Executor(t)
