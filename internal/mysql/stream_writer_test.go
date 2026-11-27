@@ -186,7 +186,7 @@ func TestStreamWriterWriteOK(t *testing.T) {
 	buf := &bytes.Buffer{}
 	writer := NewStreamWriter(buf, 1, 1024)
 
-	if err := writer.WriteOK(10, 2); err != nil {
+	if err := writer.WriteOK(10, 0, 2); err != nil {
 		t.Fatalf("WriteOK: %v", err)
 	}
 
@@ -687,5 +687,37 @@ func TestStreamWriterPreparedMetadata(t *testing.T) {
 
 	if writer.Sequence() != 7 {
 		t.Fatalf("writer sequence = %d, want 7", writer.Sequence())
+	}
+}
+
+func TestOKPacketAndWarningsEncoding(t *testing.T) {
+	if got := okPacket(); len(got) != 7 || got[0] != 0x00 || got[1] != 0x00 || got[2] != 0x00 || got[3] != 0x02 || got[4] != 0x00 || got[5] != 0x00 || got[6] != 0x00 {
+		t.Fatalf("okPacket() = %x", got)
+	}
+	if got := okPacket(300); len(got) != 9 || got[1] != 0xfc || got[2] != 0x2c || got[3] != 0x01 || got[4] != 0x00 {
+		t.Fatalf("okPacket(300) = %x", got)
+	}
+	if got := okPacket(250); got[1] != 250 || len(got) != 7 {
+		t.Fatalf("okPacket(250) = %x", got)
+	}
+	if got := okPacket(251); len(got) != 9 || got[1] != 0xfc || got[2] != 251 || got[3] != 0x00 {
+		t.Fatalf("okPacket(251) = %x", got)
+	}
+	payload := okPacketWithWarnings(2, 300, 300)
+	if len(payload) != 9 || payload[0] != 0x00 || payload[1] != 2 || payload[2] != 0xfc || payload[3] != 0x2c || payload[4] != 0x01 || payload[5] != 0x02 || payload[6] != 0x00 || payload[7] != 0x2c || payload[8] != 0x01 {
+		t.Fatalf("okPacketWithWarnings = %x", payload)
+	}
+	buf := &bytes.Buffer{}
+	writer := NewStreamWriter(buf, 1, 1024)
+	if err := writer.WriteOK(5, 42, 6600); err != nil {
+		t.Fatalf("WriteOK: %v", err)
+	}
+	body := buf.Bytes()[4:]
+	if body[0] != 0x00 || body[1] != 5 || body[2] != 42 || body[3] != 0x02 || body[4] != 0x00 {
+		t.Fatalf("WriteOK payload = %x", body)
+	}
+	warnings := uint16(body[len(body)-2]) | uint16(body[len(body)-1])<<8
+	if warnings != 6600 {
+		t.Fatalf("warnings = %d, want 6600", warnings)
 	}
 }
