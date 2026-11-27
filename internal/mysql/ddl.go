@@ -969,7 +969,7 @@ func alterTableIndexVisibility(table *catalog.Table, name string, invisible bool
 
 func addTableConstraint(table *catalog.Table, constraint catalog.Constraint) error {
 	candidates := append(catalog.CloneConstraints(table.Constraints), constraint)
-	named, err := namedTableConstraints(table.Name, candidates, indexKeyNames(table.Indexes))
+	named, err := namedTableConstraints(table.Name, candidates, indexKeyNames(table.Indexes), nil)
 	if err != nil {
 		return err
 	}

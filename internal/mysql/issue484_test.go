@@ -69,6 +69,7 @@ func TestIssue484DuplicateExplicitNamesFail(t *testing.T) {
 		"CREATE TABLE same_unique (a INT, b INT, CONSTRAINT a UNIQUE (a), CONSTRAINT a UNIQUE (b))",
 		"CREATE TABLE same_check (a INT, CHECK (a > 0), CONSTRAINT same_check_chk_1 CHECK (a < 10))",
 		"CREATE TABLE two_primary (a INT, b INT, PRIMARY KEY (a), PRIMARY KEY (b))",
+		"CREATE TABLE duplicate_primary (a INT PRIMARY KEY, b INT, CONSTRAINT `PRIMARY` UNIQUE (b))",
 	} {
 		if _, err := executeStatement(executor, query); err == nil {
 			t.Fatalf("%s succeeded", query)
@@ -115,4 +116,49 @@ func assertShowIndexKeys(t *testing.T, executor *textStatementExecutor, table st
 			t.Fatalf("SHOW INDEX FROM %s keys = %v, want %v", table, got, want)
 		}
 	}
+}
+
+func TestIssue484ExplicitIndexOrder(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	if _, err := executeStatement(executor, "CREATE TABLE first_index (a INT, b INT, INDEX a (b), UNIQUE (a))"); err != nil {
+		t.Fatal(err)
+	}
+	assertShowIndexKeys(t, executor, "first_index", []string{"a_2", "a"})
+	for _, query := range []string{
+		"CREATE TABLE first_unique (a INT, b INT, UNIQUE (a), INDEX a (b))",
+		"CREATE TABLE first_unique_constraint (a INT, b INT, UNIQUE (a), CONSTRAINT a UNIQUE (b))",
+	} {
+		if _, err := executeStatement(executor, query); err == nil {
+			t.Fatalf("%s: expected duplicate key name", query)
+		}
+	}
+}
+
+func TestIssue484LongNameWithThreeDigitSuffix(t *testing.T) {
+	base := strings.Repeat("x", 64)
+	taken := map[string]bool{catalog.Key(base): true}
+	for i := 2; i < 100; i++ {
+		taken[catalog.Key(strings.Repeat("x", 61)+"_"+fmt.Sprint(i))] = true
+	}
+	got := availableIndexName(base, taken)
+	want := strings.Repeat("x", 60) + "_100"
+	if got != want {
+		t.Fatalf("name = %q, want %q", got, want)
+	}
+}
+
+func TestIssue484ShowCreateReplaysCheckAndUniqueNames(t *testing.T) {
+	executor := ddlExecutorForTest(t)
+	if _, err := executeStatement(executor, "CREATE TABLE original (a INT, CONSTRAINT a CHECK (a > 0), UNIQUE (a))"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := executeStatement(executor, "SHOW CREATE TABLE original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddl := strings.Replace(result.rows[0][1], "`original`", "`replayed`", 1)
+	if _, err := executeStatement(executor, ddl); err != nil {
+		t.Fatalf("replay %s: %v", ddl, err)
+	}
+	assertShowIndexKeys(t, executor, "replayed", []string{"a"})
 }

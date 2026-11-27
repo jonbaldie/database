@@ -1377,11 +1377,12 @@ type tableDefinition struct {
 }
 
 type parsedTableColumns struct {
-	columns     []string
-	types       []string
-	attributes  []catalog.ColumnAttribute
-	constraints []catalog.Constraint
-	indexes     []catalog.Index
+	generatedUnique map[int]bool
+	columns         []string
+	types           []string
+	attributes      []catalog.ColumnAttribute
+	constraints     []catalog.Constraint
+	indexes         []catalog.Index
 }
 
 func parseCreateTable(query string) (tableDefinition, error) {
@@ -1402,14 +1403,14 @@ func parseCreateTable(query string) (tableDefinition, error) {
 	if err != nil {
 		return tableDefinition{}, err
 	}
-	columns, err := parseTableColumns(body)
+	columns, err := parseTableColumns(body, target[len(target)-1])
 	if err != nil {
 		return tableDefinition{}, err
 	}
 	if err := validateTableColumns(columns.columns); err != nil {
 		return tableDefinition{}, err
 	}
-	constraints, err := namedTableConstraints(target[len(target)-1], columns.constraints, explicitIndexNames(columns.indexes))
+	constraints, err := namedTableConstraints(target[len(target)-1], columns.constraints, nil, columns.generatedUnique)
 	if err != nil {
 		return tableDefinition{}, err
 	}
@@ -1484,7 +1485,7 @@ func parseCreateTableOptions(value string) (uint64, bool, error) {
 	return parsed, true, nil
 }
 
-func parseTableColumns(body string) (parsedTableColumns, error) {
+func parseTableColumns(body, tableName string) (parsedTableColumns, error) {
 	parts := splitCSV(body)
 	parsed := parsedTableColumns{
 		columns:     make([]string, 0, len(parts)),
@@ -1493,12 +1494,18 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 		constraints: make([]catalog.Constraint, 0, len(parts)),
 		indexes:     make([]catalog.Index, 0, len(parts)),
 	}
+	taken := map[string]bool{}
+	parsed.generatedUnique = map[int]bool{}
 	for _, part := range parts {
 		if isTableIndexDefinition(part) {
 			index, err := parseTableIndexDefinition(part)
 			if err != nil {
 				return parsedTableColumns{}, err
 			}
+			if index.Name == "" {
+				index.Name = availableIndexName(indexNameBase(tableName, index), taken)
+			}
+			taken[catalog.Key(index.Name)] = true
 			parsed.indexes = append(parsed.indexes, index)
 			continue
 		}
@@ -1507,6 +1514,7 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 			if err != nil {
 				return parsedTableColumns{}, err
 			}
+			nameParsedConstraint(&constraint, len(parsed.constraints), taken, parsed.generatedUnique)
 			parsed.constraints = append(parsed.constraints, constraint)
 			continue
 		}
@@ -1517,9 +1525,24 @@ func parseTableColumns(body string) (parsedTableColumns, error) {
 		parsed.columns = append(parsed.columns, column)
 		parsed.types = append(parsed.types, typeName)
 		parsed.attributes = append(parsed.attributes, attribute)
+		for i := range columnConstraints {
+			nameParsedConstraint(&columnConstraints[i], len(parsed.constraints)+i, taken, parsed.generatedUnique)
+		}
 		parsed.constraints = append(parsed.constraints, columnConstraints...)
 	}
 	return parsed, nil
+}
+
+func nameParsedConstraint(constraint *catalog.Constraint, position int, taken map[string]bool, generated map[int]bool) {
+	if constraint.Type == catalog.ConstraintTypePrimary {
+		taken[catalog.Key("PRIMARY")] = true
+	} else if constraint.Type == catalog.ConstraintTypeUnique {
+		if constraint.Name == "" && len(constraint.Columns) > 0 {
+			constraint.Name = availableIndexName(constraint.Columns[0], taken)
+			generated[position] = true
+		}
+		taken[catalog.Key(constraint.Name)] = true
+	}
 }
 
 func parseTableColumn(part string) (string, string, catalog.ColumnAttribute, bool, []catalog.Constraint, error) {

@@ -300,16 +300,6 @@ func indexKeyNames(indexes []catalog.Index) map[string]bool {
 	return taken
 }
 
-func explicitIndexNames(indexes []catalog.Index) map[string]bool {
-	taken := map[string]bool{}
-	for _, index := range indexes {
-		if index.Name != "" {
-			taken[catalog.Key(index.Name)] = true
-		}
-	}
-	return taken
-}
-
 func tableConstraintIndexNames(constraints []catalog.Constraint) map[string]bool {
 	taken := map[string]bool{}
 	for _, constraint := range constraints {
@@ -336,7 +326,12 @@ func availableIndexName(base string, taken map[string]bool) string {
 	}
 	shortened := truncateKeyNameBase(base)
 	for suffix := 2; ; suffix++ {
-		candidate := shortened + "_" + strconv.Itoa(suffix)
+		ending := "_" + strconv.Itoa(suffix)
+		prefix := []rune(shortened)
+		if len(prefix)+len(ending) > catalog.IdentifierLimit {
+			prefix = prefix[:catalog.IdentifierLimit-len(ending)]
+		}
+		candidate := string(prefix) + ending
 		if !generatedKeyNameTaken(candidate, taken) {
 			return candidate
 		}
