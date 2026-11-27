@@ -142,10 +142,10 @@ func parseInformationSchemaTableSource(s *relationExecutor, parts []string, rema
 }
 
 func informationSchemaTableName(s *relationExecutor, parts []string) (string, bool) {
-	if len(parts) == 2 && strings.EqualFold(parts[0], informationSchemaName) {
+	if len(parts) == 2 && catalog.IsInformationSchema(parts[0]) {
 		return parts[1], true
 	}
-	if len(parts) == 1 && s != nil && strings.EqualFold(s.database, informationSchemaName) {
+	if len(parts) == 1 && s != nil && catalog.IsInformationSchema(s.database) {
 		return parts[0], true
 	}
 	return "", false
