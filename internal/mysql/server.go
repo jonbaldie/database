@@ -700,12 +700,13 @@ type sqlDiagnostic struct {
 }
 
 type queryResult struct {
-	columns  []string
-	rows     [][]string
-	metadata []columnMetadata
-	affected uint64
-	warnings uint16
-	stream   queryRowStream
+	columns      []string
+	rows         [][]string
+	metadata     []columnMetadata
+	affected     uint64
+	lastInsertID uint64
+	warnings     uint16
+	stream       queryRowStream
 	// release owns resources allocated before row delivery starts.
 	release func()
 	// nulls mirrors rows. A true entry is encoded as SQL NULL instead of an
@@ -870,11 +871,11 @@ func (s *queryExecutor) writeQueryResult(connection net.Conn, sequence byte, que
 	}
 	warnings := s.statements.session.diagnosticCount()
 	if result == nil {
-		return writer.WriteOK(0, warnings)
+		return writer.WriteOK(0, 0, warnings)
 	}
 	result.warnings = warnings
 	if len(result.columns) == 0 {
-		return writer.WriteOK(result.affected, warnings)
+		return writer.WriteOK(result.affected, result.lastInsertID, warnings)
 	}
 	if err := writer.WriteResultSet(result, ResultModeText); err != nil {
 		if writer.PacketsWritten() == 0 {
@@ -1137,11 +1138,11 @@ func (s *textStatementExecutor) relationStatement(query, lower string) (*queryRe
 	case strings.HasPrefix(lower, "create table "):
 		return nil, true, createTable(&relations, query)
 	case strings.HasPrefix(lower, "insert into "):
-		affected, err := insertRows(&relations, query)
-		return &queryResult{affected: affected}, true, err
+		affected, lastInsertID, err := insertRows(&relations, query)
+		return &queryResult{affected: affected, lastInsertID: lastInsertID}, true, err
 	case strings.HasPrefix(lower, "replace "):
-		affected, err := replaceRows(&relations, query)
-		return &queryResult{affected: affected}, true, err
+		affected, lastInsertID, err := replaceRows(&relations, query)
+		return &queryResult{affected: affected, lastInsertID: lastInsertID}, true, err
 	case strings.HasPrefix(lower, "update "):
 		affected, err := updateRows(&relations, query)
 		return &queryResult{affected: affected}, true, err
@@ -1881,19 +1882,19 @@ func mutateTableRows(definition *catalog.Definition, namespaceName, tableName st
 	return nil
 }
 
-func insertRows(s *relationExecutor, query string) (uint64, error) {
+func insertRows(s *relationExecutor, query string) (uint64, uint64, error) {
 	input, assignments, upsert, err := splitInsertOnDuplicate(query)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if upsert {
 		return upsertRows(s, input, assignments)
 	}
 	plan, err := makeInsertionPlan(s, input)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	var affected uint64
+	var affected, lastInsertID uint64
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
@@ -1905,13 +1906,14 @@ func insertRows(s *relationExecutor, query string) (uint64, error) {
 			table.Rows = rows
 			setAutoIncrementState(table, state)
 			affected = count
+			lastInsertID = state.firstGenerated
 			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
-		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+		return 0, 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
-	return affected, nil
+	return affected, lastInsertID, nil
 }
 
 // splitInsertOnDuplicate keeps the INSERT value input separate from the
@@ -1930,32 +1932,35 @@ func splitInsertOnDuplicate(query string) (string, string, bool, error) {
 	return input, assignments, true, nil
 }
 
-func upsertRows(s *relationExecutor, query, assignments string) (uint64, error) {
+func upsertRows(s *relationExecutor, query, assignments string) (uint64, uint64, error) {
 	plan, err := makeUpsertPlan(s, query, assignments)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	_, affected, _, err := applyUpsertPlan(plan)
+	_, affected, state, err := applyUpsertPlan(plan)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
+	lastInsertID := state.firstGenerated
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.insert.namespace, plan.insert.name, func(table *catalog.Table) error {
 			currentPlan := plan
 			currentPlan.insert.table = *table
-			rows, _, state, err := applyUpsertPlan(currentPlan)
+			rows, count, state, err := applyUpsertPlan(currentPlan)
 			if err != nil {
 				return err
 			}
 			table.Rows = rows
 			setAutoIncrementState(table, state)
+			affected = count
+			lastInsertID = state.firstGenerated
 			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
-		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+		return 0, 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
-	return affected, nil
+	return affected, lastInsertID, nil
 }
 
 type upsertPlan struct {
@@ -2159,15 +2164,16 @@ func equalTableRow(left, right []string) bool {
 // row followed by an insert of the submitted row. The final image is committed
 // through mutateCatalog, so all row and cross-table constraints are checked
 // before it becomes visible.
-func replaceRows(s *relationExecutor, query string) (uint64, error) {
+func replaceRows(s *relationExecutor, query string) (uint64, uint64, error) {
 	plan, err := makeReplacePlan(s, query)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	_, affected, _, err := applyReplacePlan(plan)
+	_, affected, state, err := applyReplacePlan(plan)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
+	lastInsertID := state.firstGenerated
 	action := func(definition *catalog.Definition) error {
 		return mutateTableRows(definition, plan.namespace, plan.name, func(table *catalog.Table) error {
 			currentPlan := plan
@@ -2175,19 +2181,21 @@ func replaceRows(s *relationExecutor, query string) (uint64, error) {
 			if err := validateReplaceDeletePhases(*definition, currentPlan); err != nil {
 				return err
 			}
-			rows, _, state, err := applyReplacePlan(currentPlan)
+			rows, count, state, err := applyReplacePlan(currentPlan)
 			if err != nil {
 				return err
 			}
 			table.Rows = rows
 			setAutoIncrementState(table, state)
+			affected = count
+			lastInsertID = state.firstGenerated
 			return nil
 		})
 	}
 	if err := s.mutateCatalog(action); err != nil {
-		return 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
+		return 0, 0, catalogMutationFailure(err, sqlFailure{1105, "HY000", err.Error()})
 	}
-	return affected, nil
+	return affected, lastInsertID, nil
 }
 
 func makeReplacePlan(s *relationExecutor, query string) (insertPlan, error) {
@@ -4637,11 +4645,11 @@ func (s *preparedExecution) executePrepared(connection net.Conn, sequence byte, 
 	}
 	warnings := s.session.diagnosticCount()
 	if result == nil {
-		return writer.WriteOK(0, warnings)
+		return writer.WriteOK(0, 0, warnings)
 	}
 	result.warnings = warnings
 	if len(result.columns) == 0 {
-		return writer.WriteOK(result.affected, warnings)
+		return writer.WriteOK(result.affected, result.lastInsertID, warnings)
 	}
 	if err := writer.WriteResultSet(result, ResultModeBinary); err != nil {
 		if writer.PacketsWritten() == 0 {

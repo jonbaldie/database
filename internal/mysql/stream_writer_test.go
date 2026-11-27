@@ -186,7 +186,7 @@ func TestStreamWriterWriteOK(t *testing.T) {
 	buf := &bytes.Buffer{}
 	writer := NewStreamWriter(buf, 1, 1024)
 
-	if err := writer.WriteOK(10, 2); err != nil {
+	if err := writer.WriteOK(10, 0, 2); err != nil {
 		t.Fatalf("WriteOK: %v", err)
 	}
 
@@ -206,10 +206,30 @@ func TestStreamWriterWriteOK(t *testing.T) {
 	if payload[1] != 10 {
 		t.Fatalf("affected = %d, want 10", payload[1])
 	}
+	// last insert id 0
+	if payload[2] != 0 {
+		t.Fatalf("lastInsertID = %d, want 0", payload[2])
+	}
 	// warnings at end: byte(2), byte(0)
 	warnings := uint16(payload[len(payload)-2]) | uint16(payload[len(payload)-1])<<8
 	if warnings != 2 {
 		t.Fatalf("warnings = %d, want 2", warnings)
+	}
+}
+
+func TestStreamWriterWriteOKLargeLastInsertID(t *testing.T) {
+	buf := &bytes.Buffer{}
+	writer := NewStreamWriter(buf, 1, 1024)
+
+	if err := writer.WriteOK(1, 300, 0); err != nil {
+		t.Fatalf("WriteOK: %v", err)
+	}
+
+	payload := buf.Bytes()[4:]
+	// 0x00 (OK), 0x01 (affected=1), 0xfc 0x2c 0x01 (lenenc 300), 0x02 0x00 (status), 0x00 0x00 (warnings)
+	want := []byte{0x00, 0x01, 0xfc, 0x2c, 0x01, 0x02, 0x00, 0x00, 0x00}
+	if !bytes.Equal(payload, want) {
+		t.Fatalf("OK payload = %x, want %x", payload, want)
 	}
 }
 
