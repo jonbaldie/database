@@ -29,12 +29,12 @@ func TestIssue488DropIndexRemovesServerNamedUniqueKeyThroughMySQL(t *testing.T) 
 		}
 	}
 
-	before := client.query("SHOW INDEX FROM p WHERE Key_name = 'p_code_unique'")
+	before := client.query("SHOW INDEX FROM p WHERE Key_name = 'code'")
 	if before.err != "" || len(before.rows) != 1 || before.rows[0][1] != "0" || before.rows[0][4] != "code" {
 		t.Fatalf("SHOW INDEX before drop: %#v", before)
 	}
-	if result := client.query("ALTER TABLE p DROP INDEX p_code_unique"); result.err != "" {
-		t.Fatalf("ALTER TABLE p DROP INDEX p_code_unique: %#v", result)
+	if result := client.query("ALTER TABLE p DROP INDEX code"); result.err != "" {
+		t.Fatalf("ALTER TABLE p DROP INDEX code: %#v", result)
 	}
 	after := client.query("SHOW INDEX FROM p")
 	if after.err != "" || len(after.rows) != 1 || after.rows[0][2] != "PRIMARY" {

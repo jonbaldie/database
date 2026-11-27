@@ -10,9 +10,9 @@ func TestIssue488DropIndexRemovesUniqueKey(t *testing.T) {
 		create string
 		drop   string
 	}{
-		{"server-named, ALTER TABLE", "CREATE TABLE p (id INT PRIMARY KEY, code INT, UNIQUE (code))", "ALTER TABLE p DROP INDEX p_code_unique"},
-		{"server-named, DROP INDEX", "CREATE TABLE p (id INT PRIMARY KEY, code INT, UNIQUE (code))", "DROP INDEX p_code_unique ON p"},
-		{"inline column UNIQUE", "CREATE TABLE p (id INT PRIMARY KEY, code INT UNIQUE)", "ALTER TABLE p DROP INDEX p_code_unique"},
+		{"server-named, ALTER TABLE", "CREATE TABLE p (id INT PRIMARY KEY, code INT, UNIQUE (code))", "ALTER TABLE p DROP INDEX code"},
+		{"server-named, DROP INDEX", "CREATE TABLE p (id INT PRIMARY KEY, code INT, UNIQUE (code))", "DROP INDEX code ON p"},
+		{"inline column UNIQUE", "CREATE TABLE p (id INT PRIMARY KEY, code INT UNIQUE)", "ALTER TABLE p DROP INDEX code"},
 		{"user-named", "CREATE TABLE p (id INT PRIMARY KEY, code INT, CONSTRAINT uq_code UNIQUE (code))", "ALTER TABLE p DROP KEY UQ_CODE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,17 +56,17 @@ func TestIssue488DropIndexKeepsReferencedUniqueKey(t *testing.T) {
 			t.Fatalf("setup %q: %v", query, err)
 		}
 	}
-	for _, drop := range []string{"ALTER TABLE p DROP INDEX p_code_unique", "DROP INDEX p_code_unique ON p"} {
+	for _, drop := range []string{"ALTER TABLE p DROP INDEX code", "DROP INDEX code ON p"} {
 		if _, err := executeStatement(executor, drop); err == nil {
 			t.Fatalf("%q succeeded while fk1 references the key", drop)
 		}
 	}
-	result, err := executeStatement(executor, "SHOW INDEX FROM p WHERE Key_name = 'p_code_unique'")
+	result, err := executeStatement(executor, "SHOW INDEX FROM p WHERE Key_name = 'code'")
 	if err != nil {
 		t.Fatalf("SHOW INDEX: %v", err)
 	}
 	if len(result.rows) != 1 {
-		t.Fatalf("SHOW INDEX rows for p_code_unique = %v, want one row", result.rows)
+		t.Fatalf("SHOW INDEX rows for code = %v, want one row", result.rows)
 	}
 }
 

@@ -375,21 +375,44 @@ func consumeParenthesized(value string) (string, string, bool) {
 	return "", "", false
 }
 
-func namedTableConstraints(table string, constraints []catalog.Constraint) ([]catalog.Constraint, error) {
+func namedTableConstraints(table string, constraints []catalog.Constraint, reservedKeys map[string]bool, generated map[int]bool) ([]catalog.Constraint, error) {
 	seen := map[string]bool{}
+	keys := copyKeyNames(reservedKeys)
 	checkNumber, foreignNumber := 0, 0
 	for index := range constraints {
 		constraint := &constraints[index]
 		if len(constraint.Columns) == 0 && constraint.Type != catalog.ConstraintTypeCheck {
 			return nil, sqlFailure{1064, "42000", "constraint requires columns"}
 		}
-		checkNumber, foreignNumber = assignConstraintName(table, constraint, checkNumber, foreignNumber)
+		checkNumber, foreignNumber = assignConstraintName(table, constraint, keys, checkNumber, foreignNumber)
+		if generatedUniqueName(constraint, keys) || generated[index] {
+			continue
+		}
 		key := catalog.Key(constraint.Name)
-		if seen[key] {
+		seenKey := constraintNameKey(*constraint)
+		if seen[seenKey] {
 			return nil, duplicateConstraintName(*constraint)
 		}
-		seen[key] = true
+		seen[seenKey] = true
+		if constraint.Type == catalog.ConstraintTypeUnique {
+			keys[key] = true
+		}
 	}
+	if err := rejectMultiplePrimaryKeys(constraints); err != nil {
+		return nil, err
+	}
+	return constraints, nil
+}
+
+func constraintNameKey(constraint catalog.Constraint) string {
+	kind := constraint.Type
+	if kind == catalog.ConstraintTypePrimary {
+		kind = catalog.ConstraintTypeUnique
+	}
+	return kind + "\x00" + catalog.Key(constraint.Name)
+}
+
+func rejectMultiplePrimaryKeys(constraints []catalog.Constraint) error {
 	primary := 0
 	for _, constraint := range constraints {
 		if constraint.Type == catalog.ConstraintTypePrimary {
@@ -397,17 +420,23 @@ func namedTableConstraints(table string, constraints []catalog.Constraint) ([]ca
 		}
 	}
 	if primary > 1 {
-		return nil, sqlFailure{1068, "42000", "multiple primary keys"}
+		return sqlFailure{1068, "42000", "multiple primary keys"}
 	}
-	return constraints, nil
+	return nil
 }
 
-func assignConstraintName(table string, constraint *catalog.Constraint, checkNumber, foreignNumber int) (int, int) {
+func generatedUniqueName(constraint *catalog.Constraint, keys map[string]bool) bool {
+	if constraint.Type != catalog.ConstraintTypeUnique || constraint.Name != "" {
+		return false
+	}
+	constraint.Name = availableIndexName(constraint.Columns[0], keys)
+	keys[catalog.Key(constraint.Name)] = true
+	return true
+}
+
+func assignConstraintName(table string, constraint *catalog.Constraint, keys map[string]bool, checkNumber, foreignNumber int) (int, int) {
 	if constraint.Type == catalog.ConstraintTypePrimary {
 		constraint.Name = "PRIMARY"
-	}
-	if constraint.Type == catalog.ConstraintTypeUnique && constraint.Name == "" {
-		constraint.Name = table + "_" + constraint.Columns[0] + "_unique"
 	}
 	if constraint.Type == catalog.ConstraintTypeCheck && constraint.Name == "" {
 		checkNumber++
@@ -418,4 +447,12 @@ func assignConstraintName(table string, constraint *catalog.Constraint, checkNum
 		constraint.Name = fmt.Sprintf("%s_ibfk_%d", table, foreignNumber)
 	}
 	return checkNumber, foreignNumber
+}
+
+func copyKeyNames(names map[string]bool) map[string]bool {
+	taken := make(map[string]bool, len(names))
+	for name := range names {
+		taken[name] = true
+	}
+	return taken
 }

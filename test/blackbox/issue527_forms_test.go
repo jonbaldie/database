@@ -35,7 +35,7 @@ func TestIssue527UniqueConstraintVisibilityCanBeAltered(t *testing.T) {
 			name:     "inline column constraint",
 			database: "app_inline",
 			create:   "CREATE TABLE accounts (id INT PRIMARY KEY, email VARCHAR(64) UNIQUE)",
-			index:    "accounts_email_unique",
+			index:    "email",
 		},
 		{
 			name:     "constraint added by ALTER TABLE",
