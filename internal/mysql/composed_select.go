@@ -638,11 +638,11 @@ func scalarSubqueryRuntimeKey(query string, dependent bool, runtimePrefixes []st
 }
 
 func recordScalarSelect(context *composedQueryContext, termKey string, result *queryResult, elapsed time.Duration) {
-	if context == nil || context.executor == nil || context.executor.session == nil || result == nil {
+	if context == nil || context.executor == nil || result == nil {
 		return
 	}
-	metrics := context.executor.session.runtimeMetrics
-	metrics.RecordOperator(metrics.OperatorID(queryexplanation.RuntimeOperatorKey(termKey, "values", 0)), 0, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
+	recorder := context.executor.operatorRecorder()
+	recorder.RecordOperator(recorder.OperatorID(queryexplanation.RuntimeOperatorKey(termKey, "values", 0)), 0, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
 }
 
 func composedSubqueryRuntimeKey(query string, dependent bool) string {
@@ -654,11 +654,11 @@ func composedSubqueryRuntimeKey(query string, dependent bool) string {
 }
 
 func recordDependentSubquery(context *composedQueryContext, key string, result *queryResult, elapsed time.Duration) {
-	if context == nil || context.executor == nil || context.executor.session == nil || result == nil {
+	if context == nil || context.executor == nil || result == nil {
 		return
 	}
-	metrics := context.executor.session.runtimeMetrics
-	metrics.RecordOperator(metrics.OperatorID(key), 1, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
+	recorder := context.executor.operatorRecorder()
+	recorder.RecordOperator(recorder.OperatorID(key), 1, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
 }
 
 func compileExistsSubquery(text string, columns []relationColumn, context *composedQueryContext, outer *outerRelationScope, runtimeKeys *predicateRuntimeKeys) (relationPredicate, bool, error) {
@@ -759,7 +759,7 @@ func executeExistsSubquery(context *composedQueryContext, query string, outer *o
 }
 
 func recordExistsSubquery(context *composedQueryContext, query string, dependent, found bool, elapsed time.Duration) {
-	if context == nil || context.executor == nil || context.executor.session == nil {
+	if context == nil || context.executor == nil {
 		return
 	}
 	inputRows := 0
@@ -770,9 +770,9 @@ func recordExistsSubquery(context *composedQueryContext, query string, dependent
 	if found {
 		outputRows = 1
 	}
-	metrics := context.executor.session.runtimeMetrics
+	recorder := context.executor.operatorRecorder()
 	key := scalarSubqueryRuntimeKey(query, dependent, []string{context.runtimePrefix})
-	metrics.RecordOperator(metrics.OperatorID(key), inputRows, outputRows, 0, 0, 0, 0, elapsed)
+	recorder.RecordOperator(recorder.OperatorID(key), inputRows, outputRows, 0, 0, 0, 0, elapsed)
 }
 
 func existsProjectionQuery(query string) string {
@@ -1166,11 +1166,11 @@ func composedMaterializeKey(context *composedQueryContext, name, query string, r
 }
 
 func recordMaterializedResult(context *composedQueryContext, key string, result *queryResult, elapsed time.Duration) {
-	if context == nil || context.executor == nil || context.executor.session == nil || result == nil {
+	if context == nil || context.executor == nil || result == nil {
 		return
 	}
-	metrics := context.executor.session.runtimeMetrics
-	metrics.RecordOperator(metrics.OperatorID(key), 0, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
+	recorder := context.executor.operatorRecorder()
+	recorder.RecordOperator(recorder.OperatorID(key), 0, len(result.rows), 0, 0, 0, queryResultMemory(result.rows, result.nulls), elapsed)
 }
 
 func cloneComposedRelations(source map[string]composedRelation) map[string]composedRelation {
@@ -1483,14 +1483,14 @@ func recordSetOperation(context *composedQueryContext, operation setQueryOperati
 }
 
 func recordSetStage(context *composedQueryContext, key, kind string, inputRows, outputRows, memory int, elapsed time.Duration) {
-	if context == nil || context.executor == nil || context.executor.session == nil {
+	if context == nil || context.executor == nil {
 		return
 	}
 	if kind != "" {
 		key = queryexplanation.RuntimeOperatorKey(key, kind, 0)
 	}
-	metrics := context.executor.session.runtimeMetrics
-	metrics.RecordOperator(metrics.OperatorID(key), inputRows, outputRows, 0, 0, 0, memory, elapsed)
+	recorder := context.executor.operatorRecorder()
+	recorder.RecordOperator(recorder.OperatorID(key), inputRows, outputRows, 0, 0, 0, memory, elapsed)
 }
 
 func removeSetRightInput(results []*queryResult, operations []setQueryOperation, index int) ([]*queryResult, []setQueryOperation) {

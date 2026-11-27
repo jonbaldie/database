@@ -4,6 +4,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/jonbaldie/database/internal/queryexplanation"
 )
 
 type wrappedConnection struct{ net.Conn }
@@ -77,7 +79,7 @@ func TestRunStatementShowsOnlyExplainableStatementAsActive(t *testing.T) {
 	conversation.session = executor.session
 	query := "UPDATE items SET label = 'hopper' WHERE id = 7"
 
-	conversation.runStatement(query, func() error {
+	conversation.runStatement(query, func(queryexplanation.OperatorRecorder) error {
 		active, _ := conversation.control.activeQuery.Load().(string)
 		if !conversation.control.running.Load() || active != query {
 			t.Fatalf("statement during execution: running=%t query=%q", conversation.control.running.Load(), active)

@@ -518,3 +518,86 @@ func TestDiscardResultRowsReportsTheLargestStreamedRow(t *testing.T) {
 		t.Fatalf("discardResultRows = %d rows, %d bytes; want 3 rows, 13 bytes", rows, memory)
 	}
 }
+
+func TestExplainAnalyzePointLookupReportsLookupStrategyAndActualCounters(t *testing.T) {
+	executor := newSeededExecutor(t,
+		"CREATE TABLE t (id BIGINT PRIMARY KEY, v VARCHAR(32))",
+		"INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+	)
+	result, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON SELECT v FROM t WHERE id = 3")
+	if err != nil {
+		t.Fatalf("explain analyze: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(result.rows[0][0]), &document); err != nil {
+		t.Fatalf("decode analysis: %v", err)
+	}
+	lookup := findExplainOperator(document["plan"].(map[string]any), "lookup")
+	if lookup == nil {
+		t.Fatalf("expected lookup operator in plan: %s", result.rows[0][0])
+	}
+	strategy, _ := lookup["strategy"].(map[string]any)
+	if strategy["name"] != "point_lookup" {
+		t.Fatalf("lookup strategy = %#v, want point_lookup", strategy)
+	}
+	operation, _ := lookup["operation"].(map[string]any)
+	if operation["lookup_type"] != "point" || operation["unique"] != true {
+		t.Fatalf("lookup operation = %#v", operation)
+	}
+	actual, _ := lookup["actual"].(map[string]any)
+	if actual == nil || actual["invocations"] != float64(1) || actual["output_rows"] != float64(1) {
+		t.Fatalf("lookup actual = %#v", actual)
+	}
+	storage, _ := actual["storage"].(map[string]any)
+	if storage == nil || storage["logical_reads"] != float64(1) || storage["bytes_read"].(float64) <= 0 {
+		t.Fatalf("lookup storage = %#v", storage)
+	}
+
+	missResult, err := executeStatement(executor, "EXPLAIN ANALYZE FORMAT=JSON SELECT v FROM t WHERE id = 999")
+	if err != nil {
+		t.Fatalf("explain analyze miss: %v", err)
+	}
+	var missDoc map[string]any
+	if err := json.Unmarshal([]byte(missResult.rows[0][0]), &missDoc); err != nil {
+		t.Fatalf("decode miss analysis: %v", err)
+	}
+	missLookup := findExplainOperator(missDoc["plan"].(map[string]any), "lookup")
+	if missLookup == nil {
+		t.Fatalf("expected lookup operator on miss: %s", missResult.rows[0][0])
+	}
+	missActual, _ := missLookup["actual"].(map[string]any)
+	if missActual == nil || missActual["invocations"] != float64(1) || missActual["output_rows"] != float64(0) {
+		t.Fatalf("miss lookup actual = %#v", missActual)
+	}
+}
+
+func TestLiveExplanationRecordsPointLookupCounters(t *testing.T) {
+	executor := newPointLookupTestExecutor(t)
+	query := "SELECT id, label FROM items WHERE id = 7"
+	plan, err := executor.planExplanation(query)
+	if err != nil {
+		t.Fatalf("planExplanation: %v", err)
+	}
+	metrics, finish := executor.server.explanations.begin(executor.session.connectionID, plan, executor.session)
+	defer finish()
+	executor.recorder = metrics
+	result, err := executeStatement(executor, query)
+	if err != nil {
+		t.Fatalf("executeStatement: %v", err)
+	}
+	result, err = materializeQueryResult(result)
+	if err != nil || len(result.rows) != 1 {
+		t.Fatalf("point lookup = %v, %v", result, err)
+	}
+	snapshot, found := executor.server.explanations.snapshot(executor.session.connectionID)
+	if !found {
+		t.Fatal("expected live explanation snapshot")
+	}
+	if snapshot.Plan == nil || len(snapshot.Plan.Children) == 0 || len(snapshot.Plan.Children[0].Children) == 0 {
+		t.Fatalf("snapshot plan missing lookup child = %#v", snapshot.Plan)
+	}
+	lookup := snapshot.Plan.Children[0].Children[0]
+	if lookup.Kind != "lookup" || lookup.Actual == nil || lookup.Actual.Invocations != 1 || lookup.Actual.OutputRows != 1 || lookup.Actual.Storage.LogicalReads != 1 {
+		t.Fatalf("snapshot lookup = %#v (actual=%#v)", lookup, lookup.Actual)
+	}
+}

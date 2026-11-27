@@ -46,7 +46,7 @@ type relationalSource struct {
 // tree. It stores IDs, rather than names, so repeated execution accumulates
 // on the same physical operator.
 type selectRuntimeBinding struct {
-	metrics      *queryexplanation.RuntimeMetrics
+	metrics      queryexplanation.OperatorRecorder
 	scans        []int
 	joins        []int
 	whereFilter  int
@@ -60,13 +60,17 @@ type selectRuntimeBinding struct {
 	limit        int
 }
 
-func newSelectRuntimeBinding(metrics *queryexplanation.RuntimeMetrics, plan *relationalSelectPlan) *selectRuntimeBinding {
+func newSelectRuntimeBinding(metrics queryexplanation.OperatorRecorder, plan *relationalSelectPlan) *selectRuntimeBinding {
 	if metrics == nil || plan == nil || plan.runtimeKey == "" {
 		return nil
 	}
 	binding := &selectRuntimeBinding{metrics: metrics}
 	for index := range plan.source.tables {
-		binding.scans = append(binding.scans, runtimeOperatorID(metrics, plan.runtimeKey, "scan", index))
+		id := runtimeOperatorID(metrics, plan.runtimeKey, "scan", index)
+		if id == 0 {
+			id = runtimeOperatorID(metrics, plan.runtimeKey, "lookup", index)
+		}
+		binding.scans = append(binding.scans, id)
 	}
 	for index := range plan.source.joins {
 		binding.joins = append(binding.joins, runtimeOperatorID(metrics, plan.runtimeKey, "join", len(plan.source.joins)-index-1))
@@ -128,7 +132,7 @@ func runtimeWindowSorts(plan *relationalSelectPlan) []relationalWindowSpec {
 	return result
 }
 
-func runtimeOperatorID(metrics *queryexplanation.RuntimeMetrics, termKey, kind string, index int) int {
+func runtimeOperatorID(metrics queryexplanation.OperatorRecorder, termKey, kind string, index int) int {
 	return metrics.OperatorID(queryexplanation.RuntimeOperatorKey(termKey, kind, index))
 }
 
@@ -347,12 +351,21 @@ func executeRelationalSelectPlan(plan *relationalSelectPlan, streamRows bool) (*
 }
 
 func tryRelationalPointLookup(plan *relationalSelectPlan) (*queryResult, bool) {
-	if plan.session != nil && plan.session.runtimeMetrics != nil {
-		return nil, false
-	}
-	rows, ok := tryPointLookup(plan)
+	started := time.Now()
+	rows, sourceBytes, ok := tryPointLookup(plan)
 	if !ok {
 		return nil, false
+	}
+	elapsed := time.Since(started)
+	if plan.runtime != nil {
+		plan.runtime.recordSourceScan(0, plan.source.tables[0], 1, sourceBytes, elapsed)
+		if plan.where != nil {
+			plan.runtime.record(plan.runtime.whereFilter, 1, 1, 0, 0, 0, 0, elapsed)
+		}
+		plan.runtime.record(plan.runtime.project, 1, len(rows), 0, 0, 0, resultMemory(rows), elapsed)
+		if plan.limit.present {
+			plan.runtime.record(plan.runtime.limit, len(rows), len(rows), 0, 0, 0, 0, elapsed)
+		}
 	}
 	return plan.result(rows), true
 }
@@ -689,7 +702,7 @@ func parseRelationalSelectContext(s *relationExecutor, query string, outer *oute
 	if err := prepareScalarSubqueries(plan); err != nil {
 		return nil, err
 	}
-	plan.runtime = newSelectRuntimeBinding(plan.session.runtimeMetrics, plan)
+	plan.runtime = newSelectRuntimeBinding(s.operatorRecorder(), plan)
 	plan.source.runtime = plan.runtime
 	return plan, nil
 }
@@ -1264,6 +1277,7 @@ func (p *relationalSelectPlan) explanation(serverVersion, currentDatabase, sql s
 	for _, table := range p.source.tables {
 		read.Tables = append(read.Tables, relationSourceInfo(table))
 	}
+	applyPointLookupExplanation(p, &read)
 	if len(read.Tables) > 0 {
 		read.Table = read.Tables[0]
 	}
