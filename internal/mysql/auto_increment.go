@@ -187,8 +187,7 @@ func fillAutoIncrementValue(table catalog.Table, row []string, state autoIncreme
 
 // statementInsertID is the OK-packet last insert ID for one INSERT or REPLACE.
 // A generated value that the statement stores wins. Otherwise the packet
-// carries the AUTO_INCREMENT value of the last row that the statement stored
-// or changed.
+// carries the AUTO_INCREMENT value of the last row that the statement stored.
 type statementInsertID struct {
 	firstGenerated uint64
 	hasGenerated   bool

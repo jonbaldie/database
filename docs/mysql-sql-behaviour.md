@@ -166,9 +166,10 @@ The OK packet of an `INSERT` or `REPLACE` reports the last insert ID with the
 MySQL 8.4.11 `mysql_insert_id()` rules. If the statement stores a generated
 value, the packet carries the first generated value. If it stores no generated
 value, the packet carries the `AUTO_INCREMENT` value of the last row that the
-statement inserted or changed. This includes an explicit value,
-`INSERT ... SELECT`, `REPLACE`, and a changed `ON DUPLICATE KEY UPDATE` row.
-An unchanged duplicate-key update reports `0`. `UPDATE`, `DELETE`, DDL, and a
+statement inserted. This includes an explicit value,
+`INSERT ... SELECT`, and `REPLACE`. A changed or unchanged duplicate-key
+update does not count as an inserted row, so a statement that only updates
+reports `0`. `UPDATE`, `DELETE`, DDL, and a
 table with no `AUTO_INCREMENT` column report `0`. A failed statement returns
 an error packet and stores no row. Values allocated before that failure are
 not reused by a later statement. A type error that allocates no value does not
