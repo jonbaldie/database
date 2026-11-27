@@ -1,8 +1,6 @@
 package mysql
 
 import (
-	"strings"
-
 	"github.com/jonbaldie/database/internal/catalog"
 )
 
@@ -19,7 +17,7 @@ type namespaceResolution struct {
 
 func resolveNamespace(definition catalog.Definition, username, name string) namespaceResolution {
 	resolution := namespaceResolution{name: name}
-	if strings.EqualFold(name, informationSchemaName) {
+	if catalog.IsInformationSchema(name) {
 		resolution.namespace = catalog.Namespace{Name: informationSchemaName}
 		resolution.exists = true
 		resolution.nameVisible = true

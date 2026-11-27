@@ -87,3 +87,26 @@ func TestTableRefIdentifiesEquivalentSpellings(t *testing.T) {
 		}
 	}
 }
+
+func TestSameIdentifierAndInformationSchema(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"straße", "STRASSE", true}, {"é", "e\u0301", true}, {"Ａ", "A", false},
+	} {
+		if got := SameIdentifier(tc.a, tc.b); got != tc.want {
+			t.Errorf("SameIdentifier(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"INFORMATION_SCHEMA", true}, {"information_ſchema", true}, {"information_schema_other", false},
+	} {
+		if got := IsInformationSchema(tc.name); got != tc.want {
+			t.Errorf("IsInformationSchema(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
